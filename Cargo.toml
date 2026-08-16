@@ -1,0 +1,19 @@
+[package]
+name = "twigpui"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+anyhow = "1.0.104"
+dotenvy = "0.15.7"
+# macos-blade renders through blade instead of pre-compiled Metal shaders, so
+# the build needs no `xcrun metal` — which ships with full Xcode, not the
+# Command Line Tools. x11/wayland are Linux-only and this project is macOS-only.
+gpui = { version = "0.2.2", default-features = false, features = [
+    "font-kit",
+    "macos-blade",
+] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+ureq = { version = "3.4.0", features = ["json"] }
