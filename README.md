@@ -21,6 +21,15 @@ redirect listener, which is deliberately left for a later milestone.
 
 ## Setup
 
+Configuration comes from the environment. Either export it:
+
+```sh
+export X_BEARER_TOKEN='…'
+cargo run
+```
+
+or keep a local `.env`, which `dotenvy` loads into the same variables:
+
 ```sh
 cp .env.example .env
 $EDITOR .env          # fill in X_BEARER_TOKEN
