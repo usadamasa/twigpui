@@ -12,6 +12,19 @@ The app resolves a screen name to a user id, fetches that user's recent posts
 with `GET /2/users/:id/tweets`, and renders them in a scrollable list with a
 reload button.
 
+`--fetch-only` runs the same fetch headlessly and prints the posts, which is
+useful for checking credentials without opening a window:
+
+```sh
+cargo run -- --fetch-only
+```
+
+## Requirements
+
+The `macos-blade` feature is enabled so the build does not need `xcrun metal`,
+which ships with full Xcode rather than the Command Line Tools. Rendering goes
+through blade instead.
+
 ## Why not the home timeline (yet)
 
 `GET /2/users/:id/timelines/reverse_chronological` only accepts OAuth 2.0

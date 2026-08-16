@@ -73,7 +73,7 @@ impl XClient {
              ?max_results={max_results}\
              &tweet.fields=created_at\
              &expansions=author_id\
-             &user.fields=name,username,profile_image_url"
+             &user.fields=name,username"
         );
         let (status, body) = self.get(&url)?;
         check_status(status, &body)?;

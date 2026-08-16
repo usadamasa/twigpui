@@ -97,7 +97,14 @@ impl TimelineView {
     }
 
     fn body(&self) -> impl IntoElement {
-        let content = div().flex().flex_col().flex_1().overflow_y_scroll();
+        // `overflow_y_scroll` lives on StatefulInteractiveElement, so the
+        // element needs an id before it can scroll.
+        let content = div()
+            .id("timeline")
+            .flex()
+            .flex_col()
+            .flex_1()
+            .overflow_y_scroll();
 
         match &self.state {
             TimelineState::Loading => content.child(notice("Fetching the timeline…", TEXT_MUTED)),

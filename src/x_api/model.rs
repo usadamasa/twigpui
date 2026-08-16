@@ -8,8 +8,6 @@ pub struct User {
     pub id: String,
     pub name: String,
     pub username: String,
-    #[serde(default)]
-    pub profile_image_url: Option<String>,
 }
 
 /// A post object as returned under `data`.

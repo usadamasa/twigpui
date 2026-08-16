@@ -1,6 +1,10 @@
 /target
 /tmp
 
+# Project-local CARGO_HOME. The sandbox cannot write the shared one, and some
+# crate tarballs carry paths it refuses to create; see PLAN.md.
+/.cargo-home
+
 # Credentials — never commit these.
 .env
 .env.*
