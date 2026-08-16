@@ -1,0 +1,7 @@
+/target
+/tmp
+
+# Credentials — never commit these.
+.env
+.env.*
+!.env.example
