@@ -464,6 +464,9 @@ pub(crate) fn save_thread(
 /// [`thread::MAX_THREAD_DEPTH`] levels or the first missing/absent parent,
 /// then cache and return the assembled result.
 ///
+/// An empty result is deliberately *not* cached — see the comment at the
+/// bottom of the body.
+///
 /// The loop below checks the depth cap *before* each fetch, never after, so
 /// the worst case is exactly [`thread::MAX_THREAD_DEPTH`] requests: hitting
 /// the cap is detected from data already in hand (the last fetched post's
@@ -515,7 +518,15 @@ pub(crate) fn fetch_thread(
     }
 
     let chain = thread::assemble_chain(hops, reached_cap);
-    save_thread(paths, reply_post_id, &chain, now)?;
+    // An empty chain means the very first parent came back absent. That is
+    // usually permanent (deleted, protected), but it is also what a transient
+    // hiccup looks like — and this cache has no TTL, so persisting it would
+    // wedge "Show thread" on this reply forever with no way out but deleting
+    // the file by hand. Re-deriving it costs exactly one request, on an
+    // explicit click; that is the cheaper mistake to make.
+    if !chain.items.is_empty() {
+        save_thread(paths, reply_post_id, &chain, now)?;
+    }
     Ok(chain)
 }
 
