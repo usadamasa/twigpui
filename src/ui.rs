@@ -5,16 +5,8 @@ use crate::config::Config;
 use crate::oauth;
 use crate::paths::Paths;
 use crate::rate_limit;
+use crate::theme::Theme;
 use crate::x_api::{TimelineItem, XClient};
-
-// Grouped per RGB channel, which is also the digit grouping clippy asks for.
-const BG: u32 = 0x15_20_2b;
-const BG_HEADER: u32 = 0x1b_28_36;
-const BORDER: u32 = 0x38_44_4d;
-const TEXT: u32 = 0xf7_f9_f9;
-const TEXT_MUTED: u32 = 0x88_99_a6;
-const ACCENT: u32 = 0x1d_9b_f0;
-const DANGER: u32 = 0xf4_21_2e;
 
 enum TimelineState {
     /// No usable credential yet: no fresh/refreshable stored OAuth session
@@ -60,6 +52,10 @@ enum PrimaryAction {
 pub(crate) struct TimelineView {
     config: Config,
     paths: Paths,
+    /// Resolved once at construction from `config.theme` — see
+    /// [`TimelineView::new`]. `Copy`, so it's handed to the free render
+    /// helpers below without lifetime noise.
+    theme: Theme,
     /// `None` until a credential is available — see [`TimelineState::NotAuthenticated`].
     client: Option<XClient>,
     state: TimelineState,
@@ -82,12 +78,19 @@ impl TimelineView {
     pub(crate) fn new(
         config: Config,
         paths: Paths,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) -> Self {
+        // Resolved once, here, rather than on every render: `system` needs a
+        // live `Window` to read the OS appearance from, and `Theme` is
+        // `Copy`, so there is no cost to keeping it around instead of
+        // re-resolving it. A `light`/`dark` config value never depends on
+        // the window at all.
+        let theme = config.theme.resolve(window.appearance());
         let mut this = Self {
             config,
             paths,
+            theme,
             client: None,
             state: TimelineState::Loading,
             fetch: None,
@@ -285,6 +288,8 @@ impl TimelineView {
             }
         };
 
+        let theme = self.theme;
+
         div()
             .flex()
             .items_center()
@@ -292,9 +297,9 @@ impl TimelineView {
             .gap_3()
             .px_4()
             .py_3()
-            .bg(rgb(BG_HEADER))
+            .bg(rgb(theme.bg_header))
             .border_b_1()
-            .border_color(rgb(BORDER))
+            .border_color(rgb(theme.border))
             .child(
                 div()
                     .font_weight(FontWeight::BOLD)
@@ -306,8 +311,12 @@ impl TimelineView {
                     .px_3()
                     .py_1()
                     .rounded_full()
-                    .bg(rgb(if busy { BORDER } else { ACCENT }))
-                    .text_color(rgb(TEXT))
+                    .bg(rgb(if busy {
+                        theme.button_busy_bg
+                    } else {
+                        theme.accent
+                    }))
+                    .text_color(rgb(theme.button_label))
                     .child(label)
                     .on_click(cx.listener(move |this, _event, _window, cx| match action {
                         PrimaryAction::Reload => this.reload(cx),
@@ -317,6 +326,8 @@ impl TimelineView {
     }
 
     fn body(&self) -> impl IntoElement {
+        let theme = self.theme;
+
         // `overflow_y_scroll` lives on StatefulInteractiveElement, so the
         // element needs an id before it can scroll.
         let content = div()
@@ -329,34 +340,40 @@ impl TimelineView {
         match &self.state {
             TimelineState::NotAuthenticated => content.child(notice(
                 "Not signed in. Click \"Sign in with X\" to continue.",
-                TEXT_MUTED,
+                theme.text_muted,
             )),
             TimelineState::SigningIn => content.child(notice(
                 "Waiting for the browser to finish sign-in…",
-                TEXT_MUTED,
+                theme.text_muted,
             )),
-            TimelineState::Loading => content.child(notice("Fetching the timeline…", TEXT_MUTED)),
+            TimelineState::Loading => {
+                content.child(notice("Fetching the timeline…", theme.text_muted))
+            }
             TimelineState::RateLimited { reset_at, cooldown } => content.child(notice(
                 cooldown_label(*cooldown, *reset_at, oauth::unix_now()),
-                DANGER,
+                theme.danger,
             )),
-            TimelineState::Failed(message) => content.child(notice(message.clone(), DANGER)),
+            TimelineState::Failed(message) => content.child(notice(message.clone(), theme.danger)),
             TimelineState::Loaded(items) if items.is_empty() => {
-                content.child(notice("No posts were returned.", TEXT_MUTED))
+                content.child(notice("No posts were returned.", theme.text_muted))
             }
-            TimelineState::Loaded(items) => content.children(items.iter().map(post_row)),
+            TimelineState::Loaded(items) => {
+                content.children(items.iter().map(|item| post_row(item, theme)))
+            }
         }
     }
 }
 
 impl Render for TimelineView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        let theme = self.theme;
+
         div()
             .flex()
             .flex_col()
             .size_full()
-            .bg(rgb(BG))
-            .text_color(rgb(TEXT))
+            .bg(rgb(theme.bg))
+            .text_color(rgb(theme.text))
             .text_sm()
             .child(self.header(cx))
             .child(self.body())
@@ -381,7 +398,7 @@ fn byline(author_username: &str) -> String {
     }
 }
 
-fn post_row(item: &TimelineItem) -> impl IntoElement {
+fn post_row(item: &TimelineItem, theme: Theme) -> impl IntoElement {
     let byline = byline(&item.author_username);
 
     div()
@@ -391,7 +408,7 @@ fn post_row(item: &TimelineItem) -> impl IntoElement {
         .px_4()
         .py_3()
         .border_b_1()
-        .border_color(rgb(BORDER))
+        .border_color(rgb(theme.border))
         .child(
             div()
                 .flex()
@@ -401,10 +418,10 @@ fn post_row(item: &TimelineItem) -> impl IntoElement {
                         .font_weight(FontWeight::BOLD)
                         .child(item.author_name.clone()),
                 )
-                .child(div().text_color(rgb(TEXT_MUTED)).child(byline))
+                .child(div().text_color(rgb(theme.text_muted)).child(byline))
                 .child(
                     div()
-                        .text_color(rgb(TEXT_MUTED))
+                        .text_color(rgb(theme.text_muted))
                         .child(format_timestamp(item.created_at.as_deref())),
                 ),
         )

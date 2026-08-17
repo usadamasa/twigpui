@@ -56,6 +56,7 @@ cargo run
 | `X_TARGET_USERNAME` | no | `XDevelopers` | Screen name to display, without a leading `@` |
 | `X_MAX_RESULTS` | no | `20` | Posts per fetch, 5–100 |
 | `X_MIN_FETCH_INTERVAL_SECONDS` | no | `60` | Floor on how often a fetch may run, in seconds (#10) |
+| `X_THEME` | no | `light` | Color theme: `light`, `dark`, or `system` (follows the OS appearance) — also `theme` in `config.toml` (#19) |
 
 At least one of `X_BEARER_TOKEN` or `X_OAUTH_CLIENT_ID` must be set — either
 credential alone is enough to run, and having both is fine too. `.env` is
@@ -134,6 +135,7 @@ target_username = "XDevelopers"
 max_results = 20
 min_fetch_interval_seconds = 60
 oauth_client_id = "…"
+theme = "light"
 ```
 
 A missing file is fine — it just means there are no file-level settings.
@@ -144,6 +146,16 @@ credential stays environment-only by design (`X_BEARER_TOKEN` or `.env`) —
 a `bearer_token` entry in the file is rejected with an error rather than
 silently read. `oauth_client_id` is the exception: it's a public client id,
 not a secret, so it's fine to check in.
+
+### Theme (#19)
+
+`theme` accepts `light`, `dark`, or `system` (case-insensitive, surrounding
+whitespace trimmed), via `X_THEME` or `theme` in `config.toml`, with the same
+env > file > default precedence as everything else above. It defaults to
+`light`. `system` follows the OS appearance, read once at startup via gpui's
+`Window::appearance()`. An unrecognized value is not a startup error — a
+typo'd theme is cosmetic, not worth blocking the app over — it falls back to
+`light` and prints a warning to stderr naming the value it ignored.
 
 ## API cost
 

@@ -193,12 +193,31 @@ impl Config {
         // block startup (#19) — so it falls back to the default and warns
         // via eprintln!, the project's established pattern for
         // non-fatal notices (see main.rs).
-        // TDD stub — deliberately wrong: ignores parsing/fallback rules so
-        // the failing-tests commit proves the tests, not a compile error.
-        let theme = match var("X_THEME").or(file.theme) {
-            Some(_) => ThemeMode::Dark,
-            None => ThemeMode::default(),
-        };
+        // env > config.toml > default, same layering as everything else
+        // above. Unlike the numeric settings, an unrecognized value here
+        // must not `bail!` — a typo'd theme is cosmetic, not a reason to
+        // block startup (#19) — so it falls back to the default and warns
+        // via eprintln!, the project's established pattern for
+        // non-fatal notices (see main.rs).
+        let theme = var("X_THEME")
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty())
+            .or_else(|| {
+                file.theme
+                    .map(|t| t.trim().to_string())
+                    .filter(|t| !t.is_empty())
+            })
+            .and_then(|raw| {
+                ThemeMode::parse(&raw).or_else(|| {
+                    eprintln!(
+                        "warning: unrecognized theme {raw:?} (expected light, dark, or \
+                         system); using {} instead",
+                        ThemeMode::default()
+                    );
+                    None
+                })
+            })
+            .unwrap_or_default();
 
         Ok(Self {
             bearer_token,
@@ -599,8 +618,11 @@ mod tests {
 
     #[test]
     fn resolve_falls_back_to_the_default_theme_when_unset() {
-        let config = Config::resolve(vars(&[("X_BEARER_TOKEN", "token")]), FileSettings::default())
-            .unwrap();
+        let config = Config::resolve(
+            vars(&[("X_BEARER_TOKEN", "token")]),
+            FileSettings::default(),
+        )
+        .unwrap();
         assert_eq!(config.theme, ThemeMode::default());
     }
 

@@ -17,7 +17,8 @@
 //! | --- | --- | --- |
 //! | `text` on `bg` | 18.5:1 | pass |
 //! | `text_muted` on `bg` | 6.9:1 | pass |
-//! | white on `accent` (button label) | 5.7:1 | pass |
+//! | `button_label` on `accent` (idle button) | 5.7:1 | pass |
+//! | `button_label` on `button_busy_bg` (busy button) | 6.9:1 | pass |
 //! | `danger` on `bg` | 5.8:1 | pass |
 
 use gpui::WindowAppearance;
@@ -38,9 +39,17 @@ pub(crate) struct Theme {
     pub(crate) text: u32,
     /// De-emphasized text (bylines, timestamps, placeholder notices).
     pub(crate) text_muted: u32,
-    /// The primary action button's fill; also stands in as the button's own
-    /// text color source in reverse (white text is drawn on top of it).
+    /// The primary action button's fill while idle (clickable).
     pub(crate) accent: u32,
+    /// The primary action button's fill while busy/disabled — deliberately
+    /// its own slot rather than reusing `border`: a light theme's hairline
+    /// border is far too pale to keep `button_label` legible as a button
+    /// fill (see the module doc's contrast table).
+    pub(crate) button_busy_bg: u32,
+    /// Text drawn on top of the primary action button, in either fill state
+    /// above. Its own slot rather than reusing `text`: on a light theme,
+    /// body text is near-black, which fails contrast against `accent`.
+    pub(crate) button_label: u32,
     /// Error and rate-limit text.
     pub(crate) danger: u32,
 }
@@ -56,6 +65,10 @@ impl Theme {
             text: 0xf7_f9_f9,
             text_muted: 0x88_99_a6,
             accent: 0x1d_9b_f0,
+            // Reproduces the pre-#19 button exactly: the button used `BORDER`
+            // as its busy fill and `TEXT` as its label, unconditionally.
+            button_busy_bg: 0x38_44_4d,
+            button_label: 0xf7_f9_f9,
             danger: 0xf4_21_2e,
         }
     }
@@ -63,9 +76,20 @@ impl Theme {
     /// The light palette #19 makes the default. See the module doc for the
     /// contrast ratios behind these values.
     pub(crate) const fn light() -> Self {
-        // TDD stub — deliberately wrong (identical to `dark()`) so the
-        // failing-tests commit proves this, not a compile error.
-        Self::dark()
+        Self {
+            bg: 0xff_ff_ff,
+            bg_header: 0xf5_f7_f8,
+            border: 0xd7_dc_e0,
+            text: 0x0f_14_19,
+            text_muted: 0x54_5b_63,
+            accent: 0x0b_65_c2,
+            // A pale hairline border would leave a white `button_label`
+            // unreadable, so the busy fill is a mid gray instead — see the
+            // module doc's contrast table.
+            button_busy_bg: 0x54_5b_63,
+            button_label: 0xff_ff_ff,
+            danger: 0xc4_1e_3a,
+        }
     }
 }
 
@@ -89,9 +113,13 @@ impl ThemeMode {
     /// `Config::resolve` treats its other string settings. `None` for
     /// anything else — the caller decides how to report a bad value, since
     /// an unrecognized theme must not fail startup (#19).
-    pub(crate) fn parse(_raw: &str) -> Option<Self> {
-        // TDD stub — deliberately unimplemented.
-        None
+    pub(crate) fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "light" => Some(Self::Light),
+            "dark" => Some(Self::Dark),
+            "system" => Some(Self::System),
+            _ => None,
+        }
     }
 
     /// Resolve to a concrete [`Theme`]. `appearance` is only consulted for
@@ -133,6 +161,8 @@ mod tests {
         assert_ne!(light.text, dark.text);
         assert_ne!(light.text_muted, dark.text_muted);
         assert_ne!(light.accent, dark.accent);
+        assert_ne!(light.button_busy_bg, dark.button_busy_bg);
+        assert_ne!(light.button_label, dark.button_label);
         assert_ne!(light.danger, dark.danger);
     }
 
