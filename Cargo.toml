@@ -35,6 +35,7 @@ gpui = { version = "0.2.2", default-features = false, features = [
     "font-kit",
     "macos-blade",
 ] }
+gpui-component = "0.5.1"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 sha2 = "0.11.0"
