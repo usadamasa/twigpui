@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use gpui::{
     AnyElement, Context, FocusHandle, FontWeight, KeyDownEvent, SharedString, Task, Window, div,
@@ -11,6 +11,7 @@ use crate::config::Config;
 use crate::oauth::{self, TimelineSource};
 use crate::paths::Paths;
 use crate::rate_limit;
+use crate::repost::{self, RepostState, RepostStatus};
 use crate::theme::Theme;
 use crate::thread::{self, ThreadChain};
 use crate::usage;
@@ -184,6 +185,25 @@ pub(crate) struct TimelineView {
     /// cancel-on-drop contract. Reassigning it (another refresh) drops and
     /// so cancels whatever read was still running.
     usage_refresh: Option<Task<()>>,
+    /// Every post id this app has reposted, per the local record (#15) —
+    /// refreshed from disk whenever the visible timeline changes (see
+    /// [`Self::refresh_reposted_ids`]). The default source for
+    /// [`Self::repost_state_for`]; `repost_overrides` below takes
+    /// precedence for any post already touched this session.
+    reposted_ids: HashSet<String>,
+    /// Holds the in-flight read from [`Self::refresh_reposted_ids`] alive;
+    /// mirrors `usage_refresh`'s cancel-on-drop contract.
+    reposted_ids_refresh: Option<Task<()>>,
+    /// Per-post repost button state (#15) for any post touched this
+    /// session — pending, failed, or a value a finished request has already
+    /// confirmed and so is authoritative over `reposted_ids` until the next
+    /// refresh catches up. Absent means "use `reposted_ids`'s plain on/off
+    /// value" — see [`Self::repost_state_for`].
+    repost_overrides: HashMap<String, RepostState>,
+    /// In-flight create/delete repost requests, keyed by post id, mirroring
+    /// `thread_fetches`'s cancel-on-drop contract: dropping the view
+    /// cancels every still-running toggle along with it.
+    repost_tasks: HashMap<String, Task<()>>,
 }
 
 impl TimelineView {
@@ -221,6 +241,10 @@ impl TimelineView {
             oauth_scope: None,
             usage_totals: usage::Totals::default(),
             usage_refresh: None,
+            reposted_ids: HashSet::new(),
+            reposted_ids_refresh: None,
+            repost_overrides: HashMap::new(),
+            repost_tasks: HashMap::new(),
         };
         this.start(cx);
         this.refresh_usage(cx);
@@ -268,6 +292,7 @@ impl TimelineView {
 
             let _ = this.update(cx, |this, cx| {
                 this.refresh_usage(cx);
+                this.refresh_reposted_ids(cx);
                 match result {
                     Ok(StartOutcome::NotAuthenticated) => {
                         this.state = TimelineState::NotAuthenticated;
@@ -380,6 +405,7 @@ impl TimelineView {
 
                     let _ = this.update(cx, |this, cx| {
                         this.refresh_usage(cx);
+                        this.refresh_reposted_ids(cx);
                         this.state = match result {
                             Ok(reloaded) => {
                                 // Single-user mode has no pagination cursor —
@@ -405,6 +431,7 @@ impl TimelineView {
 
                     let _ = this.update(cx, |this, cx| {
                         this.refresh_usage(cx);
+                        this.refresh_reposted_ids(cx);
                         this.state = match result {
                             Ok(reloaded) => {
                                 this.home_user_id = Some(reloaded.me.id);
@@ -459,6 +486,7 @@ impl TimelineView {
 
             let _ = this.update(cx, |this, cx| {
                 this.refresh_usage(cx);
+                this.refresh_reposted_ids(cx);
                 this.state = match result {
                     Ok((items, next_token)) => {
                         this.next_page_token = next_token;
@@ -553,6 +581,126 @@ impl TimelineView {
                 });
             }
         }));
+    }
+
+    /// Refresh `self.reposted_ids` from the local repost record (#15)
+    /// whenever the visible timeline changes — mirrors
+    /// [`Self::refresh_usage`]'s pattern exactly: read on the background
+    /// executor so a slow disk read never blocks rendering, and a read that
+    /// fails just leaves whatever was already shown rather than failing the
+    /// fetch it rode in on. This file is the project's only source for "did
+    /// I repost this" (#15's whole reason for existing — the X API itself
+    /// carries no such field), so a stale or lost read here can only ever
+    /// under- or over-report *this app's own* reposts, never one made from
+    /// another client, which this issue accepts as out of scope regardless.
+    fn refresh_reposted_ids(&mut self, cx: &mut Context<'_, Self>) {
+        let paths = self.paths.clone();
+        self.reposted_ids_refresh = Some(cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { repost::load_all(&paths) })
+                .await;
+
+            if let Ok(ids) = result {
+                let _ = this.update(cx, |this, cx| {
+                    this.reposted_ids = ids;
+                    cx.notify();
+                });
+            }
+        }));
+    }
+
+    /// The button state to render for `post_id` (#15): whatever this
+    /// session already knows (in flight, failed, or a value a finished
+    /// request already confirmed) if there is one, else the plain on/off
+    /// value from the local record `refresh_reposted_ids` last read.
+    fn repost_state_for(&self, post_id: &str) -> RepostState {
+        self.repost_overrides
+            .get(post_id)
+            .cloned()
+            .unwrap_or_else(|| RepostState::new(self.reposted_ids.contains(post_id)))
+    }
+
+    /// Toggle one post's repost state (#15): flip the button immediately
+    /// (never waiting on the network — mirrors #14's synchronous
+    /// `start_submitting`), then run the actual create/delete request on
+    /// the background executor and apply whatever it resolves to —
+    /// including any error-reconciliation `repost::create`/`repost::remove`
+    /// already folded into their own `Result<bool>` — back onto the same
+    /// per-post state.
+    ///
+    /// No-ops without a client or a resolved `home_user_id` — the repost
+    /// endpoints act as *this* account, whose id only `/me` (#11) resolves,
+    /// so there is nothing to call yet if it hasn't. The `tweet.write`
+    /// scope check mirrors `submit_post`'s exactly, reusing #14's own
+    /// "Re-authorize" affordance rather than a parallel check, per #15's
+    /// explicit instruction.
+    fn toggle_repost(&mut self, post_id: String, cx: &mut Context<'_, Self>) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        let Some(user_id) = self.home_user_id.clone() else {
+            return;
+        };
+
+        let mut state = self.repost_state_for(&post_id);
+        if !state.can_toggle() {
+            return;
+        }
+
+        if !oauth::tokens::has_scope(
+            self.oauth_scope.as_deref(),
+            oauth::tokens::TWEET_WRITE_SCOPE,
+        ) {
+            state.refuse(
+                "This session can't repost yet — click \"Re-authorize\" above first.".to_string(),
+            );
+            self.repost_overrides.insert(post_id, state);
+            cx.notify();
+            return;
+        }
+
+        let creating = !state.is_reposted();
+        state.start_toggle();
+        self.repost_overrides.insert(post_id.clone(), state);
+        cx.notify();
+
+        let paths = self.paths.clone();
+        let update_key = post_id.clone();
+        let task_key = post_id.clone();
+
+        let task = cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    if creating {
+                        repost::create(&paths, &client, &user_id, &post_id, oauth::unix_now())
+                    } else {
+                        repost::remove(&paths, &client, &user_id, &post_id, oauth::unix_now())
+                    }
+                })
+                .await;
+
+            let _ = this.update(cx, |this, cx| {
+                this.refresh_usage(cx);
+                let mut state = this
+                    .repost_overrides
+                    .remove(&update_key)
+                    .unwrap_or_else(|| RepostState::new(!creating));
+                state.apply_result(result.map_err(|error| format!("{error:#}")));
+                this.repost_overrides.insert(update_key.clone(), state);
+                this.repost_tasks.remove(&update_key);
+                cx.notify();
+            });
+        });
+        self.repost_tasks.insert(task_key, task);
+    }
+
+    /// The repost/un-repost toggle for one post (#15), rendered whenever
+    /// [`offers_repost`] allows it for `item`.
+    fn repost_button(&self, item: &TimelineItem, cx: &mut Context<'_, Self>) -> AnyElement {
+        let state = self.repost_state_for(&item.id);
+        repost_row(&item.id, &state, self.theme, cx)
     }
 
     /// Run the interactive PKCE sign-in flow: open the browser, wait for the
@@ -997,6 +1145,17 @@ impl TimelineView {
             .when_some(item.replied_to.as_ref(), |column, replied_to| {
                 column.child(self.thread_section(&item.id, replied_to, cx))
             })
+            // #15: repost/un-repost — see `offers_repost`'s doc for exactly
+            // which posts get one.
+            .when(
+                offers_repost(
+                    self.signed_in_with_oauth,
+                    self.home_user_id.as_deref(),
+                    self.home_username.as_deref(),
+                    item,
+                ),
+                |column| column.child(self.repost_button(item, cx)),
+            )
             .into_any_element()
     }
 
@@ -1424,6 +1583,104 @@ fn offers_reauthorize(signed_in_with_oauth: bool, oauth_scope: Option<&str>) -> 
     signed_in_with_oauth && !oauth::tokens::has_scope(oauth_scope, oauth::tokens::TWEET_WRITE_SCOPE)
 }
 
+/// Whether post `item` should offer a repost/un-repost toggle (#15).
+///
+/// Requires a signed-in OAuth session whose own id has resolved
+/// (`home_user_id`, via `/me` — #11): the repost endpoints act as *this*
+/// account, and there is nothing to call without it. Withheld for a post
+/// that is itself already a repost (`item.reposted_by.is_some()`): a
+/// repost-of-a-repost row's `item.id` is the *retweet activity's own* post
+/// id (see `x_api::model::build_item`), not the original content's id the
+/// repost endpoints actually need, and `TimelineItem` currently carries no
+/// separate field for the original — offering the button there would risk
+/// sending the wrong id (see the implementation report for this
+/// deliberate, documented gap). Withheld for one's own post, matching the
+/// API's own rejection (#15) — see [`is_own_post`].
+fn offers_repost(
+    signed_in_with_oauth: bool,
+    home_user_id: Option<&str>,
+    home_username: Option<&str>,
+    item: &TimelineItem,
+) -> bool {
+    signed_in_with_oauth
+        && home_user_id.is_some()
+        && item.reposted_by.is_none()
+        && !is_own_post(home_username, &item.author_username)
+}
+
+/// Whether `author_username` is the signed-in account's own (#15) — the API
+/// rejects reposting your own post, and checking here saves a
+/// guaranteed-failing request, mirroring #14's client-side character-limit
+/// check. `home_username: None` (not yet resolved) never withholds the
+/// button: safer to let an occasional same-account repost through to the
+/// API's own rejection than to hide the button for every post before the
+/// signed-in identity is known. Case-insensitive since `home_username`
+/// (from `/me`) and `author_username` (from the timeline expansion) are
+/// resolved independently.
+fn is_own_post(home_username: Option<&str>, author_username: &str) -> bool {
+    home_username.is_some_and(|home| home.eq_ignore_ascii_case(author_username))
+}
+
+/// The repost/un-repost toggle for one post (#15): "Repost" when not
+/// reposted, "Reposted" once it is — both clickable (a repost is
+/// reversible, so the button doubles as its own undo), styled like
+/// [`thread_toggle_row`]. Disabled — no click handler at all, matching
+/// #14's double-submit guard — while a request is in flight; a failed
+/// attempt shows its message above the (still clickable) toggle, offering a
+/// retry.
+fn repost_row(
+    post_id: &str,
+    state: &RepostState,
+    theme: Theme,
+    cx: &mut Context<'_, TimelineView>,
+) -> AnyElement {
+    let label = repost_action_label(state);
+    let color = if state.is_reposted() {
+        theme.accent
+    } else {
+        theme.text_muted
+    };
+
+    let toggle = div()
+        .id(SharedString::from(format!("repost-{post_id}")))
+        .text_color(rgb(color))
+        .child(label)
+        .when(state.can_toggle(), |element| {
+            let id = post_id.to_string();
+            element.on_click(cx.listener(move |this, _event, _window, cx| {
+                this.toggle_repost(id.clone(), cx);
+            }))
+        });
+
+    if let RepostStatus::Failed(message) = state.status() {
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(div().text_color(rgb(theme.danger)).child(message.clone()))
+            .child(toggle)
+            .into_any_element()
+    } else {
+        toggle.into_any_element()
+    }
+}
+
+/// The clickable label for [`repost_row`] (#15): the pending direction
+/// while a request is in flight, else the plain on/off label.
+fn repost_action_label(state: &RepostState) -> &'static str {
+    if matches!(state.status(), RepostStatus::Pending) {
+        if state.is_reposted() {
+            "Reposting…"
+        } else {
+            "Removing repost…"
+        }
+    } else if state.is_reposted() {
+        "Reposted"
+    } else {
+        "Repost"
+    }
+}
+
 /// Map a failed reload/load-older's error to the state that should show it —
 /// shared by every fetch path in this file (single-user reload, home-timeline
 /// reload, and "Load older") so the #10 rate-limit-countdown behavior stays
@@ -1524,12 +1781,26 @@ fn format_timestamp(created_at: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        ComposeStatus, Cooldown, RepliedTo, Theme, ThreadFetchState, TimelineItem, TimelineSource,
-        TimelineState, at_the_post_cap, byline, compose_error_message, cooldown_label,
-        format_timestamp, header_title, offers_load_older, offers_reauthorize, offers_sign_in,
-        reload_cooldown, reply_banner_label, repost_banner_label, thread_action_label, usage,
-        usage_color, usage_label,
+        ComposeStatus, Cooldown, RepliedTo, RepostState, Theme, ThreadFetchState, TimelineItem,
+        TimelineSource, TimelineState, at_the_post_cap, byline, compose_error_message,
+        cooldown_label, format_timestamp, header_title, is_own_post, offers_load_older,
+        offers_reauthorize, offers_repost, offers_sign_in, reload_cooldown, reply_banner_label,
+        repost_action_label, repost_banner_label, thread_action_label, usage, usage_color,
+        usage_label,
     };
+
+    fn item_with(id: &str, author_username: &str, reposted_by: Option<&str>) -> TimelineItem {
+        TimelineItem {
+            id: id.to_string(),
+            text: String::new(),
+            created_at: None,
+            author_name: String::new(),
+            author_username: author_username.to_string(),
+            reposted_by: reposted_by.map(str::to_string),
+            quoted: None,
+            replied_to: None,
+        }
+    }
 
     #[test]
     fn offers_sign_in_while_running_on_the_app_only_bearer_token() {
@@ -1895,5 +2166,86 @@ mod tests {
             usage_color(usage::BudgetStatus::Exceeded, theme),
             theme.danger
         );
+    }
+
+    // --- offers_repost / is_own_post (#15) ---
+
+    #[test]
+    fn offers_repost_once_signed_in_with_a_resolved_home_id_on_someone_elses_post() {
+        let item = item_with("1", "alice", None);
+        assert!(offers_repost(true, Some("2244994945"), Some("bob"), &item));
+    }
+
+    #[test]
+    fn does_not_offer_repost_without_oauth() {
+        let item = item_with("1", "alice", None);
+        assert!(!offers_repost(
+            false,
+            Some("2244994945"),
+            Some("bob"),
+            &item
+        ));
+    }
+
+    #[test]
+    fn does_not_offer_repost_before_home_user_id_resolves() {
+        // #11: the repost endpoints act as *this* account, whose id only
+        // `/me` resolves — nothing to call yet without it.
+        let item = item_with("1", "alice", None);
+        assert!(!offers_repost(true, None, Some("bob"), &item));
+    }
+
+    #[test]
+    fn does_not_offer_repost_on_a_row_that_is_itself_already_a_repost() {
+        // #15: the row's `item.id` is the retweet activity's own id, not the
+        // original content's — there's no id to call the endpoint with
+        // safely (see `offers_repost`'s doc).
+        let item = item_with("1", "alice", Some("bob"));
+        assert!(!offers_repost(true, Some("2244994945"), Some("bob"), &item));
+    }
+
+    #[test]
+    fn does_not_offer_repost_on_ones_own_post() {
+        let item = item_with("1", "bob", None);
+        assert!(!offers_repost(true, Some("2244994945"), Some("bob"), &item));
+    }
+
+    #[test]
+    fn is_own_post_matches_case_insensitively() {
+        assert!(is_own_post(Some("Bob"), "bob"));
+        assert!(is_own_post(Some("bob"), "BOB"));
+    }
+
+    #[test]
+    fn is_own_post_is_false_when_home_username_is_unknown() {
+        assert!(!is_own_post(None, "bob"));
+    }
+
+    #[test]
+    fn is_own_post_is_false_for_a_different_author() {
+        assert!(!is_own_post(Some("bob"), "alice"));
+    }
+
+    // --- repost_action_label (#15) ---
+
+    #[test]
+    fn repost_action_label_offers_to_repost_when_not_reposted() {
+        assert_eq!(repost_action_label(&RepostState::new(false)), "Repost");
+    }
+
+    #[test]
+    fn repost_action_label_shows_reposted_once_it_is() {
+        assert_eq!(repost_action_label(&RepostState::new(true)), "Reposted");
+    }
+
+    #[test]
+    fn repost_action_label_shows_the_pending_direction() {
+        let mut creating = RepostState::new(false);
+        creating.start_toggle();
+        assert_eq!(repost_action_label(&creating), "Reposting…");
+
+        let mut deleting = RepostState::new(true);
+        deleting.start_toggle();
+        assert_eq!(repost_action_label(&deleting), "Removing repost…");
     }
 }

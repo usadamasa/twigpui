@@ -117,10 +117,17 @@ fn persist(paths: &Paths, post_id: &str, reposted: bool) -> Result<()> {
 /// …" prefix `check_status` adds — more robust to X's exact wording than
 /// matching on the status code alone, since a plain 403 is also returned
 /// for unrelated permission failures.
-// TODO(TDD): stubbed to always report "not recognized" until the tests
-// below are confirmed failing.
-pub(crate) fn reconcile_from_error(_creating: bool, _message: &str) -> Option<bool> {
-    None
+pub(crate) fn reconcile_from_error(creating: bool, message: &str) -> Option<bool> {
+    let lower = message.to_lowercase();
+    if creating && lower.contains("already retweeted") {
+        Some(true)
+    } else if !creating
+        && (lower.contains("have not retweeted") || lower.contains("haven't retweeted"))
+    {
+        Some(false)
+    } else {
+        None
+    }
 }
 
 /// Repost `post_id` as `user_id` (#15): call the API, then persist success.
@@ -236,9 +243,8 @@ impl RepostState {
     /// flight (#15's "flip on click, revert on failure") — the button never
     /// waits on the network to show something changed. Callers must have
     /// already checked [`Self::can_toggle`]; this doesn't re-check.
-    // TODO(TDD): stubbed to a no-op until the tests below are confirmed
-    // failing.
     pub(crate) fn start_toggle(&mut self) {
+        self.reposted = !self.reposted;
         self.status = RepostStatus::Pending;
     }
 
@@ -256,8 +262,6 @@ impl RepostState {
     /// generally does — see [`reconcile_from_error`]'s doc); `Err` rolls the
     /// optimistic flip back to exactly what it was before `start_toggle`,
     /// #15's explicit rollback guarantee.
-    // TODO(TDD): stubbed to never roll back until the tests below are
-    // confirmed failing.
     pub(crate) fn apply_result(&mut self, result: Result<bool, String>) {
         match result {
             Ok(actual) => {
@@ -265,6 +269,7 @@ impl RepostState {
                 self.status = RepostStatus::Idle;
             }
             Err(message) => {
+                self.reposted = !self.reposted;
                 self.status = RepostStatus::Failed(message);
             }
         }
@@ -275,7 +280,7 @@ impl RepostState {
 mod tests {
     use super::*;
 
-    fn test_paths(root: &std::path::Path) -> Paths {
+    fn test_paths(root: &Path) -> Paths {
         let home = root.display().to_string();
         Paths::from_vars(move |key| (key == "HOME").then(|| home.clone())).unwrap()
     }

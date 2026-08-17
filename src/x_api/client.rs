@@ -556,17 +556,15 @@ fn create_post_url() -> String {
 /// `POST /2/users/:id/retweets` (#15) — `user_id` is the signed-in
 /// account's own id (`/me`, #11); the target post's id travels in the JSON
 /// body ([`RepostRequest`]), not the URL.
-// TODO(TDD): stubbed until the tests below are confirmed failing.
-fn create_repost_url(_user_id: &str) -> String {
-    String::new()
+fn create_repost_url(user_id: &str) -> String {
+    format!("{API_BASE}/users/{user_id}/retweets")
 }
 
 /// `DELETE /2/users/:id/retweets/:source_tweet_id` (#15) — the only
 /// endpoint in this crate where the *acted-on* resource's own id is a URL
 /// path segment rather than a query parameter or JSON body field.
-// TODO(TDD): stubbed until the tests below are confirmed failing.
-fn delete_repost_url(_user_id: &str, _source_tweet_id: &str) -> String {
-    String::new()
+fn delete_repost_url(user_id: &str, source_tweet_id: &str) -> String {
+    format!("{API_BASE}/users/{user_id}/retweets/{source_tweet_id}")
 }
 
 /// Pull the API's own error text out of a response body, if it has any.
