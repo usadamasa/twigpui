@@ -168,20 +168,57 @@ instead of showing nothing.
 
 ## Setup
 
-Configuration comes from the environment. Either export it:
+At least one of the two credentials below is required — either alone is
+enough to run, and having both is fine too.
+
+**Recommended: put `oauth_client_id` in `config.toml`.** It's the only
+non-secret credential twigpui has (a public OAuth client has no client
+secret), so unlike the Bearer token it's fine to check into a dotfiles repo —
+and unlike an exported environment variable, it's picked up no matter how
+twigpui is started. An exported `X_OAUTH_CLIENT_ID` is invisible to a
+different terminal, a fresh shell that never sourced your profile, and a
+`.app` launched from Finder/Spotlight/Dock (#40) — none of which inherit your
+shell's environment. That gap is exactly how #54 happened: a stored session
+expired, couldn't refresh without the client id in that particular shell, and
+the app quietly kept working in a degraded, read-only mode with nothing on
+screen explaining why.
+
+```sh
+mkdir -p ~/.config/twigpui
+cat >> ~/.config/twigpui/config.toml <<'EOF'
+oauth_client_id = "…"
+EOF
+cargo run
+```
+
+(`~/.config/twigpui/config.toml` is the default path —
+`$XDG_CONFIG_HOME/twigpui/config.toml` if that's set. See "`config.toml`"
+below for the full path resolution and every other key the file accepts.)
+
+**`X_BEARER_TOKEN` cannot go in `config.toml`.** It's a secret, and
+`config.toml` is a plain file people check into dotfiles repos, so a
+`bearer_token` entry there is rejected outright rather than silently
+accepted. Export it instead:
 
 ```sh
 export X_BEARER_TOKEN='…'
 cargo run
 ```
 
-or keep a local `.env`, which `dotenvy` loads into the same variables:
+or keep a local `.env`, which `dotenvy` loads into the same variables (this
+also works for `X_OAUTH_CLIENT_ID`, if you'd rather not use `config.toml`):
 
 ```sh
 cp .env.example .env
-$EDITOR .env          # fill in X_BEARER_TOKEN or X_OAUTH_CLIENT_ID
+$EDITOR .env          # fill in X_BEARER_TOKEN, or X_OAUTH_CLIENT_ID
 cargo run
 ```
+
+An environment variable always overrides the same key in `config.toml` (see
+"`config.toml`" below) — handy for a one-off override, but not a substitute
+for putting `oauth_client_id` in the file if you want it to survive across
+terminals and launch methods without having to remember to export it again
+each time.
 
 | Variable | Required | Default | Meaning |
 | --- | --- | --- | --- |
@@ -194,9 +231,7 @@ cargo run
 | `X_REQUEST_PRICE` | no | unset | Price per API request, in whatever unit you have in mind — also `request_price` in `config.toml` (#18, see "Usage tracking" below) |
 | `X_DAILY_REQUEST_BUDGET` | no | unset | Daily request-count budget that colors the header's usage line as it's approached — also `daily_request_budget` in `config.toml` (#18) |
 
-At least one of `X_BEARER_TOKEN` or `X_OAUTH_CLIENT_ID` must be set — either
-credential alone is enough to run, and having both is fine too. `.env` is
-gitignored. Do not commit credentials.
+`.env` is gitignored. Do not commit credentials.
 
 ## Signing in with X (OAuth 2.0 Authorization Code + PKCE)
 
@@ -658,7 +693,12 @@ send/don't-send decision, `429` classification, jittered backoff schedule,
 and persistence (#10), the scope check behind #14's "Re-authorize" button
 (sufficient / insufficient / never-recorded scope), that an old-format
 `TokenSet` with no `scope` field at all still deserializes rather than
-logging the user out, the composer's weighted-length character counter and
+logging the user out, which of #54's three reasons a stale stored session
+gets demoted for (no `oauth_client_id` configured, no refresh token on the
+session, or X rejecting an attempted refresh outright) and the message
+`describe_demotion` builds for each (including that it names the resolved
+`config.toml` path for the no-client-id case, since that's the one with an
+actual file to point at), the composer's weighted-length character counter and
 draft validation (boundary length, over-limit, empty, whitespace-only), its
 submit state machine (a failed submit keeps the draft and stays retryable;
 a successful one clears it), the `POST /2/tweets` request body, the local
@@ -686,4 +726,8 @@ own post the way its documentation implies), refresh-token rotation, and
 the real rate-limit header values X sends aren't covered by tests — those
 need a real Developer Portal registration, a one-time manual sign-in, and
 (for repost) actually hitting a live rate limit or a live already-reposted
-conflict.
+conflict. X actually rejecting a refresh attempt (#54's `SessionDemotion::Rejected`
+branch inside `resolve_credential` itself, as opposed to `describe_demotion`'s
+formatting of it, which is tested) is in the same boat — it needs the token
+endpoint to actually answer with a revoked-or-expired-beyond-recovery error,
+which nothing in this test suite can trigger without a live session.
