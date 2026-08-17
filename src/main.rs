@@ -3,6 +3,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 mod config;
+mod paths;
 mod ui;
 mod x_api;
 
