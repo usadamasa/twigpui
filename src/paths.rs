@@ -64,29 +64,48 @@ impl Paths {
     /// ids are effectively permanent, so caching this alone (TTL'd by
     /// [`crate::cache`]) turns a reload's two requests into one.
     pub(crate) fn user_ids_file(&self) -> PathBuf {
-        // Stub: deliberately wrong so the new paths.rs tests fail on the
-        // assertion rather than a compile error, per TDD — fixed in the
-        // next commit.
-        PathBuf::new()
+        self.cache_dir.join("user_ids.json")
     }
 
     /// Path to one user's cached timeline, under `cache_dir` (#9). Split per
     /// user, rather than one shared file, so #24's additional panels can
     /// each grow their own cache file without contention.
     pub(crate) fn timeline_file(&self, user_id: &str) -> PathBuf {
-        let _ = user_id;
-        // Stub: see `user_ids_file` above.
-        PathBuf::new()
+        self.cache_dir.join(format!("timeline-{user_id}.json"))
     }
 
     /// Create all three directories (recursively) if they do not already
     /// exist.
     pub(crate) fn ensure_dirs(&self) -> Result<()> {
+        // Checked before creation so the (best-effort, possibly slow)
+        // exclusion call below only ever runs once, the run that actually
+        // creates `cache_dir` — not on every startup.
+        let cache_dir_is_new = !self.cache_dir.exists();
+
         for dir in [&self.config_dir, &self.cache_dir, &self.state_dir] {
             create_private_dir(dir)?;
         }
+
+        if cache_dir_is_new {
+            exclude_cache_dir_from_time_machine(&self.cache_dir);
+        }
+
         Ok(())
     }
+}
+
+/// Best-effort exclude `dir` from Time Machine via `tmutil addexclusion`
+/// (#9). `~/Library/Caches` is exempted from backups automatically by
+/// macOS; the XDG cache location this app actually uses (`~/.cache`) is
+/// not, so without this the response cache would get backed up on every
+/// Time Machine run like ordinary data. Failure — `tmutil` missing, no
+/// permission, anything — is silently ignored: this is a nice-to-have, and
+/// must never be able to block startup.
+fn exclude_cache_dir_from_time_machine(dir: &Path) {
+    let _ = std::process::Command::new("tmutil")
+        .arg("addexclusion")
+        .arg(dir)
+        .output();
 }
 
 /// Resolve one XDG base directory: `$<xdg_var>/twigpui` if `xdg_var` holds a

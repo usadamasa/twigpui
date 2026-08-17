@@ -91,7 +91,8 @@ impl TimelineView {
                     let Some(token) = token else {
                         return anyhow::Ok((None, None));
                     };
-                    let cached = cache::startup(&paths, &config.target_username, oauth::unix_now())?;
+                    let cached =
+                        cache::startup(&paths, &config.target_username, oauth::unix_now())?;
                     anyhow::Ok((Some(token), cached))
                 })
                 .await;

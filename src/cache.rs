@@ -57,10 +57,7 @@ struct TimelineCacheFile {
 /// Whether a user id cached at `cached_at` is still within the TTL window at
 /// `now`.
 fn user_id_is_fresh(cached_at: i64, now: i64) -> bool {
-    // Stub: always stale, so the freshness tests fail on the assertion
-    // rather than a compile error, per TDD — fixed in the next commit.
-    let _ = (cached_at, now);
-    false
+    now.saturating_sub(cached_at) < USER_ID_TTL_SECONDS
 }
 
 /// Load and parse `path` as JSON. Distinguishes three outcomes: the file
@@ -164,10 +161,7 @@ pub(crate) fn startup(
 /// lexicographic string comparison (which breaks across digit-count
 /// boundaries, e.g. `"9" > "10"`).
 pub(crate) fn since_id(cached: &[TimelineItem]) -> Option<&str> {
-    // Stub: always `None`, so the since-id tests fail on the assertion
-    // rather than a compile error, per TDD — fixed in the next commit.
-    let _ = cached;
-    None
+    cached.first().map(|item| item.id.as_str())
 }
 
 /// Merge freshly fetched posts (newest-first) ahead of what's cached (also
@@ -178,11 +172,14 @@ pub(crate) fn merge_timeline(
     fresh: Vec<TimelineItem>,
     cached: Vec<TimelineItem>,
 ) -> Vec<TimelineItem> {
-    // Stub: returns `cached` unchanged, ignoring `fresh` entirely, so the
-    // merge tests fail on the assertion rather than a compile error, per
-    // TDD — fixed in the next commit.
-    let _ = fresh;
-    cached
+    let cached_ids: HashSet<&str> = cached.iter().map(|item| item.id.as_str()).collect();
+    let mut merged: Vec<TimelineItem> = fresh
+        .into_iter()
+        .filter(|item| !cached_ids.contains(item.id.as_str()))
+        .collect();
+    merged.extend(cached);
+    merged.truncate(MAX_CACHED_POSTS);
+    merged
 }
 
 /// What a reload spent: the merged, capped timeline to render, and whether
@@ -211,13 +208,12 @@ pub(crate) fn reload(
     max_results: u32,
     now: i64,
 ) -> Result<Reloaded> {
-    let (user_id, user_id_cache_hit) = match cached_user_id(paths, username, now)? {
-        Some(id) => (id, true),
-        None => {
-            let id = client.user_id_by_username(username)?;
-            save_user_id(paths, username, &id, now)?;
-            (id, false)
-        }
+    let (user_id, user_id_cache_hit) = if let Some(id) = cached_user_id(paths, username, now)? {
+        (id, true)
+    } else {
+        let id = client.user_id_by_username(username)?;
+        save_user_id(paths, username, &id, now)?;
+        (id, false)
     };
 
     let cached = load_timeline(paths, &user_id)?.unwrap_or_default();
@@ -255,10 +251,8 @@ mod tests {
     }
 
     fn temp_root(label: &str) -> std::path::PathBuf {
-        let root = std::env::temp_dir().join(format!(
-            "twigpui-test-cache-{label}-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("twigpui-test-cache-{label}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         root
     }

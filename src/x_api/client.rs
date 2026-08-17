@@ -100,11 +100,10 @@ fn timeline_url(user_id: &str, max_results: u32, since_id: Option<&str>) -> Stri
          &expansions=author_id\
          &user.fields=name,username"
     );
-    // Stub: `since_id` is accepted but not yet appended, so the new
-    // "with_since_id" test fails on the assertion rather than a compile
-    // error, per TDD — fixed in the next commit.
-    let _ = since_id;
-    base
+    match since_id {
+        Some(id) => format!("{base}&since_id={id}"),
+        None => base,
+    }
 }
 
 /// Pull the API's own error text out of a response body, if it has any.

@@ -116,7 +116,7 @@ created (mode `0700`) on startup:
 | Variable | Default | Holds |
 | --- | --- | --- |
 | `XDG_CONFIG_HOME` | `~/.config/twigpui/` | `config.toml` |
-| `XDG_CACHE_HOME` | `~/.cache/twigpui/` | Response cache (#9) |
+| `XDG_CACHE_HOME` | `~/.cache/twigpui/` | Response cache: `user_ids.json`, `timeline-<user_id>.json` (#9) |
 | `XDG_STATE_HOME` | `~/.local/state/twigpui/` | `oauth_tokens.json`, mode `0600` |
 
 An `XDG_*` variable is only honored if it is set to a non-blank absolute
@@ -145,12 +145,57 @@ not a secret, so it's fine to check in.
 
 ## API cost
 
-The X API bills per request against prepaid credits. Each reload spends two
-requests: one user lookup and one timeline fetch. Fetching happens only on
-startup and on an explicit reload — there is no polling or auto-refresh.
+The X API bills per request against prepaid credits. A cold reload spends two
+requests: one user lookup and one timeline fetch. Fetching happens only on an
+explicit reload — there is no polling or auto-refresh, and since #9, **opening
+the app spends nothing at all**: startup renders straight from the local
+cache below whenever one exists, with no request in the loop.
 
 When credits run out the API answers `429` with a `UsageCapExceeded` problem
 body; the app surfaces that text directly in the window.
+
+## Local cache (#9)
+
+To avoid re-paying for the same content, twigpui keeps a small JSON cache
+under `$XDG_CACHE_HOME/twigpui/` (see the file locations table above):
+
+| File | Holds | TTL |
+| --- | --- | --- |
+| `user_ids.json` | Every screen name resolved so far, mapped to its numeric user id | 30 days |
+| `timeline-<user_id>.json` | One user's cached posts, newest first, plus when they were fetched | none — see below |
+
+**User ids are effectively permanent**, so caching the screen-name lookup
+alone is what turns a reload from two requests into one: once a user's id is
+cached and still within its 30-day TTL, a reload skips the lookup and only
+spends the timeline-fetch request.
+
+**Timelines have no TTL.** Freshness is bounded by an explicit reload, not by
+age — the cache is trusted at startup no matter how old it is, since the
+whole point is that opening the window costs nothing. Reloading passes the
+newest cached post's id as the API's `since_id`, so the response only
+contains what's actually new; those posts are merged ahead of what's already
+cached (any id already on file is dropped rather than duplicated), and the
+result is capped at **500 posts per user**, oldest dropped first — `~/.cache`
+isn't purged automatically by macOS the way `~/Library/Caches` is, so this
+cap is twigpui's own.
+
+**A broken cache never blocks startup.** If a cache file fails to parse — or
+was written by a version of twigpui with a different file shape — it's
+treated as a plain cache miss and silently rebuilt on the next reload, rather
+than as an error.
+
+**Time Machine.** `cache_dir` is excluded from Time Machine backups via
+`tmutil addexclusion` the first time it's created (best-effort; a failure
+here, e.g. `tmutil` missing, never blocks startup).
+
+**Clearing the cache by hand:**
+
+```sh
+rm -rf "$XDG_CACHE_HOME/twigpui"   # or ~/.cache/twigpui if XDG_CACHE_HOME is unset
+```
+
+The directory is recreated automatically on the next run; the next startup
+after that falls back to a full reload since there's nothing cached yet.
 
 ## Tests
 
@@ -158,9 +203,10 @@ body; the app surfaces that text directly in the window.
 cargo test
 ```
 
-Tests cover response parsing and error mapping against fixture JSON, plus the
-OAuth PKCE math, callback parsing, and token-file handling, so they make no
-network calls, open no browser, and spend no credits. The actual code
-exchange, X's live response shapes, and refresh-token rotation aren't
-covered by tests — those need a real Developer Portal registration and a
-one-time manual sign-in.
+Tests cover response parsing and error mapping against fixture JSON, the
+OAuth PKCE math, callback parsing, and token-file handling, and the local
+cache's TTL, merge, and corruption-recovery logic, so they make no network
+calls, open no browser, and spend no credits. The actual code exchange, X's
+live response shapes, and refresh-token rotation aren't covered by tests —
+those need a real Developer Portal registration and a one-time manual
+sign-in.
