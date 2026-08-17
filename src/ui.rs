@@ -1,5 +1,6 @@
 use gpui::{Context, FontWeight, SharedString, Task, Window, div, prelude::*, rgb};
 
+use crate::cache;
 use crate::config::Config;
 use crate::oauth;
 use crate::paths::Paths;
@@ -70,8 +71,12 @@ impl TimelineView {
     }
 
     /// Resolve a credential (stored OAuth session, refreshing if stale, else
-    /// the bearer token) before the very first fetch. Runs on the background
-    /// executor because it can touch disk and, on a refresh, the network.
+    /// the bearer token) before the very first fetch, and — since #9 — try
+    /// to render straight from the local cache instead of always reloading.
+    /// A cache hit means startup spends no API request at all; a miss falls
+    /// through to [`Self::reload`], which does. Runs on the background
+    /// executor because it can touch disk and, on a token refresh or cache
+    /// miss, the network.
     fn start(&mut self, cx: &mut Context<'_, Self>) {
         self.state = TimelineState::Loading;
 
@@ -81,17 +86,27 @@ impl TimelineView {
         self.fetch = Some(cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
-                .spawn(
-                    async move { oauth::resolve_access_token(&config, &paths, oauth::unix_now()) },
-                )
+                .spawn(async move {
+                    let token = oauth::resolve_access_token(&config, &paths, oauth::unix_now())?;
+                    let Some(token) = token else {
+                        return anyhow::Ok((None, None));
+                    };
+                    let cached = cache::startup(&paths, &config.target_username, oauth::unix_now())?;
+                    anyhow::Ok((Some(token), cached))
+                })
                 .await;
 
             let _ = this.update(cx, |this, cx| match result {
-                Ok(Some(token)) => {
+                Ok((Some(token), Some(items))) => {
+                    this.client = Some(XClient::new(token));
+                    this.state = TimelineState::Loaded(items);
+                    cx.notify();
+                }
+                Ok((Some(token), None)) => {
                     this.client = Some(XClient::new(token));
                     this.reload(cx);
                 }
-                Ok(None) => {
+                Ok((None, _)) => {
                     this.state = TimelineState::NotAuthenticated;
                     cx.notify();
                 }
@@ -109,7 +124,10 @@ impl TimelineView {
     /// A no-op (falls back to [`TimelineState::NotAuthenticated`]) if called
     /// without a client — the "Reload" button isn't shown in that state, but
     /// this guards against it anyway rather than assuming the caller got it
-    /// right.
+    /// right. Goes through [`cache::reload`] rather than a bare fetch: a
+    /// cached user id turns this into one request instead of two, and the
+    /// result is merged into (and persisted to) the local cache rather than
+    /// replacing it outright.
     fn reload(&mut self, cx: &mut Context<'_, Self>) {
         let Some(client) = self.client.clone() else {
             self.state = TimelineState::NotAuthenticated;
@@ -119,6 +137,7 @@ impl TimelineView {
 
         self.state = TimelineState::Loading;
 
+        let paths = self.paths.clone();
         let username = self.config.target_username.clone();
         let max_results = self.config.max_results;
 
@@ -126,12 +145,14 @@ impl TimelineView {
             // The client blocks, so it must not run on the foreground thread.
             let result = cx
                 .background_executor()
-                .spawn(async move { client.user_timeline(&username, max_results) })
+                .spawn(async move {
+                    cache::reload(&paths, &client, &username, max_results, oauth::unix_now())
+                })
                 .await;
 
             let _ = this.update(cx, |this, cx| {
                 this.state = match result {
-                    Ok(items) => TimelineState::Loaded(items),
+                    Ok(reloaded) => TimelineState::Loaded(reloaded.items),
                     Err(error) => TimelineState::Failed(format!("{error:#}").into()),
                 };
                 cx.notify();

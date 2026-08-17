@@ -60,6 +60,25 @@ impl Paths {
         self.state_dir.join("oauth_tokens.json")
     }
 
+    /// Path to the screen-name → user-id cache, under `cache_dir` (#9). User
+    /// ids are effectively permanent, so caching this alone (TTL'd by
+    /// [`crate::cache`]) turns a reload's two requests into one.
+    pub(crate) fn user_ids_file(&self) -> PathBuf {
+        // Stub: deliberately wrong so the new paths.rs tests fail on the
+        // assertion rather than a compile error, per TDD — fixed in the
+        // next commit.
+        PathBuf::new()
+    }
+
+    /// Path to one user's cached timeline, under `cache_dir` (#9). Split per
+    /// user, rather than one shared file, so #24's additional panels can
+    /// each grow their own cache file without contention.
+    pub(crate) fn timeline_file(&self, user_id: &str) -> PathBuf {
+        let _ = user_id;
+        // Stub: see `user_ids_file` above.
+        PathBuf::new()
+    }
+
     /// Create all three directories (recursively) if they do not already
     /// exist.
     pub(crate) fn ensure_dirs(&self) -> Result<()> {
@@ -207,6 +226,24 @@ mod tests {
         assert_eq!(
             paths.oauth_token_file(),
             PathBuf::from("/home/alice/.local/state/twigpui/oauth_tokens.json")
+        );
+    }
+
+    #[test]
+    fn user_ids_file_is_under_the_cache_dir() {
+        let paths = Paths::from_vars(vars(&[("HOME", "/home/alice")])).unwrap();
+        assert_eq!(
+            paths.user_ids_file(),
+            PathBuf::from("/home/alice/.cache/twigpui/user_ids.json")
+        );
+    }
+
+    #[test]
+    fn timeline_file_is_under_the_cache_dir_named_by_user_id() {
+        let paths = Paths::from_vars(vars(&[("HOME", "/home/alice")])).unwrap();
+        assert_eq!(
+            paths.timeline_file("2244994945"),
+            PathBuf::from("/home/alice/.cache/twigpui/timeline-2244994945.json")
         );
     }
 

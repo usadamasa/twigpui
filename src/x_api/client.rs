@@ -65,14 +65,18 @@ impl XClient {
         }
     }
 
-    /// Fetch recent posts authored by `username`, newest first.
-    pub(crate) fn user_timeline(
+    /// Fetch recent posts for `user_id` directly (the caller already
+    /// resolved the screen name — see `cache::reload`), newest first.
+    /// `since_id`, when given, asks the API to return only posts newer than
+    /// it, keeping both the response and the credit cost down on an
+    /// incremental reload.
+    pub(crate) fn timeline(
         &self,
-        username: &str,
+        user_id: &str,
         max_results: u32,
+        since_id: Option<&str>,
     ) -> Result<Vec<TimelineItem>> {
-        let user_id = self.user_id_by_username(username)?;
-        let url = timeline_url(&user_id, max_results);
+        let url = timeline_url(user_id, max_results, since_id);
         let (status, body) = self.get(&url)?;
         check_status(status, &body)?;
 
@@ -88,14 +92,19 @@ fn user_lookup_url(username: &str) -> String {
 
 /// The timeline endpoint returns bare post ids unless `expansions` and the
 /// `*.fields` parameters ask for more, so the query string is load-bearing.
-fn timeline_url(user_id: &str, max_results: u32) -> String {
-    format!(
+fn timeline_url(user_id: &str, max_results: u32, since_id: Option<&str>) -> String {
+    let base = format!(
         "{API_BASE}/users/{user_id}/tweets\
          ?max_results={max_results}\
          &tweet.fields=created_at\
          &expansions=author_id\
          &user.fields=name,username"
-    )
+    );
+    // Stub: `since_id` is accepted but not yet appended, so the new
+    // "with_since_id" test fails on the assertion rather than a compile
+    // error, per TDD — fixed in the next commit.
+    let _ = since_id;
+    base
 }
 
 /// Pull the API's own error text out of a response body, if it has any.
@@ -152,8 +161,19 @@ mod tests {
         // query across `\` line continuations, and repeating that trick here
         // would hide exactly the stray-whitespace bug this guards against.
         assert_eq!(
-            timeline_url("2244994945", 20),
+            timeline_url("2244994945", 20, None),
             "https://api.x.com/2/users/2244994945/tweets?max_results=20&tweet.fields=created_at&expansions=author_id&user.fields=name,username"
+        );
+    }
+
+    #[test]
+    fn appends_since_id_when_given() {
+        // #9: an incremental reload passes the newest cached post id so the
+        // API returns only what's new, keeping both the response and the
+        // credit cost down.
+        assert_eq!(
+            timeline_url("2244994945", 20, Some("1700000000000000001")),
+            "https://api.x.com/2/users/2244994945/tweets?max_results=20&tweet.fields=created_at&expansions=author_id&user.fields=name,username&since_id=1700000000000000001"
         );
     }
 

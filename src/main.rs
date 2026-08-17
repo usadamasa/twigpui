@@ -2,6 +2,7 @@
 // lints in Cargo.toml are aimed at the code that actually ships.
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
+mod cache;
 mod config;
 mod oauth;
 mod paths;
@@ -63,6 +64,14 @@ fn main() {
 /// Resolve a token the same way the window does at startup, but without ever
 /// opening a browser — `--fetch-only` is meant to run headless, e.g. in a
 /// script checking whether credentials are still valid.
+///
+/// Unlike opening the window, this always spends at least one API request:
+/// its whole point per the README is checking that the credential and
+/// connectivity actually work, which a cache-only render can't verify. It
+/// still goes through `cache::reload` rather than a bare fetch, so a cached
+/// user id turns that into one request instead of two, and an incremental
+/// `since_id` keeps the response small — see the eprintln! below for which
+/// happened.
 fn fetch_only(config: &config::Config, paths: &paths::Paths) -> i32 {
     let token = match oauth::resolve_access_token(config, paths, oauth::unix_now()) {
         Ok(Some(token)) => token,
@@ -80,8 +89,27 @@ fn fetch_only(config: &config::Config, paths: &paths::Paths) -> i32 {
     };
 
     let client = x_api::XClient::new(token);
-    match client.user_timeline(&config.target_username, config.max_results) {
-        Ok(items) => {
+    match cache::reload(
+        paths,
+        &client,
+        &config.target_username,
+        config.max_results,
+        oauth::unix_now(),
+    ) {
+        Ok(cache::Reloaded {
+            items,
+            user_id_cache_hit,
+        }) => {
+            eprintln!(
+                "cache: user id {} ({} request{} spent)",
+                if user_id_cache_hit {
+                    "cache hit"
+                } else {
+                    "cache miss, resolved via the API"
+                },
+                if user_id_cache_hit { 1 } else { 2 },
+                if user_id_cache_hit { "" } else { "s" }
+            );
             println!("{} post(s) from @{}", items.len(), config.target_username);
             for item in &items {
                 println!(
