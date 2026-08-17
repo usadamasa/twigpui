@@ -4,6 +4,7 @@ use crate::cache;
 use crate::config::Config;
 use crate::oauth;
 use crate::paths::Paths;
+use crate::rate_limit;
 use crate::x_api::{TimelineItem, XClient};
 
 // Grouped per RGB channel, which is also the digit grouping clippy asks for.
@@ -24,7 +25,27 @@ enum TimelineState {
     SigningIn,
     Loading,
     Loaded(Vec<TimelineItem>),
+    /// Blocked before any request went out (#10). Carries when it becomes
+    /// allowed again so the header can render a countdown instead of a bare
+    /// error message, and which side imposed the wait — see [`Cooldown`].
+    RateLimited {
+        reset_at: i64,
+        cooldown: Cooldown,
+    },
     Failed(SharedString),
+}
+
+/// Which side is making the app wait. Both render a countdown, but they are
+/// different facts and must not be described with the same words: saying "X
+/// rate limited you" when the app is really just honouring its own configured
+/// fetch interval would be a plain misstatement of what happened.
+#[derive(Clone, Copy)]
+enum Cooldown {
+    /// `config.min_fetch_interval_seconds` — self-imposed, nothing was sent
+    /// and X has said nothing.
+    LocalInterval,
+    /// X's own rate-limit window, per the tracked `x-rate-limit-*` headers.
+    ApiRateLimit,
 }
 
 /// What the header's primary button does, independent of its current label —
@@ -49,6 +70,12 @@ pub(crate) struct TimelineView {
     /// new one (a second click) drops and so cancels whatever was running,
     /// which also closes the loopback socket — see `oauth::callback`.
     sign_in_flow: Option<Task<()>>,
+    /// When the last reload was kicked off, so [`Self::reload`] can enforce
+    /// `config.min_fetch_interval_seconds` (#10) as a client-side throttle
+    /// on the button itself — independent of, and in addition to, whatever
+    /// the tracked API rate-limit state says via `rate_limit::decision`.
+    /// `None` until the first reload, which is therefore never throttled.
+    last_reload_at: Option<i64>,
 }
 
 impl TimelineView {
@@ -65,6 +92,7 @@ impl TimelineView {
             state: TimelineState::Loading,
             fetch: None,
             sign_in_flow: None,
+            last_reload_at: None,
         };
         this.start(cx);
         this
@@ -129,12 +157,33 @@ impl TimelineView {
     /// cached user id turns this into one request instead of two, and the
     /// result is merged into (and persisted to) the local cache rather than
     /// replacing it outright.
+    ///
+    /// Also enforces `config.min_fetch_interval_seconds` (#10) before
+    /// spawning anything: [`reload_cooldown`] is a client-side throttle on
+    /// the button itself, checked without touching the network, on top of
+    /// (not instead of) whatever the tracked API rate-limit state says once
+    /// a request actually goes out.
     fn reload(&mut self, cx: &mut Context<'_, Self>) {
         let Some(client) = self.client.clone() else {
             self.state = TimelineState::NotAuthenticated;
             cx.notify();
             return;
         };
+
+        let now = oauth::unix_now();
+        if let Some(reset_at) = reload_cooldown(
+            self.last_reload_at,
+            self.config.min_fetch_interval_seconds,
+            now,
+        ) {
+            self.state = TimelineState::RateLimited {
+                reset_at,
+                cooldown: Cooldown::LocalInterval,
+            };
+            cx.notify();
+            return;
+        }
+        self.last_reload_at = Some(now);
 
         self.state = TimelineState::Loading;
 
@@ -154,7 +203,19 @@ impl TimelineView {
             let _ = this.update(cx, |this, cx| {
                 this.state = match result {
                     Ok(reloaded) => TimelineState::Loaded(reloaded.items),
-                    Err(error) => TimelineState::Failed(format!("{error:#}").into()),
+                    // #10: a blocked-send carries a known reset time is
+                    // shown as a countdown; everything else (including a
+                    // rate limit whose 429 carried no usable reset header)
+                    // falls back to the plain error message.
+                    Err(error) => match error.downcast_ref::<rate_limit::RateLimited>() {
+                        Some(rate_limit::RateLimited {
+                            reset_at: Some(reset_at),
+                        }) => TimelineState::RateLimited {
+                            reset_at: *reset_at,
+                            cooldown: Cooldown::ApiRateLimit,
+                        },
+                        _ => TimelineState::Failed(format!("{error:#}").into()),
+                    },
                 };
                 cx.notify();
             });
@@ -206,11 +267,21 @@ impl TimelineView {
 
     fn header(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let (label, busy, action) = match self.state {
-            TimelineState::Loading => ("Loading…", true, PrimaryAction::Reload),
-            TimelineState::SigningIn => ("Signing in…", true, PrimaryAction::SignIn),
-            TimelineState::NotAuthenticated => ("Sign in with X", false, PrimaryAction::SignIn),
+            TimelineState::Loading => ("Loading…".to_string(), true, PrimaryAction::Reload),
+            TimelineState::SigningIn => ("Signing in…".to_string(), true, PrimaryAction::SignIn),
+            TimelineState::NotAuthenticated => {
+                ("Sign in with X".to_string(), false, PrimaryAction::SignIn)
+            }
+            // Still wired to `PrimaryAction::Reload`: re-clicking just
+            // re-runs the (network-free) rate-limit decision — #10 forbids
+            // sleeping out the window, not retrying the cheap local check.
+            TimelineState::RateLimited { reset_at, cooldown } => (
+                cooldown_label(cooldown, reset_at, oauth::unix_now()),
+                true,
+                PrimaryAction::Reload,
+            ),
             TimelineState::Loaded(_) | TimelineState::Failed(_) => {
-                ("Reload", false, PrimaryAction::Reload)
+                ("Reload".to_string(), false, PrimaryAction::Reload)
             }
         };
 
@@ -265,6 +336,10 @@ impl TimelineView {
                 TEXT_MUTED,
             )),
             TimelineState::Loading => content.child(notice("Fetching the timeline…", TEXT_MUTED)),
+            TimelineState::RateLimited { reset_at, cooldown } => content.child(notice(
+                cooldown_label(*cooldown, *reset_at, oauth::unix_now()),
+                DANGER,
+            )),
             TimelineState::Failed(message) => content.child(notice(message.clone(), DANGER)),
             TimelineState::Loaded(items) if items.is_empty() => {
                 content.child(notice("No posts were returned.", TEXT_MUTED))
@@ -336,6 +411,36 @@ fn post_row(item: &TimelineItem) -> impl IntoElement {
         .child(div().child(item.text.clone()))
 }
 
+/// Countdown text for the reload button while blocked by #10's rate-limit
+/// decision. `remaining` is clamped to zero rather than going negative if
+/// `reset_at` has (just) passed by the time this renders.
+///
+/// The two cooldowns read differently on purpose: only one of them is X
+/// actually rate limiting this app, and reporting the self-imposed interval
+/// as a rate limit would misdescribe what happened.
+fn cooldown_label(cooldown: Cooldown, reset_at: i64, now: i64) -> String {
+    let remaining = (reset_at - now).max(0);
+    match cooldown {
+        Cooldown::LocalInterval => format!("Waiting out the fetch interval — {remaining}s"),
+        Cooldown::ApiRateLimit => format!("Rate limited by X — retry in {remaining}s"),
+    }
+}
+
+/// Whether [`TimelineView::reload`] should refuse to run right now, per
+/// `config.min_fetch_interval_seconds` (#10). `None` means "go ahead" —
+/// either there has never been a reload yet, or the interval since the last
+/// one has already elapsed. `Some(reset_at)` means "not yet", carrying when
+/// it becomes allowed again, in the same shape [`cooldown_label`] expects.
+fn reload_cooldown(
+    last_reload_at: Option<i64>,
+    min_interval_seconds: u32,
+    now: i64,
+) -> Option<i64> {
+    let last = last_reload_at?;
+    let reset_at = last.saturating_add(i64::from(min_interval_seconds));
+    (reset_at > now).then_some(reset_at)
+}
+
 /// Turn `2026-08-16T09:00:00.000Z` into `2026-08-16 09:00`.
 ///
 /// The API always returns UTC in RFC 3339, so slicing beats pulling in a date
@@ -352,7 +457,7 @@ fn format_timestamp(created_at: Option<&str>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{byline, format_timestamp};
+    use super::{Cooldown, byline, cooldown_label, format_timestamp, reload_cooldown};
 
     #[test]
     fn prefixes_a_byline_with_an_at_sign() {
@@ -386,5 +491,49 @@ mod tests {
     #[test]
     fn renders_a_missing_timestamp_as_empty() {
         assert_eq!(format_timestamp(None), "");
+    }
+
+    #[test]
+    fn cooldown_label_counts_down_to_the_reset_time() {
+        assert_eq!(
+            cooldown_label(Cooldown::ApiRateLimit, 1_060, 1_000),
+            "Rate limited by X — retry in 60s"
+        );
+    }
+
+    #[test]
+    fn cooldown_label_clamps_a_reset_time_already_passed() {
+        // #10: a countdown that's just crossed zero must read "0s", never a
+        // confusing negative number.
+        assert_eq!(
+            cooldown_label(Cooldown::ApiRateLimit, 1_000, 1_060),
+            "Rate limited by X — retry in 0s"
+        );
+    }
+
+    #[test]
+    fn cooldown_label_does_not_blame_x_for_the_local_fetch_interval() {
+        // The self-imposed interval blocks a reload before anything is sent,
+        // so X has said nothing — calling it a rate limit would be a plain
+        // misstatement of what happened.
+        let label = cooldown_label(Cooldown::LocalInterval, 1_060, 1_000);
+        assert_eq!(label, "Waiting out the fetch interval — 60s");
+        assert!(!label.contains("Rate limited"), "{label}");
+    }
+
+    #[test]
+    fn reload_cooldown_allows_the_very_first_reload() {
+        assert_eq!(reload_cooldown(None, 60, 1_000), None);
+    }
+
+    #[test]
+    fn reload_cooldown_blocks_within_the_configured_interval() {
+        assert_eq!(reload_cooldown(Some(1_000), 60, 1_030), Some(1_060));
+    }
+
+    #[test]
+    fn reload_cooldown_allows_once_the_interval_has_elapsed() {
+        assert_eq!(reload_cooldown(Some(1_000), 60, 1_060), None);
+        assert_eq!(reload_cooldown(Some(1_000), 60, 1_061), None);
     }
 }

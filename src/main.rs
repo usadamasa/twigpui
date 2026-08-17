@@ -6,6 +6,7 @@ mod cache;
 mod config;
 mod oauth;
 mod paths;
+mod rate_limit;
 mod ui;
 mod x_api;
 
