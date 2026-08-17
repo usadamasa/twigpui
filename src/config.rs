@@ -32,6 +32,20 @@ pub(crate) struct Config {
     /// appearance). Defaults to `light`; an unrecognized value falls back to
     /// the default rather than failing startup — see [`Config::resolve`].
     pub theme: ThemeMode,
+    /// Price per API request (#18), in whatever unit the operator has in
+    /// mind — this crate never assumes a currency. `None` by default: the
+    /// per-request price depends on the account's plan and there is no way
+    /// to know it from here, so no estimated amount is ever shown unless
+    /// this is explicitly configured. See `usage.rs`'s module doc.
+    pub request_price: Option<f64>,
+    /// Daily request-count budget (#18): once today's total across every
+    /// tracked endpoint approaches or reaches this, the header's usage line
+    /// switches to a warning/danger color — see `usage::budget_status`.
+    /// Deliberately a request count, not a monetary amount: unlike
+    /// `request_price`, this always has a value to compare against (request
+    /// counts are always known), so it works whether or not a price is
+    /// configured.
+    pub daily_request_budget: Option<u32>,
 }
 
 const DEFAULT_USERNAME: &str = "XDevelopers";
@@ -65,6 +79,13 @@ struct FileSettings {
     /// failing the whole file load.
     #[serde(default)]
     theme: Option<String>,
+    /// Non-secret (see [`Config::request_price`]'s doc), so this key is
+    /// allowed in `config.toml` like `oauth_client_id` above.
+    #[serde(default)]
+    request_price: Option<f64>,
+    /// Non-secret, same reasoning as `request_price`.
+    #[serde(default)]
+    daily_request_budget: Option<u32>,
     /// Present only so [`Config::resolve`] can detect and reject a bearer
     /// token accidentally checked into `config.toml`. Kept as an untyped
     /// `toml::Value` so any shape (string, table, array, ...) under this key
@@ -219,6 +240,14 @@ impl Config {
             })
             .unwrap_or_default();
 
+        // #18: stubbed to always `None` for now — the tests below pin the
+        // real env > file > default layering and validation this is meant
+        // to grow into.
+        let _ = &file.request_price;
+        let request_price: Option<f64> = None;
+        let _ = &file.daily_request_budget;
+        let daily_request_budget: Option<u32> = None;
+
         Ok(Self {
             bearer_token,
             oauth_client_id,
@@ -226,6 +255,8 @@ impl Config {
             max_results,
             min_fetch_interval_seconds,
             theme,
+            request_price,
+            daily_request_budget,
         })
     }
 }
@@ -657,6 +688,141 @@ mod tests {
         )
         .unwrap();
         assert_eq!(config.theme, ThemeMode::default());
+    }
+
+    // --- request_price / daily_request_budget (#18) ---
+
+    #[test]
+    fn request_price_and_daily_budget_are_unset_by_default() {
+        let config = Config::resolve(
+            vars(&[("X_BEARER_TOKEN", "token")]),
+            FileSettings::default(),
+        )
+        .unwrap();
+        assert_eq!(config.request_price, None);
+        assert_eq!(config.daily_request_budget, None);
+    }
+
+    #[test]
+    fn parses_the_request_price_from_env() {
+        let config = Config::resolve(
+            vars(&[("X_BEARER_TOKEN", "token"), ("X_REQUEST_PRICE", "0.015")]),
+            FileSettings::default(),
+        )
+        .unwrap();
+        assert_eq!(config.request_price, Some(0.015));
+    }
+
+    #[test]
+    fn rejects_a_non_numeric_request_price() {
+        let error = Config::resolve(
+            vars(&[("X_BEARER_TOKEN", "token"), ("X_REQUEST_PRICE", "free")]),
+            FileSettings::default(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("X_REQUEST_PRICE"), "{error}");
+    }
+
+    #[test]
+    fn rejects_a_negative_request_price() {
+        let error = Config::resolve(
+            vars(&[("X_BEARER_TOKEN", "token"), ("X_REQUEST_PRICE", "-0.01")]),
+            FileSettings::default(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("X_REQUEST_PRICE"), "{error}");
+    }
+
+    #[test]
+    fn resolve_reads_the_request_price_from_the_file_when_env_is_unset() {
+        let file = FileSettings {
+            request_price: Some(0.02),
+            ..FileSettings::default()
+        };
+        let config = Config::resolve(vars(&[("X_BEARER_TOKEN", "token")]), file).unwrap();
+        assert_eq!(config.request_price, Some(0.02));
+    }
+
+    #[test]
+    fn resolve_prefers_the_env_request_price_over_the_file() {
+        let file = FileSettings {
+            request_price: Some(0.02),
+            ..FileSettings::default()
+        };
+        let config = Config::resolve(
+            vars(&[("X_BEARER_TOKEN", "token"), ("X_REQUEST_PRICE", "0.05")]),
+            file,
+        )
+        .unwrap();
+        assert_eq!(config.request_price, Some(0.05));
+    }
+
+    #[test]
+    fn resolve_rejects_a_negative_request_price_from_the_file() {
+        let file = FileSettings {
+            request_price: Some(-1.0),
+            ..FileSettings::default()
+        };
+        let error = Config::resolve(vars(&[("X_BEARER_TOKEN", "token")]), file)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("request_price"), "{error}");
+    }
+
+    #[test]
+    fn parses_the_daily_request_budget_from_env() {
+        let config = Config::resolve(
+            vars(&[
+                ("X_BEARER_TOKEN", "token"),
+                ("X_DAILY_REQUEST_BUDGET", "500"),
+            ]),
+            FileSettings::default(),
+        )
+        .unwrap();
+        assert_eq!(config.daily_request_budget, Some(500));
+    }
+
+    #[test]
+    fn rejects_a_non_numeric_daily_request_budget() {
+        let error = Config::resolve(
+            vars(&[
+                ("X_BEARER_TOKEN", "token"),
+                ("X_DAILY_REQUEST_BUDGET", "lots"),
+            ]),
+            FileSettings::default(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("X_DAILY_REQUEST_BUDGET"), "{error}");
+    }
+
+    #[test]
+    fn resolve_reads_the_daily_request_budget_from_the_file_when_env_is_unset() {
+        let file = FileSettings {
+            daily_request_budget: Some(200),
+            ..FileSettings::default()
+        };
+        let config = Config::resolve(vars(&[("X_BEARER_TOKEN", "token")]), file).unwrap();
+        assert_eq!(config.daily_request_budget, Some(200));
+    }
+
+    #[test]
+    fn resolve_prefers_the_env_daily_request_budget_over_the_file() {
+        let file = FileSettings {
+            daily_request_budget: Some(200),
+            ..FileSettings::default()
+        };
+        let config = Config::resolve(
+            vars(&[
+                ("X_BEARER_TOKEN", "token"),
+                ("X_DAILY_REQUEST_BUDGET", "50"),
+            ]),
+            file,
+        )
+        .unwrap();
+        assert_eq!(config.daily_request_budget, Some(50));
     }
 
     #[test]

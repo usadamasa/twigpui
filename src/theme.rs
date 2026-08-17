@@ -52,6 +52,12 @@ pub(crate) struct Theme {
     pub(crate) button_label: u32,
     /// Error and rate-limit text.
     pub(crate) danger: u32,
+    /// The usage line's color while today's request count is approaching
+    /// (but has not yet reached) a configured daily budget (#18) — distinct
+    /// from `danger`, which is reserved for the budget actually being
+    /// exceeded (and for errors), so the two severities read as visibly
+    /// different at a glance.
+    pub(crate) warning: u32,
 }
 
 impl Theme {
@@ -70,6 +76,10 @@ impl Theme {
             button_busy_bg: 0x38_44_4d,
             button_label: 0xf7_f9_f9,
             danger: 0xf4_21_2e,
+            // STUB (#18): placeholder equal to `danger` until the real
+            // amber value lands — makes `light_and_dark_are_distinct_in_every_slot`
+            // fail for the right reason rather than a compile error.
+            warning: 0xf4_21_2e,
         }
     }
 
@@ -89,6 +99,8 @@ impl Theme {
             button_busy_bg: 0x54_5b_63,
             button_label: 0xff_ff_ff,
             danger: 0xc4_1e_3a,
+            // STUB (#18): see the note in `dark()` above.
+            warning: 0xc4_1e_3a,
         }
     }
 }
@@ -164,6 +176,16 @@ mod tests {
         assert_ne!(light.button_busy_bg, dark.button_busy_bg);
         assert_ne!(light.button_label, dark.button_label);
         assert_ne!(light.danger, dark.danger);
+        assert_ne!(light.warning, dark.warning);
+    }
+
+    #[test]
+    fn warning_is_distinct_from_danger_in_both_palettes() {
+        // #18: `usage_color` maps "near budget" to `warning` and "budget
+        // exceeded" to `danger` — if the two colors were the same, the
+        // header couldn't visually distinguish the two severities.
+        assert_ne!(Theme::light().warning, Theme::light().danger);
+        assert_ne!(Theme::dark().warning, Theme::dark().danger);
     }
 
     #[test]

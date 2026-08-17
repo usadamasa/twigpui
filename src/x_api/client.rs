@@ -6,6 +6,7 @@ use ureq::Agent;
 use super::model::{ApiProblem, TimelineItem, TimelineResponse, User, UserLookupResponse};
 use crate::paths::Paths;
 use crate::rate_limit::{self, Endpoint, RateLimitState};
+use crate::usage;
 
 const API_BASE: &str = "https://api.x.com/2";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
@@ -43,18 +44,29 @@ impl XClient {
     /// recovers on its own schedule (never sooner for having retried), and
     /// a usage-cap 429 never recovers at all.
     ///
+    /// #18: every actual HTTP send is counted via [`usage::record_request`],
+    /// right before [`Self::send_once`] — including retries. X bills each
+    /// send it receives regardless of the outcome (a 5xx still reached the
+    /// server), so a retried request is counted once per attempt, not once
+    /// per logical call. A request refused before ever sending by
+    /// [`rate_limit::decision`] above is not counted, since nothing went
+    /// out. This is the one place in the whole crate `usage.rs` is written
+    /// from, by design: nothing can spend a request without going through
+    /// this method first.
+    ///
     /// Not unit-tested directly — it touches the network and, via `paths`,
     /// the filesystem, the same way `cache::reload` isn't. The pure seams
     /// that carry this behavior's actual test coverage are
     /// `rate_limit::decision`, `rate_limit::backoff_delay`,
-    /// `rate_limit::parse_headers`, and `rate_limit::classify_429` (via
-    /// [`check_status`], below).
+    /// `rate_limit::parse_headers`, `rate_limit::classify_429` (via
+    /// [`check_status`], below), and `usage::record`.
     fn get(&self, paths: &Paths, endpoint: Endpoint, url: &str, now: i64) -> Result<String> {
         let tracked = rate_limit::load(paths, endpoint)?;
         rate_limit::decision(tracked, now).map_err(anyhow::Error::from)?;
 
         let mut attempt = 0u32;
         loop {
+            usage::record_request(paths, endpoint, now)?;
             match self.send_once(url) {
                 Ok((status, body, state)) => {
                     // Persisted even on a non-2xx response — an exhausted
