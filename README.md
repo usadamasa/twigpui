@@ -221,16 +221,17 @@ network error, rate limit, character limit, missing scope — leaves the draft
 exactly as typed. There is no way to lose what you wrote by a request
 failing.
 
-**Typing.** gpui 0.2.2 ships no ready-made text-input widget — only the raw
-IME/cursor/selection protocol (`EntityInputHandler`) a real one would be
-built on top of, which is a few hundred lines of custom painting and
-keybindings the crate's own example spends to implement it properly.
-twigpui's composer instead reads typed characters directly off key events:
-enough to type and correct a short draft, but **not** a real text field —
-there is no cursor to move, no text selection, no copy/paste, and no
-multi-keystroke IME composition (typing Japanese/Chinese/Korean through a
-system input method does not work; only characters a keystroke hands back
-directly are captured).
+**Typing (#38).** The draft area is a real text-entry widget from the
+[`gpui-component`](https://crates.io/crates/gpui-component) crate
+(`gpui_component::input::Input`, backed by `InputState`, which implements
+gpui's `EntityInputHandler` properly) rather than twigpui reading raw key
+events itself. IME composition — typing Japanese, Chinese, Korean, or any
+other input method — works, along with cursor movement, text selection, and
+copy/paste/undo/redo. The box grows with the draft (2–8 lines) instead of
+scrolling a fixed height. It is still a plain text composer, not a full
+client: there's no @mention/#hashtag autocomplete and no media attachments,
+and Enter inserts a newline rather than submitting — only the "Post" button
+does that.
 
 **Character counting.** X's 280-character limit is enforced client-side
 before anything is sent, using an approximation of X's own "weighted
