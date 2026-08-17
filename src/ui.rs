@@ -802,10 +802,40 @@ impl TimelineView {
         }
     }
 
+    /// The quote target shown inside the composer, if `compose.quote()` has
+    /// one (#16). Reuses #13's [`quote_card`] rendering rather than a second
+    /// one, with a "Remove quote" control added below it so a mis-click on
+    /// "Quote" doesn't force discarding the whole draft — that goes through
+    /// `ComposeState::clear_quote`, never `submit_post`, so the draft text
+    /// is untouched either way.
+    fn composer_quote_card(
+        &self,
+        target: &compose::QuoteTarget,
+        cx: &mut Context<'_, Self>,
+    ) -> impl IntoElement {
+        let theme = self.theme;
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(quote_card(&target.quoted, theme))
+            .child(
+                div()
+                    .id("compose-remove-quote")
+                    .text_color(rgb(theme.accent))
+                    .child("Remove quote")
+                    .on_click(cx.listener(|this, _event, _window, cx| {
+                        this.compose.clear_quote();
+                        cx.notify();
+                    })),
+            )
+    }
+
     /// The post composer (#14): a real text input (#38), character counter,
     /// and submit button. Shown whenever the session is signed in with
     /// OAuth — see [`Render::render`]'s doc on why a missing `tweet.write`
-    /// scope doesn't hide this entirely.
+    /// scope doesn't hide this entirely. #16 adds the quote target card, when
+    /// one is set — see [`Self::composer_quote_card`].
     fn composer(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let theme = self.theme;
         let text = self.compose.text().to_string();
@@ -831,6 +861,11 @@ impl TimelineView {
             // submit button's own disabled state below — see
             // `ComposeState::can_submit`'s doc for why that matters.
             .child(Input::new(&self.compose_input).disabled(is_submitting))
+            // #16: the quote target, when "Quote" set one — see
+            // `composer_quote_card`'s doc.
+            .when_some(self.compose.quote(), |column, target| {
+                column.child(self.composer_quote_card(target, cx))
+            })
             .when_some(
                 compose_error_message(self.compose.status()),
                 |column, message| column.child(div().text_color(rgb(theme.danger)).child(message)),
@@ -874,7 +909,8 @@ impl TimelineView {
             )
     }
 
-    /// Submit the composer's current draft as a new post (#14).
+    /// Submit the composer's current draft as a new post (#14), quoting
+    /// whatever [`ComposeState::quote`] currently holds, if anything (#16).
     ///
     /// Refuses to do anything — without spawning a task or touching the
     /// network — unless [`ComposeState::can_submit`] says yes. This is
@@ -925,11 +961,17 @@ impl TimelineView {
 
         let paths = self.paths.clone();
         let text = self.compose.text().to_string();
+        // #16: whichever post (if any) "Quote" set as the target — cloned
+        // out before the closure below moves `self.compose` implicitly via
+        // `apply_result`'s mutation, same as `text` above.
+        let quote_tweet_id = self.compose.quote().map(|target| target.post_id.clone());
 
         self.submit_task = Some(cx.spawn_in(window, async move |this, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async move { client.create_post(&paths, &text, oauth::unix_now()) })
+                .spawn(async move {
+                    client.create_post(&paths, &text, quote_tweet_id.as_deref(), oauth::unix_now())
+                })
                 .await;
 
             let _ = this.update_in(cx, |this, window, cx| {
@@ -1135,6 +1177,12 @@ impl TimelineView {
                 ),
                 |column| column.child(self.repost_button(item, cx)),
             )
+            // #16: "Quote" — see `offers_quote`'s doc for exactly which
+            // posts get one (a repost row is withheld for the same reason
+            // `offers_repost` withholds its own button).
+            .when(offers_quote(self.signed_in_with_oauth, item), |column| {
+                column.child(quote_row(item, theme, cx))
+            })
             .into_any_element()
     }
 
@@ -1660,6 +1708,51 @@ fn repost_action_label(state: &RepostState) -> &'static str {
     }
 }
 
+/// Whether post `item` should offer a "Quote" action (#16).
+///
+/// Requires the composer to even be reachable — `signed_in_with_oauth`,
+/// mirroring [`Render::render`]'s own gate on `self.composer` — since
+/// quoting has nowhere to go without one. Withheld for a post that is
+/// itself already a repost (`item.reposted_by.is_some()`), for exactly the
+/// reason [`offers_repost`] withholds its own button there: `item.id` is
+/// the retweet activity's own id, not the original content's, and
+/// `TimelineItem` carries no separate field for the original — see
+/// [`offers_repost`]'s doc and #52, which tracks fixing that for both
+/// buttons together. Unlike [`offers_repost`], quoting one's own post *is*
+/// allowed (#16's design decision — the API doesn't reject it the way it
+/// rejects reposting yourself), so there is no `is_own_post` check here.
+fn offers_quote(signed_in_with_oauth: bool, item: &TimelineItem) -> bool {
+    signed_in_with_oauth && item.reposted_by.is_none()
+}
+
+/// The "Quote" action for one post (#16), rendered whenever [`offers_quote`]
+/// allows it for `item`. Unlike #15's repost toggle this is a one-shot,
+/// purely local action, not a per-post request: clicking it only loads the
+/// composer's quote target (`ComposeState::set_quote`) so the card renders
+/// there — nothing is sent to X until the composer's own "Post" button is
+/// clicked, exactly like an ordinary draft.
+fn quote_row(item: &TimelineItem, theme: Theme, cx: &mut Context<'_, TimelineView>) -> AnyElement {
+    let post_id = item.id.clone();
+    let quoted = QuotedPost {
+        author_name: item.author_name.clone(),
+        author_username: item.author_username.clone(),
+        text: item.text.clone(),
+    };
+
+    div()
+        .id(SharedString::from(format!("quote-{}", item.id)))
+        .text_color(rgb(theme.text_muted))
+        .child("Quote")
+        .on_click(cx.listener(move |this, _event, _window, cx| {
+            this.compose.set_quote(compose::QuoteTarget {
+                post_id: post_id.clone(),
+                quoted: quoted.clone(),
+            });
+            cx.notify();
+        }))
+        .into_any_element()
+}
+
 /// Map a failed reload/load-older's error to the state that should show it —
 /// shared by every fetch path in this file (single-user reload, home-timeline
 /// reload, and "Load older") so the #10 rate-limit-countdown behavior stays
@@ -1763,9 +1856,9 @@ mod tests {
         ComposeStatus, Cooldown, RepliedTo, RepostState, Theme, ThreadFetchState, TimelineItem,
         TimelineSource, TimelineState, at_the_post_cap, byline, compose_error_message,
         cooldown_label, format_timestamp, header_title, is_own_post, offers_load_older,
-        offers_reauthorize, offers_repost, offers_sign_in, reload_cooldown, reply_banner_label,
-        repost_action_label, repost_banner_label, thread_action_label, usage, usage_color,
-        usage_label,
+        offers_quote, offers_reauthorize, offers_repost, offers_sign_in, reload_cooldown,
+        reply_banner_label, repost_action_label, repost_banner_label, thread_action_label, usage,
+        usage_color, usage_label,
     };
 
     fn item_with(id: &str, author_username: &str, reposted_by: Option<&str>) -> TimelineItem {
@@ -2187,6 +2280,40 @@ mod tests {
     fn does_not_offer_repost_on_ones_own_post() {
         let item = item_with("1", "bob", None);
         assert!(!offers_repost(true, Some("2244994945"), Some("bob"), &item));
+    }
+
+    // --- offers_quote (#16) ---
+
+    #[test]
+    fn offers_quote_once_signed_in_on_an_ordinary_post() {
+        let item = item_with("1", "alice", None);
+        assert!(offers_quote(true, &item));
+    }
+
+    #[test]
+    fn does_not_offer_quote_without_oauth() {
+        // The composer itself isn't reachable without OAuth (see
+        // `Render::render`'s gate) — nowhere for a quote to go.
+        let item = item_with("1", "alice", None);
+        assert!(!offers_quote(false, &item));
+    }
+
+    #[test]
+    fn does_not_offer_quote_on_a_row_that_is_itself_already_a_repost() {
+        // #16: same reason `offers_repost` withholds its own button —
+        // `item.id` is the retweet activity's own id, not the original
+        // content's `quote_tweet_id` would need.
+        let item = item_with("1", "alice", Some("bob"));
+        assert!(!offers_quote(true, &item));
+    }
+
+    #[test]
+    fn offers_quote_on_ones_own_post() {
+        // Unlike `offers_repost`, quoting your own post is allowed — the
+        // API doesn't reject it, per #16's design decision, so this must
+        // stay `true` even though the equivalent repost case is `false`.
+        let item = item_with("1", "bob", None);
+        assert!(offers_quote(true, &item));
     }
 
     #[test]

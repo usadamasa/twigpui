@@ -112,13 +112,12 @@ pub(crate) struct UserLookupResponse {
 /// than a separate quote request type or `Endpoint` variant: X has no
 /// dedicated quote endpoint, and splitting the rate-limit tracking for what
 /// X treats as one endpoint would only create a second, incorrect window.
-// TODO(#16): `#[serde(skip_serializing_if = "Option::is_none")]` still
-// missing — see the failing test this is paired with. A bare `None` here
-// serializes as `"quote_tweet_id":null`, which X may reject outright for an
-// ordinary (non-quote) post.
+/// `skip_serializing_if` keeps it entirely absent (not `null`) for an
+/// ordinary post — X may reject a stray null outright.
 #[derive(Debug, Serialize)]
 pub(crate) struct PostTweetRequest<'a> {
     pub text: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub quote_tweet_id: Option<&'a str>,
 }
 

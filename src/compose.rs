@@ -191,15 +191,16 @@ impl ComposeState {
     /// Set (or replace) the quote target (#16) — clicking "Quote" on a post
     /// while composing simply overwrites whatever was there before, since a
     /// draft only ever quotes one post at a time.
-    // TODO(#16): stubbed no-op until the implementation commit — see the
-    // failing tests this is paired with.
-    pub(crate) fn set_quote(&mut self, _target: QuoteTarget) {}
+    pub(crate) fn set_quote(&mut self, target: QuoteTarget) {
+        self.quote = Some(target);
+    }
 
     /// Clear the quote target without touching the draft text (#16) — the
     /// mis-click recovery the issue calls for: removing a wrong quote must
     /// not force discarding what was already typed.
-    // TODO(#16): stubbed no-op until the implementation commit.
-    pub(crate) fn clear_quote(&mut self) {}
+    pub(crate) fn clear_quote(&mut self) {
+        self.quote = None;
+    }
 
     /// Whether a submit is currently in flight.
     pub(crate) fn is_submitting(&self) -> bool {
@@ -232,13 +233,16 @@ impl ComposeState {
         self.status = ComposeStatus::Failed(message);
     }
 
-    /// Apply a finished submit's outcome (#14's core guarantee): success
-    /// clears the draft, failure leaves `text` completely untouched and
-    /// records `message` in its place.
+    /// Apply a finished submit's outcome (#14's core guarantee, extended by
+    /// #16): success clears the draft *and* the quote target — the post
+    /// that was quoted has now been sent, so there's nothing left to keep
+    /// showing in the composer; failure leaves both `text` and `quote`
+    /// completely untouched and records `message` in their place.
     pub(crate) fn apply_result(&mut self, result: Result<(), String>) {
         match result {
             Ok(()) => {
                 self.text.clear();
+                self.quote = None;
                 self.status = ComposeStatus::Idle;
             }
             Err(message) => self.refuse(message),

@@ -67,19 +67,22 @@ impl XClient {
         Self::send_with_retry(paths, endpoint, now, || self.send_once(url))
     }
 
-    /// Perform one `POST /2/tweets` (#14), sharing every rate-limit and
-    /// retry rule [`Self::get`] already follows — see
-    /// [`Self::send_with_retry`], which the two now share so #10's central
-    /// rule stays in exactly one place regardless of HTTP method.
+    /// Perform one `POST /2/tweets` (#14, `quote_tweet_id` added by #16),
+    /// sharing every rate-limit and retry rule [`Self::get`] already follows
+    /// — see [`Self::send_with_retry`], which the two now share so #10's
+    /// central rule stays in exactly one place regardless of HTTP method.
     fn post(
         &self,
         paths: &Paths,
         endpoint: Endpoint,
         url: &str,
         text: &str,
+        quote_tweet_id: Option<&str>,
         now: i64,
     ) -> Result<String> {
-        Self::send_with_retry(paths, endpoint, now, || self.send_post_once(url, text))
+        Self::send_with_retry(paths, endpoint, now, || {
+            self.send_post_once(url, text, quote_tweet_id)
+        })
     }
 
     /// Perform one DELETE (#15's un-repost), sharing every rate-limit/retry
@@ -199,22 +202,24 @@ impl XClient {
         Ok((status, body, state))
     }
 
-    /// One raw HTTP POST for `POST /2/tweets` (#14), mirroring
-    /// [`Self::send_once`]'s shape so [`Self::send_with_retry`] can treat
-    /// the two identically. `send_json` (the `ureq` `json` feature, already
-    /// a dependency) both serializes [`PostTweetRequest`] and sets
-    /// `Content-Type: application/json`.
-    fn send_post_once(&self, url: &str, text: &str) -> Result<(u16, String, RateLimitState)> {
+    /// One raw HTTP POST for `POST /2/tweets` (#14, `quote_tweet_id` added
+    /// by #16), mirroring [`Self::send_once`]'s shape so
+    /// [`Self::send_with_retry`] can treat the two identically. `send_json`
+    /// (the `ureq` `json` feature, already a dependency) both serializes
+    /// [`PostTweetRequest`] and sets `Content-Type: application/json`.
+    fn send_post_once(
+        &self,
+        url: &str,
+        text: &str,
+        quote_tweet_id: Option<&str>,
+    ) -> Result<(u16, String, RateLimitState)> {
         let mut response = self
             .agent
             .post(url)
             .header("Authorization", format!("Bearer {}", self.bearer_token))
-            // TODO(#16): `quote_tweet_id` still hardcoded to `None` here —
-            // see the failing test paired with this change; threaded
-            // through properly once `PostTweetRequest` itself is fixed.
             .send_json(PostTweetRequest {
                 text,
-                quote_tweet_id: None,
+                quote_tweet_id,
             })
             .with_context(|| format!("request to {url} failed"))?;
 
@@ -421,16 +426,26 @@ impl XClient {
         Ok(response.into_items())
     }
 
-    /// `POST /2/tweets` (#14) — submit the composer's draft as a new post.
+    /// `POST /2/tweets` (#14, `quote_tweet_id` added by #16) — submit the
+    /// composer's draft as a new post, optionally quoting `quote_tweet_id`.
     /// Tracked under its own `Endpoint::CreatePost` (#10): X limits posting
     /// separately from every read endpoint above, so sharing a bucket with
-    /// any of them would corrupt both. Returns nothing on success — `ui.rs`
-    /// falls into a normal reload afterward (subject to #10's own interval,
-    /// like any other reload) rather than this call handing back the
-    /// created post's own fields, which nothing here currently needs.
-    pub(crate) fn create_post(&self, paths: &Paths, text: &str, now: i64) -> Result<()> {
+    /// any of them would corrupt both — and #16 deliberately reuses this
+    /// same endpoint/tracking rather than adding a new `Endpoint` variant,
+    /// since X has no separate quote endpoint to track independently.
+    /// Returns nothing on success — `ui.rs` falls into a normal reload
+    /// afterward (subject to #10's own interval, like any other reload)
+    /// rather than this call handing back the created post's own fields,
+    /// which nothing here currently needs.
+    pub(crate) fn create_post(
+        &self,
+        paths: &Paths,
+        text: &str,
+        quote_tweet_id: Option<&str>,
+        now: i64,
+    ) -> Result<()> {
         let url = create_post_url();
-        self.post(paths, Endpoint::CreatePost, &url, text, now)?;
+        self.post(paths, Endpoint::CreatePost, &url, text, quote_tweet_id, now)?;
         Ok(())
     }
 
