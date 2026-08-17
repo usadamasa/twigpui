@@ -3,7 +3,7 @@ use std::time::Duration;
 use anyhow::{Context as _, Result, bail};
 use ureq::Agent;
 
-use super::model::{ApiProblem, TimelineItem, TimelineResponse, UserLookupResponse};
+use super::model::{ApiProblem, TimelineItem, TimelineResponse, User, UserLookupResponse};
 use crate::paths::Paths;
 use crate::rate_limit::{self, Endpoint, RateLimitState};
 
@@ -168,6 +168,49 @@ impl XClient {
             serde_json::from_str(&body).context("could not parse the timeline response")?;
         Ok(response.into_items())
     }
+
+    /// Resolve the signed-in user's own id and screen name via
+    /// `GET /2/users/me` (#11). Requires an OAuth user-context token — an
+    /// app-only bearer token gets a 401 here, the same way it does on the
+    /// home timeline itself.
+    pub(crate) fn me(&self, paths: &Paths, now: i64) -> Result<User> {
+        let url = me_url();
+        let body = self.get(paths, Endpoint::Me, &url, now)?;
+
+        let response: UserLookupResponse =
+            serde_json::from_str(&body).context("could not parse the /me response")?;
+        match response.data {
+            Some(user) => Ok(user),
+            None => match describe_problem(&body) {
+                Some(message) => bail!("could not resolve the signed-in user: {message}"),
+                None => bail!("could not resolve the signed-in user: the API returned no user"),
+            },
+        }
+    }
+
+    /// Fetch a page of the signed-in user's home timeline (#11), newest
+    /// first, alongside `meta.next_token` for #11's "Load older". `since_id`
+    /// (an incremental reload) and `pagination_token` (resuming from a prior
+    /// `next_token`) are mutually exclusive in practice — see
+    /// [`home_timeline_url`] — but the caller decides which one it needs;
+    /// this just passes both through.
+    pub(crate) fn home_timeline(
+        &self,
+        paths: &Paths,
+        user_id: &str,
+        max_results: u32,
+        since_id: Option<&str>,
+        pagination_token: Option<&str>,
+        now: i64,
+    ) -> Result<(Vec<TimelineItem>, Option<String>)> {
+        let url = home_timeline_url(user_id, max_results, since_id, pagination_token);
+        let body = self.get(paths, Endpoint::HomeTimeline, &url, now)?;
+
+        let response: TimelineResponse =
+            serde_json::from_str(&body).context("could not parse the home timeline response")?;
+        let next_token = response.next_token().map(str::to_string);
+        Ok((response.into_items(), next_token))
+    }
 }
 
 /// Whether a status is worth retrying: server-side (5xx) failures only.
@@ -181,6 +224,42 @@ fn is_retryable_status(status: u16) -> bool {
 
 fn user_lookup_url(username: &str) -> String {
     format!("{API_BASE}/users/by/username/{username}")
+}
+
+/// `GET /2/users/me` (#11) — resolves the signed-in user's own id and screen
+/// name. Only meaningful with an OAuth user-context credential; an app-only
+/// bearer token gets a 401 here just like the home timeline itself.
+fn me_url() -> String {
+    format!("{API_BASE}/users/me")
+}
+
+/// The home timeline endpoint (#11), with the same expansions as
+/// [`timeline_url`] since it returns the same post shape. `since_id` (an
+/// incremental reload) and `pagination_token` (#11's "Load older") are
+/// mutually exclusive in practice — a reload always starts from the newest
+/// cached post, and "Load older" always resumes from the last response's
+/// `meta.next_token` — but both are accepted here independently so the
+/// pure URL-building logic doesn't need to know which caller it's serving.
+fn home_timeline_url(
+    user_id: &str,
+    max_results: u32,
+    since_id: Option<&str>,
+    pagination_token: Option<&str>,
+) -> String {
+    let mut url = format!(
+        "{API_BASE}/users/{user_id}/timelines/reverse_chronological\
+         ?max_results={max_results}\
+         &tweet.fields=created_at\
+         &expansions=author_id\
+         &user.fields=name,username"
+    );
+    if let Some(id) = since_id {
+        url = format!("{url}&since_id={id}");
+    }
+    if let Some(token) = pagination_token {
+        url = format!("{url}&pagination_token={token}");
+    }
+    url
 }
 
 /// The timeline endpoint returns bare post ids unless `expansions` and the
@@ -271,6 +350,37 @@ mod tests {
         assert_eq!(
             timeline_url("2244994945", 20, None),
             "https://api.x.com/2/users/2244994945/tweets?max_results=20&tweet.fields=created_at&expansions=author_id&user.fields=name,username"
+        );
+    }
+
+    #[test]
+    fn builds_the_me_url() {
+        assert_eq!(me_url(), "https://api.x.com/2/users/me");
+    }
+
+    #[test]
+    fn builds_the_home_timeline_url_with_every_expansion() {
+        assert_eq!(
+            home_timeline_url("2244994945", 20, None, None),
+            "https://api.x.com/2/users/2244994945/timelines/reverse_chronological?max_results=20&tweet.fields=created_at&expansions=author_id&user.fields=name,username"
+        );
+    }
+
+    #[test]
+    fn home_timeline_url_appends_since_id_for_an_incremental_reload() {
+        assert_eq!(
+            home_timeline_url("2244994945", 20, Some("1700000000000000001"), None),
+            "https://api.x.com/2/users/2244994945/timelines/reverse_chronological?max_results=20&tweet.fields=created_at&expansions=author_id&user.fields=name,username&since_id=1700000000000000001"
+        );
+    }
+
+    #[test]
+    fn home_timeline_url_appends_pagination_token_for_load_older() {
+        // #11: "Load older" resends `meta.next_token` from the previous
+        // response as `pagination_token`.
+        assert_eq!(
+            home_timeline_url("2244994945", 20, None, Some("cursor-abc")),
+            "https://api.x.com/2/users/2244994945/timelines/reverse_chronological?max_results=20&tweet.fields=created_at&expansions=author_id&user.fields=name,username&pagination_token=cursor-abc"
         );
     }
 

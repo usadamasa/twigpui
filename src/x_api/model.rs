@@ -66,12 +66,24 @@ pub(crate) struct UserLookupResponse {
     pub data: Option<User>,
 }
 
+/// Pagination info returned alongside `data`. Only `next_token` matters to
+/// this crate — it's the cursor `x_api::client::home_timeline_url` sends back
+/// as `pagination_token` to fetch the next (older) page, driving #11's "Load
+/// older" button.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub(crate) struct Meta {
+    #[serde(default)]
+    pub next_token: Option<String>,
+}
+
 #[derive(Debug, Default, Deserialize)]
 pub(crate) struct TimelineResponse {
     #[serde(default)]
     pub data: Vec<Post>,
     #[serde(default)]
     pub includes: Includes,
+    #[serde(default)]
+    pub meta: Meta,
 }
 
 /// A post flattened with its author, ready for rendering.
@@ -88,6 +100,14 @@ pub(crate) struct TimelineItem {
 }
 
 impl TimelineResponse {
+    /// `meta.next_token`, if the response carried one — the cursor for
+    /// fetching the next (older) page (#11). Reads `&self` rather than
+    /// consuming it so callers can check this before [`Self::into_items`]
+    /// takes ownership.
+    pub(crate) fn next_token(&self) -> Option<&str> {
+        self.meta.next_token.as_deref()
+    }
+
     /// Join each post with its author from `includes.users`.
     ///
     /// Posts whose author is absent from the expansion still render, with the
@@ -148,7 +168,7 @@ mod tests {
           }
         ]
       },
-      "meta": { "result_count": 2 }
+      "meta": { "result_count": 2, "next_token": "abc123" }
     }"#;
 
     #[test]
@@ -174,6 +194,27 @@ mod tests {
         assert_eq!(items[1].id, "1700000000000000002");
         assert_eq!(items[1].author_name, "");
         assert_eq!(items[1].author_username, "");
+    }
+
+    #[test]
+    fn next_token_is_read_from_meta() {
+        // #11: this is the cursor "Load older" resends as `pagination_token`.
+        let response: TimelineResponse = serde_json::from_str(TIMELINE_JSON).unwrap();
+        assert_eq!(response.next_token(), Some("abc123"));
+    }
+
+    #[test]
+    fn next_token_is_none_when_meta_omits_it() {
+        let response: TimelineResponse =
+            serde_json::from_str(r#"{"meta":{"result_count":0}}"#).unwrap();
+        assert_eq!(response.next_token(), None);
+    }
+
+    #[test]
+    fn next_token_is_none_when_meta_is_absent_entirely() {
+        let response: TimelineResponse =
+            serde_json::from_str(r#"{"data":[{"id":"1","text":"orphan"}]}"#).unwrap();
+        assert_eq!(response.next_token(), None);
     }
 
     #[test]

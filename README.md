@@ -6,14 +6,24 @@ considered.
 
 ## Status
 
-Milestone 1: fetch and display a timeline.
+The app shows one of two timelines, depending on which credential is active
+(#11):
 
-The app resolves a screen name to a user id, fetches that user's recent posts
-with `GET /2/users/:id/tweets`, and renders them in a scrollable list with a
-reload button.
+- **Signed in with OAuth** (see "Signing in with X" below): your own home
+  timeline, `GET /2/users/:id/timelines/reverse_chronological` for the id
+  `GET /2/users/me` resolves. A "Load older" button pages further back via
+  `meta.next_token`.
+- **App-only Bearer token only**: `X_TARGET_USERNAME`'s recent posts via
+  `GET /2/users/:id/tweets` — the original milestone-1 view, kept as the
+  fallback since the home timeline endpoint rejects an app-only token with
+  401 (see "Why the fallback exists" below).
 
-`--fetch-only` runs the same fetch headlessly and prints the posts, which is
-useful for checking credentials without opening a window:
+Either way, results render in a scrollable list with a reload button, and the
+header names which mode is showing.
+
+`--fetch-only` runs the same fetch headlessly (always the single-user view,
+regardless of credential) and prints the posts, which is useful for checking
+credentials without opening a window:
 
 ```sh
 cargo run -- --fetch-only
@@ -25,12 +35,13 @@ The `macos-blade` feature is enabled so the build does not need `xcrun metal`,
 which ships with full Xcode rather than the Command Line Tools. Rendering goes
 through blade instead.
 
-## Why not the home timeline (yet)
+## Why the single-user fallback exists
 
-`GET /2/users/:id/timelines/reverse_chronological` only accepts OAuth 2.0
-Authorization Code (user context) — an app-only Bearer token is rejected.
-Signing in with OAuth (below) is the prerequisite for that endpoint; reading
-the home timeline itself is a later milestone.
+`GET /2/users/:id/timelines/reverse_chronological` (the home timeline) only
+accepts OAuth 2.0 Authorization Code (user context) — an app-only Bearer
+token gets a 401. Signing in with OAuth (below) is what unlocks it. Without a
+signed-in session, twigpui falls back to showing `X_TARGET_USERNAME`'s posts
+instead of showing nothing.
 
 ## Setup
 
@@ -118,7 +129,7 @@ created (mode `0700`) on startup:
 | Variable | Default | Holds |
 | --- | --- | --- |
 | `XDG_CONFIG_HOME` | `~/.config/twigpui/` | `config.toml` |
-| `XDG_CACHE_HOME` | `~/.cache/twigpui/` | Response cache: `user_ids.json`, `timeline-<user_id>.json` (#9) |
+| `XDG_CACHE_HOME` | `~/.cache/twigpui/` | Response cache: `user_ids.json`, `timeline-<user_id>.json` (#9), `me.json`, `home-timeline-<user_id>.json` (#11) |
 | `XDG_STATE_HOME` | `~/.local/state/twigpui/` | `oauth_tokens.json` (mode `0600`), `rate_limit.json` (#10) |
 
 An `XDG_*` variable is only honored if it is set to a non-blank absolute
@@ -160,10 +171,12 @@ typo'd theme is cosmetic, not worth blocking the app over — it falls back to
 ## API cost
 
 The X API bills per request against prepaid credits. A cold reload spends two
-requests: one user lookup and one timeline fetch. Fetching happens only on an
-explicit reload — there is no polling or auto-refresh, and since #9, **opening
-the app spends nothing at all**: startup renders straight from the local
-cache below whenever one exists, with no request in the loop.
+requests: one id lookup (`/users/by/username/:username` for the single-user
+view, `/users/me` for the home timeline — #11) and one timeline fetch, plus
+one more request per "Load older" click. Fetching happens only on an explicit
+action — there is no polling or auto-refresh, and since #9, **opening the app
+spends nothing at all**: startup renders straight from the local cache below
+whenever one exists, with no request in the loop.
 
 When credits run out the API answers `429` with a `UsageCapExceeded` problem
 body; the app surfaces that text directly in the window.
@@ -176,9 +189,10 @@ helps (the account needs topping up), while an ordinary rate limit recovers
 once its window resets. twigpui tells them apart and treats each accordingly:
 
 - **What's tracked.** Every response's `x-rate-limit-limit` /
-  `-remaining` / `-reset` headers are parsed and kept per endpoint (the user
-  lookup and the timeline fetch are tracked separately, since X limits them
-  separately).
+  `-remaining` / `-reset` headers are parsed and kept per endpoint: the
+  username lookup, the single-user timeline fetch, `/users/me`, and the home
+  timeline (#11) are all tracked separately, since X limits each of them
+  separately.
 - **The app refuses to send rather than waiting.** If the tracked remaining
   count is zero and the reset time hasn't arrived yet, twigpui does **not**
   send the request — a GUI app has no business sleeping a background thread
@@ -212,22 +226,27 @@ under `$XDG_CACHE_HOME/twigpui/` (see the file locations table above):
 | File | Holds | TTL |
 | --- | --- | --- |
 | `user_ids.json` | Every screen name resolved so far, mapped to its numeric user id | 30 days |
-| `timeline-<user_id>.json` | One user's cached posts, newest first, plus when they were fetched | none — see below |
+| `timeline-<user_id>.json` | One user's cached posts (single-user mode), newest first, plus when they were fetched | none — see below |
+| `me.json` | The signed-in user's own id and screen name, from `/users/me` (#11) | 30 days |
+| `home-timeline-<user_id>.json` | That user's cached home timeline (#11), newest first — a deliberately separate file from `timeline-<user_id>.json` for the same id, since the two hold different content | none — see below |
 
-**User ids are effectively permanent**, so caching the screen-name lookup
-alone is what turns a reload from two requests into one: once a user's id is
-cached and still within its 30-day TTL, a reload skips the lookup and only
-spends the timeline-fetch request.
+**User ids — including the signed-in user's own, from `/users/me` — are
+effectively permanent**, so caching the lookup is what turns a reload from
+two requests into one: once an id is cached and still within its 30-day TTL,
+a reload skips straight to the timeline-fetch request.
 
-**Timelines have no TTL.** Freshness is bounded by an explicit reload, not by
-age — the cache is trusted at startup no matter how old it is, since the
-whole point is that opening the window costs nothing. Reloading passes the
-newest cached post's id as the API's `since_id`, so the response only
-contains what's actually new; those posts are merged ahead of what's already
-cached (any id already on file is dropped rather than duplicated), and the
-result is capped at **500 posts per user**, oldest dropped first — `~/.cache`
-isn't purged automatically by macOS the way `~/Library/Caches` is, so this
-cap is twigpui's own.
+**Timelines have no TTL**, in either mode. Freshness is bounded by an explicit
+reload, not by age — the cache is trusted at startup no matter how old it is,
+since the whole point is that opening the window costs nothing. Reloading
+passes the newest cached post's id as the API's `since_id`, so the response
+only contains what's actually new; those posts are merged ahead of what's
+already cached (any id already on file is dropped rather than duplicated),
+and the result is capped at **500 posts per user**, oldest dropped first —
+`~/.cache` isn't purged automatically by macOS the way `~/Library/Caches` is,
+so this cap is twigpui's own. The home timeline's "Load older" button works
+the other direction: it appends older posts (via `meta.next_token`) *behind*
+what's cached rather than merging them ahead, and the same 500-post cap still
+applies.
 
 **A broken cache never blocks startup.** If a cache file fails to parse — or
 was written by a version of twigpui with a different file shape — it's
@@ -255,11 +274,15 @@ cargo test
 
 Tests cover response parsing and error mapping against fixture JSON, the
 OAuth PKCE math, callback parsing, and token-file handling, the local
-cache's TTL, merge, and corruption-recovery logic, and the rate-limit
-tracker's header parsing, send/don't-send decision, `429` classification,
-jittered backoff schedule, and persistence (#10), so they make no network
-calls, open no browser, and spend no credits. The actual code exchange, X's
-live response shapes, refresh-token rotation, and the real rate-limit header
-values X sends aren't covered by tests — those need a real Developer Portal
-registration, a one-time manual sign-in, and (for the last one) actually
-hitting a live rate limit.
+cache's TTL, merge, and corruption-recovery logic (including #11's
+merge-ahead-vs-append-behind distinction between a normal reload and "Load
+older", and that the home-timeline and single-user caches for the same id
+never collide), which timeline mode a credential resolves to (#11), and the
+rate-limit tracker's header parsing, send/don't-send decision, `429`
+classification, jittered backoff schedule, and persistence (#10), so they
+make no network calls, open no browser, and spend no credits. The actual code
+exchange, X's live response shapes (including `/users/me` and the home
+timeline's `meta.next_token`), refresh-token rotation, and the real
+rate-limit header values X sends aren't covered by tests — those need a real
+Developer Portal registration, a one-time manual sign-in, and (for the last)
+actually hitting a live rate limit.
