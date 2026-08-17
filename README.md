@@ -57,6 +57,40 @@ cargo run
 
 `.env` is gitignored. Do not commit credentials.
 
+### File locations (XDG Base Directory)
+
+Everything twigpui persists lives under three directories, resolved per the
+[XDG Base Directory
+spec](https://specifications.freedesktop.org/basedir-spec/latest/) and
+created (mode `0700`) on startup:
+
+| Variable | Default | Holds |
+| --- | --- | --- |
+| `XDG_CONFIG_HOME` | `~/.config/twigpui/` | `config.toml` |
+| `XDG_CACHE_HOME` | `~/.cache/twigpui/` | Response cache (#9) |
+| `XDG_STATE_HOME` | `~/.local/state/twigpui/` | OAuth token store (#7) |
+
+An `XDG_*` variable is only honored if it is set to a non-blank absolute
+path; a relative or blank value falls back to the default, per spec.
+
+### `config.toml`
+
+`$XDG_CONFIG_HOME/twigpui/config.toml` is an optional, hand-edited settings
+file with the same keys as the environment variables above, minus the token:
+
+```toml
+target_username = "XDevelopers"
+max_results = 20
+```
+
+A missing file is fine — it just means there are no file-level settings.
+Precedence is **environment variable > `config.toml` > built-in default**,
+so an env var always wins over the file. There is no `bearer_token` key:
+`config.toml` is a plain file people check into dotfiles repos, so
+credentials stay environment-only by design (`X_BEARER_TOKEN` or `.env`) —
+a `bearer_token` entry in the file is rejected with an error rather than
+silently read.
+
 ## API cost
 
 The X API bills per request against prepaid credits. Each reload spends two
