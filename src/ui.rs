@@ -81,7 +81,9 @@ impl TimelineView {
         self.fetch = Some(cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async move { oauth::resolve_access_token(&config, &paths, oauth::unix_now()) })
+                .spawn(
+                    async move { oauth::resolve_access_token(&config, &paths, oauth::unix_now()) },
+                )
                 .await;
 
             let _ = this.update(cx, |this, cx| match result {

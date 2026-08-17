@@ -96,14 +96,29 @@ impl Config {
             );
         }
 
-        // TODO(#7 red phase): still bails when the bearer token is missing,
-        // and never reads `oauth_client_id` — the "either credential"
-        // behavior lands in the implementation commit.
         let bearer_token = var("X_BEARER_TOKEN")
-            .filter(|t| !t.trim().is_empty())
-            .context("X_BEARER_TOKEN is unset. Copy .env.example to .env and fill it in.")?;
-        let bearer_token = Some(bearer_token.trim().to_string());
-        let oauth_client_id: Option<String> = None;
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty());
+
+        let oauth_client_id = var("X_OAUTH_CLIENT_ID")
+            .map(|c| c.trim().to_string())
+            .filter(|c| !c.is_empty())
+            .or_else(|| {
+                file.oauth_client_id
+                    .map(|c| c.trim().to_string())
+                    .filter(|c| !c.is_empty())
+            });
+
+        // Since #7, an OAuth session is an equally valid credential to the
+        // bearer token, so only the *combination* of both being absent is a
+        // hard failure — either one alone is enough to run.
+        if bearer_token.is_none() && oauth_client_id.is_none() {
+            bail!(
+                "no credential is configured. Set X_BEARER_TOKEN for app-only access, \
+                 or X_OAUTH_CLIENT_ID (or oauth_client_id in config.toml) to sign in \
+                 with X via OAuth."
+            );
+        }
 
         let target_username = var("X_TARGET_USERNAME")
             .filter(|u| !u.trim().is_empty())

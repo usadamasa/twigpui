@@ -23,7 +23,7 @@ pub(crate) const LOOPBACK_PORT: u16 = 8733;
 
 /// How long the loopback listener waits for the browser to complete the
 /// consent flow before giving up.
-const CALLBACK_TIMEOUT: Duration = Duration::from_secs(120);
+const CALLBACK_TIMEOUT: Duration = Duration::from_mins(2);
 
 /// How often the accept loop polls the non-blocking listener. Awaiting this
 /// timer (rather than a blocking `std::thread::sleep`) is what lets dropping
@@ -44,8 +44,7 @@ const CONNECTION_TIMEOUT: Duration = Duration::from_secs(5);
 /// The redirect URI registered with X's Developer Portal, derived from
 /// [`LOOPBACK_PORT`] so the two can never drift apart in code.
 pub(crate) fn redirect_uri() -> String {
-    let _ = LOOPBACK_PORT;
-    String::new()
+    format!("http://127.0.0.1:{LOOPBACK_PORT}/callback")
 }
 
 /// One parsed HTTP request line: method, path, and decoded query
@@ -61,8 +60,62 @@ pub(crate) struct RequestLine {
 /// `GET /callback?code=abc&state=xyz HTTP/1.1` — plus its query string.
 /// Pure over `&str` so it's testable with canned request bytes.
 pub(crate) fn parse_request_line(raw: &str) -> Option<RequestLine> {
-    let _ = raw;
-    None
+    let first_line = raw.lines().next()?;
+    let mut parts = first_line.split_whitespace();
+    let method = parts.next()?.to_string();
+    let target = parts.next()?;
+    parts.next()?; // HTTP version — required for a well-formed request line.
+
+    let (path, query_str) = target.split_once('?').unwrap_or((target, ""));
+    Some(RequestLine {
+        method,
+        path: path.to_string(),
+        query: parse_query(query_str),
+    })
+}
+
+fn parse_query(raw: &str) -> HashMap<String, String> {
+    raw.split('&')
+        .filter(|pair| !pair.is_empty())
+        .filter_map(|pair| {
+            let (key, value) = pair.split_once('=')?;
+            Some((percent_decode(key), percent_decode(value)))
+        })
+        .collect()
+}
+
+fn hex_digit(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// Decode `%XX` escapes. Query values from X are base64url or opaque codes,
+/// so this is the only escaping this parser needs to undo — no `+`-as-space
+/// handling, which is an `application/x-www-form-urlencoded` convention, not
+/// a query-string one (RFC 3986). Works byte-by-byte rather than slicing the
+/// `&str` so a stray `%` near a multi-byte character can't panic on a
+/// non-char-boundary slice.
+fn percent_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let (Some(hi), Some(lo)) = (hex_digit(bytes[i + 1]), hex_digit(bytes[i + 2]))
+        {
+            out.push(hi * 16 + lo);
+            i += 3;
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// The outcome of interpreting a `/callback` request's query parameters.
@@ -101,9 +154,29 @@ impl std::error::Error for CallbackError {}
 
 /// Turn a `/callback` request's query parameters into an authorization, or
 /// the specific reason it isn't one.
-pub(crate) fn interpret_query(query: &HashMap<String, String>) -> Result<Authorization, CallbackError> {
-    let _ = query;
-    Err(CallbackError::MissingCode)
+pub(crate) fn interpret_query(
+    query: &HashMap<String, String>,
+) -> Result<Authorization, CallbackError> {
+    if let Some(error) = query.get("error") {
+        return Err(if error == "access_denied" {
+            CallbackError::AccessDenied
+        } else {
+            CallbackError::Provider(match query.get("error_description") {
+                Some(description) => format!("{error}: {description}"),
+                None => error.clone(),
+            })
+        });
+    }
+
+    let code = query
+        .get("code")
+        .cloned()
+        .ok_or(CallbackError::MissingCode)?;
+    let state = query
+        .get("state")
+        .cloned()
+        .ok_or(CallbackError::MissingState)?;
+    Ok(Authorization { code, state })
 }
 
 const SUCCESS_BODY: &str = "Signed in with X. You can close this tab.";
@@ -116,8 +189,15 @@ fn error_body(message: &str) -> String {
 /// rather than a connection reset — a status line, a couple of headers, and
 /// a plain-text body.
 pub(crate) fn http_response(status_line: &str, body: &str) -> String {
-    let _ = (status_line, body);
-    String::new()
+    format!(
+        "{status_line}\r\n\
+         Content-Type: text/plain; charset=utf-8\r\n\
+         Content-Length: {len}\r\n\
+         Connection: close\r\n\
+         \r\n\
+         {body}",
+        len = body.len(),
+    )
 }
 
 /// Block (asynchronously) until the browser redirects back with an
@@ -192,10 +272,9 @@ fn handle_connection(mut stream: TcpStream) -> Result<Option<Authorization>> {
     for _ in 0..MAX_HEADER_LINES {
         line.clear();
         match reader.read_line(&mut line) {
-            Ok(0) => break,
+            Ok(0) | Err(_) => break,
             Ok(_) if line == "\r\n" || line == "\n" => break,
-            Ok(_) => continue,
-            Err(_) => break,
+            Ok(_) => {}
         }
     }
 
@@ -208,7 +287,10 @@ fn handle_connection(mut stream: TcpStream) -> Result<Option<Authorization>> {
     };
 
     if parsed.path != "/callback" {
-        let _ = write_response(&mut stream, &http_response("HTTP/1.1 404 Not Found", "not found"));
+        let _ = write_response(
+            &mut stream,
+            &http_response("HTTP/1.1 404 Not Found", "not found"),
+        );
         return Ok(None);
     }
 
@@ -263,7 +345,10 @@ mod tests {
     fn parses_an_access_denied_error_callback() {
         let raw = "GET /callback?error=access_denied&state=xyz789 HTTP/1.1\r\n\r\n";
         let parsed = parse_request_line(raw).unwrap();
-        assert_eq!(parsed.query.get("error"), Some(&"access_denied".to_string()));
+        assert_eq!(
+            parsed.query.get("error"),
+            Some(&"access_denied".to_string())
+        );
     }
 
     #[test]
@@ -306,7 +391,10 @@ mod tests {
     fn interpret_query_reports_other_provider_errors_with_their_description() {
         let query = HashMap::from([
             ("error".to_string(), "invalid_scope".to_string()),
-            ("error_description".to_string(), "unsupported scope".to_string()),
+            (
+                "error_description".to_string(),
+                "unsupported scope".to_string(),
+            ),
         ]);
         let error = interpret_query(&query).unwrap_err();
         match error {
@@ -321,13 +409,19 @@ mod tests {
     #[test]
     fn interpret_query_rejects_a_missing_code() {
         let query = HashMap::from([("state".to_string(), "xyz789".to_string())]);
-        assert_eq!(interpret_query(&query).unwrap_err(), CallbackError::MissingCode);
+        assert_eq!(
+            interpret_query(&query).unwrap_err(),
+            CallbackError::MissingCode
+        );
     }
 
     #[test]
     fn interpret_query_rejects_a_missing_state() {
         let query = HashMap::from([("code".to_string(), "abc123".to_string())]);
-        assert_eq!(interpret_query(&query).unwrap_err(), CallbackError::MissingState);
+        assert_eq!(
+            interpret_query(&query).unwrap_err(),
+            CallbackError::MissingState
+        );
     }
 
     #[test]

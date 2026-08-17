@@ -41,8 +41,12 @@ struct TokenErrorResponse {
 
 /// Best-effort human-readable description of a token-endpoint error body.
 pub(crate) fn describe_token_error(body: &str) -> Option<String> {
-    let _ = body;
-    None
+    let problem: TokenErrorResponse = serde_json::from_str(body).ok()?;
+    let error = problem.error?;
+    Some(match problem.error_description {
+        Some(description) => format!("{error}: {description}"),
+        None => error,
+    })
 }
 
 /// A persisted OAuth session: the access token used verbatim in the
@@ -64,19 +68,18 @@ impl TokenSet {
     /// Build a `TokenSet` from a fresh token response, resolving
     /// `expires_in` against `now`.
     pub(crate) fn from_response(response: TokenResponse, now: i64) -> Self {
-        let _ = (response, now);
+        let expires_in = i64::try_from(response.expires_in).unwrap_or(i64::MAX);
         Self {
-            access_token: String::new(),
-            refresh_token: None,
-            expires_at: 0,
+            access_token: response.access_token,
+            refresh_token: response.refresh_token,
+            expires_at: now.saturating_add(expires_in),
         }
     }
 
     /// Whether this token should be refreshed before use: already expired,
     /// or inside the skew window.
     pub(crate) fn needs_refresh(&self, now: i64) -> bool {
-        let _ = now;
-        false
+        now + REFRESH_SKEW_SECONDS >= self.expires_at
     }
 }
 
@@ -85,8 +88,7 @@ impl TokenSet {
 /// for the directories above it.
 pub(crate) fn save(paths: &Paths, tokens: &TokenSet) -> Result<()> {
     let path = paths.oauth_token_file();
-    let json =
-        serde_json::to_vec_pretty(tokens).context("could not serialize the OAuth tokens")?;
+    let json = serde_json::to_vec_pretty(tokens).context("could not serialize the OAuth tokens")?;
 
     let mut file = OpenOptions::new()
         .write(true)
@@ -95,16 +97,24 @@ pub(crate) fn save(paths: &Paths, tokens: &TokenSet) -> Result<()> {
         .mode(0o600)
         .open(&path)
         .with_context(|| format!("could not open {} for writing", path.display()))?;
-    let _ = json;
-    file.write_all(b"")
+    file.write_all(&json)
         .with_context(|| format!("could not write {}", path.display()))
 }
 
 /// Load the persisted tokens, or `None` if there is no session yet — a
 /// missing file is not an error, mirroring `config::FileSettings::load`.
 pub(crate) fn load(paths: &Paths) -> Result<Option<TokenSet>> {
-    let _ = paths;
-    Ok(None)
+    let path = paths.oauth_token_file();
+    let contents = match std::fs::read_to_string(&path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error).with_context(|| format!("could not read {}", path.display()));
+        }
+    };
+    let tokens = serde_json::from_str(&contents)
+        .with_context(|| format!("could not parse {}", path.display()))?;
+    Ok(Some(tokens))
 }
 
 #[cfg(test)]
@@ -190,8 +200,10 @@ mod tests {
     }
 
     fn temp_root(label: &str) -> std::path::PathBuf {
-        let root =
-            std::env::temp_dir().join(format!("twigpui-test-oauth-tokens-{label}-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!(
+            "twigpui-test-oauth-tokens-{label}-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&root);
         root
     }

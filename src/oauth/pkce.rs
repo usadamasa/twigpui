@@ -5,6 +5,8 @@
 //! and [`crate::paths`] inject a variable lookup. Tests supply a fixed byte
 //! sequence; [`OsRandom`] is the only implementation used outside tests.
 
+use std::fmt::Write as _;
+
 use anyhow::{Context as _, Result, bail};
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -41,29 +43,34 @@ impl RandomSource for OsRandom {
 /// Generate a PKCE code verifier: 32 random bytes, base64url-encoded without
 /// padding (RFC 7636 §4.1).
 pub(crate) fn generate_code_verifier(random: &impl RandomSource) -> Result<String> {
-    let _ = random;
-    Ok(String::new())
+    let mut bytes = [0u8; RANDOM_BYTES];
+    random.fill(&mut bytes)?;
+    Ok(URL_SAFE_NO_PAD.encode(bytes))
 }
 
 /// Derive the S256 code challenge from a verifier (RFC 7636 §4.2):
 /// `BASE64URL-ENCODE(SHA256(ASCII(code_verifier)))`.
 pub(crate) fn code_challenge(verifier: &str) -> String {
-    let _ = verifier;
-    String::new()
+    let digest = Sha256::digest(verifier.as_bytes());
+    URL_SAFE_NO_PAD.encode(digest)
 }
 
 /// Generate the CSRF `state` parameter. Random bytes are enough here too —
 /// there's no RFC-mandated shape the way there is for the code verifier.
 pub(crate) fn generate_state(random: &impl RandomSource) -> Result<String> {
-    let _ = random;
-    Ok(String::new())
+    let mut bytes = [0u8; RANDOM_BYTES];
+    random.fill(&mut bytes)?;
+    Ok(URL_SAFE_NO_PAD.encode(bytes))
 }
 
 /// Reject a `state` echoed back by the callback that doesn't match what was
 /// sent — the CSRF check RFC 6749 §10.12 requires of the client.
 pub(crate) fn verify_state(expected: &str, received: &str) -> Result<()> {
-    let _ = (expected, received);
-    Ok(())
+    if expected == received {
+        Ok(())
+    } else {
+        bail!("state mismatch — possible CSRF, aborting sign-in")
+    }
 }
 
 /// Percent-encode one query-parameter value per RFC 3986's `unreserved` set.
@@ -71,7 +78,19 @@ pub(crate) fn verify_state(expected: &str, received: &str) -> Result<()> {
 /// spliced into the authorize URL by hand — unlike the token request body,
 /// which `ureq::send_form` encodes for us.
 fn percent_encode(value: &str) -> String {
-    value.to_string()
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(char::from(byte));
+            }
+            _ => {
+                // `write!` to a `String` is infallible.
+                let _ = write!(out, "%{byte:02X}");
+            }
+        }
+    }
+    out
 }
 
 /// Build the `https://x.com/i/oauth2/authorize` URL for the interactive
@@ -82,8 +101,15 @@ pub(crate) fn build_authorize_url(
     code_challenge: &str,
     state: &str,
 ) -> String {
-    let _ = (client_id, redirect_uri, code_challenge, state, AUTHORIZE_URL, SCOPES);
-    String::new()
+    format!(
+        "{AUTHORIZE_URL}?response_type=code&client_id={client_id}&redirect_uri={redirect_uri}\
+         &scope={scope}&state={state}&code_challenge={code_challenge}&code_challenge_method=S256",
+        client_id = percent_encode(client_id),
+        redirect_uri = percent_encode(redirect_uri),
+        scope = percent_encode(SCOPES),
+        state = percent_encode(state),
+        code_challenge = percent_encode(code_challenge),
+    )
 }
 
 #[cfg(test)]

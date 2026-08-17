@@ -39,6 +39,7 @@ macOS 専用、開発用途のみ。他プラットフォームは考慮しな�
 | `src/config.rs` | 環境変数 / `.env` の読み込みと検証 |
 | `src/x_api/model.rs` | API レスポンス型、投稿と作者の join |
 | `src/x_api/client.rs` | ureq によるブロッキングクライアント、ステータス→メッセージ変換 |
+| `src/oauth/` | OAuth 2.0 Authorization Code + PKCE (#7): PKCE 生成、ループバックリスナー、トークン永続化 |
 | `src/ui.rs` | gpui のウィンドウとタイムライン描画 |
 | `PLAN.md` | マイルストーンの記録 |
 
@@ -83,4 +84,5 @@ cargo test
 `GET /2/users/:id/timelines/reverse_chronological` は OAuth 2.0 Authorization Code
 (ユーザーコンテキスト) しか受け付けず、アプリ専用 Bearer トークンでは 401 になる。
 そのため現状は `GET /2/users/:id/tweets` で単一ユーザーの投稿を表示している。
-解消は OAuth 2.0 PKCE の実装待ち。
+OAuth 2.0 PKCE 自体は #7 で実装済み (`src/oauth/`) だが、ホームタイムラインの
+エンドポイントへの切り替えは別issue (#11) の範囲。

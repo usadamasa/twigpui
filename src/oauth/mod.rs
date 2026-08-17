@@ -31,8 +31,7 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 pub(crate) fn unix_now() -> i64 {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or(0);
+        .map_or(0, |duration| duration.as_secs());
     i64::try_from(secs).unwrap_or(i64::MAX)
 }
 
@@ -124,9 +123,27 @@ fn request_token(form: &[(&str, &str)]) -> Result<TokenResponse> {
 /// token — in that order. `None` means neither credential is currently
 /// usable and the caller (`--fetch-only`, or `ui.rs` at startup) should ask
 /// the user to sign in.
-pub(crate) fn resolve_access_token(config: &Config, paths: &Paths, now: i64) -> Result<Option<String>> {
-    let _ = (config, paths, now, refresh_access_token as fn(&str, &str) -> Result<TokenResponse>);
-    Ok(None)
+pub(crate) fn resolve_access_token(
+    config: &Config,
+    paths: &Paths,
+    now: i64,
+) -> Result<Option<String>> {
+    if let Some(stored) = tokens::load(paths)? {
+        if !stored.needs_refresh(now) {
+            return Ok(Some(stored.access_token));
+        }
+        if let (Some(client_id), Some(refresh)) = (&config.oauth_client_id, &stored.refresh_token) {
+            let response = refresh_access_token(client_id, refresh)?;
+            let refreshed = TokenSet::from_response(response, now);
+            tokens::save(paths, &refreshed)?;
+            return Ok(Some(refreshed.access_token));
+        }
+        // Stale and unrefreshable (no client id configured, or X issued no
+        // refresh token) — fall through to the bearer token rather than
+        // erroring, since that may still be a usable credential.
+    }
+
+    Ok(config.bearer_token.clone())
 }
 
 #[cfg(test)]
@@ -148,8 +165,10 @@ mod tests {
     }
 
     fn temp_root(label: &str) -> std::path::PathBuf {
-        let root =
-            std::env::temp_dir().join(format!("twigpui-test-oauth-mod-{label}-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!(
+            "twigpui-test-oauth-mod-{label}-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&root);
         root
     }
