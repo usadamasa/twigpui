@@ -55,6 +55,7 @@ cargo run
 | `X_OAUTH_CLIENT_ID` | see below | — | OAuth 2.0 client id for "Sign in with X" — non-secret, may also live in `config.toml` |
 | `X_TARGET_USERNAME` | no | `XDevelopers` | Screen name to display, without a leading `@` |
 | `X_MAX_RESULTS` | no | `20` | Posts per fetch, 5–100 |
+| `X_MIN_FETCH_INTERVAL_SECONDS` | no | `60` | Floor on how often a fetch may run, in seconds (#10) |
 
 At least one of `X_BEARER_TOKEN` or `X_OAUTH_CLIENT_ID` must be set — either
 credential alone is enough to run, and having both is fine too. `.env` is
@@ -117,7 +118,7 @@ created (mode `0700`) on startup:
 | --- | --- | --- |
 | `XDG_CONFIG_HOME` | `~/.config/twigpui/` | `config.toml` |
 | `XDG_CACHE_HOME` | `~/.cache/twigpui/` | Response cache: `user_ids.json`, `timeline-<user_id>.json` (#9) |
-| `XDG_STATE_HOME` | `~/.local/state/twigpui/` | `oauth_tokens.json`, mode `0600` |
+| `XDG_STATE_HOME` | `~/.local/state/twigpui/` | `oauth_tokens.json` (mode `0600`), `rate_limit.json` (#10) |
 
 An `XDG_*` variable is only honored if it is set to a non-blank absolute
 path; a relative or blank value falls back to the default, per spec.
@@ -131,6 +132,7 @@ token:
 ```toml
 target_username = "XDevelopers"
 max_results = 20
+min_fetch_interval_seconds = 60
 oauth_client_id = "…"
 ```
 
@@ -153,6 +155,40 @@ cache below whenever one exists, with no request in the loop.
 
 When credits run out the API answers `429` with a `UsageCapExceeded` problem
 body; the app surfaces that text directly in the window.
+
+## Rate limits (#10)
+
+X's per-endpoint rate limits and the prepaid usage cap above both surface as
+HTTP `429`, but they behave nothing alike — retrying a usage-cap `429` never
+helps (the account needs topping up), while an ordinary rate limit recovers
+once its window resets. twigpui tells them apart and treats each accordingly:
+
+- **What's tracked.** Every response's `x-rate-limit-limit` /
+  `-remaining` / `-reset` headers are parsed and kept per endpoint (the user
+  lookup and the timeline fetch are tracked separately, since X limits them
+  separately).
+- **The app refuses to send rather than waiting.** If the tracked remaining
+  count is zero and the reset time hasn't arrived yet, twigpui does **not**
+  send the request — a GUI app has no business sleeping a background thread
+  for up to 15 minutes on the chance a click resolves itself. Instead the
+  reload button shows a countdown to the reset time, and clicking again
+  before then just re-checks the (free, local) tracked state rather than
+  hitting the network.
+- **Retries.** A network error or a `5xx` response is retried with
+  exponential backoff and jitter, up to a small attempt cap. Neither kind of
+  `429` is ever retried — one recovers on its own schedule regardless of
+  retrying, and the other never recovers at all.
+- **Where it's kept.** `$XDG_STATE_HOME/twigpui/rate_limit.json` (state, not
+  cache — a process restart doesn't reset X's window, so losing this file
+  risks firing a request straight into one that's already exhausted). A
+  missing or corrupt file is a clean "nothing tracked yet", the same way a
+  broken response cache is (see below), never a startup failure.
+- **Minimum fetch interval.** `X_MIN_FETCH_INTERVAL_SECONDS` (or
+  `min_fetch_interval_seconds` in `config.toml`, default `60`) is a
+  client-side floor on how often the reload button itself may fire,
+  independent of what the tracked API state above says — the reload button
+  shows the same countdown while waiting it out. #21's auto-refresh will use
+  the same setting once it lands.
 
 ## Local cache (#9)
 
@@ -204,9 +240,12 @@ cargo test
 ```
 
 Tests cover response parsing and error mapping against fixture JSON, the
-OAuth PKCE math, callback parsing, and token-file handling, and the local
-cache's TTL, merge, and corruption-recovery logic, so they make no network
+OAuth PKCE math, callback parsing, and token-file handling, the local
+cache's TTL, merge, and corruption-recovery logic, and the rate-limit
+tracker's header parsing, send/don't-send decision, `429` classification,
+jittered backoff schedule, and persistence (#10), so they make no network
 calls, open no browser, and spend no credits. The actual code exchange, X's
-live response shapes, and refresh-token rotation aren't covered by tests —
-those need a real Developer Portal registration and a one-time manual
-sign-in.
+live response shapes, refresh-token rotation, and the real rate-limit header
+values X sends aren't covered by tests — those need a real Developer Portal
+registration, a one-time manual sign-in, and (for the last one) actually
+hitting a live rate limit.

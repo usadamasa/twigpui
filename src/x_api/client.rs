@@ -302,7 +302,9 @@ mod tests {
         let body =
             r#"{"title":"UsageCapExceeded","detail":"Usage cap exceeded: Monthly product cap"}"#;
         let error = check_status(429, body, Some(1_700_000_000)).unwrap_err();
-        let typed = error.downcast_ref::<rate_limit::UsageCapExceeded>().unwrap();
+        let typed = error
+            .downcast_ref::<rate_limit::UsageCapExceeded>()
+            .unwrap();
         assert!(typed.detail.contains("Usage cap exceeded"), "{typed:?}");
     }
 

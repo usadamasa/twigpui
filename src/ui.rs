@@ -28,7 +28,9 @@ enum TimelineState {
     /// Blocked by #10's rate-limit decision — no request was sent at all.
     /// Carries the tracked window's reset time so the header can render a
     /// countdown instead of a bare error message.
-    RateLimited { reset_at: i64 },
+    RateLimited {
+        reset_at: i64,
+    },
     Failed(SharedString),
 }
 
@@ -54,6 +56,12 @@ pub(crate) struct TimelineView {
     /// new one (a second click) drops and so cancels whatever was running,
     /// which also closes the loopback socket — see `oauth::callback`.
     sign_in_flow: Option<Task<()>>,
+    /// When the last reload was kicked off, so [`Self::reload`] can enforce
+    /// `config.min_fetch_interval_seconds` (#10) as a client-side throttle
+    /// on the button itself — independent of, and in addition to, whatever
+    /// the tracked API rate-limit state says via `rate_limit::decision`.
+    /// `None` until the first reload, which is therefore never throttled.
+    last_reload_at: Option<i64>,
 }
 
 impl TimelineView {
@@ -70,6 +78,7 @@ impl TimelineView {
             state: TimelineState::Loading,
             fetch: None,
             sign_in_flow: None,
+            last_reload_at: None,
         };
         this.start(cx);
         this
@@ -134,12 +143,30 @@ impl TimelineView {
     /// cached user id turns this into one request instead of two, and the
     /// result is merged into (and persisted to) the local cache rather than
     /// replacing it outright.
+    ///
+    /// Also enforces `config.min_fetch_interval_seconds` (#10) before
+    /// spawning anything: [`reload_cooldown`] is a client-side throttle on
+    /// the button itself, checked without touching the network, on top of
+    /// (not instead of) whatever the tracked API rate-limit state says once
+    /// a request actually goes out.
     fn reload(&mut self, cx: &mut Context<'_, Self>) {
         let Some(client) = self.client.clone() else {
             self.state = TimelineState::NotAuthenticated;
             cx.notify();
             return;
         };
+
+        let now = oauth::unix_now();
+        if let Some(reset_at) = reload_cooldown(
+            self.last_reload_at,
+            self.config.min_fetch_interval_seconds,
+            now,
+        ) {
+            self.state = TimelineState::RateLimited { reset_at };
+            cx.notify();
+            return;
+        }
+        self.last_reload_at = Some(now);
 
         self.state = TimelineState::Loading;
 
@@ -230,9 +257,11 @@ impl TimelineView {
             // Still wired to `PrimaryAction::Reload`: re-clicking just
             // re-runs the (network-free) rate-limit decision — #10 forbids
             // sleeping out the window, not retrying the cheap local check.
-            TimelineState::RateLimited { reset_at } => {
-                (cooldown_label(reset_at, oauth::unix_now()), true, PrimaryAction::Reload)
-            }
+            TimelineState::RateLimited { reset_at } => (
+                cooldown_label(reset_at, oauth::unix_now()),
+                true,
+                PrimaryAction::Reload,
+            ),
             TimelineState::Loaded(_) | TimelineState::Failed(_) => {
                 ("Reload".to_string(), false, PrimaryAction::Reload)
             }
@@ -289,10 +318,9 @@ impl TimelineView {
                 TEXT_MUTED,
             )),
             TimelineState::Loading => content.child(notice("Fetching the timeline…", TEXT_MUTED)),
-            TimelineState::RateLimited { reset_at } => content.child(notice(
-                cooldown_label(*reset_at, oauth::unix_now()),
-                DANGER,
-            )),
+            TimelineState::RateLimited { reset_at } => {
+                content.child(notice(cooldown_label(*reset_at, oauth::unix_now()), DANGER))
+            }
             TimelineState::Failed(message) => content.child(notice(message.clone(), DANGER)),
             TimelineState::Loaded(items) if items.is_empty() => {
                 content.child(notice("No posts were returned.", TEXT_MUTED))
@@ -367,9 +395,24 @@ fn post_row(item: &TimelineItem) -> impl IntoElement {
 /// Countdown text for the reload button while blocked by #10's rate-limit
 /// decision. `remaining` is clamped to zero rather than going negative if
 /// `reset_at` has (just) passed by the time this renders.
-fn cooldown_label(_reset_at: i64, _now: i64) -> String {
-    // TODO(#10): stub for the red phase of TDD.
-    String::new()
+fn cooldown_label(reset_at: i64, now: i64) -> String {
+    let remaining = (reset_at - now).max(0);
+    format!("Rate limited — retry in {remaining}s")
+}
+
+/// Whether [`TimelineView::reload`] should refuse to run right now, per
+/// `config.min_fetch_interval_seconds` (#10). `None` means "go ahead" —
+/// either there has never been a reload yet, or the interval since the last
+/// one has already elapsed. `Some(reset_at)` means "not yet", carrying when
+/// it becomes allowed again, in the same shape [`cooldown_label`] expects.
+fn reload_cooldown(
+    last_reload_at: Option<i64>,
+    min_interval_seconds: u32,
+    now: i64,
+) -> Option<i64> {
+    let last = last_reload_at?;
+    let reset_at = last.saturating_add(i64::from(min_interval_seconds));
+    (reset_at > now).then_some(reset_at)
 }
 
 /// Turn `2026-08-16T09:00:00.000Z` into `2026-08-16 09:00`.
@@ -388,7 +431,7 @@ fn format_timestamp(created_at: Option<&str>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{byline, cooldown_label, format_timestamp};
+    use super::{byline, cooldown_label, format_timestamp, reload_cooldown};
 
     #[test]
     fn prefixes_a_byline_with_an_at_sign() {
@@ -434,5 +477,21 @@ mod tests {
         // #10: a countdown that's just crossed zero must read "0s", never a
         // confusing negative number.
         assert_eq!(cooldown_label(1_000, 1_060), "Rate limited — retry in 0s");
+    }
+
+    #[test]
+    fn reload_cooldown_allows_the_very_first_reload() {
+        assert_eq!(reload_cooldown(None, 60, 1_000), None);
+    }
+
+    #[test]
+    fn reload_cooldown_blocks_within_the_configured_interval() {
+        assert_eq!(reload_cooldown(Some(1_000), 60, 1_030), Some(1_060));
+    }
+
+    #[test]
+    fn reload_cooldown_allows_once_the_interval_has_elapsed() {
+        assert_eq!(reload_cooldown(Some(1_000), 60, 1_060), None);
+        assert_eq!(reload_cooldown(Some(1_000), 60, 1_061), None);
     }
 }

@@ -162,11 +162,20 @@ impl Config {
             );
         }
 
-        // TODO(#10): stub for the red phase of TDD — ignores env/file and
-        // always reports the built-in default.
-        let _ = var("X_MIN_FETCH_INTERVAL_SECONDS");
-        let _ = file.min_fetch_interval_seconds;
-        let min_fetch_interval_seconds = DEFAULT_MIN_FETCH_INTERVAL_SECONDS;
+        let min_fetch_interval_seconds = match var("X_MIN_FETCH_INTERVAL_SECONDS") {
+            Some(raw) => raw.trim().parse::<u32>().with_context(|| {
+                format!("X_MIN_FETCH_INTERVAL_SECONDS is not a number: {raw:?}")
+            })?,
+            None => file
+                .min_fetch_interval_seconds
+                .unwrap_or(DEFAULT_MIN_FETCH_INTERVAL_SECONDS),
+        };
+        if min_fetch_interval_seconds == 0 {
+            bail!(
+                "X_MIN_FETCH_INTERVAL_SECONDS (or min_fetch_interval_seconds in config.toml) \
+                 must be greater than 0"
+            );
+        }
 
         Ok(Self {
             bearer_token,

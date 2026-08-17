@@ -47,13 +47,15 @@ pub(crate) struct RateLimitState {
 /// whole parse. An unparseable header means "no information", never "fail
 /// the request".
 pub(crate) fn parse_headers(
-    _limit: Option<&str>,
-    _remaining: Option<&str>,
-    _reset: Option<&str>,
+    limit: Option<&str>,
+    remaining: Option<&str>,
+    reset: Option<&str>,
 ) -> RateLimitState {
-    // TODO(#10): stub for the red phase of TDD — always reports "nothing
-    // tracked" regardless of input.
-    RateLimitState::default()
+    RateLimitState {
+        limit: limit.and_then(|value| value.trim().parse().ok()),
+        remaining: remaining.and_then(|value| value.trim().parse().ok()),
+        reset_at: reset.and_then(|value| value.trim().parse().ok()),
+    }
 }
 
 /// Returned by [`decision`] when the tracked window says not to send.
@@ -84,9 +86,13 @@ impl std::error::Error for RateLimited {}
 /// caller decide whether to wait — never sleep the calling thread out. Every
 /// other case is safe to send: remaining above zero, an unknown remaining
 /// count (no information yet), or a reset time that has already passed.
-pub(crate) fn decision(_state: RateLimitState, _now: i64) -> Result<(), RateLimited> {
-    // TODO(#10): stub for the red phase of TDD — always allows sending.
-    Ok(())
+pub(crate) fn decision(state: RateLimitState, now: i64) -> Result<(), RateLimited> {
+    match (state.remaining, state.reset_at) {
+        (Some(0), Some(reset_at)) if reset_at > now => Err(RateLimited {
+            reset_at: Some(reset_at),
+        }),
+        _ => Ok(()),
+    }
 }
 
 /// The two distinct kinds of HTTP 429 X can return (#10). A type, not a
@@ -106,10 +112,14 @@ pub(crate) enum RateLimitKind {
 /// `UsageCapExceeded` — including one that fails to parse at all — is
 /// treated as an ordinary rate limit: the safer default, since it's the
 /// kind that recovers on its own rather than the kind that never does.
-pub(crate) fn classify_429(_body: &str) -> RateLimitKind {
-    // TODO(#10): stub for the red phase of TDD — always reports the
-    // non-recoverable kind.
-    RateLimitKind::UsageCapExceeded
+pub(crate) fn classify_429(body: &str) -> RateLimitKind {
+    let title = serde_json::from_str::<ApiProblem>(body)
+        .ok()
+        .and_then(|problem| problem.title);
+    match title.as_deref() {
+        Some("UsageCapExceeded") => RateLimitKind::UsageCapExceeded,
+        _ => RateLimitKind::RateLimited,
+    }
 }
 
 /// Carries the API's own explanation of an exhausted usage cap (#10).
@@ -153,9 +163,22 @@ const BACKOFF_MAX_MILLIS: u64 = 30_000;
 /// the capped exponential ceiling down to the actual delay; production
 /// draws a fresh fraction from the OS RNG via [`random_jitter_fraction`] on
 /// every call.
-pub(crate) fn backoff_delay(_attempt: u32, _jitter_fraction: f64) -> Duration {
-    // TODO(#10): stub for the red phase of TDD — always reports no delay.
-    Duration::ZERO
+pub(crate) fn backoff_delay(attempt: u32, jitter_fraction: f64) -> Duration {
+    // Capped at 6 (2^6 = 64x base) so the shift below never overflows even
+    // if `MAX_RETRIES` grows later; `BACKOFF_MAX_MILLIS` is the real ceiling
+    // in practice long before that.
+    let exponent = attempt.saturating_sub(1).min(6);
+    let ceiling_millis = BACKOFF_BASE_MILLIS
+        .saturating_mul(1u64 << exponent)
+        .min(BACKOFF_MAX_MILLIS);
+    let jitter_fraction = jitter_fraction.clamp(0.0, 1.0);
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss
+    )]
+    let delay_millis = (ceiling_millis as f64 * jitter_fraction) as u64;
+    Duration::from_millis(delay_millis)
 }
 
 /// A fresh jitter fraction in `0.0..=1.0`, drawn from the OS CSPRNG via
@@ -186,10 +209,10 @@ pub(crate) enum Endpoint {
 
 impl Endpoint {
     fn key(self) -> &'static str {
-        // TODO(#10): stub for the red phase of TDD — collapses both
-        // endpoints onto the same key.
-        let _ = self;
-        "endpoint"
+        match self {
+            Self::UserLookup => "user_lookup",
+            Self::Timeline => "timeline",
+        }
     }
 }
 
@@ -225,7 +248,11 @@ fn load_file(paths: &Paths) -> Result<RateLimitFile> {
 /// nothing on file for it yet.
 pub(crate) fn load(paths: &Paths, endpoint: Endpoint) -> Result<RateLimitState> {
     let file = load_file(paths)?;
-    Ok(file.endpoints.get(endpoint.key()).copied().unwrap_or_default())
+    Ok(file
+        .endpoints
+        .get(endpoint.key())
+        .copied()
+        .unwrap_or_default())
 }
 
 /// Persist `state` for `endpoint`, alongside whatever other endpoints were
@@ -359,7 +386,8 @@ mod tests {
 
     #[test]
     fn classifies_a_usage_cap_body_as_usage_cap_exceeded() {
-        let body = r#"{"title":"UsageCapExceeded","detail":"Usage cap exceeded: Monthly product cap"}"#;
+        let body =
+            r#"{"title":"UsageCapExceeded","detail":"Usage cap exceeded: Monthly product cap"}"#;
         assert_eq!(classify_429(body), RateLimitKind::UsageCapExceeded);
     }
 
@@ -390,13 +418,13 @@ mod tests {
     #[test]
     fn backoff_delay_doubles_the_ceiling_each_attempt_with_full_jitter() {
         assert_eq!(backoff_delay(1, 1.0), Duration::from_millis(500));
-        assert_eq!(backoff_delay(2, 1.0), Duration::from_millis(1_000));
-        assert_eq!(backoff_delay(3, 1.0), Duration::from_millis(2_000));
+        assert_eq!(backoff_delay(2, 1.0), Duration::from_secs(1));
+        assert_eq!(backoff_delay(3, 1.0), Duration::from_secs(2));
     }
 
     #[test]
     fn backoff_delay_is_capped_for_a_large_attempt_count() {
-        assert_eq!(backoff_delay(20, 1.0), Duration::from_millis(30_000));
+        assert_eq!(backoff_delay(20, 1.0), Duration::from_secs(30));
     }
 
     #[test]
