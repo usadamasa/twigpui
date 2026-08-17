@@ -15,6 +15,13 @@ use crate::theme::Theme;
 use crate::thread::{self, ThreadChain};
 use crate::x_api::{QuotedPost, RepliedTo, TimelineItem, XClient};
 
+/// Shown under the composer for as long as #38 is open. The composer reads
+/// raw keystrokes because gpui 0.2.2 has no text input widget, so an input
+/// method's composition never reaches it — and someone typing Japanese into a
+/// box where nothing appears cannot tell a missing feature from a bug.
+const IME_UNSUPPORTED_NOTE: &str = "Typing goes through raw key events for now — an input method (Japanese, \
+     Chinese, Korean) will not reach this box. See issue #38.";
+
 /// What's known about one reply's "Show thread" walk (#12), keyed by the
 /// reply's own post id in [`TimelineView::threads`]. Absent from that map
 /// means "not requested yet" — the toggle still offers to fetch.
@@ -647,6 +654,16 @@ impl TimelineView {
                     } else {
                         div().child(text.clone()).into_any_element()
                     }),
+            )
+            // Stated here, not only in the README: someone typing Japanese
+            // into this box sees nothing appear and has no way to tell a
+            // missing feature from a broken app. gpui 0.2.2 ships no text
+            // input widget, so this reads raw keystrokes and IME composition
+            // never reaches it — #38 tracks building a real input.
+            .child(
+                div()
+                    .text_color(rgb(theme.text_muted))
+                    .child(IME_UNSUPPORTED_NOTE),
             )
             .when_some(
                 compose_error_message(self.compose.status()),
