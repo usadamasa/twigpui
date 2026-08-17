@@ -4,7 +4,7 @@ use serde::Deserialize;
 
 /// A user object as returned under `data` or `includes.users`.
 #[derive(Debug, Clone, Deserialize)]
-pub struct User {
+pub(crate) struct User {
     pub id: String,
     pub name: String,
     pub username: String,
@@ -12,7 +12,7 @@ pub struct User {
 
 /// A post object as returned under `data`.
 #[derive(Debug, Clone, Deserialize)]
-pub struct Post {
+pub(crate) struct Post {
     pub id: String,
     pub text: String,
     #[serde(default)]
@@ -22,7 +22,7 @@ pub struct Post {
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
-pub struct Includes {
+pub(crate) struct Includes {
     #[serde(default)]
     pub users: Vec<User>,
 }
@@ -30,7 +30,7 @@ pub struct Includes {
 /// The `errors` array X returns alongside partial results, and also the
 /// problem-details body it returns for outright failures.
 #[derive(Debug, Clone, Default, Deserialize)]
-pub struct ApiProblem {
+pub(crate) struct ApiProblem {
     #[serde(default)]
     pub title: Option<String>,
     #[serde(default)]
@@ -43,7 +43,7 @@ pub struct ApiProblem {
 
 impl ApiProblem {
     /// Best available human-readable description, flattening nested `errors`.
-    pub fn message(&self) -> Option<String> {
+    pub(crate) fn message(&self) -> Option<String> {
         if let Some(detail) = &self.detail {
             return Some(match &self.title {
                 Some(title) => format!("{title}: {detail}"),
@@ -56,18 +56,18 @@ impl ApiProblem {
         if let Some(reason) = &self.reason {
             return Some(reason.clone());
         }
-        self.errors.iter().find_map(|e| e.message())
+        self.errors.iter().find_map(ApiProblem::message)
     }
 }
 
 #[derive(Debug, Deserialize)]
-pub struct UserLookupResponse {
+pub(crate) struct UserLookupResponse {
     #[serde(default)]
     pub data: Option<User>,
 }
 
 #[derive(Debug, Default, Deserialize)]
-pub struct TimelineResponse {
+pub(crate) struct TimelineResponse {
     #[serde(default)]
     pub data: Vec<Post>,
     #[serde(default)]
@@ -76,7 +76,7 @@ pub struct TimelineResponse {
 
 /// A post flattened with its author, ready for rendering.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TimelineItem {
+pub(crate) struct TimelineItem {
     pub id: String,
     pub text: String,
     pub created_at: Option<String>,
@@ -89,7 +89,7 @@ impl TimelineResponse {
     ///
     /// Posts whose author is absent from the expansion still render, with the
     /// author fields left empty — dropping them would silently hide content.
-    pub fn into_items(self) -> Vec<TimelineItem> {
+    pub(crate) fn into_items(self) -> Vec<TimelineItem> {
         let users: HashMap<&str, &User> = self
             .includes
             .users
@@ -199,6 +199,42 @@ mod tests {
             problem.message().as_deref(),
             Some("Unauthorized: Unauthorized")
         );
+    }
+
+    #[test]
+    fn falls_back_from_detail_to_title_to_reason() {
+        let title_only: ApiProblem = serde_json::from_str(r#"{"title":"Unauthorized"}"#).unwrap();
+        assert_eq!(title_only.message().as_deref(), Some("Unauthorized"));
+
+        let reason_only: ApiProblem =
+            serde_json::from_str(r#"{"reason":"client-not-enrolled"}"#).unwrap();
+        assert_eq!(
+            reason_only.message().as_deref(),
+            Some("client-not-enrolled")
+        );
+
+        // A body with none of the three has nothing to report, and the caller
+        // falls back to the raw text instead.
+        let empty: ApiProblem = serde_json::from_str("{}").unwrap();
+        assert_eq!(empty.message(), None);
+    }
+
+    #[test]
+    fn skips_nested_errors_that_say_nothing() {
+        let problem: ApiProblem =
+            serde_json::from_str(r#"{"errors":[{},{"title":"Not Found Error"}]}"#).unwrap();
+        assert_eq!(problem.message().as_deref(), Some("Not Found Error"));
+    }
+
+    #[test]
+    fn keeps_a_post_whose_author_id_is_absent_entirely() {
+        let response: TimelineResponse =
+            serde_json::from_str(r#"{"data":[{"id":"1","text":"orphan"}]}"#).unwrap();
+        let items = response.into_items();
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].author_username, "");
+        assert_eq!(items[0].created_at, None);
     }
 
     #[test]
