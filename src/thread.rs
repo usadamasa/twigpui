@@ -61,12 +61,20 @@ pub(crate) struct ThreadChain {
 /// [`MAX_THREAD_DEPTH`] entries the result is truncated and `capped` is
 /// forced `true` regardless of what the caller passed, so the invariant
 /// "never show more than the cap" holds even under a malformed input.
-pub(crate) fn assemble_chain(hops: Vec<ThreadItem>, _reached_cap: bool) -> ThreadChain {
-    // STUB (TDD red phase): no dedup, no cutoff, no reordering.
-    let _ = HashSet::<String>::new();
+pub(crate) fn assemble_chain(hops: Vec<ThreadItem>, reached_cap: bool) -> ThreadChain {
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut deduped: Vec<ThreadItem> = hops
+        .into_iter()
+        .filter(|item| seen.insert(item.id.clone()))
+        .collect();
+
+    let capped = reached_cap || deduped.len() > MAX_THREAD_DEPTH;
+    deduped.truncate(MAX_THREAD_DEPTH);
+    deduped.reverse();
+
     ThreadChain {
-        items: hops,
-        capped: false,
+        items: deduped,
+        capped,
     }
 }
 

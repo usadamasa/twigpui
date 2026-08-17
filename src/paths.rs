@@ -98,8 +98,7 @@ impl Paths {
     /// walked chain instead of re-spending up to
     /// [`crate::thread::MAX_THREAD_DEPTH`] requests.
     pub(crate) fn thread_file(&self, reply_post_id: &str) -> PathBuf {
-        // STUB (TDD red phase): wrong filename.
-        self.cache_dir.join(format!("wrong-{reply_post_id}.json"))
+        self.cache_dir.join(format!("thread-{reply_post_id}.json"))
     }
 
     /// Path to the tracked rate-limit state, under `state_dir` (#10). State,

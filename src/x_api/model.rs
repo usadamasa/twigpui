@@ -323,9 +323,19 @@ fn reply_target(
     users: &HashMap<&str, &User>,
     referenced: &HashMap<&str, &Post>,
 ) -> Option<RepliedTo> {
-    // STUB (TDD red phase): never recognizes a reply.
-    let _ = (post, users, referenced);
-    None
+    let reply_ref = post
+        .referenced_tweets
+        .iter()
+        .find(|r| r.kind == ReferenceKind::RepliedTo)?;
+    let (author_name, author_username) = referenced
+        .get(reply_ref.id.as_str())
+        .map(|parent| author_fields(parent, users))
+        .unwrap_or_default();
+    Some(RepliedTo {
+        post_id: reply_ref.id.clone(),
+        author_name,
+        author_username,
+    })
 }
 
 /// The post `post` quotes, if it has a `quoted` reference and that post is

@@ -225,8 +225,7 @@ impl Endpoint {
             Self::Timeline => "timeline",
             Self::Me => "me",
             Self::HomeTimeline => "home_timeline",
-            // STUB (TDD red phase): collides with `Timeline`.
-            Self::TweetById => "timeline",
+            Self::TweetById => "tweet_by_id",
         }
     }
 }

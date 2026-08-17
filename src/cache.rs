@@ -438,9 +438,8 @@ struct ThreadCacheFile {
 /// trusted forever, matching [`load_timeline`]'s own "no TTL" rule for
 /// materially the same reason.
 pub(crate) fn load_thread(paths: &Paths, reply_post_id: &str) -> Result<Option<ThreadChain>> {
-    // STUB (TDD red phase): always a miss.
-    let _ = (paths, reply_post_id);
-    Ok(None)
+    let file: Option<ThreadCacheFile> = load_json(&paths.thread_file(reply_post_id))?;
+    Ok(file.map(|file| file.chain))
 }
 
 /// Persist `chain` as `reply_post_id`'s cached parent chain (#12).

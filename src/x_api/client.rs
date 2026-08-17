@@ -305,8 +305,13 @@ fn timeline_url(user_id: &str, max_results: u32, since_id: Option<&str>) -> Stri
 /// a time, since the parent-chain walk only learns the next id after this
 /// one resolves.
 fn tweets_by_id_url(id: &str) -> String {
-    // STUB (TDD red phase): missing expansions.
-    format!("{API_BASE}/tweets?ids={id}")
+    format!(
+        "{API_BASE}/tweets\
+         ?ids={id}\
+         &tweet.fields=created_at,referenced_tweets\
+         &expansions=author_id,referenced_tweets.id,referenced_tweets.id.author_id\
+         &user.fields=name,username"
+    )
 }
 
 /// Pull the API's own error text out of a response body, if it has any.
