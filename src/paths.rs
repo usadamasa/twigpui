@@ -110,6 +110,15 @@ impl Paths {
         self.state_dir.join("rate_limit.json")
     }
 
+    /// Path to the tracked per-endpoint request-count usage, under
+    /// `state_dir` (#18). State, not cache: unlike the response cache,
+    /// losing this file doesn't just cost a slower cold start — it loses the
+    /// cumulative spend history itself, which is the whole point of tracking
+    /// it in the first place.
+    pub(crate) fn usage_file(&self) -> PathBuf {
+        self.state_dir.join("usage.json")
+    }
+
     /// Create all three directories (recursively) if they do not already
     /// exist.
     ///
@@ -350,6 +359,15 @@ mod tests {
         assert_eq!(
             paths.rate_limit_file(),
             PathBuf::from("/home/alice/.local/state/twigpui/rate_limit.json")
+        );
+    }
+
+    #[test]
+    fn usage_file_is_under_the_state_dir() {
+        let paths = Paths::from_vars(vars(&[("HOME", "/home/alice")])).unwrap();
+        assert_eq!(
+            paths.usage_file(),
+            PathBuf::from("/home/alice/.local/state/twigpui/usage.json")
         );
     }
 

@@ -101,6 +101,8 @@ cargo run
 | `X_MAX_RESULTS` | no | `20` | Posts per fetch, 5–100 |
 | `X_MIN_FETCH_INTERVAL_SECONDS` | no | `60` | Floor on how often a fetch may run, in seconds (#10) |
 | `X_THEME` | no | `light` | Color theme: `light`, `dark`, or `system` (follows the OS appearance) — also `theme` in `config.toml` (#19) |
+| `X_REQUEST_PRICE` | no | unset | Price per API request, in whatever unit you have in mind — also `request_price` in `config.toml` (#18, see "Usage tracking" below) |
+| `X_DAILY_REQUEST_BUDGET` | no | unset | Daily request-count budget that colors the header's usage line as it's approached — also `daily_request_budget` in `config.toml` (#18) |
 
 At least one of `X_BEARER_TOKEN` or `X_OAUTH_CLIENT_ID` must be set — either
 credential alone is enough to run, and having both is fine too. `.env` is
@@ -172,7 +174,7 @@ created (mode `0700`) on startup:
 | --- | --- | --- |
 | `XDG_CONFIG_HOME` | `~/.config/twigpui/` | `config.toml` |
 | `XDG_CACHE_HOME` | `~/.cache/twigpui/` | Response cache: `user_ids.json`, `timeline-<user_id>.json` (#9), `me.json`, `home-timeline-<user_id>.json` (#11), `thread-<reply_id>.json` (#12) |
-| `XDG_STATE_HOME` | `~/.local/state/twigpui/` | `oauth_tokens.json` (mode `0600`), `rate_limit.json` (#10) |
+| `XDG_STATE_HOME` | `~/.local/state/twigpui/` | `oauth_tokens.json` (mode `0600`), `rate_limit.json` (#10), `usage.json` (#18) |
 
 An `XDG_*` variable is only honored if it is set to a non-blank absolute
 path; a relative or blank value falls back to the default, per spec.
@@ -189,6 +191,8 @@ max_results = 20
 min_fetch_interval_seconds = 60
 oauth_client_id = "…"
 theme = "light"
+request_price = 0.02
+daily_request_budget = 500
 ```
 
 A missing file is fine — it just means there are no file-level settings.
@@ -305,6 +309,97 @@ once its window resets. twigpui tells them apart and treats each accordingly:
   interval" rather than "Rate limited by X" — because in this case nothing
   was sent and X has said nothing. #21's auto-refresh will use the same
   setting once it lands.
+
+## Usage tracking (#18)
+
+The X API bills per request against prepaid credits (see "API cost" above),
+but until now there was no way to see what had actually been spent short of
+hitting `429`. twigpui now counts every request it actually sends and
+persists the counts, so the running total is visible both in the window and
+from the command line.
+
+**What's counted.** Every actual HTTP send counted from `x_api::client`'s one
+central `get` method — including retries: a request retried after a network
+error or a `5xx` counts once per attempt, since each one is a real send that
+reaches (or attempts to reach) the API and is billed accordingly. A request
+`#10`'s rate-limit tracker refuses to send in the first place is **not**
+counted, since nothing went out. Counts are kept per endpoint (the same five
+`Endpoint`s #10 already tracks separately) and summed for the totals shown
+below.
+
+**Where it's kept.** `$XDG_STATE_HOME/twigpui/usage.json` (state, not cache —
+see the rate-limit section above for why that distinction matters here too).
+Each endpoint's entry holds an all-time total and a count for the current UTC
+day. A missing or corrupt file is a clean "nothing tracked yet", the same way
+a broken response cache or rate-limit file is — never a startup failure.
+
+**Day boundary: UTC.** "Today" resets at UTC midnight, not the machine's
+local midnight, for two reasons: the X API's own `created_at` timestamps are
+already UTC, so this keeps "today" meaning one consistent thing throughout
+the app; and Rust's standard library has no reliable way to read the local
+UTC offset without pulling in a date/time crate, which this project does not
+otherwise need. No new dependency was added for this feature — a day
+boundary is just `unix_seconds.div_euclid(86_400)` on the same Unix
+timestamp every other module already uses. The tradeoff: someone west of UTC
+sees "today" roll over mid-afternoon local time, not at their own midnight.
+
+**No amount is ever shown unless a price is configured.** The per-request
+price depends on the account's plan, and there is no way to know it from
+here — so by default the header and `--usage` (below) show request *counts*
+only. Setting `X_REQUEST_PRICE` (or `request_price` in `config.toml`), in
+whatever unit you have in mind, turns those counts into an estimated amount
+(`count × price`). A wrong, guessed price would be worse than no price at
+all, so twigpui never invents a built-in default.
+
+**Budget coloring.** `X_DAILY_REQUEST_BUDGET` (or `daily_request_budget` in
+`config.toml`) is a request-count budget, not a monetary one — deliberately,
+so it works whether or not a price is configured, since request counts are
+always known. Once today's total across every endpoint reaches 80% of the
+budget the header's usage line switches to a warning color; at or past the
+budget itself, it switches to the same color used for errors and rate-limit
+countdowns.
+
+**In the window.** The header always shows a compact line under the title:
+today's request count and the all-time total, with an estimated amount
+appended when a price is configured — e.g. `Today: 3 req (~0.06) · Total: 42
+req` or, with no price set, `Today: 3 req · Total: 42 req`.
+
+**From the command line: `--usage`.** Prints the same numbers as JSON to
+stdout and exits, without opening a window or making any network call (it
+only reads `usage.json`):
+
+```sh
+cargo run -- --usage
+```
+
+```json
+{
+  "endpoints": {
+    "user_lookup": { "total": 12, "today": 3 },
+    "timeline": { "total": 12, "today": 3 },
+    "me": { "total": 0, "today": 0 },
+    "home_timeline": { "total": 0, "today": 0 },
+    "tweet_by_id": { "total": 0, "today": 0 }
+  },
+  "total": {
+    "total_requests": 24,
+    "today_requests": 6,
+    "price_per_request": null,
+    "estimated_amount_total": null,
+    "estimated_amount_today": null,
+    "daily_budget": null,
+    "budget_status": "ok"
+  }
+}
+```
+
+JSON rather than a bespoke text format, since the project already depends on
+`serde_json` for everything else it persists, and a machine-readable
+consumer (a script, another tool) needs structure to parse rather than a
+format it has to scrape. `price_per_request` and every `estimated_amount_*`
+field are `null` unless `X_REQUEST_PRICE` is configured, matching the
+header's own rule. `budget_status` is `"ok"`, `"near"` (80% of the configured
+budget), or `"exceeded"`; it's always `"ok"` when no budget is configured.
 
 ## Local cache (#9)
 
