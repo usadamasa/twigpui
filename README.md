@@ -174,7 +174,7 @@ created (mode `0700`) on startup:
 | --- | --- | --- |
 | `XDG_CONFIG_HOME` | `~/.config/twigpui/` | `config.toml` |
 | `XDG_CACHE_HOME` | `~/.cache/twigpui/` | Response cache: `user_ids.json`, `timeline-<user_id>.json` (#9), `me.json`, `home-timeline-<user_id>.json` (#11), `thread-<reply_id>.json` (#12) |
-| `XDG_STATE_HOME` | `~/.local/state/twigpui/` | `oauth_tokens.json` (mode `0600`), `rate_limit.json` (#10), `usage.json` (#18) |
+| `XDG_STATE_HOME` | `~/.local/state/twigpui/` | `oauth_tokens.json` (mode `0600`), `rate_limit.json` (#10), `usage.json` (#18), `reposted_posts.json` (#15) |
 
 An `XDG_*` variable is only honored if it is set to a non-blank absolute
 path; a relative or blank value falls back to the default, per spec.
@@ -257,6 +257,56 @@ a second click before the first request resolves has nothing to do.
 **Rate limiting.** `POST /2/tweets` is tracked as its own endpoint (#10) —
 see "Rate limits" below.
 
+## Reposting and un-reposting (#15)
+
+Most posts show a "Repost" / "Reposted" toggle — see "Which posts don't get
+one" below for the two exceptions. Clicking "Repost" sends
+`POST /2/users/:id/retweets`; clicking "Reposted" (to undo it) sends
+`DELETE /2/users/:id/retweets/:source_tweet_id`. The button flips
+immediately on click — optimistic update, no waiting on the network to see
+something change — and reverts if the request fails. There is no
+confirmation dialog: a repost is a reversible action, the same way no other
+X client asks before one either.
+
+**twigpui cannot tell whether you've already reposted a post from the API
+itself.** X API v2's timeline response carries no field for this — unlike
+v1.1's `retweeted`, there is no v2 equivalent — and checking per-post via
+`GET /2/tweets/:id/retweeted_by` would cost one request per visible post,
+which is out of the question for an app whose entire cache exists to avoid
+spend. So twigpui keeps its own local record instead:
+`$XDG_STATE_HOME/twigpui/reposted_posts.json`, holding every post id *this
+app* has reposted.
+
+**Reposts made in other clients — the official app, the web, anywhere but
+here — are never reflected.** The button can only ever show what twigpui
+itself has done; a post you reposted from your phone still shows "Repost"
+here. This is a deliberate, accepted tradeoff for a workable button state
+at zero request cost, not a bug. Losing `reposted_posts.json` costs more
+than a lost cache entry would: every post reposted before the loss reverts
+to showing "Repost" again, so clicking it risks sending a duplicate — see
+"Recovering from a stale record" below for why that's recoverable rather
+than silently wrong.
+
+**Recovering from a stale record.** If the local record disagrees with
+reality — reposting something already reposted, or un-reposting something
+that isn't — the API returns an error rather than silently succeeding.
+twigpui recognizes that specific conflict, matched case-insensitively
+against the API's own error text ("already retweeted" / "have not
+retweeted"), and corrects the local record to match instead of showing it
+as a failure. Any other error rolls the button back to its state before the
+click and shows the message, offering a retry.
+
+**Which posts don't get a button.** Your own posts don't — the API rejects
+reposting yourself, and twigpui checks this client-side first rather than
+spending a guaranteed-failing request. A post that is itself already a
+repost in your timeline doesn't either: it renders with the *original*
+post's text and author (see "Reposts and quotes are expanded" above), but
+its own post id is still the retweet activity's, not the original content's
+— and the repost endpoints act on the original. twigpui doesn't currently
+resolve that original id for a displayed repost row, so it withholds the
+button there rather than risk sending the wrong id. Reposting the original
+post directly, wherever else it appears in the timeline, is unaffected.
+
 ## API cost
 
 The X API bills per request against prepaid credits. A cold reload spends two
@@ -268,6 +318,8 @@ parent level, capped as described above). Fetching happens only on an
 explicit action — there is no polling or auto-refresh, and since #9,
 **opening the app spends nothing at all**: startup renders straight from the
 local cache below whenever one exists, with no request in the loop.
+
+Reposting spends one request; un-reposting spends one more.
 
 When credits run out the API answers `429` with a `UsageCapExceeded` problem
 body; the app surfaces that text directly in the window.
@@ -282,9 +334,11 @@ once its window resets. twigpui tells them apart and treats each accordingly:
 - **What's tracked.** Every response's `x-rate-limit-limit` /
   `-remaining` / `-reset` headers are parsed and kept per endpoint: the
   username lookup, the single-user timeline fetch, `/users/me`, the home
-  timeline (#11), `GET /2/tweets?ids=` (#12, "Show thread"), and
-  `POST /2/tweets` (#14, posting) are all tracked separately, since X limits
-  each of them separately.
+  timeline (#11), `GET /2/tweets?ids=` (#12, "Show thread"),
+  `POST /2/tweets` (#14, posting), and reposting/un-reposting (#15,
+  `POST`/`DELETE /2/users/:id/retweets…`, tracked as two separate endpoints
+  since X limits creating and deleting a repost independently) are all
+  tracked separately, since X limits each of them separately.
 - **The app refuses to send rather than waiting.** If the tracked remaining
   count is zero and the reset time hasn't arrived yet, twigpui does **not**
   send the request — a GUI app has no business sleeping a background thread
@@ -477,12 +531,20 @@ and persistence (#10), the scope check behind #14's "Re-authorize" button
 logging the user out, the composer's weighted-length character counter and
 draft validation (boundary length, over-limit, empty, whitespace-only), its
 submit state machine (a failed submit keeps the draft and stays retryable;
-a successful one clears it), and the `POST /2/tweets` request body, so they
-make no network calls, open no browser, and spend no credits. The actual
-code exchange, X's live response shapes (including `/users/me`, the home
-timeline's `meta.next_token`, #13's `referenced_tweets` expansion, #12's
-`GET /2/tweets?ids=` response shape, and #14's live `POST /2/tweets`
-response), refresh-token rotation, and the real rate-limit header values X
-sends aren't covered by tests — those need a real Developer Portal
-registration, a one-time manual sign-in, and (for the last) actually
-hitting a live rate limit.
+a successful one clears it), the `POST /2/tweets` request body, the local
+repost record's roundtrip and corruption recovery, the create/delete repost
+URLs and their independently tracked rate-limit endpoints, the repost
+button's optimistic-update state machine (including that a failed toggle
+rolls back to exactly its pre-click value, and that a reconciled outcome
+can commit a value that disagrees with the optimistic guess), and the
+conflict-message interpretation behind #15's "already reposted"/"not
+reposted" recovery, so they make no network calls, open no browser, and
+spend no credits. The actual code exchange, X's live response shapes
+(including `/users/me`, the home timeline's `meta.next_token`, #13's
+`referenced_tweets` expansion, #12's `GET /2/tweets?ids=` response shape,
+#14's live `POST /2/tweets` response, and #15's live repost/un-repost
+responses and their exact conflict-error wording), refresh-token rotation,
+and the real rate-limit header values X sends aren't covered by tests —
+those need a real Developer Portal registration, a one-time manual sign-in,
+and (for the last two) actually hitting a live rate limit or a live
+already-reposted conflict.
