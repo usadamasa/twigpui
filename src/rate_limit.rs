@@ -235,12 +235,20 @@ impl Endpoint {
     /// of them rather than one at a time — `usage`'s `--usage`/header
     /// totals (#18) is the current user, so the list lives here rather than
     /// being duplicated wherever it's needed.
-    pub(crate) const ALL: [Self; 5] = [
+    /// Every write endpoint counts too: a post or a repost is billed exactly
+    /// like a read, so omitting one under-reports spend — which is the one
+    /// failure #18 exists to prevent. `CreatePost` was missing here until
+    /// #50; the test below now fails to compile rather than silently pass if
+    /// a new variant is left out again.
+    pub(crate) const ALL: [Self; 8] = [
         Self::UserLookup,
         Self::Timeline,
         Self::Me,
         Self::HomeTimeline,
         Self::TweetById,
+        Self::CreatePost,
+        Self::CreateRepost,
+        Self::DeleteRepost,
     ];
 
     /// `pub(crate)` rather than private (unlike before #18): `usage.rs`
@@ -733,8 +741,45 @@ mod tests {
     #[test]
     fn endpoint_all_lists_every_variant_with_a_unique_key() {
         // #18's usage tracker iterates `Endpoint::ALL` to summarize across
-        // every endpoint — a missing or duplicated variant here would
-        // silently under- or double-count.
+        // every endpoint, so a variant missing from it is silently
+        // under-counted spend. The previous version of this test asserted
+        // only that the keys were unique, which is why `CreatePost` could go
+        // missing for a whole release without anything failing (#50).
+        //
+        // The match below is the actual guard: it is exhaustive, so adding a
+        // variant stops this file compiling until the new arm is written —
+        // and the arm sits directly beside the list that must grow with it.
+        // Uniqueness alone, or a bare length check, would both still pass on
+        // an omission.
+        let every = [
+            Endpoint::UserLookup,
+            Endpoint::Timeline,
+            Endpoint::Me,
+            Endpoint::HomeTimeline,
+            Endpoint::TweetById,
+            Endpoint::CreatePost,
+            Endpoint::CreateRepost,
+            Endpoint::DeleteRepost,
+        ];
+        for endpoint in every {
+            match endpoint {
+                Endpoint::UserLookup
+                | Endpoint::Timeline
+                | Endpoint::Me
+                | Endpoint::HomeTimeline
+                | Endpoint::TweetById
+                | Endpoint::CreatePost
+                | Endpoint::CreateRepost
+                | Endpoint::DeleteRepost => {}
+            }
+            assert!(
+                Endpoint::ALL.contains(&endpoint),
+                "{endpoint:?} is missing from Endpoint::ALL, so its requests \
+                 would not be counted as spend"
+            );
+        }
+        assert_eq!(Endpoint::ALL.len(), every.len());
+
         let keys: std::collections::HashSet<&str> = Endpoint::ALL
             .iter()
             .map(|endpoint| endpoint.key())

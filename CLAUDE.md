@@ -42,6 +42,7 @@ macOS 専用、開発用途のみ。他プラットフォームは考慮しな�
 | `src/oauth/` | OAuth 2.0 Authorization Code + PKCE (#7): PKCE 生成、ループバックリスナー、トークン永続化 |
 | `src/compose.rs` | 投稿コンポーザーの純粋ロジック (#14): 文字数カウント、下書き検証、送信状態遷移 |
 | `src/ui.rs` | gpui のウィンドウとタイムライン描画 |
+| `scripts/build-app-bundle.sh` | `.app` バンドル生成 (#40): リリースビルド、`Info.plist`、任意アイコン、ad-hoc 署名 |
 | `PLAN.md` | マイルストーンの記録 |
 
 ## ビルドとテスト
