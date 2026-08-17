@@ -1,0 +1,527 @@
+//! Local JSON cache for X API responses (#9).
+//!
+//! Cuts API spend: startup renders straight from cache with no request at
+//! all (see [`startup`]), and an explicit reload spends one request instead
+//! of two once a user's id is cached (see [`reload`]). Mirrors
+//! `oauth::tokens`'s injected-`now` seam — TTL and merge logic never read
+//! the real clock or touch the filesystem themselves, so they're testable in
+//! isolation; only the thin `cached_*` / `save_*` wrappers below touch disk.
+//! [`reload`] is the one function that also touches the network (via
+//! `XClient`), so unlike the rest of this module it is not unit tested — see
+//! its own doc comment.
+
+use std::collections::{HashMap, HashSet};
+use std::path::Path;
+
+use anyhow::{Context as _, Result};
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
+
+use crate::paths::Paths;
+use crate::x_api::{TimelineItem, XClient};
+
+/// How long a cached screen-name → user-id mapping stays usable before a
+/// reload re-resolves it via the API. User ids are effectively permanent, so
+/// this is generous — the whole point is to turn a reload's two requests
+/// into one for as long as possible.
+const USER_ID_TTL_SECONDS: i64 = 30 * 24 * 60 * 60;
+
+/// Per-user cap on how many cached posts are kept, oldest dropped first.
+/// `~/.cache` is not purged automatically by macOS the way `~/Library/Caches`
+/// is, so without this an actively reloaded user's cache would grow forever.
+const MAX_CACHED_POSTS: usize = 500;
+
+/// One cached screen-name → user-id mapping.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct UserIdEntry {
+    id: String,
+    cached_at: i64,
+}
+
+/// The whole contents of [`Paths::user_ids_file`]: every screen name
+/// resolved so far, keyed exactly as configured
+/// (`Config::target_username`, already trimmed and `@`-stripped).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct UserIdCacheFile {
+    #[serde(default)]
+    users: HashMap<String, UserIdEntry>,
+}
+
+/// The whole contents of one [`Paths::timeline_file`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TimelineCacheFile {
+    fetched_at: i64,
+    items: Vec<TimelineItem>,
+}
+
+/// Whether a user id cached at `cached_at` is still within the TTL window at
+/// `now`.
+fn user_id_is_fresh(cached_at: i64, now: i64) -> bool {
+    now.saturating_sub(cached_at) < USER_ID_TTL_SECONDS
+}
+
+/// Load and parse `path` as JSON. Distinguishes three outcomes: the file
+/// doesn't exist (`Ok(None)`, same as `oauth::tokens::load`'s missing-file
+/// case), it exists but fails to parse — corruption, or a shape from a
+/// future or old version — which is *also* `Ok(None)` rather than an error,
+/// and a genuine I/O error (permissions, etc.), which propagates. The whole
+/// point of the cache is saving money, so a broken cache file must never
+/// stop the app from starting; it just gets silently rebuilt on the next
+/// write.
+fn load_json<T: DeserializeOwned>(path: &Path) -> Result<Option<T>> {
+    let contents = match std::fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error).with_context(|| format!("could not read {}", path.display()));
+        }
+    };
+    Ok(serde_json::from_str(&contents).ok())
+}
+
+fn save_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+    let json = serde_json::to_vec_pretty(value)
+        .with_context(|| format!("could not serialize {}", path.display()))?;
+    std::fs::write(path, json).with_context(|| format!("could not write {}", path.display()))
+}
+
+/// The cached user id for `username`, if one is on file and still fresh.
+/// `None` means "resolve it via the API and cache it" — either there was
+/// nothing cached, the file was unreadable/corrupt, or the TTL lapsed.
+pub(crate) fn cached_user_id(paths: &Paths, username: &str, now: i64) -> Result<Option<String>> {
+    let file: UserIdCacheFile = load_json(&paths.user_ids_file())?.unwrap_or_default();
+    Ok(file
+        .users
+        .get(username)
+        .filter(|entry| user_id_is_fresh(entry.cached_at, now))
+        .map(|entry| entry.id.clone()))
+}
+
+/// Persist `username`'s resolved id, alongside whatever other screen names
+/// were already cached.
+pub(crate) fn save_user_id(paths: &Paths, username: &str, user_id: &str, now: i64) -> Result<()> {
+    let path = paths.user_ids_file();
+    let mut file: UserIdCacheFile = load_json(&path)?.unwrap_or_default();
+    file.users.insert(
+        username.to_string(),
+        UserIdEntry {
+            id: user_id.to_string(),
+            cached_at: now,
+        },
+    );
+    save_json(&path, &file)
+}
+
+/// The cached timeline for `user_id`, newest-first, or `None` if there is
+/// nothing usable cached (missing or corrupt file). Unlike the user-id
+/// cache, there is no TTL here — staleness is bounded by an explicit
+/// reload, never by age alone, matching the issue's "render from cache,
+/// only an explicit reload spends credits" decision.
+pub(crate) fn load_timeline(paths: &Paths, user_id: &str) -> Result<Option<Vec<TimelineItem>>> {
+    let file: Option<TimelineCacheFile> = load_json(&paths.timeline_file(user_id))?;
+    Ok(file.map(|file| file.items))
+}
+
+/// Persist `items` (already merged and capped by the caller) as `user_id`'s
+/// timeline cache.
+pub(crate) fn save_timeline(
+    paths: &Paths,
+    user_id: &str,
+    items: &[TimelineItem],
+    now: i64,
+) -> Result<()> {
+    let file = TimelineCacheFile {
+        fetched_at: now,
+        items: items.to_vec(),
+    };
+    save_json(&paths.timeline_file(user_id), &file)
+}
+
+/// Render straight from cache with no API request at all: `Some` only when
+/// both the user id and a timeline are already cached (and the user id is
+/// still within its TTL) — anything less and there's nothing trustworthy to
+/// show, so the caller falls back to a full [`reload`].
+pub(crate) fn startup(
+    paths: &Paths,
+    username: &str,
+    now: i64,
+) -> Result<Option<Vec<TimelineItem>>> {
+    let Some(user_id) = cached_user_id(paths, username, now)? else {
+        return Ok(None);
+    };
+    load_timeline(paths, &user_id)
+}
+
+/// The id of the newest cached post, to pass as `since_id` on the next
+/// fetch — the first element, since every cache file is stored newest-first.
+///
+/// X post ids are snowflake-style numeric strings that exceed `u32`, so they
+/// stay `String` throughout; nothing here parses one into an integer, and
+/// ordering always comes from the API's own response order rather than a
+/// lexicographic string comparison (which breaks across digit-count
+/// boundaries, e.g. `"9" > "10"`).
+pub(crate) fn since_id(cached: &[TimelineItem]) -> Option<&str> {
+    cached.first().map(|item| item.id.as_str())
+}
+
+/// Merge freshly fetched posts (newest-first) ahead of what's cached (also
+/// newest-first): drop any id already present in `cached` — the API can
+/// return a post already on file — then cap the combined, still
+/// newest-first list to [`MAX_CACHED_POSTS`].
+pub(crate) fn merge_timeline(
+    fresh: Vec<TimelineItem>,
+    cached: Vec<TimelineItem>,
+) -> Vec<TimelineItem> {
+    let cached_ids: HashSet<&str> = cached.iter().map(|item| item.id.as_str()).collect();
+    let mut merged: Vec<TimelineItem> = fresh
+        .into_iter()
+        .filter(|item| !cached_ids.contains(item.id.as_str()))
+        .collect();
+    merged.extend(cached);
+    merged.truncate(MAX_CACHED_POSTS);
+    merged
+}
+
+/// What a reload spent: the merged, capped timeline to render, and whether
+/// the user-id lookup was skipped because it was already cached (in which
+/// case the reload cost one request instead of two).
+#[derive(Debug)]
+pub(crate) struct Reloaded {
+    pub items: Vec<TimelineItem>,
+    pub user_id_cache_hit: bool,
+}
+
+/// Spend the credits an explicit reload is allowed to spend: resolve the
+/// user id (from cache if fresh, else one API request, then cached for next
+/// time), fetch posts newer than the newest cached one, merge them ahead of
+/// what's cached, persist the result, and return it.
+///
+/// Not unit-tested directly — it makes real HTTP requests through `client`.
+/// Everything it composes ([`cached_user_id`], [`save_user_id`],
+/// [`load_timeline`], [`since_id`], [`merge_timeline`], [`save_timeline`])
+/// is tested standalone, the same way `oauth::resolve_access_token`'s
+/// network-calling refresh branch isn't directly tested either.
+pub(crate) fn reload(
+    paths: &Paths,
+    client: &XClient,
+    username: &str,
+    max_results: u32,
+    now: i64,
+) -> Result<Reloaded> {
+    let (user_id, user_id_cache_hit) = if let Some(id) = cached_user_id(paths, username, now)? {
+        (id, true)
+    } else {
+        let id = client.user_id_by_username(username)?;
+        save_user_id(paths, username, &id, now)?;
+        (id, false)
+    };
+
+    let cached = load_timeline(paths, &user_id)?.unwrap_or_default();
+    let since = since_id(&cached);
+    let fresh = client.timeline(&user_id, max_results, since)?;
+    let items = merge_timeline(fresh, cached);
+    save_timeline(paths, &user_id, &items, now)?;
+    Ok(Reloaded {
+        items,
+        user_id_cache_hit,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn item(id: &str) -> TimelineItem {
+        TimelineItem {
+            id: id.to_string(),
+            text: String::new(),
+            created_at: None,
+            author_name: String::new(),
+            author_username: String::new(),
+        }
+    }
+
+    fn ids(items: &[TimelineItem]) -> Vec<&str> {
+        items.iter().map(|item| item.id.as_str()).collect()
+    }
+
+    fn test_paths(root: &Path) -> Paths {
+        let home = root.display().to_string();
+        Paths::from_vars(move |key| (key == "HOME").then(|| home.clone())).unwrap()
+    }
+
+    fn temp_root(label: &str) -> std::path::PathBuf {
+        let root =
+            std::env::temp_dir().join(format!("twigpui-test-cache-{label}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        root
+    }
+
+    // --- user_id_is_fresh ---
+
+    #[test]
+    fn user_id_is_fresh_just_inside_the_ttl_window() {
+        assert!(user_id_is_fresh(0, USER_ID_TTL_SECONDS - 1));
+    }
+
+    #[test]
+    fn user_id_is_stale_once_the_ttl_has_fully_elapsed() {
+        assert!(!user_id_is_fresh(0, USER_ID_TTL_SECONDS));
+    }
+
+    // --- since_id ---
+
+    #[test]
+    fn since_id_is_none_for_an_empty_cache() {
+        assert_eq!(since_id(&[]), None);
+    }
+
+    #[test]
+    fn since_id_is_the_first_and_therefore_newest_cached_post() {
+        let cached = vec![item("300"), item("200"), item("100")];
+        assert_eq!(since_id(&cached), Some("300"));
+    }
+
+    // --- merge_timeline ---
+
+    #[test]
+    fn merge_places_fresh_posts_ahead_of_cached_posts() {
+        let fresh = vec![item("3"), item("2")];
+        let cached = vec![item("1")];
+        let merged = merge_timeline(fresh, cached);
+        assert_eq!(ids(&merged), vec!["3", "2", "1"]);
+    }
+
+    #[test]
+    fn merge_drops_a_fresh_post_whose_id_is_already_cached() {
+        // The API can hand back a post that's already on file; the cached
+        // copy stays put rather than being duplicated.
+        let fresh = vec![item("3"), item("2")];
+        let cached = vec![item("2"), item("1")];
+        let merged = merge_timeline(fresh, cached);
+        assert_eq!(ids(&merged), vec!["3", "2", "1"]);
+    }
+
+    #[test]
+    fn merge_keeps_the_result_ordered_newest_first() {
+        let fresh = vec![item("6"), item("5"), item("4")];
+        let cached = vec![item("3"), item("2"), item("1")];
+        let merged = merge_timeline(fresh, cached);
+        assert_eq!(ids(&merged), vec!["6", "5", "4", "3", "2", "1"]);
+    }
+
+    #[test]
+    fn merge_truncates_to_the_500_post_cap() {
+        let fresh = vec![item("502"), item("501")];
+        let cached: Vec<_> = (1..=500).rev().map(|n| item(&n.to_string())).collect();
+        let merged = merge_timeline(fresh, cached);
+        assert_eq!(merged.len(), 500);
+        assert_eq!(merged.first().unwrap().id, "502");
+        // The two oldest cached posts ("2" and "1") were pushed out by the cap.
+        assert!(!ids(&merged).contains(&"1"));
+        assert!(!ids(&merged).contains(&"2"));
+        assert_eq!(merged.last().unwrap().id, "3");
+    }
+
+    // --- cached_user_id / save_user_id ---
+
+    #[test]
+    fn cached_user_id_is_none_when_the_file_is_missing() {
+        let root = temp_root("user-id-missing");
+        let paths = test_paths(&root);
+        paths.ensure_dirs().unwrap();
+
+        assert_eq!(cached_user_id(&paths, "XDevelopers", 0).unwrap(), None);
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn save_user_id_then_cached_user_id_roundtrips_while_fresh() {
+        let root = temp_root("user-id-roundtrip");
+        let paths = test_paths(&root);
+        paths.ensure_dirs().unwrap();
+
+        save_user_id(&paths, "XDevelopers", "2244994945", 1_000).unwrap();
+        let id = cached_user_id(&paths, "XDevelopers", 1_000 + USER_ID_TTL_SECONDS - 1).unwrap();
+        assert_eq!(id.as_deref(), Some("2244994945"));
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn cached_user_id_is_none_once_the_ttl_has_elapsed() {
+        let root = temp_root("user-id-stale");
+        let paths = test_paths(&root);
+        paths.ensure_dirs().unwrap();
+
+        save_user_id(&paths, "XDevelopers", "2244994945", 0).unwrap();
+        let id = cached_user_id(&paths, "XDevelopers", USER_ID_TTL_SECONDS).unwrap();
+        assert_eq!(id, None);
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn save_user_id_preserves_other_already_cached_screen_names() {
+        let root = temp_root("user-id-multi");
+        let paths = test_paths(&root);
+        paths.ensure_dirs().unwrap();
+
+        save_user_id(&paths, "alice", "1", 0).unwrap();
+        save_user_id(&paths, "bob", "2", 0).unwrap();
+
+        assert_eq!(
+            cached_user_id(&paths, "alice", 0).unwrap().as_deref(),
+            Some("1")
+        );
+        assert_eq!(
+            cached_user_id(&paths, "bob", 0).unwrap().as_deref(),
+            Some("2")
+        );
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_corrupted_user_id_cache_file_is_a_clean_miss_not_an_error() {
+        let root = temp_root("user-id-corrupt");
+        let paths = test_paths(&root);
+        paths.ensure_dirs().unwrap();
+        std::fs::write(paths.user_ids_file(), b"not json at all").unwrap();
+
+        let id = cached_user_id(&paths, "XDevelopers", 0).unwrap();
+        assert_eq!(id, None);
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_genuine_io_error_reading_the_user_id_cache_still_propagates() {
+        let root = temp_root("user-id-io-error");
+        let paths = test_paths(&root);
+        paths.ensure_dirs().unwrap();
+        // A directory where a file is expected is a real I/O error (not
+        // NotFound), distinct from corruption — it must surface rather than
+        // being swallowed as a cache miss.
+        std::fs::create_dir(paths.user_ids_file()).unwrap();
+
+        assert!(cached_user_id(&paths, "XDevelopers", 0).is_err());
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    // --- load_timeline / save_timeline ---
+
+    #[test]
+    fn load_timeline_is_none_when_the_file_is_missing() {
+        let root = temp_root("timeline-missing");
+        let paths = test_paths(&root);
+        paths.ensure_dirs().unwrap();
+
+        assert_eq!(load_timeline(&paths, "2244994945").unwrap(), None);
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn save_timeline_then_load_timeline_roundtrips() {
+        let root = temp_root("timeline-roundtrip");
+        let paths = test_paths(&root);
+        paths.ensure_dirs().unwrap();
+
+        let items = vec![item("2"), item("1")];
+        save_timeline(&paths, "2244994945", &items, 1_000).unwrap();
+        let loaded = load_timeline(&paths, "2244994945").unwrap();
+        assert_eq!(loaded, Some(items));
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_corrupted_timeline_cache_file_is_a_clean_miss_not_an_error() {
+        let root = temp_root("timeline-corrupt");
+        let paths = test_paths(&root);
+        paths.ensure_dirs().unwrap();
+        std::fs::write(paths.timeline_file("2244994945"), b"{ not valid json").unwrap();
+
+        assert_eq!(load_timeline(&paths, "2244994945").unwrap(), None);
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_timeline_cache_file_from_a_future_shape_is_a_clean_miss_not_an_error() {
+        let root = temp_root("timeline-future-shape");
+        let paths = test_paths(&root);
+        paths.ensure_dirs().unwrap();
+        // Valid JSON, but not the shape this version expects — simulates a
+        // cache file written by a future version of twigpui.
+        std::fs::write(
+            paths.timeline_file("2244994945"),
+            br#"{"schema_version": 99, "wildly_different_shape": true}"#,
+        )
+        .unwrap();
+
+        assert_eq!(load_timeline(&paths, "2244994945").unwrap(), None);
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    // --- startup ---
+
+    #[test]
+    fn startup_renders_from_cache_when_both_the_user_id_and_timeline_are_cached() {
+        let root = temp_root("startup-hit");
+        let paths = test_paths(&root);
+        paths.ensure_dirs().unwrap();
+
+        save_user_id(&paths, "XDevelopers", "2244994945", 0).unwrap();
+        let items = vec![item("2"), item("1")];
+        save_timeline(&paths, "2244994945", &items, 0).unwrap();
+
+        let rendered = startup(&paths, "XDevelopers", 0).unwrap();
+        assert_eq!(rendered, Some(items));
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn startup_is_none_when_the_user_id_is_not_cached() {
+        let root = temp_root("startup-no-user-id");
+        let paths = test_paths(&root);
+        paths.ensure_dirs().unwrap();
+
+        assert_eq!(startup(&paths, "XDevelopers", 0).unwrap(), None);
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn startup_is_none_when_the_user_id_is_cached_but_the_timeline_is_not() {
+        let root = temp_root("startup-no-timeline");
+        let paths = test_paths(&root);
+        paths.ensure_dirs().unwrap();
+
+        save_user_id(&paths, "XDevelopers", "2244994945", 0).unwrap();
+
+        assert_eq!(startup(&paths, "XDevelopers", 0).unwrap(), None);
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn startup_is_none_when_the_cached_user_id_has_gone_stale() {
+        let root = temp_root("startup-stale-user-id");
+        let paths = test_paths(&root);
+        paths.ensure_dirs().unwrap();
+
+        save_user_id(&paths, "XDevelopers", "2244994945", 0).unwrap();
+        save_timeline(&paths, "2244994945", &[item("1")], 0).unwrap();
+
+        let rendered = startup(&paths, "XDevelopers", USER_ID_TTL_SECONDS).unwrap();
+        assert_eq!(rendered, None);
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+}

@@ -60,13 +60,55 @@ impl Paths {
         self.state_dir.join("oauth_tokens.json")
     }
 
+    /// Path to the screen-name → user-id cache, under `cache_dir` (#9). User
+    /// ids are effectively permanent, so caching this alone (TTL'd by
+    /// [`crate::cache`]) turns a reload's two requests into one.
+    pub(crate) fn user_ids_file(&self) -> PathBuf {
+        self.cache_dir.join("user_ids.json")
+    }
+
+    /// Path to one user's cached timeline, under `cache_dir` (#9). Split per
+    /// user, rather than one shared file, so #24's additional panels can
+    /// each grow their own cache file without contention.
+    pub(crate) fn timeline_file(&self, user_id: &str) -> PathBuf {
+        self.cache_dir.join(format!("timeline-{user_id}.json"))
+    }
+
     /// Create all three directories (recursively) if they do not already
     /// exist.
-    pub(crate) fn ensure_dirs(&self) -> Result<()> {
+    ///
+    /// Returns whether `cache_dir` was created by this call, so the caller
+    /// can run the one-time setup in [`Paths::exclude_cache_from_backups`].
+    /// That side effect stays out of here deliberately: `ensure_dirs` is
+    /// called by most of this crate's filesystem tests, and shelling out to
+    /// `tmutil` on each of them costs a second apiece.
+    pub(crate) fn ensure_dirs(&self) -> Result<bool> {
+        // Sampled before creation, since afterwards the directory exists
+        // either way.
+        let cache_dir_is_new = !self.cache_dir.exists();
+
         for dir in [&self.config_dir, &self.cache_dir, &self.state_dir] {
             create_private_dir(dir)?;
         }
-        Ok(())
+
+        Ok(cache_dir_is_new)
+    }
+
+    /// Best-effort exclude `cache_dir` from Time Machine via
+    /// `tmutil addexclusion` (#9). `~/Library/Caches` is exempted from
+    /// backups automatically by macOS; the XDG cache location this app
+    /// actually uses (`~/.cache`) is not, so without this the response cache
+    /// would get backed up on every Time Machine run like ordinary data.
+    ///
+    /// Failure — `tmutil` missing, no permission, anything — is silently
+    /// ignored: this is a nice-to-have and must never block startup. The call
+    /// takes about a second, so run it only when `ensure_dirs` reports that
+    /// it just created the directory.
+    pub(crate) fn exclude_cache_from_backups(&self) {
+        let _ = std::process::Command::new("tmutil")
+            .arg("addexclusion")
+            .arg(&self.cache_dir)
+            .output();
     }
 }
 
@@ -211,6 +253,24 @@ mod tests {
     }
 
     #[test]
+    fn user_ids_file_is_under_the_cache_dir() {
+        let paths = Paths::from_vars(vars(&[("HOME", "/home/alice")])).unwrap();
+        assert_eq!(
+            paths.user_ids_file(),
+            PathBuf::from("/home/alice/.cache/twigpui/user_ids.json")
+        );
+    }
+
+    #[test]
+    fn timeline_file_is_under_the_cache_dir_named_by_user_id() {
+        let paths = Paths::from_vars(vars(&[("HOME", "/home/alice")])).unwrap();
+        assert_eq!(
+            paths.timeline_file("2244994945"),
+            PathBuf::from("/home/alice/.cache/twigpui/timeline-2244994945.json")
+        );
+    }
+
+    #[test]
     fn ensure_dirs_creates_all_three_directories_with_owner_only_permissions() {
         use std::os::unix::fs::PermissionsExt as _;
 
@@ -232,6 +292,26 @@ mod tests {
 
         // Calling it again on an already-populated tree must not error.
         paths.ensure_dirs().unwrap();
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn ensure_dirs_reports_the_cache_dir_as_new_only_on_the_call_that_creates_it() {
+        // The flag gates a ~1s `tmutil` subprocess, so reporting "new" on
+        // every startup would be a visible cost, not just a cosmetic slip.
+        let root = std::env::temp_dir().join(format!(
+            "twigpui-test-ensure-dirs-new-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+
+        let paths = Paths::from_vars(vars(&[("HOME", &root.display().to_string())])).unwrap();
+        assert!(paths.ensure_dirs().unwrap(), "first call creates cache_dir");
+        assert!(
+            !paths.ensure_dirs().unwrap(),
+            "second call finds it already there"
+        );
 
         std::fs::remove_dir_all(&root).unwrap();
     }

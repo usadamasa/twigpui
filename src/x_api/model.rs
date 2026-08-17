@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// A user object as returned under `data` or `includes.users`.
 #[derive(Debug, Clone, Deserialize)]
@@ -75,7 +75,10 @@ pub(crate) struct TimelineResponse {
 }
 
 /// A post flattened with its author, ready for rendering.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Serialize`/`Deserialize` since #9: this is the exact shape persisted to
+/// the timeline cache file, so no separate cache-only type is needed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct TimelineItem {
     pub id: String,
     pub text: String,
