@@ -74,6 +74,30 @@ impl Paths {
         self.cache_dir.join(format!("timeline-{user_id}.json"))
     }
 
+    /// Path to one user's cached *home* timeline, under `cache_dir` (#11).
+    /// Deliberately a different filename from [`Self::timeline_file`] for the
+    /// same `user_id`: the home timeline and a single-user timeline are
+    /// different content, and a user who has run both modes (e.g. by signing
+    /// out and back in with a bearer token) must not have one silently
+    /// overwrite the other.
+    pub(crate) fn home_timeline_file(&self, user_id: &str) -> PathBuf {
+        // TODO(#11): stubbed to collide with `timeline_file` on purpose, so
+        // the "does not collide" test fails on behavior instead of a missing
+        // symbol.
+        self.timeline_file(user_id)
+    }
+
+    /// Path to the cached result of `GET /2/users/me` (#11): the signed-in
+    /// user's own id and screen name, under `cache_dir`. Immutable for a
+    /// given account, so caching it (like #9 caches screen-name → id) avoids
+    /// re-spending a request on every start.
+    pub(crate) fn me_file(&self) -> PathBuf {
+        // TODO(#11): stubbed to the wrong filename on purpose, so the
+        // "under the cache dir" test fails on behavior instead of a missing
+        // symbol.
+        self.cache_dir.join("user_ids.json")
+    }
+
     /// Path to the tracked rate-limit state, under `state_dir` (#10). State,
     /// not cache: a process restart does not reset X's rate-limit window, so
     /// losing this file risks firing a request straight into an
@@ -276,6 +300,35 @@ mod tests {
         assert_eq!(
             paths.timeline_file("2244994945"),
             PathBuf::from("/home/alice/.cache/twigpui/timeline-2244994945.json")
+        );
+    }
+
+    #[test]
+    fn home_timeline_file_is_under_the_cache_dir_named_by_user_id() {
+        let paths = Paths::from_vars(vars(&[("HOME", "/home/alice")])).unwrap();
+        assert_eq!(
+            paths.home_timeline_file("2244994945"),
+            PathBuf::from("/home/alice/.cache/twigpui/home-timeline-2244994945.json")
+        );
+    }
+
+    #[test]
+    fn home_timeline_file_does_not_collide_with_the_single_user_timeline_file() {
+        // #11: same user id, different content — overwriting one with the
+        // other would silently corrupt whichever mode wasn't showing.
+        let paths = Paths::from_vars(vars(&[("HOME", "/home/alice")])).unwrap();
+        assert_ne!(
+            paths.timeline_file("2244994945"),
+            paths.home_timeline_file("2244994945")
+        );
+    }
+
+    #[test]
+    fn me_file_is_under_the_cache_dir() {
+        let paths = Paths::from_vars(vars(&[("HOME", "/home/alice")])).unwrap();
+        assert_eq!(
+            paths.me_file(),
+            PathBuf::from("/home/alice/.cache/twigpui/me.json")
         );
     }
 

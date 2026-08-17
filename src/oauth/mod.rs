@@ -147,6 +147,32 @@ impl Credential {
     }
 }
 
+/// Which timeline `ui.rs` shows (#11), decided once — alongside the
+/// credential itself — rather than scattered as `if credential.is_oauth()`
+/// checks through `cache.rs` and `ui.rs`. A pure function of the credential
+/// kind: an OAuth session can read the home timeline
+/// (`GET /2/users/:id/timelines/reverse_chronological`); an app-only bearer
+/// token gets a 401 there, so it keeps the milestone-1 single-user view
+/// (`GET /2/users/:id/tweets` for `Config::target_username`) instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TimelineSource {
+    /// The signed-in user's own home timeline.
+    Home,
+    /// `Config::target_username`'s posts — the pre-#11 behavior, kept as the
+    /// fallback for an app-only bearer token.
+    SingleUser,
+}
+
+impl TimelineSource {
+    pub(crate) fn for_credential(credential: &Credential) -> Self {
+        // TODO(#11): stubbed to always report `SingleUser`, so the
+        // OAuth-maps-to-Home test fails on behavior instead of a missing
+        // symbol.
+        let _ = credential;
+        Self::SingleUser
+    }
+}
+
 /// Find a usable credential without opening a browser: a fresh stored OAuth
 /// session, a stale one refreshed in place, or the app-only bearer token —
 /// in that order. `None` means neither is currently usable and the caller
@@ -201,6 +227,22 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&root);
         root
+    }
+
+    #[test]
+    fn timeline_source_is_home_for_an_oauth_credential() {
+        assert_eq!(
+            TimelineSource::for_credential(&Credential::OAuth("token".into())),
+            TimelineSource::Home
+        );
+    }
+
+    #[test]
+    fn timeline_source_is_single_user_for_a_bearer_credential() {
+        assert_eq!(
+            TimelineSource::for_credential(&Credential::Bearer("token".into())),
+            TimelineSource::SingleUser
+        );
     }
 
     #[test]

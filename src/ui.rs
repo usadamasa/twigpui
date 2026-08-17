@@ -2,7 +2,7 @@ use gpui::{Context, FontWeight, SharedString, Task, Window, div, prelude::*, rgb
 
 use crate::cache;
 use crate::config::Config;
-use crate::oauth;
+use crate::oauth::{self, TimelineSource};
 use crate::paths::Paths;
 use crate::rate_limit;
 use crate::theme::Theme;
@@ -509,6 +509,38 @@ fn offers_sign_in(
     )
 }
 
+/// The header's title (#11): which account's posts these are, and — since
+/// #11 introduces a second mode — which mode is showing, so the user is
+/// never left guessing whether they're looking at their own home timeline or
+/// one account's posts.
+///
+/// `source` is `None` only before a credential has resolved, in which case
+/// there is nothing to distinguish yet and this falls back to
+/// `target_username` (the eventual `SingleUser` display), matching what the
+/// header showed before #11. `home_username` is `None` only for the brief
+/// window in `Home` mode before `/me` has resolved even once (never true
+/// once anything is cached or has loaded).
+fn header_title(
+    source: Option<TimelineSource>,
+    home_username: Option<&str>,
+    target_username: &str,
+) -> String {
+    // TODO(#11): stubbed to always show the pre-#11 single-user title, so
+    // the Home-mode tests fail on behavior instead of a missing symbol.
+    let _ = (source, home_username);
+    format!("@{target_username}")
+}
+
+/// Whether the header should offer a "Load older" button (#11): only once a
+/// response has actually carried a `meta.next_token` to resume from, and
+/// only while the timeline is in a state where clicking it makes sense.
+fn offers_load_older(next_page_token: Option<&str>, state: &TimelineState) -> bool {
+    // TODO(#11): stubbed to never offer it, so the "token present" test
+    // fails on behavior instead of a missing symbol.
+    let _ = (next_page_token, state);
+    false
+}
+
 /// Whether [`TimelineView::reload`] should refuse to run right now, per
 /// `config.min_fetch_interval_seconds` (#10). `None` means "go ahead" —
 /// either there has never been a reload yet, or the interval since the last
@@ -541,8 +573,8 @@ fn format_timestamp(created_at: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        Cooldown, TimelineState, byline, cooldown_label, format_timestamp, offers_sign_in,
-        reload_cooldown,
+        Cooldown, TimelineSource, TimelineState, byline, cooldown_label, format_timestamp,
+        header_title, offers_load_older, offers_sign_in, reload_cooldown,
     };
 
     #[test]
@@ -595,6 +627,55 @@ mod tests {
             false,
             &TimelineState::SigningIn
         ));
+    }
+
+    #[test]
+    fn header_title_shows_the_target_username_for_single_user_mode() {
+        assert_eq!(
+            header_title(Some(TimelineSource::SingleUser), None, "XDevelopers"),
+            "@XDevelopers"
+        );
+    }
+
+    #[test]
+    fn header_title_shows_the_target_username_before_a_credential_has_resolved() {
+        // Matches what the header showed before #11 — nothing to
+        // distinguish yet, since there's no credential at all.
+        assert_eq!(header_title(None, None, "XDevelopers"), "@XDevelopers");
+    }
+
+    #[test]
+    fn header_title_shows_the_signed_in_users_own_name_for_home_mode() {
+        assert_eq!(
+            header_title(Some(TimelineSource::Home), Some("alice"), "XDevelopers"),
+            "@alice — Home timeline"
+        );
+    }
+
+    #[test]
+    fn header_title_falls_back_while_home_mode_has_not_learned_the_username_yet() {
+        assert_eq!(
+            header_title(Some(TimelineSource::Home), None, "XDevelopers"),
+            "Home timeline"
+        );
+    }
+
+    #[test]
+    fn offers_load_older_when_a_next_page_token_is_present_and_the_timeline_is_loaded() {
+        assert!(offers_load_older(
+            Some("cursor-abc"),
+            &TimelineState::Loaded(Vec::new())
+        ));
+    }
+
+    #[test]
+    fn does_not_offer_load_older_without_a_next_page_token() {
+        assert!(!offers_load_older(None, &TimelineState::Loaded(Vec::new())));
+    }
+
+    #[test]
+    fn does_not_offer_load_older_while_not_in_the_loaded_state() {
+        assert!(!offers_load_older(Some("cursor-abc"), &TimelineState::Loading));
     }
 
     #[test]

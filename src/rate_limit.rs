@@ -205,6 +205,12 @@ pub(crate) fn random_jitter_fraction() -> f64 {
 pub(crate) enum Endpoint {
     UserLookup,
     Timeline,
+    /// `GET /2/users/me` (#11) — X limits this separately from the
+    /// screen-name lookup above.
+    Me,
+    /// `GET /2/users/:id/timelines/reverse_chronological` (#11) — X limits
+    /// the home timeline separately from the single-user `Timeline` fetch.
+    HomeTimeline,
 }
 
 impl Endpoint {
@@ -212,6 +218,11 @@ impl Endpoint {
         match self {
             Self::UserLookup => "user_lookup",
             Self::Timeline => "timeline",
+            // TODO(#11): both stubbed to collide with existing keys on
+            // purpose, so the "tracked independently" test fails on behavior
+            // instead of a missing symbol.
+            Self::Me => "user_lookup",
+            Self::HomeTimeline => "timeline",
         }
     }
 }
@@ -500,6 +511,54 @@ mod tests {
             user_lookup_state
         );
         assert_eq!(load(&paths, Endpoint::Timeline).unwrap(), timeline_state);
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn me_and_home_timeline_endpoints_are_tracked_independently_of_the_originals() {
+        // #11: X limits `/users/me` and the home timeline separately from
+        // the existing user-lookup and single-user timeline endpoints, so
+        // sharing a key with either would corrupt the tracked state for both.
+        let root = temp_root("four-endpoints");
+        let paths = test_paths(&root);
+        paths.ensure_dirs().unwrap();
+
+        let user_lookup_state = RateLimitState {
+            limit: Some(300),
+            remaining: Some(299),
+            reset_at: Some(1_000),
+        };
+        let timeline_state = RateLimitState {
+            limit: Some(15),
+            remaining: Some(10),
+            reset_at: Some(2_000),
+        };
+        let me_state = RateLimitState {
+            limit: Some(25),
+            remaining: Some(24),
+            reset_at: Some(3_000),
+        };
+        let home_timeline_state = RateLimitState {
+            limit: Some(15),
+            remaining: Some(0),
+            reset_at: Some(4_000),
+        };
+        save(&paths, Endpoint::UserLookup, user_lookup_state).unwrap();
+        save(&paths, Endpoint::Timeline, timeline_state).unwrap();
+        save(&paths, Endpoint::Me, me_state).unwrap();
+        save(&paths, Endpoint::HomeTimeline, home_timeline_state).unwrap();
+
+        assert_eq!(
+            load(&paths, Endpoint::UserLookup).unwrap(),
+            user_lookup_state
+        );
+        assert_eq!(load(&paths, Endpoint::Timeline).unwrap(), timeline_state);
+        assert_eq!(load(&paths, Endpoint::Me).unwrap(), me_state);
+        assert_eq!(
+            load(&paths, Endpoint::HomeTimeline).unwrap(),
+            home_timeline_state
+        );
 
         std::fs::remove_dir_all(&root).unwrap();
     }
