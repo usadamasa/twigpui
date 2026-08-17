@@ -66,9 +66,21 @@ impl XClient {
 
         let mut attempt = 0u32;
         loop {
-            usage::record_request(paths, endpoint, now)?;
             match self.send_once(url) {
                 Ok((status, body, state)) => {
+                    // Counted here rather than before the send, because a
+                    // response coming back is the only evidence available
+                    // that X actually processed (and so billed) the request.
+                    // Counting up front would charge the user for every
+                    // connection that never arrived — and a flaky network
+                    // retries up to `MAX_RETRIES` times, so one reload could
+                    // invent five requests that were never made. Counted per
+                    // send, not per call, since a retried request is billed
+                    // again. The remaining inaccuracy is the opposite case: a
+                    // request X processed whose response was lost in transit
+                    // is billed but not counted here.
+                    usage::record_request(paths, endpoint, now)?;
+
                     // Persisted even on a non-2xx response — an exhausted
                     // window's own 429 is exactly the information #10 needs
                     // tracked so the *next* call refuses to send at all.

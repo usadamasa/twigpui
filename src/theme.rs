@@ -20,6 +20,7 @@
 //! | `button_label` on `accent` (idle button) | 5.7:1 | pass |
 //! | `button_label` on `button_busy_bg` (busy button) | 6.9:1 | pass |
 //! | `danger` on `bg` | 5.8:1 | pass |
+//! | `warning` on `bg` (#18) | 5.0:1 | pass |
 
 use gpui::WindowAppearance;
 
@@ -76,10 +77,9 @@ impl Theme {
             button_busy_bg: 0x38_44_4d,
             button_label: 0xf7_f9_f9,
             danger: 0xf4_21_2e,
-            // STUB (#18): placeholder equal to `danger` until the real
-            // amber value lands — makes `light_and_dark_are_distinct_in_every_slot`
-            // fail for the right reason rather than a compile error.
-            warning: 0xf4_21_2e,
+            // Amber-400-ish: ~9.9:1 against `bg` (0x15_20_2b) by the same
+            // WCAG formula the module doc's light-palette table uses.
+            warning: 0xfb_bf_24,
         }
     }
 
@@ -99,8 +99,10 @@ impl Theme {
             button_busy_bg: 0x54_5b_63,
             button_label: 0xff_ff_ff,
             danger: 0xc4_1e_3a,
-            // STUB (#18): see the note in `dark()` above.
-            warning: 0xc4_1e_3a,
+            // Amber-700-ish: ~5.0:1 against `bg` (white), passing the same
+            // AA text threshold (4.5:1) the module doc's table checks the
+            // other slots against.
+            warning: 0xb4_53_09,
         }
     }
 }

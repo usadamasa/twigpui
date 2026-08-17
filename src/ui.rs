@@ -233,40 +233,40 @@ impl TimelineView {
             let _ = this.update(cx, |this, cx| {
                 this.refresh_usage(cx);
                 match result {
-                Ok(StartOutcome::NotAuthenticated) => {
-                    this.state = TimelineState::NotAuthenticated;
-                    cx.notify();
-                }
-                Ok(StartOutcome::SingleUser { credential, cached }) => {
-                    this.signed_in_with_oauth = credential.is_oauth();
-                    this.source = Some(TimelineSource::SingleUser);
-                    this.client = Some(XClient::new(credential.token().to_string()));
-                    match cached {
-                        Some(items) => {
-                            this.state = TimelineState::Loaded(items);
-                            cx.notify();
-                        }
-                        None => this.reload(cx),
+                    Ok(StartOutcome::NotAuthenticated) => {
+                        this.state = TimelineState::NotAuthenticated;
+                        cx.notify();
                     }
-                }
-                Ok(StartOutcome::Home { credential, cached }) => {
-                    this.signed_in_with_oauth = credential.is_oauth();
-                    this.source = Some(TimelineSource::Home);
-                    this.client = Some(XClient::new(credential.token().to_string()));
-                    match cached {
-                        Some((me, items)) => {
-                            this.home_user_id = Some(me.id);
-                            this.home_username = Some(me.username);
-                            this.state = TimelineState::Loaded(items);
-                            cx.notify();
+                    Ok(StartOutcome::SingleUser { credential, cached }) => {
+                        this.signed_in_with_oauth = credential.is_oauth();
+                        this.source = Some(TimelineSource::SingleUser);
+                        this.client = Some(XClient::new(credential.token().to_string()));
+                        match cached {
+                            Some(items) => {
+                                this.state = TimelineState::Loaded(items);
+                                cx.notify();
+                            }
+                            None => this.reload(cx),
                         }
-                        None => this.reload(cx),
                     }
-                }
-                Err(error) => {
-                    this.state = TimelineState::Failed(format!("{error:#}").into());
-                    cx.notify();
-                }
+                    Ok(StartOutcome::Home { credential, cached }) => {
+                        this.signed_in_with_oauth = credential.is_oauth();
+                        this.source = Some(TimelineSource::Home);
+                        this.client = Some(XClient::new(credential.token().to_string()));
+                        match cached {
+                            Some((me, items)) => {
+                                this.home_user_id = Some(me.id);
+                                this.home_username = Some(me.username);
+                                this.state = TimelineState::Loaded(items);
+                                cx.notify();
+                            }
+                            None => this.reload(cx),
+                        }
+                    }
+                    Err(error) => {
+                        this.state = TimelineState::Failed(format!("{error:#}").into());
+                        cx.notify();
+                    }
                 }
             });
         }));
@@ -503,9 +503,9 @@ impl TimelineView {
             let now = oauth::unix_now();
             let result = cx
                 .background_executor()
-                .spawn(
-                    async move { usage::load_all(&paths).map(|entries| usage::totals(&entries, now)) },
-                )
+                .spawn(async move {
+                    usage::load_all(&paths).map(|entries| usage::totals(&entries, now))
+                })
                 .await;
 
             if let Ok(totals) = result {
@@ -1056,9 +1056,10 @@ fn thread_row(thread_item: &thread::ThreadItem, theme: Theme) -> impl IntoElemen
 /// `request_price` is configured, per the issue's core rule that a guessed
 /// price is worse than showing no price at all.
 fn usage_label(today: u64, total: u64, request_price: Option<f64>) -> String {
-    let _ = (today, total, request_price);
-    // STUB: real formatting lands with the rest of #18's implementation.
-    String::new()
+    match usage::estimated_amount(today, request_price) {
+        Some(amount) => format!("Today: {today} req (~{amount:.2}) · Total: {total} req"),
+        None => format!("Today: {today} req · Total: {total} req"),
+    }
 }
 
 /// Which theme slot the usage line renders in: `warning`/`danger` as
@@ -1066,9 +1067,11 @@ fn usage_label(today: u64, total: u64, request_price: Option<f64>) -> String {
 /// severities [`usage::budget_status`] returns; the same muted slot
 /// timestamps and bylines already use once there is nothing to flag.
 fn usage_color(status: usage::BudgetStatus, theme: Theme) -> u32 {
-    let _ = status;
-    // STUB: real mapping lands with the rest of #18's implementation.
-    theme.text_muted
+    match status {
+        usage::BudgetStatus::Ok => theme.text_muted,
+        usage::BudgetStatus::Near => theme.warning,
+        usage::BudgetStatus::Exceeded => theme.danger,
+    }
 }
 
 /// Countdown text for the reload button while blocked by #10's rate-limit

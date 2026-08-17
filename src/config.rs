@@ -240,13 +240,8 @@ impl Config {
             })
             .unwrap_or_default();
 
-        // #18: stubbed to always `None` for now — the tests below pin the
-        // real env > file > default layering and validation this is meant
-        // to grow into.
-        let _ = &file.request_price;
-        let request_price: Option<f64> = None;
-        let _ = &file.daily_request_budget;
-        let daily_request_budget: Option<u32> = None;
+        let request_price = resolve_request_price(&var, file.request_price)?;
+        let daily_request_budget = resolve_daily_request_budget(&var, file.daily_request_budget)?;
 
         Ok(Self {
             bearer_token,
@@ -258,6 +253,55 @@ impl Config {
             request_price,
             daily_request_budget,
         })
+    }
+}
+
+/// Resolve `request_price` (#18): env > file > unset, the same precedence
+/// every other setting in [`Config::resolve`] uses — split out from there
+/// only to keep that function under clippy's line-count lint, not because
+/// the logic itself is reused elsewhere.
+///
+/// Unlike every numeric setting `Config::resolve` handles inline, a
+/// *missing* value here is the normal case, not something to default away
+/// — see [`Config::request_price`]'s doc for why there is no built-in
+/// default. Still validated when present, from either source: a negative
+/// or non-finite price would silently corrupt every estimated amount
+/// downstream.
+fn resolve_request_price(
+    var: &impl Fn(&str) -> Option<String>,
+    file_value: Option<f64>,
+) -> Result<Option<f64>> {
+    let (value, source) = match var("X_REQUEST_PRICE") {
+        Some(raw) => {
+            let value = raw
+                .trim()
+                .parse::<f64>()
+                .with_context(|| format!("X_REQUEST_PRICE is not a number: {raw:?}"))?;
+            (Some(value), "X_REQUEST_PRICE")
+        }
+        None => (file_value, "request_price in config.toml"),
+    };
+    if let Some(value) = value
+        && (!value.is_finite() || value < 0.0)
+    {
+        bail!("{source} must be a non-negative number, got {value}");
+    }
+    Ok(value)
+}
+
+/// Resolve `daily_request_budget` (#18): env > file > unset. Split out for
+/// the same reason as [`resolve_request_price`]. No validation beyond
+/// parsing as `u32`: every value in that range (including zero) is
+/// meaningful to `usage::budget_status`.
+fn resolve_daily_request_budget(
+    var: &impl Fn(&str) -> Option<String>,
+    file_value: Option<u32>,
+) -> Result<Option<u32>> {
+    match var("X_DAILY_REQUEST_BUDGET") {
+        Some(raw) => Ok(Some(raw.trim().parse::<u32>().with_context(|| {
+            format!("X_DAILY_REQUEST_BUDGET is not a number: {raw:?}")
+        })?)),
+        None => Ok(file_value),
     }
 }
 

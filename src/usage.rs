@@ -80,7 +80,7 @@ pub(crate) struct EndpointUsage {
 /// The UTC epoch day `now` (Unix seconds) falls in. Two timestamps map to
 /// the same day exactly when a UTC midnight does not separate them.
 pub(crate) fn epoch_day(now: i64) -> i64 {
-    0
+    now.div_euclid(SECONDS_PER_DAY)
 }
 
 /// What `entry.today` reads as *right now*, without mutating anything: the
@@ -88,7 +88,11 @@ pub(crate) fn epoch_day(now: i64) -> i64 {
 /// for, else zero — covers reading the file after midnight but before the
 /// next [`record`] call would actually perform the reset on disk.
 pub(crate) fn today_count(entry: EndpointUsage, now: i64) -> u64 {
-    entry.today
+    if epoch_day(now) == entry.today_epoch_day {
+        entry.today
+    } else {
+        0
+    }
 }
 
 /// Record one more request against `entry` at `now`: `total` always
@@ -98,7 +102,11 @@ pub(crate) fn today_count(entry: EndpointUsage, now: i64) -> u64 {
 /// is astronomically unlikely for a request counter, but silently wrapping
 /// to zero would be a worse failure mode than saturating.
 pub(crate) fn record(entry: EndpointUsage, now: i64) -> EndpointUsage {
-    entry
+    EndpointUsage {
+        total: entry.total.saturating_add(1),
+        today: today_count(entry, now).saturating_add(1),
+        today_epoch_day: epoch_day(now),
+    }
 }
 
 /// Turn `count` into an estimated amount, in whatever unit
@@ -108,7 +116,10 @@ pub(crate) fn record(entry: EndpointUsage, now: i64) -> EndpointUsage {
 /// than no number at all, so there is no built-in default price anywhere in
 /// this crate.
 pub(crate) fn estimated_amount(count: u64, price_per_request: Option<f64>) -> Option<f64> {
-    None
+    // A request count large enough to lose precision as f64 (2^53) is not
+    // realistic for this app.
+    #[allow(clippy::cast_precision_loss)]
+    price_per_request.map(|price| price * count as f64)
 }
 
 /// Which of three severities today's usage falls into, relative to an
@@ -127,9 +138,25 @@ pub(crate) enum BudgetStatus {
 
 /// Classify `today_total` against `daily_budget` — see [`BudgetStatus`].
 /// `budget == 0` is treated as already exceeded by any non-negative count,
-/// rather than dividing by zero.
+/// rather than dividing by zero (which would otherwise produce `NaN` for
+/// `today_total == 0` and fail every comparison below).
 pub(crate) fn budget_status(today_total: u64, daily_budget: Option<u32>) -> BudgetStatus {
-    BudgetStatus::Ok
+    let Some(budget) = daily_budget else {
+        return BudgetStatus::Ok;
+    };
+    if budget == 0 {
+        return BudgetStatus::Exceeded;
+    }
+
+    #[allow(clippy::cast_precision_loss)]
+    let ratio = today_total as f64 / f64::from(budget);
+    if ratio >= 1.0 {
+        BudgetStatus::Exceeded
+    } else if ratio >= NEAR_BUDGET_RATIO {
+        BudgetStatus::Near
+    } else {
+        BudgetStatus::Ok
+    }
 }
 
 /// The whole contents of [`Paths::usage_file`]: every endpoint's tracked
@@ -319,10 +346,8 @@ mod tests {
     }
 
     fn temp_root(label: &str) -> std::path::PathBuf {
-        let root = std::env::temp_dir().join(format!(
-            "twigpui-test-usage-{label}-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("twigpui-test-usage-{label}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         root
     }

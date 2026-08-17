@@ -649,8 +649,10 @@ mod tests {
         // #18's usage tracker iterates `Endpoint::ALL` to summarize across
         // every endpoint — a missing or duplicated variant here would
         // silently under- or double-count.
-        let keys: std::collections::HashSet<&str> =
-            Endpoint::ALL.iter().map(|endpoint| endpoint.key()).collect();
+        let keys: std::collections::HashSet<&str> = Endpoint::ALL
+            .iter()
+            .map(|endpoint| endpoint.key())
+            .collect();
         assert_eq!(keys.len(), Endpoint::ALL.len());
     }
 
