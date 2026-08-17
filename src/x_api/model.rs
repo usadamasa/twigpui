@@ -195,7 +195,10 @@ mod tests {
             r#"{"title":"Unauthorized","detail":"Unauthorized","status":401}"#,
         )
         .unwrap();
-        assert_eq!(problem.message().as_deref(), Some("Unauthorized: Unauthorized"));
+        assert_eq!(
+            problem.message().as_deref(),
+            Some("Unauthorized: Unauthorized")
+        );
     }
 
     #[test]
