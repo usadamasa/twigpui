@@ -5,6 +5,15 @@
 //! matter most (never lose a draft, never submit twice, never send an
 //! obviously-too-long post) are unit-tested directly rather than only
 //! inspectable by reading `ui.rs`.
+//!
+//! #16 adds an optional quote target alongside the draft text: the post
+//! being quoted, carried as [`QuoteTarget`] on [`ComposeState`]. It follows
+//! the same "survive a failure together" rule the draft text already has
+//! (#14) — see [`ComposeState::apply_result`] — and can be cleared
+//! independently of the draft (a mis-click on "Quote" shouldn't force
+//! discarding what was typed).
+
+use crate::x_api::QuotedPost;
 
 /// X's public character limit (Free/Basic tiers) that a post must fit
 /// under, measured by [`weighted_length`] rather than a plain
@@ -131,12 +140,25 @@ pub(crate) enum ComposeStatus {
     Failed(String),
 }
 
-/// The composer's full state (#14): draft text plus [`ComposeStatus`],
-/// bundled so "never lose the draft" and "never submit twice" can each be
+/// The post a draft quotes (#16): its id (what `quote_tweet_id` sends X) and
+/// the already-known author/text (reusing [`QuotedPost`], #13's own "post
+/// embedded as a card" shape) so `ui.rs` can render the same quote card
+/// inside the composer without a second lookup — the timeline row that
+/// offered the "Quote" button already had this data on screen.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct QuoteTarget {
+    pub(crate) post_id: String,
+    pub(crate) quoted: QuotedPost,
+}
+
+/// The composer's full state (#14, #16): draft text, an optional quote
+/// target, plus [`ComposeStatus`], bundled so "never lose the draft",
+/// "never lose the quote target", and "never submit twice" can each be
 /// expressed — and tested — as one value's transitions.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ComposeState {
     text: String,
+    quote: Option<QuoteTarget>,
     status: ComposeStatus,
 }
 
@@ -144,6 +166,7 @@ impl ComposeState {
     pub(crate) fn new() -> Self {
         Self {
             text: String::new(),
+            quote: None,
             status: ComposeStatus::Idle,
         }
     }
@@ -159,6 +182,24 @@ impl ComposeState {
     pub(crate) fn status(&self) -> &ComposeStatus {
         &self.status
     }
+
+    /// The post currently being quoted, if any (#16).
+    pub(crate) fn quote(&self) -> Option<&QuoteTarget> {
+        self.quote.as_ref()
+    }
+
+    /// Set (or replace) the quote target (#16) — clicking "Quote" on a post
+    /// while composing simply overwrites whatever was there before, since a
+    /// draft only ever quotes one post at a time.
+    // TODO(#16): stubbed no-op until the implementation commit — see the
+    // failing tests this is paired with.
+    pub(crate) fn set_quote(&mut self, _target: QuoteTarget) {}
+
+    /// Clear the quote target without touching the draft text (#16) — the
+    /// mis-click recovery the issue calls for: removing a wrong quote must
+    /// not force discarding what was already typed.
+    // TODO(#16): stubbed no-op until the implementation commit.
+    pub(crate) fn clear_quote(&mut self) {}
 
     /// Whether a submit is currently in flight.
     pub(crate) fn is_submitting(&self) -> bool {
@@ -214,9 +255,21 @@ impl Default for ComposeState {
 #[cfg(test)]
 mod tests {
     use super::{
-        ComposeState, ComposeStatus, ComposeValidationError, MAX_WEIGHTED_LENGTH, validate,
-        weighted_length,
+        ComposeState, ComposeStatus, ComposeValidationError, MAX_WEIGHTED_LENGTH, QuoteTarget,
+        validate, weighted_length,
     };
+    use crate::x_api::QuotedPost;
+
+    fn sample_target(post_id: &str) -> QuoteTarget {
+        QuoteTarget {
+            post_id: post_id.to_string(),
+            quoted: QuotedPost {
+                author_name: "Developers".to_string(),
+                author_username: "XDevelopers".to_string(),
+                text: "hello from the timeline".to_string(),
+            },
+        }
+    }
 
     // --- weighted_length ---
 
@@ -293,6 +346,14 @@ mod tests {
     }
 
     #[test]
+    fn a_fresh_composer_has_no_quote_target() {
+        // #16: an ordinary post is the default — nothing is being quoted
+        // until "Quote" is clicked on some row.
+        let state = ComposeState::new();
+        assert_eq!(state.quote(), None);
+    }
+
+    #[test]
     fn cannot_submit_blank_text() {
         let state = ComposeState::new();
         assert!(!state.can_submit());
@@ -332,6 +393,22 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_quote_submit_keeps_the_quote_target_together_with_the_draft() {
+        // #16's central guarantee, mirroring #14's for plain text: a failed
+        // quote must not silently drop what was being quoted, any more than
+        // it drops the draft itself.
+        let mut state = ComposeState::new();
+        state.set_text("hello".to_string());
+        state.set_quote(sample_target("1700000000000000001"));
+        state.start_submitting();
+        state.apply_result(Err("network error".to_string()));
+
+        assert_eq!(state.text(), "hello");
+        assert_eq!(state.quote(), Some(&sample_target("1700000000000000001")));
+        assert!(state.can_submit(), "a failed submit must stay retryable");
+    }
+
+    #[test]
     fn a_successful_submit_clears_the_text_and_returns_to_idle() {
         let mut state = ComposeState::new();
         state.set_text("hello".to_string());
@@ -340,6 +417,49 @@ mod tests {
 
         assert_eq!(state.text(), "");
         assert_eq!(state.status(), &ComposeStatus::Idle);
+    }
+
+    #[test]
+    fn a_successful_quote_submit_clears_the_quote_target_along_with_the_draft() {
+        let mut state = ComposeState::new();
+        state.set_text("hello".to_string());
+        state.set_quote(sample_target("1700000000000000001"));
+        state.start_submitting();
+        state.apply_result(Ok(()));
+
+        assert_eq!(state.text(), "");
+        assert_eq!(state.quote(), None);
+        assert_eq!(state.status(), &ComposeStatus::Idle);
+    }
+
+    #[test]
+    fn set_quote_records_the_target() {
+        let mut state = ComposeState::new();
+        state.set_quote(sample_target("1700000000000000001"));
+        assert_eq!(state.quote(), Some(&sample_target("1700000000000000001")));
+    }
+
+    #[test]
+    fn set_quote_replaces_a_previously_set_target() {
+        // A draft only ever quotes one post at a time — clicking "Quote" on
+        // a second row while composing overwrites, not stacks.
+        let mut state = ComposeState::new();
+        state.set_quote(sample_target("1700000000000000001"));
+        state.set_quote(sample_target("1700000000000000002"));
+        assert_eq!(state.quote(), Some(&sample_target("1700000000000000002")));
+    }
+
+    #[test]
+    fn clear_quote_removes_the_target_without_touching_the_draft_text() {
+        // #16: a mis-click on "Quote" must not force discarding the draft —
+        // clearing the quote target is the way out.
+        let mut state = ComposeState::new();
+        state.set_text("hello".to_string());
+        state.set_quote(sample_target("1700000000000000001"));
+        state.clear_quote();
+
+        assert_eq!(state.quote(), None);
+        assert_eq!(state.text(), "hello");
     }
 
     #[test]
@@ -356,5 +476,14 @@ mod tests {
             state.status(),
             &ComposeStatus::Failed("needs re-authorization".to_string())
         );
+    }
+
+    #[test]
+    fn refuse_does_not_touch_the_quote_target() {
+        let mut state = ComposeState::new();
+        state.set_quote(sample_target("1700000000000000001"));
+        state.refuse("needs re-authorization".to_string());
+
+        assert_eq!(state.quote(), Some(&sample_target("1700000000000000001")));
     }
 }

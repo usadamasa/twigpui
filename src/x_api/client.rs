@@ -209,7 +209,13 @@ impl XClient {
             .agent
             .post(url)
             .header("Authorization", format!("Bearer {}", self.bearer_token))
-            .send_json(PostTweetRequest { text })
+            // TODO(#16): `quote_tweet_id` still hardcoded to `None` here —
+            // see the failing test paired with this change; threaded
+            // through properly once `PostTweetRequest` itself is fixed.
+            .send_json(PostTweetRequest {
+                text,
+                quote_tweet_id: None,
+            })
             .with_context(|| format!("request to {url} failed"))?;
 
         let header = |name: &str| -> Option<String> {

@@ -105,11 +105,21 @@ pub(crate) struct UserLookupResponse {
     pub data: Option<User>,
 }
 
-/// The `POST /2/tweets` request body (#14) — just the post text; no
-/// reply/quote/poll support yet (see #12/#15/#16).
+/// The `POST /2/tweets` request body (#14, extended by #16) — the post text
+/// plus an optional quote target; no reply/poll support yet (see #12).
+///
+/// `quote_tweet_id` deliberately reuses this same endpoint/struct rather
+/// than a separate quote request type or `Endpoint` variant: X has no
+/// dedicated quote endpoint, and splitting the rate-limit tracking for what
+/// X treats as one endpoint would only create a second, incorrect window.
+// TODO(#16): `#[serde(skip_serializing_if = "Option::is_none")]` still
+// missing — see the failing test this is paired with. A bare `None` here
+// serializes as `"quote_tweet_id":null`, which X may reject outright for an
+// ordinary (non-quote) post.
 #[derive(Debug, Serialize)]
 pub(crate) struct PostTweetRequest<'a> {
     pub text: &'a str,
+    pub quote_tweet_id: Option<&'a str>,
 }
 
 /// The `POST /2/users/:id/retweets` request body (#15) — the id of the post
@@ -887,14 +897,33 @@ mod tests {
     }
 
     #[test]
-    fn serializes_the_post_tweet_request_body() {
-        // #14: the whole request body `x_api::client::XClient::create_post`
-        // sends — no reply/quote/poll fields, matching the "just text"
-        // scope this issue keeps to.
-        let request = PostTweetRequest { text: "hello" };
+    fn serializes_the_post_tweet_request_body_without_a_quote() {
+        // #14/#16: an ordinary post must omit `quote_tweet_id` entirely
+        // rather than sending it as `null` — X may reject a stray null
+        // outright, so this checks the exact serialized shape, not just
+        // that `quote_tweet_id` deserializes back to `None`.
+        let request = PostTweetRequest {
+            text: "hello",
+            quote_tweet_id: None,
+        };
         assert_eq!(
             serde_json::to_string(&request).unwrap(),
             r#"{"text":"hello"}"#
+        );
+    }
+
+    #[test]
+    fn serializes_the_post_tweet_request_body_with_a_quote() {
+        // #16: `POST /2/tweets` gains `quote_tweet_id` rather than a
+        // separate quote endpoint — this is the whole body a quote post
+        // sends.
+        let request = PostTweetRequest {
+            text: "hello",
+            quote_tweet_id: Some("1700000000000000001"),
+        };
+        assert_eq!(
+            serde_json::to_string(&request).unwrap(),
+            r#"{"text":"hello","quote_tweet_id":"1700000000000000001"}"#
         );
     }
 
