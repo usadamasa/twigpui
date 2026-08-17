@@ -9,7 +9,15 @@ use crate::paths::Paths;
 #[derive(Debug, Clone)]
 pub(crate) struct Config {
     /// App-only Bearer token, used verbatim in the `Authorization` header.
-    pub bearer_token: String,
+    ///
+    /// `Option` since #7: an OAuth session is an equally valid credential,
+    /// so this is no longer the only way to authenticate. [`Config::resolve`]
+    /// only fails when *neither* this nor [`Config::oauth_client_id`] is set.
+    pub bearer_token: Option<String>,
+    /// OAuth 2.0 client id for the PKCE sign-in flow (#7). Non-secret — a
+    /// public OAuth client has no client secret — so unlike `bearer_token`
+    /// this may live in `config.toml`.
+    pub oauth_client_id: Option<String>,
     /// Screen name whose posts are shown, without a leading `@`.
     pub target_username: String,
     /// Posts requested per fetch. The X API accepts 5..=100.
@@ -32,6 +40,10 @@ struct FileSettings {
     target_username: Option<String>,
     #[serde(default)]
     max_results: Option<u32>,
+    /// Non-secret (see [`Config::oauth_client_id`]), so — unlike
+    /// `bearer_token` below — this key is allowed in `config.toml`.
+    #[serde(default)]
+    oauth_client_id: Option<String>,
     /// Present only so [`Config::resolve`] can detect and reject a bearer
     /// token accidentally checked into `config.toml`. Kept as an untyped
     /// `toml::Value` so any shape (string, table, array, ...) under this key
@@ -84,9 +96,14 @@ impl Config {
             );
         }
 
+        // TODO(#7 red phase): still bails when the bearer token is missing,
+        // and never reads `oauth_client_id` — the "either credential"
+        // behavior lands in the implementation commit.
         let bearer_token = var("X_BEARER_TOKEN")
             .filter(|t| !t.trim().is_empty())
             .context("X_BEARER_TOKEN is unset. Copy .env.example to .env and fill it in.")?;
+        let bearer_token = Some(bearer_token.trim().to_string());
+        let oauth_client_id: Option<String> = None;
 
         let target_username = var("X_TARGET_USERNAME")
             .filter(|u| !u.trim().is_empty())
@@ -116,7 +133,8 @@ impl Config {
         }
 
         Ok(Self {
-            bearer_token: bearer_token.trim().to_string(),
+            bearer_token,
+            oauth_client_id,
             target_username,
             max_results,
         })
@@ -144,25 +162,39 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(config.bearer_token, "token");
+        assert_eq!(config.bearer_token.as_deref(), Some("token"));
         assert_eq!(config.target_username, DEFAULT_USERNAME);
         assert_eq!(config.max_results, DEFAULT_MAX_RESULTS);
     }
 
+    // Since #7, a bearer token is one of *two* valid credentials (the other
+    // being an OAuth client id), so "no token" alone is no longer an error —
+    // only "neither credential" is. This test used to be
+    // `rejects_a_missing_token`; it now asserts the new failure condition
+    // instead of the old one.
     #[test]
-    fn rejects_a_missing_token() {
+    fn rejects_when_no_credential_is_configured() {
         let error = Config::resolve(vars(&[]), FileSettings::default())
             .unwrap_err()
             .to_string();
-        assert!(error.contains("X_BEARER_TOKEN is unset"), "{error}");
+        assert!(error.contains("X_BEARER_TOKEN"), "{error}");
+        assert!(error.contains("X_OAUTH_CLIENT_ID"), "{error}");
     }
 
+    // A blank token must still count as "not configured" rather than being
+    // used verbatim — but with an oauth_client_id present, that no longer
+    // means resolution fails, only that `bearer_token` ends up `None`.
     #[test]
-    fn treats_a_blank_token_as_missing() {
-        let error = Config::resolve(vars(&[("X_BEARER_TOKEN", "   ")]), FileSettings::default())
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("X_BEARER_TOKEN is unset"), "{error}");
+    fn treats_a_blank_token_as_unset_rather_than_a_literal_value() {
+        let config = Config::resolve(
+            vars(&[
+                ("X_BEARER_TOKEN", "   "),
+                ("X_OAUTH_CLIENT_ID", "client-123"),
+            ]),
+            FileSettings::default(),
+        )
+        .unwrap();
+        assert_eq!(config.bearer_token, None);
     }
 
     #[test]
@@ -174,7 +206,62 @@ mod tests {
             FileSettings::default(),
         )
         .unwrap();
-        assert_eq!(config.bearer_token, "token");
+        assert_eq!(config.bearer_token.as_deref(), Some("token"));
+    }
+
+    #[test]
+    fn resolve_succeeds_with_only_an_oauth_client_id() {
+        let config = Config::resolve(
+            vars(&[("X_OAUTH_CLIENT_ID", "client-123")]),
+            FileSettings::default(),
+        )
+        .unwrap();
+        assert_eq!(config.bearer_token, None);
+        assert_eq!(config.oauth_client_id.as_deref(), Some("client-123"));
+    }
+
+    #[test]
+    fn resolve_succeeds_with_both_credentials_configured() {
+        let config = Config::resolve(
+            vars(&[
+                ("X_BEARER_TOKEN", "token"),
+                ("X_OAUTH_CLIENT_ID", "client-123"),
+            ]),
+            FileSettings::default(),
+        )
+        .unwrap();
+        assert_eq!(config.bearer_token.as_deref(), Some("token"));
+        assert_eq!(config.oauth_client_id.as_deref(), Some("client-123"));
+    }
+
+    #[test]
+    fn trims_the_oauth_client_id() {
+        let config = Config::resolve(
+            vars(&[("X_OAUTH_CLIENT_ID", "  client-123\n")]),
+            FileSettings::default(),
+        )
+        .unwrap();
+        assert_eq!(config.oauth_client_id.as_deref(), Some("client-123"));
+    }
+
+    #[test]
+    fn resolve_reads_the_oauth_client_id_from_the_file_when_env_is_unset() {
+        let file = FileSettings {
+            oauth_client_id: Some("file-client".to_string()),
+            ..FileSettings::default()
+        };
+        let config = Config::resolve(vars(&[]), file).unwrap();
+        assert_eq!(config.oauth_client_id.as_deref(), Some("file-client"));
+    }
+
+    #[test]
+    fn resolve_prefers_the_env_oauth_client_id_over_the_file() {
+        let file = FileSettings {
+            oauth_client_id: Some("file-client".to_string()),
+            ..FileSettings::default()
+        };
+        let config = Config::resolve(vars(&[("X_OAUTH_CLIENT_ID", "env-client")]), file).unwrap();
+        assert_eq!(config.oauth_client_id.as_deref(), Some("env-client"));
     }
 
     #[test]

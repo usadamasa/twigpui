@@ -1,6 +1,8 @@
 use gpui::{Context, FontWeight, SharedString, Task, Window, div, prelude::*, rgb};
 
 use crate::config::Config;
+use crate::oauth;
+use crate::paths::Paths;
 use crate::x_api::{TimelineItem, XClient};
 
 // Grouped per RGB channel, which is also the digit grouping clippy asks for.
@@ -13,37 +15,108 @@ const ACCENT: u32 = 0x1d_9b_f0;
 const DANGER: u32 = 0xf4_21_2e;
 
 enum TimelineState {
+    /// No usable credential yet: no fresh/refreshable stored OAuth session
+    /// and no bearer token. Shown at startup before the sign-in flow runs.
+    NotAuthenticated,
+    /// The interactive "Sign in with X" flow is running — browser opened,
+    /// waiting on the loopback callback.
+    SigningIn,
     Loading,
     Loaded(Vec<TimelineItem>),
     Failed(SharedString),
 }
 
+/// What the header's primary button does, independent of its current label —
+/// kept `Copy` so it can be captured into the click closure without
+/// borrowing `self.state`.
+#[derive(Clone, Copy)]
+enum PrimaryAction {
+    Reload,
+    SignIn,
+}
+
 pub(crate) struct TimelineView {
     config: Config,
-    client: XClient,
+    paths: Paths,
+    /// `None` until a credential is available — see [`TimelineState::NotAuthenticated`].
+    client: Option<XClient>,
     state: TimelineState,
-    /// Holding the task keeps the in-flight fetch alive; dropping it cancels.
+    /// Holding the task keeps the in-flight fetch (or startup credential
+    /// resolution) alive; dropping it cancels.
     fetch: Option<Task<()>>,
+    /// Holding this keeps the interactive sign-in flow alive; assigning a
+    /// new one (a second click) drops and so cancels whatever was running,
+    /// which also closes the loopback socket — see `oauth::callback`.
+    sign_in_flow: Option<Task<()>>,
 }
 
 impl TimelineView {
-    pub(crate) fn new(config: Config, _window: &mut Window, cx: &mut Context<'_, Self>) -> Self {
-        let client = XClient::new(config.bearer_token.clone());
+    pub(crate) fn new(
+        config: Config,
+        paths: Paths,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) -> Self {
         let mut this = Self {
             config,
-            client,
+            paths,
+            client: None,
             state: TimelineState::Loading,
             fetch: None,
+            sign_in_flow: None,
         };
-        this.reload(cx);
+        this.start(cx);
         this
     }
 
-    /// Every reload spends API credits, so this only runs on explicit action.
-    fn reload(&mut self, cx: &mut Context<'_, Self>) {
+    /// Resolve a credential (stored OAuth session, refreshing if stale, else
+    /// the bearer token) before the very first fetch. Runs on the background
+    /// executor because it can touch disk and, on a refresh, the network.
+    fn start(&mut self, cx: &mut Context<'_, Self>) {
         self.state = TimelineState::Loading;
 
-        let client = self.client.clone();
+        let config = self.config.clone();
+        let paths = self.paths.clone();
+
+        self.fetch = Some(cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { oauth::resolve_access_token(&config, &paths, oauth::unix_now()) })
+                .await;
+
+            let _ = this.update(cx, |this, cx| match result {
+                Ok(Some(token)) => {
+                    this.client = Some(XClient::new(token));
+                    this.reload(cx);
+                }
+                Ok(None) => {
+                    this.state = TimelineState::NotAuthenticated;
+                    cx.notify();
+                }
+                Err(error) => {
+                    this.state = TimelineState::Failed(format!("{error:#}").into());
+                    cx.notify();
+                }
+            });
+        }));
+
+        cx.notify();
+    }
+
+    /// Every reload spends API credits, so this only runs on explicit action.
+    /// A no-op (falls back to [`TimelineState::NotAuthenticated`]) if called
+    /// without a client — the "Reload" button isn't shown in that state, but
+    /// this guards against it anyway rather than assuming the caller got it
+    /// right.
+    fn reload(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(client) = self.client.clone() else {
+            self.state = TimelineState::NotAuthenticated;
+            cx.notify();
+            return;
+        };
+
+        self.state = TimelineState::Loading;
+
         let username = self.config.target_username.clone();
         let max_results = self.config.max_results;
 
@@ -66,8 +139,56 @@ impl TimelineView {
         cx.notify();
     }
 
+    /// Run the interactive PKCE sign-in flow: open the browser, wait for the
+    /// loopback callback, exchange the code, persist the tokens, then fall
+    /// straight into [`Self::reload`].
+    fn sign_in(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(client_id) = self.config.oauth_client_id.clone() else {
+            self.state = TimelineState::Failed(
+                "X_OAUTH_CLIENT_ID (or oauth_client_id in config.toml) is not set.".into(),
+            );
+            cx.notify();
+            return;
+        };
+
+        self.state = TimelineState::SigningIn;
+        let paths = self.paths.clone();
+
+        self.sign_in_flow = Some(cx.spawn(async move |this, cx| {
+            let executor = cx.background_executor().clone();
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let tokens = oauth::sign_in(&executor, &client_id).await?;
+                    oauth::tokens::save(&paths, &tokens)?;
+                    anyhow::Ok(tokens)
+                })
+                .await;
+
+            let _ = this.update(cx, |this, cx| match result {
+                Ok(tokens) => {
+                    this.client = Some(XClient::new(tokens.access_token));
+                    this.reload(cx);
+                }
+                Err(error) => {
+                    this.state = TimelineState::Failed(format!("{error:#}").into());
+                    cx.notify();
+                }
+            });
+        }));
+
+        cx.notify();
+    }
+
     fn header(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
-        let busy = matches!(self.state, TimelineState::Loading);
+        let (label, busy, action) = match self.state {
+            TimelineState::Loading => ("Loading…", true, PrimaryAction::Reload),
+            TimelineState::SigningIn => ("Signing in…", true, PrimaryAction::SignIn),
+            TimelineState::NotAuthenticated => ("Sign in with X", false, PrimaryAction::SignIn),
+            TimelineState::Loaded(_) | TimelineState::Failed(_) => {
+                ("Reload", false, PrimaryAction::Reload)
+            }
+        };
 
         div()
             .flex()
@@ -86,14 +207,17 @@ impl TimelineView {
             )
             .child(
                 div()
-                    .id("reload")
+                    .id("primary-action")
                     .px_3()
                     .py_1()
                     .rounded_full()
                     .bg(rgb(if busy { BORDER } else { ACCENT }))
                     .text_color(rgb(TEXT))
-                    .child(if busy { "Loading…" } else { "Reload" })
-                    .on_click(cx.listener(|this, _event, _window, cx| this.reload(cx))),
+                    .child(label)
+                    .on_click(cx.listener(move |this, _event, _window, cx| match action {
+                        PrimaryAction::Reload => this.reload(cx),
+                        PrimaryAction::SignIn => this.sign_in(cx),
+                    })),
             )
     }
 
@@ -108,6 +232,14 @@ impl TimelineView {
             .overflow_y_scroll();
 
         match &self.state {
+            TimelineState::NotAuthenticated => content.child(notice(
+                "Not signed in. Click \"Sign in with X\" to continue.",
+                TEXT_MUTED,
+            )),
+            TimelineState::SigningIn => content.child(notice(
+                "Waiting for the browser to finish sign-in…",
+                TEXT_MUTED,
+            )),
             TimelineState::Loading => content.child(notice("Fetching the timeline…", TEXT_MUTED)),
             TimelineState::Failed(message) => content.child(notice(message.clone(), DANGER)),
             TimelineState::Loaded(items) if items.is_empty() => {
