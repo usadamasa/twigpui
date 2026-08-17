@@ -125,7 +125,8 @@ mod tests {
 
     #[test]
     fn explains_an_exhausted_credit_cap() {
-        let body = r#"{"title":"UsageCapExceeded","detail":"Usage cap exceeded: Monthly product cap"}"#;
+        let body =
+            r#"{"title":"UsageCapExceeded","detail":"Usage cap exceeded: Monthly product cap"}"#;
         let error = check_status(429, body).unwrap_err().to_string();
         assert!(error.contains("429"), "{error}");
         assert!(error.contains("Usage cap exceeded"), "{error}");
