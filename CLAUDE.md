@@ -41,6 +41,7 @@ macOS 専用、開発用途のみ。他プラットフォームは考慮しな�
 | `src/x_api/client.rs` | ureq によるブロッキングクライアント、ステータス→メッセージ変換 |
 | `src/oauth/` | OAuth 2.0 Authorization Code + PKCE (#7): PKCE 生成、ループバックリスナー、トークン永続化 |
 | `src/ui.rs` | gpui のウィンドウとタイムライン描画 |
+| `scripts/build-app-bundle.sh` | `.app` バンドル生成 (#40): リリースビルド、`Info.plist`、任意アイコン、ad-hoc 署名 |
 | `PLAN.md` | マイルストーンの記録 |
 
 ## ビルドとテスト
