@@ -81,10 +81,7 @@ impl Paths {
     /// out and back in with a bearer token) must not have one silently
     /// overwrite the other.
     pub(crate) fn home_timeline_file(&self, user_id: &str) -> PathBuf {
-        // TODO(#11): stubbed to collide with `timeline_file` on purpose, so
-        // the "does not collide" test fails on behavior instead of a missing
-        // symbol.
-        self.timeline_file(user_id)
+        self.cache_dir.join(format!("home-timeline-{user_id}.json"))
     }
 
     /// Path to the cached result of `GET /2/users/me` (#11): the signed-in
@@ -92,10 +89,7 @@ impl Paths {
     /// given account, so caching it (like #9 caches screen-name → id) avoids
     /// re-spending a request on every start.
     pub(crate) fn me_file(&self) -> PathBuf {
-        // TODO(#11): stubbed to the wrong filename on purpose, so the
-        // "under the cache dir" test fails on behavior instead of a missing
-        // symbol.
-        self.cache_dir.join("user_ids.json")
+        self.cache_dir.join("me.json")
     }
 
     /// Path to the tracked rate-limit state, under `state_dir` (#10). State,

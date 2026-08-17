@@ -131,10 +131,8 @@ pub(crate) fn save_user_id(paths: &Paths, username: &str, user_id: &str, now: i6
 /// "resolve it via the API and cache it" — the same contract as
 /// [`cached_user_id`].
 pub(crate) fn cached_me(paths: &Paths, now: i64) -> Result<Option<MeEntry>> {
-    // TODO(#11): stubbed to always report a miss, so the roundtrip and TTL
-    // tests fail on behavior instead of a missing symbol.
-    let _ = (paths, now);
-    Ok(None)
+    let entry: Option<MeEntry> = load_json(&paths.me_file())?;
+    Ok(entry.filter(|entry| user_id_is_fresh(entry.cached_at, now)))
 }
 
 /// Persist the signed-in user's id and screen name from `/me`.
@@ -206,7 +204,10 @@ pub(crate) fn save_home_timeline(
 /// resolved [`MeEntry`] alongside the items so the caller (`ui.rs`) can
 /// populate the header and the id needed for "Load older" even on a
 /// cache-only render.
-pub(crate) fn startup_home(paths: &Paths, now: i64) -> Result<Option<(MeEntry, Vec<TimelineItem>)>> {
+pub(crate) fn startup_home(
+    paths: &Paths,
+    now: i64,
+) -> Result<Option<(MeEntry, Vec<TimelineItem>)>> {
     let Some(me) = cached_me(paths, now)? else {
         return Ok(None);
     };
@@ -273,10 +274,15 @@ pub(crate) fn append_older(
     cached: Vec<TimelineItem>,
     older: Vec<TimelineItem>,
 ) -> Vec<TimelineItem> {
-    // TODO(#11): stubbed to drop `older` entirely, so the append tests fail
-    // on behavior instead of a missing symbol.
-    let _ = older;
-    cached
+    let cached_ids: HashSet<&str> = cached.iter().map(|item| item.id.as_str()).collect();
+    let filtered_older: Vec<TimelineItem> = older
+        .into_iter()
+        .filter(|item| !cached_ids.contains(item.id.as_str()))
+        .collect();
+    let mut merged = cached;
+    merged.extend(filtered_older);
+    merged.truncate(MAX_CACHED_POSTS);
+    merged
 }
 
 /// What a reload spent: the merged, capped timeline to render, and whether
@@ -322,6 +328,94 @@ pub(crate) fn reload(
         items,
         user_id_cache_hit,
     })
+}
+
+/// What a home-timeline reload spent (#11): the merged, capped timeline to
+/// render, the resolved [`MeEntry`] itself (so `ui.rs` can populate the
+/// header and remember the id for a later "Load older"), and the response's
+/// `meta.next_token`, if any.
+///
+/// Unlike [`Reloaded`], this carries no `me_cache_hit` flag: nothing in this
+/// crate currently reports per-reload request cost for the home-timeline
+/// path the way `main.rs`'s `--fetch-only` does for [`Reloaded`] via
+/// `user_id_cache_hit`, so tracking it here would be dead weight. Add it back
+/// if a caller needs it.
+#[derive(Debug)]
+pub(crate) struct ReloadedHome {
+    pub items: Vec<TimelineItem>,
+    pub me: MeEntry,
+    pub next_token: Option<String>,
+}
+
+/// Spend the credits a home-timeline reload is allowed to spend: resolve
+/// `/me` (from cache if fresh, else one API request, then cached for next
+/// time), fetch posts newer than the newest cached one, merge them ahead of
+/// what's cached (never appended behind — that's [`load_older_home`]'s job),
+/// persist the result, and return it alongside `meta.next_token`.
+///
+/// Mirrors [`reload`], the single-user equivalent. Not unit-tested directly
+/// for the same reason `reload` isn't — it makes real HTTP requests through
+/// `client`. Everything it composes is tested standalone.
+pub(crate) fn reload_home(
+    paths: &Paths,
+    client: &XClient,
+    max_results: u32,
+    now: i64,
+) -> Result<ReloadedHome> {
+    let me = if let Some(entry) = cached_me(paths, now)? {
+        entry
+    } else {
+        let user = client.me(paths, now)?;
+        save_me(paths, &user.id, &user.username, now)?;
+        MeEntry {
+            id: user.id,
+            username: user.username,
+            cached_at: now,
+        }
+    };
+
+    let cached = load_home_timeline(paths, &me.id)?.unwrap_or_default();
+    let since = since_id(&cached);
+    let (fresh, next_token) = client.home_timeline(paths, &me.id, max_results, since, None, now)?;
+    let items = merge_timeline(fresh, cached);
+    save_home_timeline(paths, &me.id, &items, now)?;
+    Ok(ReloadedHome {
+        items,
+        me,
+        next_token,
+    })
+}
+
+/// Spend one request to fetch the page *behind* `pagination_token` (#11's
+/// "Load older"): append it after what's cached — via [`append_older`],
+/// never [`merge_timeline`] — persist the combined result, and return it
+/// alongside the next `meta.next_token` (`None` once there's nothing further
+/// back). `user_id` is the caller's responsibility to supply — `ui.rs` keeps
+/// it around from the last [`reload_home`] or [`startup_home`], since this
+/// function has no reason to re-resolve `/me` just to page further back
+/// through content it's already showing.
+///
+/// Not unit-tested directly, for the same reason [`reload_home`] isn't.
+pub(crate) fn load_older_home(
+    paths: &Paths,
+    client: &XClient,
+    user_id: &str,
+    max_results: u32,
+    pagination_token: &str,
+    now: i64,
+) -> Result<(Vec<TimelineItem>, Option<String>)> {
+    let cached = load_home_timeline(paths, user_id)?.unwrap_or_default();
+    let (older, next_token) = client.home_timeline(
+        paths,
+        user_id,
+        max_results,
+        None,
+        Some(pagination_token),
+        now,
+    )?;
+    let items = append_older(cached, older);
+    save_home_timeline(paths, user_id, &items, now)?;
+    Ok((items, next_token))
 }
 
 #[cfg(test)]

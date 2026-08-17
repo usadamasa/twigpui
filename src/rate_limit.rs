@@ -218,11 +218,8 @@ impl Endpoint {
         match self {
             Self::UserLookup => "user_lookup",
             Self::Timeline => "timeline",
-            // TODO(#11): both stubbed to collide with existing keys on
-            // purpose, so the "tracked independently" test fails on behavior
-            // instead of a missing symbol.
-            Self::Me => "user_lookup",
-            Self::HomeTimeline => "timeline",
+            Self::Me => "me",
+            Self::HomeTimeline => "home_timeline",
         }
     }
 }

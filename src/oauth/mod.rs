@@ -165,11 +165,11 @@ pub(crate) enum TimelineSource {
 
 impl TimelineSource {
     pub(crate) fn for_credential(credential: &Credential) -> Self {
-        // TODO(#11): stubbed to always report `SingleUser`, so the
-        // OAuth-maps-to-Home test fails on behavior instead of a missing
-        // symbol.
-        let _ = credential;
-        Self::SingleUser
+        if credential.is_oauth() {
+            Self::Home
+        } else {
+            Self::SingleUser
+        }
     }
 }
 

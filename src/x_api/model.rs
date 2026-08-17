@@ -105,10 +105,7 @@ impl TimelineResponse {
     /// consuming it so callers can check this before [`Self::into_items`]
     /// takes ownership.
     pub(crate) fn next_token(&self) -> Option<&str> {
-        // TODO(#11): stubbed to always report "no more pages" until the real
-        // parsing is implemented, so the pure `next_token` tests fail on
-        // behavior rather than a missing symbol.
-        unimplemented!()
+        self.meta.next_token.as_deref()
     }
 
     /// Join each post with its author from `includes.users`.

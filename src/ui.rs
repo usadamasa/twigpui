@@ -49,6 +49,25 @@ enum PrimaryAction {
     SignIn,
 }
 
+/// What [`TimelineView::start`]'s background half found, carried back across
+/// the executor boundary to the `update` closure that applies it to `self`.
+/// A local enum rather than a tuple because the two credential-bearing modes
+/// carry differently shaped cached data (#11): `SingleUser` only ever needed
+/// a bare `Option<Vec<TimelineItem>>`, but `Home` also needs the resolved
+/// [`cache::MeEntry`] so the header and `home_user_id` can be populated even
+/// on a pure cache hit, without a second round trip through `/me`.
+enum StartOutcome {
+    NotAuthenticated,
+    SingleUser {
+        credential: oauth::Credential,
+        cached: Option<Vec<TimelineItem>>,
+    },
+    Home {
+        credential: oauth::Credential,
+        cached: Option<(cache::MeEntry, Vec<TimelineItem>)>,
+    },
+}
+
 pub(crate) struct TimelineView {
     config: Config,
     paths: Paths,
@@ -79,6 +98,27 @@ pub(crate) struct TimelineView {
     /// reachable instead of only appearing when there is no credential at
     /// all.
     signed_in_with_oauth: bool,
+    /// Which timeline this view shows (#11) — decided once, alongside
+    /// `client`, from the resolved credential via
+    /// [`oauth::TimelineSource::for_credential`]. `None` until a credential
+    /// is resolved, mirroring `client`.
+    source: Option<TimelineSource>,
+    /// The signed-in user's own id, resolved via `GET /2/users/me`. Needed to
+    /// call the home-timeline endpoint and to page further back with
+    /// [`Self::load_older`]. Populated whenever `source` is
+    /// `TimelineSource::Home`; stays `None` for `SingleUser`, which has no
+    /// use for it.
+    home_user_id: Option<String>,
+    /// The signed-in user's own screen name (also from `/me`), shown in the
+    /// header instead of `config.target_username` while `source` is
+    /// `TimelineSource::Home` — see [`header_title`].
+    home_username: Option<String>,
+    /// `meta.next_token` from the most recent home-timeline response, if
+    /// any (#11). Drives whether the "Load older" button appears — see
+    /// [`offers_load_older`]. `None` whenever there is nothing further back
+    /// to fetch, or nothing has come from the network yet: a cache-only
+    /// render carries no token, since the cursor is not itself persisted.
+    next_page_token: Option<String>,
 }
 
 impl TimelineView {
@@ -104,6 +144,10 @@ impl TimelineView {
             sign_in_flow: None,
             last_reload_at: None,
             signed_in_with_oauth: false,
+            source: None,
+            home_user_id: None,
+            home_username: None,
+            next_page_token: None,
         };
         this.start(cx);
         this
@@ -128,29 +172,56 @@ impl TimelineView {
                 .spawn(async move {
                     let credential = oauth::resolve_credential(&config, &paths, oauth::unix_now())?;
                     let Some(credential) = credential else {
-                        return anyhow::Ok((None, None));
+                        return anyhow::Ok(StartOutcome::NotAuthenticated);
                     };
-                    let cached =
-                        cache::startup(&paths, &config.target_username, oauth::unix_now())?;
-                    anyhow::Ok((Some(credential), cached))
+                    // #11: decided once, right where the credential itself
+                    // resolves — everything downstream (which cache file,
+                    // which endpoint, which header text) branches on this
+                    // rather than re-deriving it.
+                    match TimelineSource::for_credential(&credential) {
+                        TimelineSource::SingleUser => {
+                            let cached =
+                                cache::startup(&paths, &config.target_username, oauth::unix_now())?;
+                            anyhow::Ok(StartOutcome::SingleUser { credential, cached })
+                        }
+                        TimelineSource::Home => {
+                            let cached = cache::startup_home(&paths, oauth::unix_now())?;
+                            anyhow::Ok(StartOutcome::Home { credential, cached })
+                        }
+                    }
                 })
                 .await;
 
             let _ = this.update(cx, |this, cx| match result {
-                Ok((Some(credential), Some(items))) => {
-                    this.signed_in_with_oauth = credential.is_oauth();
-                    this.client = Some(XClient::new(credential.token().to_string()));
-                    this.state = TimelineState::Loaded(items);
-                    cx.notify();
-                }
-                Ok((Some(credential), None)) => {
-                    this.signed_in_with_oauth = credential.is_oauth();
-                    this.client = Some(XClient::new(credential.token().to_string()));
-                    this.reload(cx);
-                }
-                Ok((None, _)) => {
+                Ok(StartOutcome::NotAuthenticated) => {
                     this.state = TimelineState::NotAuthenticated;
                     cx.notify();
+                }
+                Ok(StartOutcome::SingleUser { credential, cached }) => {
+                    this.signed_in_with_oauth = credential.is_oauth();
+                    this.source = Some(TimelineSource::SingleUser);
+                    this.client = Some(XClient::new(credential.token().to_string()));
+                    match cached {
+                        Some(items) => {
+                            this.state = TimelineState::Loaded(items);
+                            cx.notify();
+                        }
+                        None => this.reload(cx),
+                    }
+                }
+                Ok(StartOutcome::Home { credential, cached }) => {
+                    this.signed_in_with_oauth = credential.is_oauth();
+                    this.source = Some(TimelineSource::Home);
+                    this.client = Some(XClient::new(credential.token().to_string()));
+                    match cached {
+                        Some((me, items)) => {
+                            this.home_user_id = Some(me.id);
+                            this.home_username = Some(me.username);
+                            this.state = TimelineState::Loaded(items);
+                            cx.notify();
+                        }
+                        None => this.reload(cx),
+                    }
                 }
                 Err(error) => {
                     this.state = TimelineState::Failed(format!("{error:#}").into());
@@ -182,6 +253,13 @@ impl TimelineView {
             cx.notify();
             return;
         };
+        // `source` is always set alongside `client` (see `start` and
+        // `sign_in`), so this is defensive rather than a real branch.
+        let Some(source) = self.source else {
+            self.state = TimelineState::NotAuthenticated;
+            cx.notify();
+            return;
+        };
 
         let now = oauth::unix_now();
         if let Some(reset_at) = reload_cooldown(
@@ -201,34 +279,110 @@ impl TimelineView {
         self.state = TimelineState::Loading;
 
         let paths = self.paths.clone();
-        let username = self.config.target_username.clone();
+        let max_results = self.config.max_results;
+
+        match source {
+            TimelineSource::SingleUser => {
+                let username = self.config.target_username.clone();
+                self.fetch = Some(cx.spawn(async move |this, cx| {
+                    // The client blocks, so it must not run on the foreground thread.
+                    let result = cx
+                        .background_executor()
+                        .spawn(async move {
+                            cache::reload(
+                                &paths,
+                                &client,
+                                &username,
+                                max_results,
+                                oauth::unix_now(),
+                            )
+                        })
+                        .await;
+
+                    let _ = this.update(cx, |this, cx| {
+                        this.state = match result {
+                            Ok(reloaded) => {
+                                // Single-user mode has no pagination cursor —
+                                // #11 keeps its "Load older" button reserved
+                                // for the home timeline.
+                                this.next_page_token = None;
+                                TimelineState::Loaded(reloaded.items)
+                            }
+                            Err(error) => map_reload_error(&error),
+                        };
+                        cx.notify();
+                    });
+                }));
+            }
+            TimelineSource::Home => {
+                self.fetch = Some(cx.spawn(async move |this, cx| {
+                    let result = cx
+                        .background_executor()
+                        .spawn(async move {
+                            cache::reload_home(&paths, &client, max_results, oauth::unix_now())
+                        })
+                        .await;
+
+                    let _ = this.update(cx, |this, cx| {
+                        this.state = match result {
+                            Ok(reloaded) => {
+                                this.home_user_id = Some(reloaded.me.id);
+                                this.home_username = Some(reloaded.me.username);
+                                this.next_page_token = reloaded.next_token;
+                                TimelineState::Loaded(reloaded.items)
+                            }
+                            Err(error) => map_reload_error(&error),
+                        };
+                        cx.notify();
+                    });
+                }));
+            }
+        }
+
+        cx.notify();
+    }
+
+    /// Fetch the page behind `next_page_token` and append it after what's
+    /// already shown (#11's "Load older") — only ever meaningful in
+    /// `TimelineSource::Home`, since `SingleUser` mode never sets a token in
+    /// the first place. A no-op if any of the three prerequisites (a client,
+    /// a known home user id, a token to resume from) is missing.
+    fn load_older(&mut self, cx: &mut Context<'_, Self>) {
+        let (Some(client), Some(user_id), Some(token)) = (
+            self.client.clone(),
+            self.home_user_id.clone(),
+            self.next_page_token.clone(),
+        ) else {
+            return;
+        };
+
+        self.state = TimelineState::Loading;
+
+        let paths = self.paths.clone();
         let max_results = self.config.max_results;
 
         self.fetch = Some(cx.spawn(async move |this, cx| {
-            // The client blocks, so it must not run on the foreground thread.
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    cache::reload(&paths, &client, &username, max_results, oauth::unix_now())
+                    cache::load_older_home(
+                        &paths,
+                        &client,
+                        &user_id,
+                        max_results,
+                        &token,
+                        oauth::unix_now(),
+                    )
                 })
                 .await;
 
             let _ = this.update(cx, |this, cx| {
                 this.state = match result {
-                    Ok(reloaded) => TimelineState::Loaded(reloaded.items),
-                    // #10: a blocked-send carries a known reset time is
-                    // shown as a countdown; everything else (including a
-                    // rate limit whose 429 carried no usable reset header)
-                    // falls back to the plain error message.
-                    Err(error) => match error.downcast_ref::<rate_limit::RateLimited>() {
-                        Some(rate_limit::RateLimited {
-                            reset_at: Some(reset_at),
-                        }) => TimelineState::RateLimited {
-                            reset_at: *reset_at,
-                            cooldown: Cooldown::ApiRateLimit,
-                        },
-                        _ => TimelineState::Failed(format!("{error:#}").into()),
-                    },
+                    Ok((items, next_token)) => {
+                        this.next_page_token = next_token;
+                        TimelineState::Loaded(items)
+                    }
+                    Err(error) => map_reload_error(&error),
                 };
                 cx.notify();
             });
@@ -266,6 +420,9 @@ impl TimelineView {
             let _ = this.update(cx, |this, cx| match result {
                 Ok(tokens) => {
                     this.signed_in_with_oauth = true;
+                    // #11: a stored OAuth session always maps to the home
+                    // timeline — see `TimelineSource::for_credential`.
+                    this.source = Some(TimelineSource::Home);
                     this.client = Some(XClient::new(tokens.access_token));
                     this.reload(cx);
                 }
@@ -311,11 +468,11 @@ impl TimelineView {
             .bg(rgb(theme.bg_header))
             .border_b_1()
             .border_color(rgb(theme.border))
-            .child(
-                div()
-                    .font_weight(FontWeight::BOLD)
-                    .child(format!("@{}", self.config.target_username)),
-            )
+            .child(div().font_weight(FontWeight::BOLD).child(header_title(
+                self.source,
+                self.home_username.as_deref(),
+                &self.config.target_username,
+            )))
             .child(
                 div()
                     .flex()
@@ -370,7 +527,7 @@ impl TimelineView {
             )
     }
 
-    fn body(&self) -> impl IntoElement {
+    fn body(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let theme = self.theme;
 
         // `overflow_y_scroll` lives on StatefulInteractiveElement, so the
@@ -402,11 +559,29 @@ impl TimelineView {
             TimelineState::Loaded(items) if items.is_empty() => {
                 content.child(notice("No posts were returned.", theme.text_muted))
             }
-            TimelineState::Loaded(items) => {
-                content.children(items.iter().map(|item| post_row(item, theme)))
-            }
+            TimelineState::Loaded(items) => content
+                .children(items.iter().map(|item| post_row(item, theme)))
+                // #11: only offered once a response has actually carried a
+                // `meta.next_token` to resume from.
+                .when(
+                    offers_load_older(self.next_page_token.as_deref(), &self.state),
+                    |list| list.child(load_older_row(theme, cx)),
+                ),
         }
     }
+}
+
+/// The "Load older" row appended after the list (#11), styled like
+/// [`notice`] but clickable — appending posts *behind* what's already shown
+/// via `cache::append_older`, never merged ahead like a normal reload.
+fn load_older_row(theme: Theme, cx: &mut Context<'_, TimelineView>) -> impl IntoElement {
+    div()
+        .id("load-older")
+        .px_4()
+        .py_3()
+        .text_color(rgb(theme.accent))
+        .child("Load older")
+        .on_click(cx.listener(|this, _event, _window, cx| this.load_older(cx)))
 }
 
 impl Render for TimelineView {
@@ -421,7 +596,7 @@ impl Render for TimelineView {
             .text_color(rgb(theme.text))
             .text_sm()
             .child(self.header(cx))
-            .child(self.body())
+            .child(self.body(cx))
     }
 }
 
@@ -509,6 +684,26 @@ fn offers_sign_in(
     )
 }
 
+/// Map a failed reload/load-older's error to the state that should show it —
+/// shared by every fetch path in this file (single-user reload, home-timeline
+/// reload, and "Load older") so the #10 rate-limit-countdown behavior stays
+/// in exactly one place rather than being copy-pasted per branch.
+///
+/// #10: a blocked-send carries a known reset time and is shown as a
+/// countdown; everything else (including a rate limit whose 429 carried no
+/// usable reset header) falls back to the plain error message.
+fn map_reload_error(error: &anyhow::Error) -> TimelineState {
+    match error.downcast_ref::<rate_limit::RateLimited>() {
+        Some(rate_limit::RateLimited {
+            reset_at: Some(reset_at),
+        }) => TimelineState::RateLimited {
+            reset_at: *reset_at,
+            cooldown: Cooldown::ApiRateLimit,
+        },
+        _ => TimelineState::Failed(format!("{error:#}").into()),
+    }
+}
+
 /// The header's title (#11): which account's posts these are, and — since
 /// #11 introduces a second mode — which mode is showing, so the user is
 /// never left guessing whether they're looking at their own home timeline or
@@ -525,20 +720,18 @@ fn header_title(
     home_username: Option<&str>,
     target_username: &str,
 ) -> String {
-    // TODO(#11): stubbed to always show the pre-#11 single-user title, so
-    // the Home-mode tests fail on behavior instead of a missing symbol.
-    let _ = (source, home_username);
-    format!("@{target_username}")
+    match (source, home_username) {
+        (Some(TimelineSource::Home), Some(username)) => format!("@{username} — Home timeline"),
+        (Some(TimelineSource::Home), None) => "Home timeline".to_string(),
+        (Some(TimelineSource::SingleUser) | None, _) => format!("@{target_username}"),
+    }
 }
 
 /// Whether the header should offer a "Load older" button (#11): only once a
 /// response has actually carried a `meta.next_token` to resume from, and
 /// only while the timeline is in a state where clicking it makes sense.
 fn offers_load_older(next_page_token: Option<&str>, state: &TimelineState) -> bool {
-    // TODO(#11): stubbed to never offer it, so the "token present" test
-    // fails on behavior instead of a missing symbol.
-    let _ = (next_page_token, state);
-    false
+    next_page_token.is_some() && matches!(state, TimelineState::Loaded(_))
 }
 
 /// Whether [`TimelineView::reload`] should refuse to run right now, per
@@ -675,7 +868,10 @@ mod tests {
 
     #[test]
     fn does_not_offer_load_older_while_not_in_the_loaded_state() {
-        assert!(!offers_load_older(Some("cursor-abc"), &TimelineState::Loading));
+        assert!(!offers_load_older(
+            Some("cursor-abc"),
+            &TimelineState::Loading
+        ));
     }
 
     #[test]
