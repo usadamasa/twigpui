@@ -222,8 +222,7 @@ pub(crate) async fn await_authorization_code(
     loop {
         match listener.accept() {
             Ok((stream, _addr)) => {
-                if let Some(authorization) = handle_connection(stream)? {
-                    super::pkce::verify_state(expected_state, &authorization.state)?;
+                if let Some(authorization) = handle_connection(stream, expected_state)? {
                     return Ok(authorization.code);
                 }
                 // Not `/callback` (or unparseable) — a spurious connection.
@@ -247,7 +246,11 @@ pub(crate) async fn await_authorization_code(
 /// authorization if the request was for `/callback`. Returns `Ok(None)` for
 /// any other path, or for a connection that doesn't look like a real
 /// browser request, so the caller keeps accepting.
-fn handle_connection(mut stream: TcpStream) -> Result<Option<Authorization>> {
+///
+/// The CSRF `state` check happens here rather than in the caller so the page
+/// the browser renders matches the outcome: a mismatched `state` must not
+/// leave the user reading "Signed in with X" while the flow aborts.
+fn handle_connection(mut stream: TcpStream, expected_state: &str) -> Result<Option<Authorization>> {
     if stream.set_nonblocking(false).is_err() {
         return Ok(None);
     }
@@ -296,6 +299,14 @@ fn handle_connection(mut stream: TcpStream) -> Result<Option<Authorization>> {
 
     match interpret_query(&parsed.query) {
         Ok(authorization) => {
+            if let Err(error) = super::pkce::verify_state(expected_state, &authorization.state) {
+                let body = error_body(&error.to_string());
+                let _ = write_response(
+                    &mut stream,
+                    &http_response("HTTP/1.1 400 Bad Request", &body),
+                );
+                return Err(error);
+            }
             let _ = write_response(&mut stream, &http_response("HTTP/1.1 200 OK", SUCCESS_BODY));
             Ok(Some(authorization))
         }
