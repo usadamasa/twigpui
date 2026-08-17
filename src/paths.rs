@@ -76,36 +76,40 @@ impl Paths {
 
     /// Create all three directories (recursively) if they do not already
     /// exist.
-    pub(crate) fn ensure_dirs(&self) -> Result<()> {
-        // Checked before creation so the (best-effort, possibly slow)
-        // exclusion call below only ever runs once, the run that actually
-        // creates `cache_dir` — not on every startup.
+    ///
+    /// Returns whether `cache_dir` was created by this call, so the caller
+    /// can run the one-time setup in [`Paths::exclude_cache_from_backups`].
+    /// That side effect stays out of here deliberately: `ensure_dirs` is
+    /// called by most of this crate's filesystem tests, and shelling out to
+    /// `tmutil` on each of them costs a second apiece.
+    pub(crate) fn ensure_dirs(&self) -> Result<bool> {
+        // Sampled before creation, since afterwards the directory exists
+        // either way.
         let cache_dir_is_new = !self.cache_dir.exists();
 
         for dir in [&self.config_dir, &self.cache_dir, &self.state_dir] {
             create_private_dir(dir)?;
         }
 
-        if cache_dir_is_new {
-            exclude_cache_dir_from_time_machine(&self.cache_dir);
-        }
-
-        Ok(())
+        Ok(cache_dir_is_new)
     }
-}
 
-/// Best-effort exclude `dir` from Time Machine via `tmutil addexclusion`
-/// (#9). `~/Library/Caches` is exempted from backups automatically by
-/// macOS; the XDG cache location this app actually uses (`~/.cache`) is
-/// not, so without this the response cache would get backed up on every
-/// Time Machine run like ordinary data. Failure — `tmutil` missing, no
-/// permission, anything — is silently ignored: this is a nice-to-have, and
-/// must never be able to block startup.
-fn exclude_cache_dir_from_time_machine(dir: &Path) {
-    let _ = std::process::Command::new("tmutil")
-        .arg("addexclusion")
-        .arg(dir)
-        .output();
+    /// Best-effort exclude `cache_dir` from Time Machine via
+    /// `tmutil addexclusion` (#9). `~/Library/Caches` is exempted from
+    /// backups automatically by macOS; the XDG cache location this app
+    /// actually uses (`~/.cache`) is not, so without this the response cache
+    /// would get backed up on every Time Machine run like ordinary data.
+    ///
+    /// Failure — `tmutil` missing, no permission, anything — is silently
+    /// ignored: this is a nice-to-have and must never block startup. The call
+    /// takes about a second, so run it only when `ensure_dirs` reports that
+    /// it just created the directory.
+    pub(crate) fn exclude_cache_from_backups(&self) {
+        let _ = std::process::Command::new("tmutil")
+            .arg("addexclusion")
+            .arg(&self.cache_dir)
+            .output();
+    }
 }
 
 /// Resolve one XDG base directory: `$<xdg_var>/twigpui` if `xdg_var` holds a
@@ -288,6 +292,26 @@ mod tests {
 
         // Calling it again on an already-populated tree must not error.
         paths.ensure_dirs().unwrap();
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn ensure_dirs_reports_the_cache_dir_as_new_only_on_the_call_that_creates_it() {
+        // The flag gates a ~1s `tmutil` subprocess, so reporting "new" on
+        // every startup would be a visible cost, not just a cosmetic slip.
+        let root = std::env::temp_dir().join(format!(
+            "twigpui-test-ensure-dirs-new-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+
+        let paths = Paths::from_vars(vars(&[("HOME", &root.display().to_string())])).unwrap();
+        assert!(paths.ensure_dirs().unwrap(), "first call creates cache_dir");
+        assert!(
+            !paths.ensure_dirs().unwrap(),
+            "second call finds it already there"
+        );
 
         std::fs::remove_dir_all(&root).unwrap();
     }

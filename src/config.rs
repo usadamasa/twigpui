@@ -75,7 +75,11 @@ impl Config {
         // A missing .env is fine — the variables may come from the real environment.
         let _ = dotenvy::dotenv();
         let paths = Paths::from_env()?;
-        paths.ensure_dirs()?;
+        // This is the real startup path, and the only place the one-time
+        // Time Machine exclusion is worth its ~1s subprocess.
+        if paths.ensure_dirs()? {
+            paths.exclude_cache_from_backups();
+        }
         let file = FileSettings::load(&paths.settings_file())?;
         Self::resolve(|key| std::env::var(key).ok(), file)
     }
