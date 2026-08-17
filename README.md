@@ -33,8 +33,26 @@ text as the body, and the quote card the original itself carried. If the
 referenced post is deleted, protected, or otherwise missing from the
 response's `includes`, the row still renders — a repost falls back to the
 API's own (possibly truncated) text with the author left blank, and a quote
-just omits the card. A reply reference is recognized but not otherwise
-rendered — thread display is #12.
+just omits the card.
+
+**Reply context and "Show thread" (#12).** A reply shows "Replying to
+@someone" for free — the parent's author is already in the same response's
+`includes` thanks to the `referenced_tweets` expansion above, so this costs
+no extra request. Walking further up the conversation costs real money,
+though, so it never happens automatically: each reply instead offers a
+"Show thread (up to 5 requests)" toggle that spells out the worst case
+before it's clicked. Clicking it walks the parent chain one
+`GET /2/tweets?ids=` request per level — each level's id is only known once
+the previous one resolves, so they can't be batched — stopping at 5 levels
+or the first parent that comes back empty (deleted, protected, or otherwise
+absent), whichever comes first. Reaching the cap is reported explicitly
+("Reached the 5-level limit…") rather than the thread just quietly trailing
+off, and a fetch that errors offers a retry in place. A missing first parent
+renders "The parent post is no longer available" instead of an empty gap.
+Once walked, a thread is cached (`thread-<reply_id>.json`, see below), so
+re-opening the same reply's thread — even after restarting the app — costs
+nothing further. Listing the replies *to* a post (the other direction) needs
+a different endpoint (`search/recent`) and is out of scope here — see #36.
 
 `--fetch-only` runs the same fetch headlessly (always the single-user view,
 regardless of credential) and prints the posts, which is useful for checking
@@ -144,7 +162,7 @@ created (mode `0700`) on startup:
 | Variable | Default | Holds |
 | --- | --- | --- |
 | `XDG_CONFIG_HOME` | `~/.config/twigpui/` | `config.toml` |
-| `XDG_CACHE_HOME` | `~/.cache/twigpui/` | Response cache: `user_ids.json`, `timeline-<user_id>.json` (#9), `me.json`, `home-timeline-<user_id>.json` (#11) |
+| `XDG_CACHE_HOME` | `~/.cache/twigpui/` | Response cache: `user_ids.json`, `timeline-<user_id>.json` (#9), `me.json`, `home-timeline-<user_id>.json` (#11), `thread-<reply_id>.json` (#12) |
 | `XDG_STATE_HOME` | `~/.local/state/twigpui/` | `oauth_tokens.json` (mode `0600`), `rate_limit.json` (#10) |
 
 An `XDG_*` variable is only honored if it is set to a non-blank absolute
@@ -188,10 +206,12 @@ typo'd theme is cosmetic, not worth blocking the app over — it falls back to
 The X API bills per request against prepaid credits. A cold reload spends two
 requests: one id lookup (`/users/by/username/:username` for the single-user
 view, `/users/me` for the home timeline — #11) and one timeline fetch, plus
-one more request per "Load older" click. Fetching happens only on an explicit
-action — there is no polling or auto-refresh, and since #9, **opening the app
-spends nothing at all**: startup renders straight from the local cache below
-whenever one exists, with no request in the loop.
+one more request per "Load older" click, plus **up to five** more per
+"Show thread" click on a reply (#12 — one `GET /2/tweets?ids=` request per
+parent level, capped as described above). Fetching happens only on an
+explicit action — there is no polling or auto-refresh, and since #9,
+**opening the app spends nothing at all**: startup renders straight from the
+local cache below whenever one exists, with no request in the loop.
 
 When credits run out the API answers `429` with a `UsageCapExceeded` problem
 body; the app surfaces that text directly in the window.
@@ -205,9 +225,9 @@ once its window resets. twigpui tells them apart and treats each accordingly:
 
 - **What's tracked.** Every response's `x-rate-limit-limit` /
   `-remaining` / `-reset` headers are parsed and kept per endpoint: the
-  username lookup, the single-user timeline fetch, `/users/me`, and the home
-  timeline (#11) are all tracked separately, since X limits each of them
-  separately.
+  username lookup, the single-user timeline fetch, `/users/me`, the home
+  timeline (#11), and `GET /2/tweets?ids=` (#12, "Show thread") are all
+  tracked separately, since X limits each of them separately.
 - **The app refuses to send rather than waiting.** If the tracked remaining
   count is zero and the reset time hasn't arrived yet, twigpui does **not**
   send the request — a GUI app has no business sleeping a background thread
@@ -244,6 +264,7 @@ under `$XDG_CACHE_HOME/twigpui/` (see the file locations table above):
 | `timeline-<user_id>.json` | One user's cached posts (single-user mode), newest first, plus when they were fetched | none — see below |
 | `me.json` | The signed-in user's own id and screen name, from `/users/me` (#11) | 30 days |
 | `home-timeline-<user_id>.json` | That user's cached home timeline (#11), newest first — a deliberately separate file from `timeline-<user_id>.json` for the same id, since the two hold different content | none — see below |
+| `thread-<reply_id>.json` | One reply's already-walked parent chain (#12), keyed by the reply's own post id | none — a post's parents never change once posted |
 
 **User ids — including the signed-in user's own, from `/users/me` — are
 effectively permanent**, so caching the lookup is what turns a reload from
@@ -295,12 +316,18 @@ older", and that the home-timeline and single-user caches for the same id
 never collide), which timeline mode a credential resolves to (#11), the
 repost/quote join against `includes.tweets`/`includes.users` and its
 precedence when a post carries more than one reference, including a missing
-referenced post and a repost-of-a-quote (#13), and the rate-limit tracker's
-header parsing, send/don't-send decision, `429` classification, jittered
-backoff schedule, and persistence (#10), so they make no network calls, open
-no browser, and spend no credits. The actual code exchange, X's live response
-shapes (including `/users/me`, the home timeline's `meta.next_token`, and
-#13's `referenced_tweets` expansion), refresh-token rotation, and the real
-rate-limit header values X sends aren't covered by tests — those need a real
-Developer Portal registration, a one-time manual sign-in, and (for the last)
-actually hitting a live rate limit.
+referenced post and a repost-of-a-quote (#13), the reply-context join and its
+own repost interaction, the `GET /2/tweets?ids=` URL and its independently
+tracked rate-limit endpoint, the thread cache's roundtrip and corruption
+recovery, and `thread::assemble_chain`'s ordering, dedup, and 5-level cutoff
+— including a partial walk stopped by a missing parent — entirely without
+network or disk (#12), and the rate-limit tracker's header parsing,
+send/don't-send decision, `429` classification, jittered backoff schedule,
+and persistence (#10), so they make no network calls, open no browser, and
+spend no credits. The actual code exchange, X's live response shapes
+(including `/users/me`, the home timeline's `meta.next_token`, #13's
+`referenced_tweets` expansion, and #12's `GET /2/tweets?ids=` response
+shape), refresh-token rotation, and the real rate-limit header values X sends
+aren't covered by tests — those need a real Developer Portal registration, a
+one-time manual sign-in, and (for the last) actually hitting a live rate
+limit.

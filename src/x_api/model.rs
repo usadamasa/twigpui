@@ -150,6 +150,27 @@ pub(crate) struct TimelineItem {
     /// `reposted_by`.
     #[serde(default)]
     pub quoted: Option<QuotedPost>,
+    /// Set for a reply (#12): who this post replies to, and that parent's
+    /// own post id — the anchor `ui.rs`'s "Show thread" walk starts from.
+    /// Populated at zero extra request cost, since the parent (and, when
+    /// expanded, its author) is already in `includes` per #13's
+    /// `referenced_tweets.id`/`.author_id` expansions. `#[serde(default)]`
+    /// for the same cache-compatibility reason as `reposted_by`/`quoted`.
+    #[serde(default)]
+    pub replied_to: Option<RepliedTo>,
+}
+
+/// Who a reply is replying to (#12), joined from `includes` the same way a
+/// repost's or quote's original is. `author_name`/`author_username` are
+/// empty (never the whole field `None`) when the parent's author wasn't
+/// resolvable — deleted, protected, or simply not expanded — mirroring
+/// [`build_item`]'s existing convention for a missing repost original,
+/// rather than hiding the reply context entirely.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct RepliedTo {
+    pub post_id: String,
+    pub author_name: String,
+    pub author_username: String,
 }
 
 /// A quoted post, flattened with its author, embedded in a [`TimelineItem`]
@@ -242,6 +263,7 @@ fn build_item(
         author_username,
         reposted_by: None,
         quoted: None,
+        replied_to: None,
     };
 
     if let Some(retweet_ref) = post
@@ -258,10 +280,11 @@ fn build_item(
             item.text.clone_from(&original.text);
             item.author_name = author_name;
             item.author_username = author_username;
-            // A repost of a quote: the quote card belongs to the original
-            // post being shown as the body, not to the (already-consumed)
-            // retweet reference on the outer post.
+            // A repost of a quote — or of a reply — carries context that
+            // belongs to the original post now shown as the body, not to
+            // the (already-consumed) retweet reference on the outer post.
             item.quoted = quote_of(original, users, referenced);
+            item.replied_to = reply_target(original, users, referenced);
         } else {
             // Original is gone from `includes` — keep the outer post's own
             // (possibly truncated `RT @user: …`) text already set above
@@ -271,15 +294,48 @@ fn build_item(
             item.author_name = String::new();
             item.author_username = String::new();
         }
-    } else if post
-        .referenced_tweets
-        .iter()
-        .any(|r| r.kind == ReferenceKind::Quoted)
-    {
-        item.quoted = quote_of(post, users, referenced);
+    } else {
+        if post
+            .referenced_tweets
+            .iter()
+            .any(|r| r.kind == ReferenceKind::Quoted)
+        {
+            item.quoted = quote_of(post, users, referenced);
+        }
+        // #12: a reply (with or without an attached quote) shows who it's
+        // replying to, at zero extra request cost — the parent is already
+        // in `includes` per #13's expansions.
+        item.replied_to = reply_target(post, users, referenced);
     }
 
     item
+}
+
+/// Who `post` is replying to (#12), if it has a `replied_to` reference —
+/// joined from `includes` the same way [`quote_of`] joins a quote's source.
+/// `None` only when `post` has no `replied_to` reference at all; a reply
+/// whose parent is missing from `includes` (deleted, protected, or simply
+/// not expanded) still returns `Some`, with empty author fields — the id
+/// alone is enough for `ui.rs`'s "Show thread" to start from, and dropping
+/// the reply context entirely would hide something real.
+fn reply_target(
+    post: &Post,
+    users: &HashMap<&str, &User>,
+    referenced: &HashMap<&str, &Post>,
+) -> Option<RepliedTo> {
+    let reply_ref = post
+        .referenced_tweets
+        .iter()
+        .find(|r| r.kind == ReferenceKind::RepliedTo)?;
+    let (author_name, author_username) = referenced
+        .get(reply_ref.id.as_str())
+        .map(|parent| author_fields(parent, users))
+        .unwrap_or_default();
+    Some(RepliedTo {
+        post_id: reply_ref.id.clone(),
+        author_name,
+        author_username,
+    })
 }
 
 /// The post `post` quotes, if it has a `quoted` reference and that post is
@@ -532,7 +588,7 @@ mod tests {
     }
 
     #[test]
-    fn a_reply_reference_is_recognized_but_does_not_change_rendering() {
+    fn a_reply_reference_does_not_change_the_body_but_is_surfaced_as_replied_to() {
         let json = r#"{
           "data": [
             {
@@ -553,11 +609,115 @@ mod tests {
         let response: TimelineResponse = serde_json::from_str(json).unwrap();
         let items = response.into_items();
 
-        // A reply is recognized as a type but not rendered specially in
-        // #13 — thread display is #12's scope — so the body is untouched.
+        // A reply's own body/author are untouched — unlike a repost, it
+        // never replaces them (#13's precedent, unchanged by #12).
         assert_eq!(items[0].text, "agreed");
         assert_eq!(items[0].reposted_by, None);
         assert_eq!(items[0].quoted, None);
+        // #12: the reply *is* surfaced, even though the parent itself is
+        // absent from `includes.tweets` here — the id alone (for "Show
+        // thread") is worth keeping, with empty author fields rather than
+        // dropping the context entirely.
+        let replied_to = items[0].replied_to.as_ref().unwrap();
+        assert_eq!(replied_to.post_id, "1700000000000000001");
+        assert_eq!(replied_to.author_name, "");
+        assert_eq!(replied_to.author_username, "");
+    }
+
+    #[test]
+    fn a_reply_shows_who_it_is_replying_to_when_the_parent_is_expanded() {
+        // #12: the parent's author is already in `includes` thanks to #13's
+        // `referenced_tweets.id.author_id` expansion, so this costs no
+        // extra request.
+        let json = r#"{
+          "data": [
+            {
+              "id": "1800000000000000006",
+              "text": "agreed",
+              "author_id": "3000000000000000001",
+              "referenced_tweets": [
+                { "type": "replied_to", "id": "1700000000000000001" }
+              ]
+            }
+          ],
+          "includes": {
+            "users": [
+              { "id": "3000000000000000001", "name": "Reposter One", "username": "reposter1" },
+              { "id": "2244994945", "name": "Developers", "username": "XDevelopers" }
+            ],
+            "tweets": [
+              {
+                "id": "1700000000000000001",
+                "text": "hello from the timeline",
+                "author_id": "2244994945"
+              }
+            ]
+          }
+        }"#;
+        let response: TimelineResponse = serde_json::from_str(json).unwrap();
+        let items = response.into_items();
+
+        let replied_to = items[0].replied_to.as_ref().unwrap();
+        assert_eq!(replied_to.post_id, "1700000000000000001");
+        assert_eq!(replied_to.author_name, "Developers");
+        assert_eq!(replied_to.author_username, "XDevelopers");
+    }
+
+    #[test]
+    fn a_non_reply_post_has_no_reply_target() {
+        let response: TimelineResponse = serde_json::from_str(TIMELINE_JSON).unwrap();
+        let items = response.into_items();
+        assert_eq!(items[0].replied_to, None);
+    }
+
+    #[test]
+    fn a_repost_of_a_reply_carries_the_originals_reply_target() {
+        // Mirrors #13's "repost of a quote" precedent: once the body
+        // becomes the original post's, any reply context worth showing is
+        // the *original's* — the outer retweet reference has been fully
+        // consumed already.
+        let json = r#"{
+          "data": [
+            {
+              "id": "1800000000000000007",
+              "text": "RT @quoter1: agreed",
+              "author_id": "3000000000000000001",
+              "referenced_tweets": [
+                { "type": "retweeted", "id": "1700000000000000003" }
+              ]
+            }
+          ],
+          "includes": {
+            "users": [
+              { "id": "3000000000000000001", "name": "Reposter One", "username": "reposter1" },
+              { "id": "4000000000000000001", "name": "Quote Author", "username": "quoter1" },
+              { "id": "2244994945", "name": "Developers", "username": "XDevelopers" }
+            ],
+            "tweets": [
+              {
+                "id": "1700000000000000003",
+                "text": "agreed",
+                "author_id": "4000000000000000001",
+                "referenced_tweets": [
+                  { "type": "replied_to", "id": "1700000000000000001" }
+                ]
+              },
+              {
+                "id": "1700000000000000001",
+                "text": "hello from the timeline",
+                "author_id": "2244994945"
+              }
+            ]
+          }
+        }"#;
+        let response: TimelineResponse = serde_json::from_str(json).unwrap();
+        let items = response.into_items();
+
+        assert_eq!(items[0].text, "agreed");
+        assert_eq!(items[0].reposted_by.as_deref(), Some("reposter1"));
+        let replied_to = items[0].replied_to.as_ref().unwrap();
+        assert_eq!(replied_to.post_id, "1700000000000000001");
+        assert_eq!(replied_to.author_username, "XDevelopers");
     }
 
     #[test]
@@ -685,6 +845,30 @@ mod tests {
         assert_eq!(item.author_name, "Developers");
         assert_eq!(item.reposted_by, None);
         assert_eq!(item.quoted, None);
+        assert_eq!(item.replied_to, None);
+    }
+
+    #[test]
+    fn a_timeline_item_from_before_12_still_deserializes() {
+        // #12 adds `replied_to` on top of #13's `reposted_by`/`quoted`. A
+        // cache file written by a #13-era build has neither key for it —
+        // this must not throw the whole cache away (see
+        // `cache::load_json`'s doc comment). Deliberately a raw literal
+        // rather than trusting `#[serde(default)]` at a glance, mirroring
+        // the sibling test above.
+        let pre_12_format = r#"{
+          "id": "1800000000000000001",
+          "text": "RT @XDevelopers: hello from the timeline",
+          "created_at": "2026-08-16T10:00:00.000Z",
+          "author_name": "Developers",
+          "author_username": "XDevelopers",
+          "reposted_by": "reposter1"
+        }"#;
+        let item: TimelineItem = serde_json::from_str(pre_12_format).unwrap();
+        assert_eq!(item.id, "1800000000000000001");
+        assert_eq!(item.reposted_by.as_deref(), Some("reposter1"));
+        assert_eq!(item.quoted, None);
+        assert_eq!(item.replied_to, None);
     }
 
     #[test]

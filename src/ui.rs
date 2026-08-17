@@ -1,4 +1,6 @@
-use gpui::{Context, FontWeight, SharedString, Task, Window, div, prelude::*, rgb};
+use std::collections::HashMap;
+
+use gpui::{AnyElement, Context, FontWeight, SharedString, Task, Window, div, prelude::*, rgb};
 
 use crate::cache;
 use crate::config::Config;
@@ -6,7 +8,19 @@ use crate::oauth::{self, TimelineSource};
 use crate::paths::Paths;
 use crate::rate_limit;
 use crate::theme::Theme;
-use crate::x_api::{QuotedPost, TimelineItem, XClient};
+use crate::thread::{self, ThreadChain};
+use crate::x_api::{QuotedPost, RepliedTo, TimelineItem, XClient};
+
+/// What's known about one reply's "Show thread" walk (#12), keyed by the
+/// reply's own post id in [`TimelineView::threads`]. Absent from that map
+/// means "not requested yet" — the toggle still offers to fetch.
+enum ThreadFetchState {
+    Loading,
+    Loaded(ThreadChain),
+    /// Carries the error text so a retry click can be offered in its place
+    /// rather than leaving the row stuck.
+    Failed(SharedString),
+}
 
 enum TimelineState {
     /// No usable credential yet: no fresh/refreshable stored OAuth session
@@ -119,6 +133,14 @@ pub(crate) struct TimelineView {
     /// to fetch, or nothing has come from the network yet: a cache-only
     /// render carries no token, since the cursor is not itself persisted.
     next_page_token: Option<String>,
+    /// "Show thread" fetches (#12), keyed by the reply's own post id — a
+    /// map rather than a single slot since more than one visible reply can
+    /// have its thread open at once. Absent means "not requested yet".
+    threads: HashMap<String, ThreadFetchState>,
+    /// In-flight thread walks, keyed the same way as `threads`, mirroring
+    /// `fetch`'s cancel-on-drop contract: dropping the view cancels every
+    /// still-running walk along with it.
+    thread_fetches: HashMap<String, Task<()>>,
 }
 
 impl TimelineView {
@@ -148,6 +170,8 @@ impl TimelineView {
             home_user_id: None,
             home_username: None,
             next_page_token: None,
+            threads: HashMap::new(),
+            thread_fetches: HashMap::new(),
         };
         this.start(cx);
         this
@@ -391,6 +415,59 @@ impl TimelineView {
         cx.notify();
     }
 
+    /// Spend "Show thread"'s credits for one reply (#12): walk its parent
+    /// chain (from cache if already fetched, else the network, up to
+    /// `thread::MAX_THREAD_DEPTH` requests) and render the result. A no-op
+    /// without a client — the toggle isn't shown in that state, but this
+    /// guards against it anyway, matching [`Self::reload`]'s convention.
+    ///
+    /// `reply_post_id` is the reply being expanded (the cache/state key);
+    /// `first_parent_id` is its immediate parent's id — `TimelineItem::replied_to`'s
+    /// `post_id`, already known for free — where the walk starts.
+    fn show_thread(
+        &mut self,
+        reply_post_id: String,
+        first_parent_id: String,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+
+        self.threads
+            .insert(reply_post_id.clone(), ThreadFetchState::Loading);
+        cx.notify();
+
+        let paths = self.paths.clone();
+        let key = reply_post_id.clone();
+        let fetch_key = reply_post_id.clone();
+        let task = cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    cache::fetch_thread(
+                        &paths,
+                        &client,
+                        &reply_post_id,
+                        &first_parent_id,
+                        oauth::unix_now(),
+                    )
+                })
+                .await;
+
+            let _ = this.update(cx, |this, cx| {
+                let state = match result {
+                    Ok(chain) => ThreadFetchState::Loaded(chain),
+                    Err(error) => ThreadFetchState::Failed(format!("{error:#}").into()),
+                };
+                this.threads.insert(key.clone(), state);
+                this.thread_fetches.remove(&key);
+                cx.notify();
+            });
+        });
+        self.thread_fetches.insert(fetch_key, task);
+    }
+
     /// Run the interactive PKCE sign-in flow: open the browser, wait for the
     /// loopback callback, exchange the code, persist the tokens, then fall
     /// straight into [`Self::reload`].
@@ -527,6 +604,118 @@ impl TimelineView {
             )
     }
 
+    fn post_row(&self, item: &TimelineItem, cx: &mut Context<'_, Self>) -> AnyElement {
+        let theme = self.theme;
+        let byline = byline(&item.author_username);
+
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .px_4()
+            .py_3()
+            .border_b_1()
+            .border_color(rgb(theme.border))
+            // #13: a repost shows who reposted it as a small line above the
+            // body, which by this point already holds the *original* post
+            // (see `TimelineResponse::into_items`'s join) — not the outer
+            // post's own author/text.
+            .when_some(item.reposted_by.as_deref(), |row, reposted_by| {
+                row.child(
+                    div()
+                        .text_color(rgb(theme.text_muted))
+                        .child(repost_banner_label(reposted_by)),
+                )
+            })
+            // #12: who this post is replying to, shown at zero extra
+            // request cost — the parent's author is already in `includes`
+            // per #13's expansions (see `x_api::model::reply_target`).
+            .when_some(item.replied_to.as_ref(), |row, replied_to| {
+                row.child(
+                    div()
+                        .text_color(rgb(theme.text_muted))
+                        .child(reply_banner_label(replied_to)),
+                )
+            })
+            .child(
+                div()
+                    .flex()
+                    .gap_2()
+                    .child(
+                        div()
+                            .font_weight(FontWeight::BOLD)
+                            .child(item.author_name.clone()),
+                    )
+                    .child(div().text_color(rgb(theme.text_muted)).child(byline))
+                    .child(
+                        div()
+                            .text_color(rgb(theme.text_muted))
+                            .child(format_timestamp(item.created_at.as_deref())),
+                    ),
+            )
+            .child(div().child(item.text.clone()))
+            // #13: a quote (including a repost of a quote) embeds its source
+            // as a bordered card under the text.
+            .when_some(item.quoted.as_ref(), |column, quoted| {
+                column.child(quote_card(quoted, theme))
+            })
+            // #12: "Show thread" — only offered for a reply, since that's
+            // the only case with a parent to walk.
+            .when_some(item.replied_to.as_ref(), |column, replied_to| {
+                column.child(self.thread_section(&item.id, replied_to, cx))
+            })
+            .into_any_element()
+    }
+
+    /// The "Show thread" toggle, loading/error state, or assembled chain for
+    /// one reply (#12) — whichever `self.threads.get(reply_post_id)` says is
+    /// current. Split out from [`Self::post_row`] only for readability; it
+    /// still needs `cx` for the toggle's click handler.
+    fn thread_section(
+        &self,
+        reply_post_id: &str,
+        replied_to: &RepliedTo,
+        cx: &mut Context<'_, Self>,
+    ) -> AnyElement {
+        let theme = self.theme;
+
+        let state = self.threads.get(reply_post_id);
+
+        if let Some(ThreadFetchState::Loaded(chain)) = state {
+            return render_thread_chain(chain, theme);
+        }
+        if matches!(state, Some(ThreadFetchState::Loading)) {
+            return div()
+                .text_color(rgb(theme.text_muted))
+                .child("Loading thread…")
+                .into_any_element();
+        }
+
+        // Reachable states here: `None` (never requested) and `Failed` —
+        // both offer a clickable toggle, just with different labels; see
+        // `thread_action_label`.
+        let label = thread_action_label(state).unwrap_or_default();
+        let toggle = thread_toggle_row(
+            reply_post_id.to_string(),
+            replied_to.post_id.clone(),
+            label,
+            theme,
+            cx,
+        );
+
+        if let Some(ThreadFetchState::Failed(message)) = state {
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(div().text_color(rgb(theme.danger)).child(message.clone()))
+                .child(toggle)
+                .into_any_element()
+        } else {
+            toggle.into_any_element()
+        }
+    }
+
     fn body(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let theme = self.theme;
 
@@ -559,25 +748,37 @@ impl TimelineView {
             TimelineState::Loaded(items) if items.is_empty() => {
                 content.child(notice("No posts were returned.", theme.text_muted))
             }
-            TimelineState::Loaded(items) => content
-                .children(items.iter().map(|item| post_row(item, theme)))
-                // #11: only offered once a response has actually carried a
-                // `meta.next_token` to resume from, and only while there is
-                // room under the cap for the page it would fetch.
-                .when(
-                    offers_load_older(self.next_page_token.as_deref(), &self.state),
-                    |list| list.child(load_older_row(theme, cx)),
-                )
-                .when(at_the_post_cap(&self.state), |list| {
-                    list.child(notice(
-                        format!(
-                            "Showing the most recent {} posts — that is as far back as \
-                             twigpui keeps.",
-                            cache::MAX_CACHED_POSTS
-                        ),
-                        theme.text_muted,
-                    ))
-                }),
+            TimelineState::Loaded(items) => {
+                // A plain loop rather than `.children(items.iter().map(...))`:
+                // `post_row` needs `cx` (for #12's "Show thread" click
+                // handler), and a `FnMut` closure invoked by `.map` can't let
+                // a value borrowed from its own captured `cx` escape into the
+                // returned element.
+                let mut rows: Vec<AnyElement> = Vec::with_capacity(items.len());
+                for item in items {
+                    rows.push(self.post_row(item, cx));
+                }
+                content
+                    .children(rows)
+                    // #11: only offered once a response has actually carried
+                    // a `meta.next_token` to resume from, and only while
+                    // there is room under the cap for the page it would
+                    // fetch.
+                    .when(
+                        offers_load_older(self.next_page_token.as_deref(), &self.state),
+                        |list| list.child(load_older_row(theme, cx)),
+                    )
+                    .when(at_the_post_cap(&self.state), |list| {
+                        list.child(notice(
+                            format!(
+                                "Showing the most recent {} posts — that is as far back as \
+                                 twigpui keeps.",
+                                cache::MAX_CACHED_POSTS
+                            ),
+                            theme.text_muted,
+                        ))
+                    })
+            }
         }
     }
 }
@@ -629,52 +830,6 @@ fn byline(author_username: &str) -> String {
     }
 }
 
-fn post_row(item: &TimelineItem, theme: Theme) -> impl IntoElement {
-    let byline = byline(&item.author_username);
-
-    div()
-        .flex()
-        .flex_col()
-        .gap_1()
-        .px_4()
-        .py_3()
-        .border_b_1()
-        .border_color(rgb(theme.border))
-        // #13: a repost shows who reposted it as a small line above the
-        // body, which by this point already holds the *original* post
-        // (see `TimelineResponse::into_items`'s join) — not the outer
-        // post's own author/text.
-        .when_some(item.reposted_by.as_deref(), |row, reposted_by| {
-            row.child(
-                div()
-                    .text_color(rgb(theme.text_muted))
-                    .child(repost_banner_label(reposted_by)),
-            )
-        })
-        .child(
-            div()
-                .flex()
-                .gap_2()
-                .child(
-                    div()
-                        .font_weight(FontWeight::BOLD)
-                        .child(item.author_name.clone()),
-                )
-                .child(div().text_color(rgb(theme.text_muted)).child(byline))
-                .child(
-                    div()
-                        .text_color(rgb(theme.text_muted))
-                        .child(format_timestamp(item.created_at.as_deref())),
-                ),
-        )
-        .child(div().child(item.text.clone()))
-        // #13: a quote (including a repost of a quote) embeds its source as
-        // a bordered card under the text.
-        .when_some(item.quoted.as_ref(), |column, quoted| {
-            column.child(quote_card(quoted, theme))
-        })
-}
-
 /// "@name reposted", or "Reposted" alone when the reposting user's screen
 /// name was missing from the expansion — mirrors [`byline`]'s empty-author
 /// fallback rather than rendering a bare `@`.
@@ -716,6 +871,111 @@ fn quote_card(quoted: &QuotedPost, theme: Theme) -> impl IntoElement {
                 .child(div().text_color(rgb(theme.text_muted)).child(byline)),
         )
         .child(div().child(quoted.text.clone()))
+}
+
+/// "Replying to @name", or a generic fallback when the parent's author
+/// wasn't resolvable (deleted, protected, or simply not expanded) — mirrors
+/// [`repost_banner_label`]'s empty-author fallback rather than rendering a
+/// bare "Replying to @" (#12).
+fn reply_banner_label(replied_to: &RepliedTo) -> String {
+    if replied_to.author_username.is_empty() {
+        "Replying to a post".to_string()
+    } else {
+        format!("Replying to @{}", replied_to.author_username)
+    }
+}
+
+/// The clickable label for [`thread_toggle_row`], or `None` when the current
+/// state (nothing yet loaded but a fetch is running) has no toggle at all —
+/// [`TimelineView::thread_section`] renders a plain "Loading thread…" notice
+/// for that case instead. `state: None` means "never requested" (offer to
+/// fetch, spelling out the worst-case cost up front per #12's "cost must be
+/// predictable" requirement); `Some(Failed(_))` offers a retry.
+fn thread_action_label(state: Option<&ThreadFetchState>) -> Option<&'static str> {
+    match state {
+        None => Some("Show thread (up to 5 requests)"),
+        Some(ThreadFetchState::Failed(_)) => Some("Retry"),
+        Some(ThreadFetchState::Loading | ThreadFetchState::Loaded(_)) => None,
+    }
+}
+
+/// The clickable "Show thread" / "Retry" row (#12), styled like
+/// [`load_older_row`] — a link-colored, clickable line rather than a full
+/// button, since it's a secondary action on an already-rendered post.
+fn thread_toggle_row(
+    reply_post_id: String,
+    first_parent_id: String,
+    label: &str,
+    theme: Theme,
+    cx: &mut Context<'_, TimelineView>,
+) -> impl IntoElement {
+    div()
+        .id(SharedString::from(format!("show-thread-{reply_post_id}")))
+        .text_color(rgb(theme.accent))
+        .child(label.to_string())
+        .on_click(cx.listener(move |this, _event, _window, cx| {
+            this.show_thread(reply_post_id.clone(), first_parent_id.clone(), cx);
+        }))
+}
+
+/// The assembled parent chain (#12), oldest ancestor first, each rendered
+/// like [`quote_card`] for visual consistency with the other "embedded post"
+/// treatment already in this file. An empty, uncapped chain only happens
+/// when the very first parent fetch found nothing (deleted, protected, or
+/// otherwise absent) — #12's "must render sensibly" requirement — so that
+/// case gets its own message rather than silently showing nothing.
+fn render_thread_chain(chain: &ThreadChain, theme: Theme) -> AnyElement {
+    if chain.items.is_empty() && !chain.capped {
+        return div()
+            .text_color(rgb(theme.text_muted))
+            .child("The parent post is no longer available.")
+            .into_any_element();
+    }
+
+    div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .children(
+            chain
+                .items
+                .iter()
+                .map(|thread_item| thread_row(thread_item, theme)),
+        )
+        .when(chain.capped, |column| {
+            column.child(div().text_color(rgb(theme.text_muted)).child(format!(
+                "Reached the {}-level limit — earlier replies in this thread \
+                         aren't shown.",
+                thread::MAX_THREAD_DEPTH
+            )))
+        })
+        .into_any_element()
+}
+
+fn thread_row(thread_item: &thread::ThreadItem, theme: Theme) -> impl IntoElement {
+    let byline = byline(&thread_item.author_username);
+
+    div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .p_2()
+        .rounded_md()
+        .border_1()
+        .border_color(rgb(theme.border))
+        .bg(rgb(theme.bg_header))
+        .child(
+            div()
+                .flex()
+                .gap_2()
+                .child(
+                    div()
+                        .font_weight(FontWeight::BOLD)
+                        .child(thread_item.author_name.clone()),
+                )
+                .child(div().text_color(rgb(theme.text_muted)).child(byline)),
+        )
+        .child(div().child(thread_item.text.clone()))
 }
 
 /// Countdown text for the reload button while blocked by #10's rate-limit
@@ -854,9 +1114,10 @@ fn format_timestamp(created_at: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        Cooldown, TimelineItem, TimelineSource, TimelineState, at_the_post_cap, byline,
-        cooldown_label, format_timestamp, header_title, offers_load_older, offers_sign_in,
-        reload_cooldown, repost_banner_label,
+        Cooldown, RepliedTo, ThreadFetchState, TimelineItem, TimelineSource, TimelineState,
+        at_the_post_cap, byline, cooldown_label, format_timestamp, header_title, offers_load_older,
+        offers_sign_in, reload_cooldown, reply_banner_label, repost_banner_label,
+        thread_action_label,
     };
 
     #[test]
@@ -968,6 +1229,7 @@ mod tests {
                 author_username: String::new(),
                 reposted_by: None,
                 quoted: None,
+                replied_to: None,
             })
             .collect();
         let state = TimelineState::Loaded(full);
@@ -1079,5 +1341,50 @@ mod tests {
     fn reload_cooldown_allows_once_the_interval_has_elapsed() {
         assert_eq!(reload_cooldown(Some(1_000), 60, 1_060), None);
         assert_eq!(reload_cooldown(Some(1_000), 60, 1_061), None);
+    }
+
+    #[test]
+    fn labels_a_reply_with_who_it_is_replying_to() {
+        let replied_to = RepliedTo {
+            post_id: "1".to_string(),
+            author_name: "Developers".to_string(),
+            author_username: "XDevelopers".to_string(),
+        };
+        assert_eq!(reply_banner_label(&replied_to), "Replying to @XDevelopers");
+    }
+
+    #[test]
+    fn labels_a_reply_generically_when_the_parent_author_is_missing() {
+        // Mirrors repost_banner_label's empty-author fallback (#12): a bare
+        // "Replying to @" would read as broken.
+        let replied_to = RepliedTo {
+            post_id: "1".to_string(),
+            author_name: String::new(),
+            author_username: String::new(),
+        };
+        assert_eq!(reply_banner_label(&replied_to), "Replying to a post");
+    }
+
+    #[test]
+    fn offers_to_show_the_thread_with_the_worst_case_cost_spelled_out() {
+        // #12: the cost must be predictable *before* spending it — the
+        // label itself says how many requests a click can cost.
+        assert_eq!(
+            thread_action_label(None),
+            Some("Show thread (up to 5 requests)")
+        );
+    }
+
+    #[test]
+    fn offers_a_retry_after_a_failed_thread_fetch() {
+        let state = ThreadFetchState::Failed("boom".into());
+        assert_eq!(thread_action_label(Some(&state)), Some("Retry"));
+    }
+
+    #[test]
+    fn offers_no_toggle_while_loading_or_once_loaded() {
+        assert_eq!(thread_action_label(Some(&ThreadFetchState::Loading)), None);
+        let loaded = ThreadFetchState::Loaded(crate::thread::ThreadChain::default());
+        assert_eq!(thread_action_label(Some(&loaded)), None);
     }
 }

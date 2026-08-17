@@ -211,6 +211,27 @@ impl XClient {
         let next_token = response.next_token().map(str::to_string);
         Ok((response.into_items(), next_token))
     }
+
+    /// `GET /2/tweets?ids=` (#12) for a single id — used one level at a time
+    /// by the parent-chain walk in `cache::fetch_thread`, since each level's
+    /// id is only known once the previous one resolves. Returns whatever
+    /// [`TimelineResponse::into_items`] produces for the (at most one) post
+    /// the API hands back: empty when the id is missing from `data`
+    /// entirely (deleted, protected, or otherwise absent), which the caller
+    /// treats as the walk stopping cleanly rather than an error.
+    pub(crate) fn tweets_by_id(
+        &self,
+        paths: &Paths,
+        id: &str,
+        now: i64,
+    ) -> Result<Vec<TimelineItem>> {
+        let url = tweets_by_id_url(id);
+        let body = self.get(paths, Endpoint::TweetById, &url, now)?;
+
+        let response: TimelineResponse =
+            serde_json::from_str(&body).context("could not parse the tweets-by-id response")?;
+        Ok(response.into_items())
+    }
 }
 
 /// Whether a status is worth retrying: server-side (5xx) failures only.
@@ -276,6 +297,21 @@ fn timeline_url(user_id: &str, max_results: u32, since_id: Option<&str>) -> Stri
         Some(id) => format!("{base}&since_id={id}"),
         None => base,
     }
+}
+
+/// `GET /2/tweets?ids=` (#12), with the same expansions as the timeline
+/// endpoints so a fetched parent's own author (and, if it is itself a
+/// reply, its own parent's id) comes back in the same response — one id at
+/// a time, since the parent-chain walk only learns the next id after this
+/// one resolves.
+fn tweets_by_id_url(id: &str) -> String {
+    format!(
+        "{API_BASE}/tweets\
+         ?ids={id}\
+         &tweet.fields=created_at,referenced_tweets\
+         &expansions=author_id,referenced_tweets.id,referenced_tweets.id.author_id\
+         &user.fields=name,username"
+    )
 }
 
 /// Pull the API's own error text out of a response body, if it has any.
@@ -352,6 +388,18 @@ mod tests {
         assert_eq!(
             timeline_url("2244994945", 20, None),
             "https://api.x.com/2/users/2244994945/tweets?max_results=20&tweet.fields=created_at,referenced_tweets&expansions=author_id,referenced_tweets.id,referenced_tweets.id.author_id&user.fields=name,username"
+        );
+    }
+
+    #[test]
+    fn builds_the_tweets_by_id_url_with_every_expansion() {
+        // #12: the parent-chain walk fetches one id per level, with the
+        // same expansions as the timeline endpoints so a fetched parent's
+        // own author — and, if it's itself a reply, its own parent's id —
+        // comes back in the same response.
+        assert_eq!(
+            tweets_by_id_url("1700000000000000001"),
+            "https://api.x.com/2/tweets?ids=1700000000000000001&tweet.fields=created_at,referenced_tweets&expansions=author_id,referenced_tweets.id,referenced_tweets.id.author_id&user.fields=name,username"
         );
     }
 

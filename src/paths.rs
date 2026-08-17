@@ -92,6 +92,15 @@ impl Paths {
         self.cache_dir.join("me.json")
     }
 
+    /// Path to a cached parent chain for one reply post, under `cache_dir`
+    /// (#12). Keyed by the *reply's own* id — the post "Show thread" was
+    /// clicked from — so re-opening the same reply renders the already-
+    /// walked chain instead of re-spending up to
+    /// [`crate::thread::MAX_THREAD_DEPTH`] requests.
+    pub(crate) fn thread_file(&self, reply_post_id: &str) -> PathBuf {
+        self.cache_dir.join(format!("thread-{reply_post_id}.json"))
+    }
+
     /// Path to the tracked rate-limit state, under `state_dir` (#10). State,
     /// not cache: a process restart does not reset X's rate-limit window, so
     /// losing this file risks firing a request straight into an
@@ -323,6 +332,15 @@ mod tests {
         assert_eq!(
             paths.me_file(),
             PathBuf::from("/home/alice/.cache/twigpui/me.json")
+        );
+    }
+
+    #[test]
+    fn thread_file_is_under_the_cache_dir_named_by_reply_post_id() {
+        let paths = Paths::from_vars(vars(&[("HOME", "/home/alice")])).unwrap();
+        assert_eq!(
+            paths.thread_file("1800000000000000003"),
+            PathBuf::from("/home/alice/.cache/twigpui/thread-1800000000000000003.json")
         );
     }
 

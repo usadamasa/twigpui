@@ -211,6 +211,11 @@ pub(crate) enum Endpoint {
     /// `GET /2/users/:id/timelines/reverse_chronological` (#11) — X limits
     /// the home timeline separately from the single-user `Timeline` fetch.
     HomeTimeline,
+    /// `GET /2/tweets?ids=` (#12) — the parent-chain walk behind "Show
+    /// thread". Tracked independently: reusing e.g. `Timeline`'s bucket
+    /// would corrupt the tracked state for both, since X limits each
+    /// endpoint on its own schedule.
+    TweetById,
 }
 
 impl Endpoint {
@@ -220,6 +225,7 @@ impl Endpoint {
             Self::Timeline => "timeline",
             Self::Me => "me",
             Self::HomeTimeline => "home_timeline",
+            Self::TweetById => "tweet_by_id",
         }
     }
 }
@@ -555,6 +561,36 @@ mod tests {
         assert_eq!(
             load(&paths, Endpoint::HomeTimeline).unwrap(),
             home_timeline_state
+        );
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn tweet_by_id_endpoint_is_tracked_independently_of_the_others() {
+        // #12: `GET /2/tweets?ids=` gets its own bucket — reusing e.g.
+        // `Timeline`'s would corrupt the tracked state for both.
+        let root = temp_root("tweet-by-id-endpoint");
+        let paths = test_paths(&root);
+        paths.ensure_dirs().unwrap();
+
+        let timeline_state = RateLimitState {
+            limit: Some(15),
+            remaining: Some(10),
+            reset_at: Some(2_000),
+        };
+        let tweet_by_id_state = RateLimitState {
+            limit: Some(300),
+            remaining: Some(0),
+            reset_at: Some(5_000),
+        };
+        save(&paths, Endpoint::Timeline, timeline_state).unwrap();
+        save(&paths, Endpoint::TweetById, tweet_by_id_state).unwrap();
+
+        assert_eq!(load(&paths, Endpoint::Timeline).unwrap(), timeline_state);
+        assert_eq!(
+            load(&paths, Endpoint::TweetById).unwrap(),
+            tweet_by_id_state
         );
 
         std::fs::remove_dir_all(&root).unwrap();

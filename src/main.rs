@@ -8,6 +8,7 @@ mod oauth;
 mod paths;
 mod rate_limit;
 mod theme;
+mod thread;
 mod ui;
 mod x_api;
 
