@@ -348,6 +348,45 @@ a second click before the first request resolves has nothing to do.
 **Rate limiting.** `POST /2/tweets` is tracked as its own endpoint (#10) —
 see "Rate limits" below.
 
+## Quoting a post (#16)
+
+Most posts show a "Quote" action alongside their text — see "Which posts
+don't get one" below for the one exception. Clicking it doesn't send
+anything by itself: it loads the composer with that post as the quote
+target, rendered as a bordered card under the draft area — the same card
+#13 already uses to show a quote in the timeline (see "Reposts and quotes
+are expanded" under "Status" above). Typing and submitting from there works
+exactly like an ordinary post — same character counter, same
+double-submission guard, same "never lose the draft on failure" guarantee —
+except the request now also carries `quote_tweet_id`. There is no separate
+quote endpoint: `POST /2/tweets` accepts an optional `quote_tweet_id`, so
+quoting reuses the same request `POST /2/tweets` already sends for a plain
+post (see #14 above) and the same `Endpoint::CreatePost` rate-limit tracking
+(#10) — a dedicated quote endpoint would only split that tracking
+incorrectly, since X itself treats this as one endpoint. A post without a
+quote never sends the field at all (not even as `null`) — only a post
+actually being quoted carries it.
+
+**Canceling a quote.** "Remove quote" appears next to the card and clears
+just the quote target, leaving the draft text untouched — a mis-click on
+"Quote" doesn't force discarding whatever was already typed. The draft
+reverts to an ordinary post; submitting from there sends no
+`quote_tweet_id` at all.
+
+**Quoting your own post is allowed.** Unlike reposting (#15, below), X's API
+doesn't reject quoting your own post, so twigpui doesn't check for it
+client-side either.
+
+**Which posts don't get one.** A post that is itself already a repost in
+your timeline doesn't offer "Quote", for the same reason it doesn't offer
+"Repost" (see "Which posts don't get a button" under "Reposting" below):
+its own post id is the retweet activity's, not the original content's, and
+`quote_tweet_id` needs the original. twigpui doesn't currently resolve that
+original id for a displayed repost row (#52 tracks fixing that for both
+buttons together), so it withholds the action there rather than risk
+quoting the wrong post. Quoting the original post directly, wherever else
+it appears in the timeline, is unaffected.
+
 ## Reposting and un-reposting (#15)
 
 Most posts show a "Repost" / "Reposted" toggle — see "Which posts don't get
@@ -627,15 +666,24 @@ repost record's roundtrip and corruption recovery, the create/delete repost
 URLs and their independently tracked rate-limit endpoints, the repost
 button's optimistic-update state machine (including that a failed toggle
 rolls back to exactly its pre-click value, and that a reconciled outcome
-can commit a value that disagrees with the optimistic guess), and the
+can commit a value that disagrees with the optimistic guess), the
 conflict-message interpretation behind #15's "already reposted"/"not
-reposted" recovery, so they make no network calls, open no browser, and
-spend no credits. The actual code exchange, X's live response shapes
-(including `/users/me`, the home timeline's `meta.next_token`, #13's
+reposted" recovery, #16's `quote_tweet_id` request body (both with and
+without a quote, since the field must be entirely absent — not `null` —
+for an ordinary post), the composer's quote-target state machine (setting,
+clearing without touching the draft, and that a failed submit keeps the
+draft and the quote target together while a successful one clears both),
+and which posts offer the "Quote" action (withheld on a repost row, for the
+same `item.id`-ambiguity reason as #15's repost button, but allowed on
+one's own post unlike reposting), so they make no network calls, open no
+browser, and spend no credits. The actual code exchange, X's live response
+shapes (including `/users/me`, the home timeline's `meta.next_token`, #13's
 `referenced_tweets` expansion, #12's `GET /2/tweets?ids=` response shape,
-#14's live `POST /2/tweets` response, and #15's live repost/un-repost
-responses and their exact conflict-error wording), refresh-token rotation,
-and the real rate-limit header values X sends aren't covered by tests —
-those need a real Developer Portal registration, a one-time manual sign-in,
-and (for the last two) actually hitting a live rate limit or a live
-already-reposted conflict.
+#14's live `POST /2/tweets` response, #15's live repost/un-repost responses
+and their exact conflict-error wording, and #16's live response to a
+`quote_tweet_id`-carrying post — including whether X accepts quoting your
+own post the way its documentation implies), refresh-token rotation, and
+the real rate-limit header values X sends aren't covered by tests — those
+need a real Developer Portal registration, a one-time manual sign-in, and
+(for repost) actually hitting a live rate limit or a live already-reposted
+conflict.
