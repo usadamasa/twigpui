@@ -3,13 +3,14 @@ use gpui::{Context, FontWeight, SharedString, Task, Window, div, prelude::*, rgb
 use crate::config::Config;
 use crate::x_api::{TimelineItem, XClient};
 
-const BG: u32 = 0x15202b;
-const BG_HEADER: u32 = 0x1b2836;
-const BORDER: u32 = 0x38444d;
-const TEXT: u32 = 0xf7f9f9;
-const TEXT_MUTED: u32 = 0x8899a6;
-const ACCENT: u32 = 0x1d9bf0;
-const DANGER: u32 = 0xf4212e;
+// Grouped per RGB channel, which is also the digit grouping clippy asks for.
+const BG: u32 = 0x15_20_2b;
+const BG_HEADER: u32 = 0x1b_28_36;
+const BORDER: u32 = 0x38_44_4d;
+const TEXT: u32 = 0xf7_f9_f9;
+const TEXT_MUTED: u32 = 0x88_99_a6;
+const ACCENT: u32 = 0x1d_9b_f0;
+const DANGER: u32 = 0xf4_21_2e;
 
 enum TimelineState {
     Loading,
@@ -17,7 +18,7 @@ enum TimelineState {
     Failed(SharedString),
 }
 
-pub struct TimelineView {
+pub(crate) struct TimelineView {
     config: Config,
     client: XClient,
     state: TimelineState,
@@ -26,7 +27,7 @@ pub struct TimelineView {
 }
 
 impl TimelineView {
-    pub fn new(config: Config, _window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(config: Config, _window: &mut Window, cx: &mut Context<'_, Self>) -> Self {
         let client = XClient::new(config.bearer_token.clone());
         let mut this = Self {
             config,
@@ -39,7 +40,7 @@ impl TimelineView {
     }
 
     /// Every reload spends API credits, so this only runs on explicit action.
-    fn reload(&mut self, cx: &mut Context<Self>) {
+    fn reload(&mut self, cx: &mut Context<'_, Self>) {
         self.state = TimelineState::Loading;
 
         let client = self.client.clone();
@@ -65,7 +66,7 @@ impl TimelineView {
         cx.notify();
     }
 
-    fn header(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn header(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let busy = matches!(self.state, TimelineState::Loading);
 
         div()
@@ -118,7 +119,7 @@ impl TimelineView {
 }
 
 impl Render for TimelineView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         div()
             .flex()
             .flex_col()
@@ -139,12 +140,18 @@ fn notice(message: impl Into<SharedString>, color: u32) -> impl IntoElement {
         .child(message.into())
 }
 
-fn post_row(item: &TimelineItem) -> impl IntoElement {
-    let byline = if item.author_username.is_empty() {
+/// `@name`, or nothing at all when the author was missing from the expansion —
+/// a bare `@` would read as a broken row.
+fn byline(author_username: &str) -> String {
+    if author_username.is_empty() {
         String::new()
     } else {
-        format!("@{}", item.author_username)
-    };
+        format!("@{author_username}")
+    }
+}
+
+fn post_row(item: &TimelineItem) -> impl IntoElement {
+    let byline = byline(&item.author_username);
 
     div()
         .flex()
@@ -189,7 +196,23 @@ fn format_timestamp(created_at: Option<&str>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::format_timestamp;
+    use super::{byline, format_timestamp};
+
+    #[test]
+    fn prefixes_a_byline_with_an_at_sign() {
+        assert_eq!(byline("XDevelopers"), "@XDevelopers");
+    }
+
+    #[test]
+    fn renders_a_missing_author_as_nothing_rather_than_a_bare_at() {
+        assert_eq!(byline(""), "");
+    }
+
+    #[test]
+    fn keeps_a_timestamp_too_short_to_slice() {
+        // `&time[..5]` would panic here, so the guard has to hold.
+        assert_eq!(format_timestamp(Some("2026-08-16T09")), "2026-08-16T09");
+    }
 
     #[test]
     fn shortens_an_rfc3339_timestamp() {

@@ -1,3 +1,7 @@
+// `unwrap` in a test is a legible assertion, not a lurking panic — the strict
+// lints in Cargo.toml are aimed at the code that actually ships.
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+
 mod config;
 mod ui;
 mod x_api;
@@ -31,10 +35,14 @@ fn main() {
             ..Default::default()
         };
 
-        cx.open_window(options, |window, cx| {
+        let opened = cx.open_window(options, |window, cx| {
             cx.new(|cx| ui::TimelineView::new(config, window, cx))
-        })
-        .expect("could not open the window");
+        });
+        if let Err(error) = opened {
+            eprintln!("could not open the window: {error:#}");
+            cx.quit();
+            return;
+        }
 
         cx.activate(true);
     });

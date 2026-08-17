@@ -4,6 +4,21 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
+# `-D warnings` in CI turns every one of these into a build failure.
+[lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+unused_qualifications = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+expect_used = "warn"
+todo = "warn"
+dbg_macro = "warn"
+
 [dependencies]
 anyhow = "1.0.104"
 dotenvy = "0.15.7"

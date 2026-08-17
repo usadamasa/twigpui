@@ -13,13 +13,13 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 /// Every call is billed against the account's API credits, so the UI fetches
 /// only on explicit user action (initial load and the reload button).
 #[derive(Clone)]
-pub struct XClient {
+pub(crate) struct XClient {
     agent: Agent,
     bearer_token: String,
 }
 
 impl XClient {
-    pub fn new(bearer_token: String) -> Self {
+    pub(crate) fn new(bearer_token: String) -> Self {
         let config = Agent::config_builder()
             .timeout_global(Some(REQUEST_TIMEOUT))
             // Read the body ourselves so failures carry the API's own explanation
@@ -48,8 +48,8 @@ impl XClient {
     }
 
     /// Resolve a screen name to the numeric user id the timeline endpoint needs.
-    pub fn user_id_by_username(&self, username: &str) -> Result<String> {
-        let url = format!("{API_BASE}/users/by/username/{username}");
+    pub(crate) fn user_id_by_username(&self, username: &str) -> Result<String> {
+        let url = user_lookup_url(username);
         let (status, body) = self.get(&url)?;
         check_status(status, &body)?;
 
@@ -66,15 +66,13 @@ impl XClient {
     }
 
     /// Fetch recent posts authored by `username`, newest first.
-    pub fn user_timeline(&self, username: &str, max_results: u32) -> Result<Vec<TimelineItem>> {
+    pub(crate) fn user_timeline(
+        &self,
+        username: &str,
+        max_results: u32,
+    ) -> Result<Vec<TimelineItem>> {
         let user_id = self.user_id_by_username(username)?;
-        let url = format!(
-            "{API_BASE}/users/{user_id}/tweets\
-             ?max_results={max_results}\
-             &tweet.fields=created_at\
-             &expansions=author_id\
-             &user.fields=name,username"
-        );
+        let url = timeline_url(&user_id, max_results);
         let (status, body) = self.get(&url)?;
         check_status(status, &body)?;
 
@@ -82,6 +80,22 @@ impl XClient {
             serde_json::from_str(&body).context("could not parse the timeline response")?;
         Ok(response.into_items())
     }
+}
+
+fn user_lookup_url(username: &str) -> String {
+    format!("{API_BASE}/users/by/username/{username}")
+}
+
+/// The timeline endpoint returns bare post ids unless `expansions` and the
+/// `*.fields` parameters ask for more, so the query string is load-bearing.
+fn timeline_url(user_id: &str, max_results: u32) -> String {
+    format!(
+        "{API_BASE}/users/{user_id}/tweets\
+         ?max_results={max_results}\
+         &tweet.fields=created_at\
+         &expansions=author_id\
+         &user.fields=name,username"
+    )
 }
 
 /// Pull the API's own error text out of a response body, if it has any.
@@ -121,6 +135,26 @@ mod tests {
     #[test]
     fn accepts_success_statuses() {
         assert!(check_status(200, "{}").is_ok());
+        assert!(check_status(299, "").is_ok());
+    }
+
+    #[test]
+    fn builds_the_user_lookup_url() {
+        assert_eq!(
+            user_lookup_url("XDevelopers"),
+            "https://api.x.com/2/users/by/username/XDevelopers"
+        );
+    }
+
+    #[test]
+    fn builds_the_timeline_url_with_every_expansion() {
+        // Spelled out on one line on purpose: the implementation splits the
+        // query across `\` line continuations, and repeating that trick here
+        // would hide exactly the stray-whitespace bug this guards against.
+        assert_eq!(
+            timeline_url("2244994945", 20),
+            "https://api.x.com/2/users/2244994945/tweets?max_results=20&tweet.fields=created_at&expansions=author_id&user.fields=name,username"
+        );
     }
 
     #[test]

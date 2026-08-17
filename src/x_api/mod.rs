@@ -1,5 +1,5 @@
 mod client;
 mod model;
 
-pub use client::XClient;
-pub use model::TimelineItem;
+pub(crate) use client::XClient;
+pub(crate) use model::TimelineItem;
