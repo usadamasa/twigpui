@@ -72,6 +72,13 @@ pub(crate) struct TimelineView {
     /// the tracked API rate-limit state says via `rate_limit::decision`.
     /// `None` until the first reload, which is therefore never throttled.
     last_reload_at: Option<i64>,
+    /// Whether the credential in `client` came from an OAuth session rather
+    /// than the app-only bearer token (#31). Drives whether the header keeps
+    /// offering "Sign in with X": running on a bearer token is a working
+    /// state, but a strictly narrower one, so the offer has to stay
+    /// reachable instead of only appearing when there is no credential at
+    /// all.
+    signed_in_with_oauth: bool,
 }
 
 impl TimelineView {
@@ -96,6 +103,7 @@ impl TimelineView {
             fetch: None,
             sign_in_flow: None,
             last_reload_at: None,
+            signed_in_with_oauth: false,
         };
         this.start(cx);
         this
@@ -118,24 +126,26 @@ impl TimelineView {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    let token = oauth::resolve_access_token(&config, &paths, oauth::unix_now())?;
-                    let Some(token) = token else {
+                    let credential = oauth::resolve_credential(&config, &paths, oauth::unix_now())?;
+                    let Some(credential) = credential else {
                         return anyhow::Ok((None, None));
                     };
                     let cached =
                         cache::startup(&paths, &config.target_username, oauth::unix_now())?;
-                    anyhow::Ok((Some(token), cached))
+                    anyhow::Ok((Some(credential), cached))
                 })
                 .await;
 
             let _ = this.update(cx, |this, cx| match result {
-                Ok((Some(token), Some(items))) => {
-                    this.client = Some(XClient::new(token));
+                Ok((Some(credential), Some(items))) => {
+                    this.signed_in_with_oauth = credential.is_oauth();
+                    this.client = Some(XClient::new(credential.token().to_string()));
                     this.state = TimelineState::Loaded(items);
                     cx.notify();
                 }
-                Ok((Some(token), None)) => {
-                    this.client = Some(XClient::new(token));
+                Ok((Some(credential), None)) => {
+                    this.signed_in_with_oauth = credential.is_oauth();
+                    this.client = Some(XClient::new(credential.token().to_string()));
                     this.reload(cx);
                 }
                 Ok((None, _)) => {
@@ -255,6 +265,7 @@ impl TimelineView {
 
             let _ = this.update(cx, |this, cx| match result {
                 Ok(tokens) => {
+                    this.signed_in_with_oauth = true;
                     this.client = Some(XClient::new(tokens.access_token));
                     this.reload(cx);
                 }
@@ -307,21 +318,55 @@ impl TimelineView {
             )
             .child(
                 div()
-                    .id("primary-action")
-                    .px_3()
-                    .py_1()
-                    .rounded_full()
-                    .bg(rgb(if busy {
-                        theme.button_busy_bg
-                    } else {
-                        theme.accent
-                    }))
-                    .text_color(rgb(theme.button_label))
-                    .child(label)
-                    .on_click(cx.listener(move |this, _event, _window, cx| match action {
-                        PrimaryAction::Reload => this.reload(cx),
-                        PrimaryAction::SignIn => this.sign_in(cx),
-                    })),
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    // #31: running on the app-only bearer token is a working
+                    // state, so the primary button says "Reload" — but the
+                    // offer to upgrade to a user context has to stay
+                    // reachable, or the OAuth flow can never be started at
+                    // all while a bearer token is configured.
+                    .when(
+                        offers_sign_in(
+                            self.config.oauth_client_id.as_deref(),
+                            self.signed_in_with_oauth,
+                            &self.state,
+                        ),
+                        |row| {
+                            row.child(
+                                div()
+                                    .id("sign-in")
+                                    .px_3()
+                                    .py_1()
+                                    .rounded_full()
+                                    .border_1()
+                                    .border_color(rgb(theme.accent))
+                                    .text_color(rgb(theme.accent))
+                                    .child("Sign in with X")
+                                    .on_click(
+                                        cx.listener(|this, _event, _window, cx| this.sign_in(cx)),
+                                    ),
+                            )
+                        },
+                    )
+                    .child(
+                        div()
+                            .id("primary-action")
+                            .px_3()
+                            .py_1()
+                            .rounded_full()
+                            .bg(rgb(if busy {
+                                theme.button_busy_bg
+                            } else {
+                                theme.accent
+                            }))
+                            .text_color(rgb(theme.button_label))
+                            .child(label)
+                            .on_click(cx.listener(move |this, _event, _window, cx| match action {
+                                PrimaryAction::Reload => this.reload(cx),
+                                PrimaryAction::SignIn => this.sign_in(cx),
+                            })),
+                    ),
             )
     }
 
@@ -443,6 +488,27 @@ fn cooldown_label(cooldown: Cooldown, reset_at: i64, now: i64) -> String {
     }
 }
 
+/// Whether the header should offer a separate "Sign in with X" button (#31).
+///
+/// True only when signing in is both possible and would change something: a
+/// client id is configured, the current credential is not already an OAuth
+/// session, and the primary button is not itself already the sign-in
+/// affordance (which it is whenever there is no credential at all, or one is
+/// mid-flight) — two identical buttons side by side would be worse than one.
+fn offers_sign_in(
+    oauth_client_id: Option<&str>,
+    signed_in_with_oauth: bool,
+    state: &TimelineState,
+) -> bool {
+    if oauth_client_id.is_none_or(str::is_empty) || signed_in_with_oauth {
+        return false;
+    }
+    !matches!(
+        state,
+        TimelineState::NotAuthenticated | TimelineState::SigningIn
+    )
+}
+
 /// Whether [`TimelineView::reload`] should refuse to run right now, per
 /// `config.min_fetch_interval_seconds` (#10). `None` means "go ahead" —
 /// either there has never been a reload yet, or the interval since the last
@@ -474,7 +540,62 @@ fn format_timestamp(created_at: Option<&str>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cooldown, byline, cooldown_label, format_timestamp, reload_cooldown};
+    use super::{
+        Cooldown, TimelineState, byline, cooldown_label, format_timestamp, offers_sign_in,
+        reload_cooldown,
+    };
+
+    #[test]
+    fn offers_sign_in_while_running_on_the_app_only_bearer_token() {
+        // #31: the whole point — a bearer token makes the app work, so the
+        // primary button says "Reload" and nothing else would ever surface
+        // the OAuth flow.
+        assert!(offers_sign_in(
+            Some("client-id"),
+            false,
+            &TimelineState::Loaded(Vec::new())
+        ));
+    }
+
+    #[test]
+    fn does_not_offer_sign_in_once_signed_in_with_oauth() {
+        assert!(!offers_sign_in(
+            Some("client-id"),
+            true,
+            &TimelineState::Loaded(Vec::new())
+        ));
+    }
+
+    #[test]
+    fn does_not_offer_sign_in_without_a_client_id() {
+        // Nothing to sign in with — the button would only ever error.
+        assert!(!offers_sign_in(
+            None,
+            false,
+            &TimelineState::Loaded(Vec::new())
+        ));
+        assert!(!offers_sign_in(
+            Some(""),
+            false,
+            &TimelineState::Loaded(Vec::new())
+        ));
+    }
+
+    #[test]
+    fn does_not_duplicate_the_primary_sign_in_button() {
+        // In these two states the primary button already *is* "Sign in with
+        // X" / "Signing in…", so a second one beside it is noise.
+        assert!(!offers_sign_in(
+            Some("client-id"),
+            false,
+            &TimelineState::NotAuthenticated
+        ));
+        assert!(!offers_sign_in(
+            Some("client-id"),
+            false,
+            &TimelineState::SigningIn
+        ));
+    }
 
     #[test]
     fn prefixes_a_byline_with_an_at_sign() {

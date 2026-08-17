@@ -75,8 +75,8 @@ fn main() {
 /// `since_id` keeps the response small — see the eprintln! below for which
 /// happened.
 fn fetch_only(config: &config::Config, paths: &paths::Paths) -> i32 {
-    let token = match oauth::resolve_access_token(config, paths, oauth::unix_now()) {
-        Ok(Some(token)) => token,
+    let credential = match oauth::resolve_credential(config, paths, oauth::unix_now()) {
+        Ok(Some(credential)) => credential,
         Ok(None) => {
             eprintln!(
                 "no credential is available. Run twigpui without --fetch-only and use \
@@ -90,7 +90,14 @@ fn fetch_only(config: &config::Config, paths: &paths::Paths) -> i32 {
         }
     };
 
-    let client = x_api::XClient::new(token);
+    if !credential.is_oauth() {
+        // Worth saying out loud: several endpoints this project is heading
+        // for (#11, #14–#17) reject an app-only token outright, so a
+        // headless run succeeding here does not mean the user context works.
+        eprintln!("credential: app-only bearer token (not a signed-in OAuth session)");
+    }
+
+    let client = x_api::XClient::new(credential.token().to_string());
     match cache::reload(
         paths,
         &client,

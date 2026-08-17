@@ -3,7 +3,7 @@
 //! Ties the three seams together: [`pkce`] generates the verifier/challenge
 //! and state, [`callback`] runs the loopback listener that catches the
 //! redirect, and [`tokens`] persists what comes back. [`sign_in`] is the only
-//! entry point `ui.rs` calls to run the interactive flow; [`resolve_access_token`]
+//! entry point `ui.rs` calls to run the interactive flow; [`resolve_credential`]
 //! is what both `ui.rs` (at startup) and `--fetch-only` use to find a usable
 //! credential without opening a browser.
 
@@ -118,32 +118,60 @@ fn request_token(form: &[(&str, &str)]) -> Result<TokenResponse> {
     serde_json::from_str(&body).context("could not parse the token response")
 }
 
-/// Find a usable access token without opening a browser: a fresh stored
-/// OAuth session, a stale one refreshed in place, or the app-only bearer
-/// token — in that order. `None` means neither credential is currently
-/// usable and the caller (`--fetch-only`, or `ui.rs` at startup) should ask
-/// the user to sign in.
-pub(crate) fn resolve_access_token(
+/// Which credential [`resolve_credential`] found. Both carry a token that
+/// goes into the same `Authorization: Bearer` header, so the token alone
+/// cannot tell them apart — and callers need to, because an app-only bearer
+/// token cannot read the home timeline or write anything (#11, #14–#17).
+/// `ui.rs` uses this to keep offering "Sign in with X" while running on a
+/// bearer token (#31).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Credential {
+    /// A user-context access token from a stored (or just-refreshed) OAuth
+    /// session.
+    OAuth(String),
+    /// The app-only bearer token from configuration.
+    Bearer(String),
+}
+
+impl Credential {
+    pub(crate) fn token(&self) -> &str {
+        match self {
+            Self::OAuth(token) | Self::Bearer(token) => token,
+        }
+    }
+
+    /// Whether this is a user-context credential. `false` means the app is
+    /// running app-only and signing in would strictly widen what it can do.
+    pub(crate) fn is_oauth(&self) -> bool {
+        matches!(self, Self::OAuth(_))
+    }
+}
+
+/// Find a usable credential without opening a browser: a fresh stored OAuth
+/// session, a stale one refreshed in place, or the app-only bearer token —
+/// in that order. `None` means neither is currently usable and the caller
+/// (`--fetch-only`, or `ui.rs` at startup) should ask the user to sign in.
+pub(crate) fn resolve_credential(
     config: &Config,
     paths: &Paths,
     now: i64,
-) -> Result<Option<String>> {
+) -> Result<Option<Credential>> {
     if let Some(stored) = tokens::load(paths)? {
         if !stored.needs_refresh(now) {
-            return Ok(Some(stored.access_token));
+            return Ok(Some(Credential::OAuth(stored.access_token)));
         }
         if let (Some(client_id), Some(refresh)) = (&config.oauth_client_id, &stored.refresh_token) {
             let response = refresh_access_token(client_id, refresh)?;
             let refreshed = TokenSet::from_response(response, now);
             tokens::save(paths, &refreshed)?;
-            return Ok(Some(refreshed.access_token));
+            return Ok(Some(Credential::OAuth(refreshed.access_token)));
         }
         // Stale and unrefreshable (no client id configured, or X issued no
         // refresh token) — fall through to the bearer token rather than
         // erroring, since that may still be a usable credential.
     }
 
-    Ok(config.bearer_token.clone())
+    Ok(config.bearer_token.clone().map(Credential::Bearer))
 }
 
 #[cfg(test)]
@@ -176,7 +204,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_access_token_prefers_a_fresh_stored_session_over_the_bearer_token() {
+    fn resolve_credential_prefers_a_fresh_stored_session_over_the_bearer_token() {
         let root = temp_root("fresh");
         let paths = test_paths(&root);
         paths.ensure_dirs().unwrap();
@@ -191,14 +219,14 @@ mod tests {
         .unwrap();
 
         let config = test_config(Some("bearer-token"), None);
-        let token = resolve_access_token(&config, &paths, 0).unwrap();
-        assert_eq!(token.as_deref(), Some("oauth-token"));
+        let credential = resolve_credential(&config, &paths, 0).unwrap();
+        assert_eq!(credential, Some(Credential::OAuth("oauth-token".into())));
 
         std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
-    fn resolve_access_token_falls_back_to_the_bearer_token_when_the_stored_session_is_stale_and_unrefreshable()
+    fn resolve_credential_falls_back_to_the_bearer_token_when_the_stored_session_is_stale_and_unrefreshable()
      {
         let root = temp_root("stale");
         let paths = test_paths(&root);
@@ -217,34 +245,37 @@ mod tests {
         // refresh isn't possible — this must fall through to the bearer
         // token rather than erroring.
         let config = test_config(Some("bearer-token"), None);
-        let token = resolve_access_token(&config, &paths, 1_000_000).unwrap();
-        assert_eq!(token.as_deref(), Some("bearer-token"));
+        let credential = resolve_credential(&config, &paths, 1_000_000).unwrap();
+        assert_eq!(credential, Some(Credential::Bearer("bearer-token".into())));
 
         std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
-    fn resolve_access_token_uses_the_bearer_token_when_there_is_no_stored_session() {
+    fn resolve_credential_uses_the_bearer_token_when_there_is_no_stored_session() {
         let root = temp_root("none");
         let paths = test_paths(&root);
         paths.ensure_dirs().unwrap();
 
         let config = test_config(Some("bearer-token"), None);
-        let token = resolve_access_token(&config, &paths, 0).unwrap();
-        assert_eq!(token.as_deref(), Some("bearer-token"));
+        let credential = resolve_credential(&config, &paths, 0).unwrap();
+        // #31: the caller must be able to tell this apart from an OAuth
+        // session, so it can keep offering to sign in.
+        assert_eq!(credential, Some(Credential::Bearer("bearer-token".into())));
+        assert!(!credential.unwrap().is_oauth());
 
         std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
-    fn resolve_access_token_is_none_when_nothing_is_configured() {
+    fn resolve_credential_is_none_when_nothing_is_configured() {
         let root = temp_root("nothing");
         let paths = test_paths(&root);
         paths.ensure_dirs().unwrap();
 
         let config = test_config(None, None);
-        let token = resolve_access_token(&config, &paths, 0).unwrap();
-        assert!(token.is_none());
+        let credential = resolve_credential(&config, &paths, 0).unwrap();
+        assert!(credential.is_none());
 
         std::fs::remove_dir_all(&root).unwrap();
     }

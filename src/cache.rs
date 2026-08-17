@@ -199,7 +199,7 @@ pub(crate) struct Reloaded {
 /// Not unit-tested directly — it makes real HTTP requests through `client`.
 /// Everything it composes ([`cached_user_id`], [`save_user_id`],
 /// [`load_timeline`], [`since_id`], [`merge_timeline`], [`save_timeline`])
-/// is tested standalone, the same way `oauth::resolve_access_token`'s
+/// is tested standalone, the same way `oauth::resolve_credential`'s
 /// network-calling refresh branch isn't directly tested either.
 pub(crate) fn reload(
     paths: &Paths,
