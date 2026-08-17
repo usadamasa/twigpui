@@ -50,6 +50,12 @@ fn main() {
     }
 
     Application::new().run(move |cx| {
+        // #38: registers gpui-component's global keybindings, theme, and
+        // other per-App state (see its own `init`'s doc) — required once,
+        // before any of its widgets (the composer's text input) can be
+        // constructed.
+        gpui_component::init(cx);
+
         let bounds = Bounds::centered(None, size(px(560.0), px(820.0)), cx);
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),

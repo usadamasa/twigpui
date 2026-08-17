@@ -1,9 +1,10 @@
 use std::collections::HashMap;
 
 use gpui::{
-    AnyElement, Context, FocusHandle, FontWeight, KeyDownEvent, SharedString, Task, Window, div,
+    AnyElement, Context, Entity, FontWeight, SharedString, Subscription, Task, Window, div,
     prelude::*, rgb,
 };
+use gpui_component::input::{Input, InputEvent, InputState};
 
 use crate::cache;
 use crate::compose::{self, ComposeState, ComposeStatus};
@@ -11,17 +12,10 @@ use crate::config::Config;
 use crate::oauth::{self, TimelineSource};
 use crate::paths::Paths;
 use crate::rate_limit;
-use crate::theme::Theme;
+use crate::theme::{self, Theme};
 use crate::thread::{self, ThreadChain};
 use crate::usage;
 use crate::x_api::{QuotedPost, RepliedTo, TimelineItem, XClient};
-
-/// Shown under the composer for as long as #38 is open. The composer reads
-/// raw keystrokes because gpui 0.2.2 has no text input widget, so an input
-/// method's composition never reaches it — and someone typing Japanese into a
-/// box where nothing appears cannot tell a missing feature from a bug.
-const IME_UNSUPPORTED_NOTE: &str = "Typing goes through raw key events for now — an input method (Japanese, \
-     Chinese, Korean) will not reach this box. See issue #38.";
 
 /// What's known about one reply's "Show thread" walk (#12), keyed by the
 /// reply's own post id in [`TimelineView::threads`]. Absent from that map
@@ -155,12 +149,32 @@ pub(crate) struct TimelineView {
     thread_fetches: HashMap<String, Task<()>>,
     /// The post composer's draft text and submit status (#14) — see
     /// `compose.rs`'s module doc for why this is its own pure type rather
-    /// than fields scattered across this struct.
+    /// than fields scattered across this struct. This stays the
+    /// authoritative *text* for everything downstream (the counter,
+    /// `can_submit`, `submit_post`): it is mirrored from `compose_input`'s
+    /// own buffer on every `InputEvent::Change` (#38) — see
+    /// [`Self::on_compose_input_event`] — rather than read directly, so
+    /// `compose.rs`'s pure logic keeps operating on a plain `&str` and stays
+    /// testable without gpui at all, exactly as before this widget existed.
     compose: ComposeState,
-    /// Focus target for the composer's key-capture draft area — see
-    /// [`Self::handle_compose_key`]'s doc for what "key-capture" means here
-    /// and its limits (no IME composition, no cursor, no selection).
-    compose_focus: FocusHandle,
+    /// The composer's real text-entry widget (#38), replacing the
+    /// raw-keystroke reading a `div().on_key_down()` used to do: this is a
+    /// `gpui_component::input::InputState`, which implements
+    /// `EntityInputHandler` properly, so IME composition (Japanese, Chinese,
+    /// Korean), cursor movement, selection, and copy/paste all work. Its
+    /// buffer is the one the user actually sees and types into; `compose`
+    /// above is kept in sync with it, not the other way around, except for
+    /// one deliberate exception — see [`Self::submit_post`]'s success path,
+    /// which clears this explicitly since a successful submit's `text.clear()`
+    /// on `compose` alone would leave the widget still showing the old draft.
+    compose_input: Entity<InputState>,
+    /// Keeps `compose_input`'s change subscription alive — dropping it would
+    /// silently stop `compose` above from ever being mirrored again. Same
+    /// cancel/keep-alive convention as `fetch` and this struct's other
+    /// `Task`-holding fields, just for a `Subscription` instead; the leading
+    /// underscore (never read, only held) matches how gpui-component names
+    /// this exact pattern for its own search-input subscription.
+    _compose_input_subscription: Subscription,
     /// Holding this keeps an in-flight `POST /2/tweets` alive, mirroring
     /// `fetch`'s cancel-on-drop contract. In practice this is only ever
     /// assigned once per submit cycle: [`ComposeState::can_submit`] is
@@ -199,6 +213,19 @@ impl TimelineView {
         // re-resolving it. A `light`/`dark` config value never depends on
         // the window at all.
         let theme = config.theme.resolve(window.appearance());
+        // #38: point gpui-component's own global theme at the same resolved
+        // palette before its `Input` widget is constructed below — see
+        // `theme::sync_gpui_component_theme`'s doc for why this is needed at
+        // all (its colors live in a completely separate global).
+        theme::sync_gpui_component_theme(theme, window, cx);
+
+        let compose_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .auto_grow(2, 8)
+                .placeholder("What's happening?")
+        });
+        let compose_input_subscription = cx.subscribe(&compose_input, Self::on_compose_input_event);
+
         let mut this = Self {
             config,
             paths,
@@ -216,7 +243,8 @@ impl TimelineView {
             threads: HashMap::new(),
             thread_fetches: HashMap::new(),
             compose: ComposeState::new(),
-            compose_focus: cx.focus_handle(),
+            compose_input,
+            _compose_input_subscription: compose_input_subscription,
             submit_task: None,
             oauth_scope: None,
             usage_totals: usage::Totals::default(),
@@ -604,68 +632,39 @@ impl TimelineView {
         cx.notify();
     }
 
-    /// Key handling for the composer's draft area (#14).
-    ///
-    /// gpui 0.2.2 has no ready-made text-input element — the only text-entry
-    /// primitive it ships is [`gpui::EntityInputHandler`], the raw
-    /// IME/cursor/selection protocol a real widget would implement (see the
-    /// crate's own `examples/input.rs`, ~750 lines, for what that actually
-    /// takes: a custom `Element` with paint-time cursor/selection
-    /// rendering, an action/keybinding table, and the full
-    /// `replace_and_mark_text_in_range` marked-text dance macOS's IME talks
-    /// to `NSTextInputClient` through). Building that from scratch is out
-    /// of proportion for what #14 needs, so this instead reads
-    /// [`gpui::Keystroke`] straight off `on_key_down`: `key_char` (when the
-    /// OS hands one back — see `platform/mac/events.rs::parse_keystroke`)
-    /// is appended to the draft, and `"backspace"` pops the last character.
-    ///
-    /// **What this does not support**, as a direct consequence of skipping
-    /// `EntityInputHandler`: no multi-keystroke IME composition (typing
-    /// Japanese/Chinese/Korean through a system input method — the OS talks
-    /// to the marked-text protocol, not raw key events, for that), no
-    /// cursor positioning or mid-string editing (characters only ever
-    /// append/pop at the end), and no text selection or copy/paste. It is
-    /// enough to type and correct a short draft one character at a time;
-    /// it is not a real text field.
-    fn handle_compose_key(
+    /// Mirror `compose_input`'s buffer into `self.compose` on every
+    /// `InputEvent::Change` (#38) — see the `compose_input` field doc for
+    /// why the mirror exists at all rather than `compose.rs` reading the
+    /// widget directly. `PressEnter`/`Focus`/`Blur` carry nothing this view
+    /// needs: multi-line mode already turns Enter into a newline inside the
+    /// widget itself (`InputState::enter`), so `PressEnter` here would only
+    /// ever fire for a plain scroll-into-view, not a submit.
+    // `Context::subscribe`'s callback bound requires `Entity<T2>` by value,
+    // not `&Entity<T2>` — there's nothing to change on this end.
+    #[allow(clippy::needless_pass_by_value)]
+    fn on_compose_input_event(
         &mut self,
-        event: &KeyDownEvent,
-        _window: &mut Window,
+        input: Entity<InputState>,
+        event: &InputEvent,
         cx: &mut Context<'_, Self>,
     ) {
-        if self.compose.is_submitting() {
-            // Refuse to mutate the draft while a submit is in flight, for
-            // the same reason the submit button itself is disabled — see
-            // `ComposeState::can_submit`'s doc.
-            return;
-        }
-
-        if event.keystroke.key == "backspace" {
-            let mut text = self.compose.text().to_string();
-            text.pop();
-            self.compose.set_text(text);
-            cx.notify();
-            return;
-        }
-
-        if let Some(input) = &event.keystroke.key_char {
-            let mut text = self.compose.text().to_string();
-            text.push_str(input);
-            self.compose.set_text(text);
+        if let InputEvent::Change = event {
+            self.compose.set_text(input.read(cx).value().to_string());
             cx.notify();
         }
     }
 
-    /// The post composer (#14): a key-capture draft area, character
-    /// counter, and submit button. Shown whenever the session is signed in
-    /// with OAuth — see [`Render::render`]'s doc on why a missing
-    /// `tweet.write` scope doesn't hide this entirely.
+    /// The post composer (#14): a real text input (#38), character counter,
+    /// and submit button. Shown whenever the session is signed in with
+    /// OAuth — see [`Render::render`]'s doc on why a missing `tweet.write`
+    /// scope doesn't hide this entirely.
     fn composer(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let theme = self.theme;
         let text = self.compose.text().to_string();
         let length = compose::weighted_length(&text);
         let over_limit = length > compose::MAX_WEIGHTED_LENGTH;
         let can_submit = self.compose.can_submit();
+        let is_submitting = self.compose.is_submitting();
         let counter_color = if over_limit {
             theme.danger
         } else {
@@ -680,40 +679,10 @@ impl TimelineView {
             .py_3()
             .border_b_1()
             .border_color(rgb(theme.border))
-            .child(
-                div()
-                    .id("compose-input")
-                    .track_focus(&self.compose_focus)
-                    .min_h(gpui::px(64.0))
-                    .p_2()
-                    .rounded_md()
-                    .border_1()
-                    .border_color(rgb(theme.border))
-                    .bg(rgb(theme.bg_header))
-                    .text_color(rgb(theme.text))
-                    .on_key_down(cx.listener(Self::handle_compose_key))
-                    .on_click(cx.listener(|this, _event, window, _cx| {
-                        window.focus(&this.compose_focus);
-                    }))
-                    .child(if text.is_empty() {
-                        div()
-                            .text_color(rgb(theme.text_muted))
-                            .child("What's happening?")
-                            .into_any_element()
-                    } else {
-                        div().child(text.clone()).into_any_element()
-                    }),
-            )
-            // Stated here, not only in the README: someone typing Japanese
-            // into this box sees nothing appear and has no way to tell a
-            // missing feature from a broken app. gpui 0.2.2 ships no text
-            // input widget, so this reads raw keystrokes and IME composition
-            // never reaches it — #38 tracks building a real input.
-            .child(
-                div()
-                    .text_color(rgb(theme.text_muted))
-                    .child(IME_UNSUPPORTED_NOTE),
-            )
+            // Refuses edits while a submit is in flight, mirroring the
+            // submit button's own disabled state below — see
+            // `ComposeState::can_submit`'s doc for why that matters.
+            .child(Input::new(&self.compose_input).disabled(is_submitting))
             .when_some(
                 compose_error_message(self.compose.status()),
                 |column, message| column.child(div().text_color(rgb(theme.danger)).child(message)),
@@ -740,11 +709,7 @@ impl TimelineView {
                                 theme.button_busy_bg
                             }))
                             .text_color(rgb(theme.button_label))
-                            .child(if self.compose.is_submitting() {
-                                "Posting…"
-                            } else {
-                                "Post"
-                            })
+                            .child(if is_submitting { "Posting…" } else { "Post" })
                             // #14's double-submit guard, part two: while a
                             // submit is in flight (or the draft is blank/
                             // over-length) the button carries no click
@@ -753,9 +718,9 @@ impl TimelineView {
                             // condition regardless, but this is what stops
                             // the click from ever reaching it.
                             .when(can_submit, |button| {
-                                button.on_click(
-                                    cx.listener(|this, _event, _window, cx| this.submit_post(cx)),
-                                )
+                                button.on_click(cx.listener(|this, _event, window, cx| {
+                                    this.submit_post(window, cx);
+                                }))
                             }),
                     ),
             )
@@ -782,7 +747,14 @@ impl TimelineView {
     /// spending a request that's guaranteed to 403 — via
     /// `ComposeState::refuse` rather than `can_submit`. The header's
     /// "Re-authorize" button (see `offers_reauthorize`) is the actual fix.
-    fn submit_post(&mut self, cx: &mut Context<'_, Self>) {
+    ///
+    /// Takes `window` (unlike most of this file's other actions) because
+    /// #38's success path needs it: clearing `compose_input`'s own buffer —
+    /// see the field's doc — goes through `InputState::set_value`, which
+    /// requires one. `cx.spawn_in`/`WeakEntity::update_in` (rather than the
+    /// plain `cx.spawn`/`update` this struct's other actions use) carry a
+    /// `Window` across the `await` for exactly that.
+    fn submit_post(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         if !self.compose.can_submit() {
             return;
         }
@@ -806,17 +778,24 @@ impl TimelineView {
         let paths = self.paths.clone();
         let text = self.compose.text().to_string();
 
-        self.submit_task = Some(cx.spawn(async move |this, cx| {
+        self.submit_task = Some(cx.spawn_in(window, async move |this, cx| {
             let result = cx
                 .background_executor()
                 .spawn(async move { client.create_post(&paths, &text, oauth::unix_now()) })
                 .await;
 
-            let _ = this.update(cx, |this, cx| {
+            let _ = this.update_in(cx, |this, window, cx| {
                 let succeeded = result.is_ok();
                 this.compose
                     .apply_result(result.map_err(|error| format!("{error:#}")));
                 if succeeded {
+                    // `apply_result`'s `Ok` branch just cleared the mirror in
+                    // `this.compose`, but `compose_input` is the widget's own,
+                    // entirely separate buffer (#38) — this is what actually
+                    // empties the box the user sees.
+                    this.compose_input.update(cx, |state, cx| {
+                        state.set_value("", window, cx);
+                    });
                     // A successful post changes the timeline, so fall into
                     // a normal reload — subject to #10's own interval limit
                     // like any other reload, never a special-cased extra
