@@ -153,19 +153,25 @@ fn applescript_quote(text: &str) -> String {
 /// `since_id` keeps the response small — see the eprintln! below for which
 /// happened.
 fn fetch_only(config: &config::Config, paths: &paths::Paths) -> i32 {
-    let credential = match oauth::resolve_credential(config, paths, oauth::unix_now()) {
-        Ok(Some(credential)) => credential,
-        Ok(None) => {
-            eprintln!(
-                "no credential is available. Run twigpui without --fetch-only and use \
-                 \"Sign in with X\", or set X_BEARER_TOKEN."
-            );
-            return 1;
-        }
+    let resolution = match oauth::resolve_credential(config, paths, oauth::unix_now()) {
+        Ok(resolution) => resolution,
         Err(error) => {
             eprintln!("could not resolve a credential: {error:#}");
             return 1;
         }
+    };
+    // #54: a stored session that couldn't be refreshed is worth saying out
+    // loud here too — headless runs have no header banner to show it in
+    // instead.
+    if let Some(demotion) = &resolution.demotion {
+        eprintln!("{}", oauth::describe_demotion(demotion, paths));
+    }
+    let Some(credential) = resolution.credential else {
+        eprintln!(
+            "no credential is available. Run twigpui without --fetch-only and use \
+             \"Sign in with X\", or set X_BEARER_TOKEN."
+        );
+        return 1;
     };
 
     if !credential.is_oauth() {
