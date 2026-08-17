@@ -220,6 +220,14 @@ pub(crate) enum Endpoint {
     /// posting separately from every read endpoint above, so sharing a
     /// bucket with any of them would corrupt the tracked state for both.
     CreatePost,
+    /// `POST /2/users/:id/retweets` (#15) — creating a repost. Tracked
+    /// independently of `DeleteRepost`: X limits create and delete
+    /// separately, and reusing either's bucket for the other would corrupt
+    /// the tracked state for both.
+    CreateRepost,
+    /// `DELETE /2/users/:id/retweets/:source_tweet_id` (#15) — undoing a
+    /// repost. See `CreateRepost`'s doc for why this needs its own bucket.
+    DeleteRepost,
 }
 
 impl Endpoint {
@@ -246,6 +254,8 @@ impl Endpoint {
             Self::HomeTimeline => "home_timeline",
             Self::TweetById => "tweet_by_id",
             Self::CreatePost => "create_post",
+            Self::CreateRepost => "create_repost",
+            Self::DeleteRepost => "delete_repost",
         }
     }
 }
@@ -641,6 +651,47 @@ mod tests {
         assert_eq!(
             load(&paths, Endpoint::CreatePost).unwrap(),
             create_post_state
+        );
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn create_repost_and_delete_repost_endpoints_are_tracked_independently() {
+        // #15: create and delete each get their own bucket — reusing
+        // either's for the other, or for an existing endpoint, would
+        // corrupt the tracked state for both.
+        let root = temp_root("repost-endpoints");
+        let paths = test_paths(&root);
+        paths.ensure_dirs().unwrap();
+
+        let timeline_state = RateLimitState {
+            limit: Some(15),
+            remaining: Some(10),
+            reset_at: Some(2_000),
+        };
+        let create_repost_state = RateLimitState {
+            limit: Some(50),
+            remaining: Some(49),
+            reset_at: Some(7_000),
+        };
+        let delete_repost_state = RateLimitState {
+            limit: Some(50),
+            remaining: Some(0),
+            reset_at: Some(8_000),
+        };
+        save(&paths, Endpoint::Timeline, timeline_state).unwrap();
+        save(&paths, Endpoint::CreateRepost, create_repost_state).unwrap();
+        save(&paths, Endpoint::DeleteRepost, delete_repost_state).unwrap();
+
+        assert_eq!(load(&paths, Endpoint::Timeline).unwrap(), timeline_state);
+        assert_eq!(
+            load(&paths, Endpoint::CreateRepost).unwrap(),
+            create_repost_state
+        );
+        assert_eq!(
+            load(&paths, Endpoint::DeleteRepost).unwrap(),
+            delete_repost_state
         );
 
         std::fs::remove_dir_all(&root).unwrap();

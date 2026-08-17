@@ -112,6 +112,14 @@ pub(crate) struct PostTweetRequest<'a> {
     pub text: &'a str,
 }
 
+/// The `POST /2/users/:id/retweets` request body (#15) — the id of the post
+/// being reposted; `user_id` (whose retweets are being created) travels in
+/// the URL, not here.
+#[derive(Debug, Serialize)]
+pub(crate) struct RepostRequest<'a> {
+    pub tweet_id: &'a str,
+}
+
 /// Pagination info returned alongside `data`. Only `next_token` matters to
 /// this crate — it's the cursor `x_api::client::home_timeline_url` sends back
 /// as `pagination_token` to fetch the next (older) page, driving #11's "Load
@@ -887,6 +895,19 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&request).unwrap(),
             r#"{"text":"hello"}"#
+        );
+    }
+
+    #[test]
+    fn serializes_the_repost_request_body() {
+        // #15: the whole request body `x_api::client::XClient::create_repost`
+        // sends.
+        let request = RepostRequest {
+            tweet_id: "1700000000000000001",
+        };
+        assert_eq!(
+            serde_json::to_string(&request).unwrap(),
+            r#"{"tweet_id":"1700000000000000001"}"#
         );
     }
 

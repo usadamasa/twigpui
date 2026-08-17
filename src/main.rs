@@ -8,6 +8,7 @@ mod config;
 mod oauth;
 mod paths;
 mod rate_limit;
+mod repost;
 mod theme;
 mod thread;
 mod ui;
