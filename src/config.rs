@@ -45,9 +45,16 @@ impl FileSettings {
     /// means there are no file-level settings yet. A malformed file is an
     /// error whose message names `path`.
     fn load(path: &Path) -> Result<Self> {
-        // TODO: stub — always behaves as if the file is missing.
-        let _ = path;
-        Ok(Self::default())
+        let contents = match std::fs::read_to_string(path) {
+            Ok(contents) => contents,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Self::default());
+            }
+            Err(error) => {
+                return Err(error).with_context(|| format!("could not read {}", path.display()));
+            }
+        };
+        toml::from_str(&contents).with_context(|| format!("could not parse {}", path.display()))
     }
 }
 
@@ -67,34 +74,46 @@ impl Config {
     /// Split out from [`Config::from_env`] so the rules below can be tested
     /// without `set_var`, which is `unsafe` and races the other test threads.
     fn resolve(var: impl Fn(&str) -> Option<String>, file: FileSettings) -> Result<Self> {
+        // config.toml is a hand-edited file that people put in dotfiles repos, so a
+        // bearer token must never be readable from it. Reject the key outright
+        // rather than silently accepting it — credentials get their own store in #7.
+        if file.bearer_token.is_some() {
+            bail!(
+                "bearer_token must not be set in config.toml. Use the X_BEARER_TOKEN \
+                 environment variable (or .env) instead."
+            );
+        }
+
         let bearer_token = var("X_BEARER_TOKEN")
             .filter(|t| !t.trim().is_empty())
             .context("X_BEARER_TOKEN is unset. Copy .env.example to .env and fill it in.")?;
 
         let target_username = var("X_TARGET_USERNAME")
             .filter(|u| !u.trim().is_empty())
+            .or_else(|| file.target_username.filter(|u| !u.trim().is_empty()))
             .unwrap_or_else(|| DEFAULT_USERNAME.to_string());
         let target_username = target_username.trim().trim_start_matches('@').to_string();
 
-        let max_results = match var("X_MAX_RESULTS") {
-            Some(raw) => raw
-                .trim()
-                .parse::<u32>()
-                .with_context(|| format!("X_MAX_RESULTS is not a number: {raw:?}"))?,
-            None => DEFAULT_MAX_RESULTS,
+        let (max_results, max_results_source) = match var("X_MAX_RESULTS") {
+            Some(raw) => {
+                let value = raw
+                    .trim()
+                    .parse::<u32>()
+                    .with_context(|| format!("X_MAX_RESULTS is not a number: {raw:?}"))?;
+                (value, "X_MAX_RESULTS")
+            }
+            None => match file.max_results {
+                Some(value) => (value, "max_results in config.toml"),
+                None => (DEFAULT_MAX_RESULTS, "the default"),
+            },
         };
         if !MAX_RESULTS_RANGE.contains(&max_results) {
             bail!(
-                "X_MAX_RESULTS must be between {} and {}, got {max_results}",
+                "{max_results_source} must be between {} and {}, got {max_results}",
                 MAX_RESULTS_RANGE.start(),
                 MAX_RESULTS_RANGE.end()
             );
         }
-
-        // TODO: stub — `file` is not consulted yet, so its precedence over
-        // the built-in default and its bearer_token rejection are not
-        // implemented until the follow-up commit.
-        let _ = &file;
 
         Ok(Self {
             bearer_token: bearer_token.trim().to_string(),
@@ -119,9 +138,11 @@ mod tests {
 
     #[test]
     fn fills_in_the_defaults_when_only_the_token_is_set() {
-        let config =
-            Config::resolve(vars(&[("X_BEARER_TOKEN", "token")]), FileSettings::default())
-                .unwrap();
+        let config = Config::resolve(
+            vars(&[("X_BEARER_TOKEN", "token")]),
+            FileSettings::default(),
+        )
+        .unwrap();
 
         assert_eq!(config.bearer_token, "token");
         assert_eq!(config.target_username, DEFAULT_USERNAME);
