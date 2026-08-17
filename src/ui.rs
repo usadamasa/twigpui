@@ -4,6 +4,7 @@ use crate::cache;
 use crate::config::Config;
 use crate::oauth;
 use crate::paths::Paths;
+use crate::rate_limit;
 use crate::x_api::{TimelineItem, XClient};
 
 // Grouped per RGB channel, which is also the digit grouping clippy asks for.
@@ -24,6 +25,10 @@ enum TimelineState {
     SigningIn,
     Loading,
     Loaded(Vec<TimelineItem>),
+    /// Blocked by #10's rate-limit decision — no request was sent at all.
+    /// Carries the tracked window's reset time so the header can render a
+    /// countdown instead of a bare error message.
+    RateLimited { reset_at: i64 },
     Failed(SharedString),
 }
 
@@ -154,7 +159,18 @@ impl TimelineView {
             let _ = this.update(cx, |this, cx| {
                 this.state = match result {
                     Ok(reloaded) => TimelineState::Loaded(reloaded.items),
-                    Err(error) => TimelineState::Failed(format!("{error:#}").into()),
+                    // #10: a blocked-send carries a known reset time is
+                    // shown as a countdown; everything else (including a
+                    // rate limit whose 429 carried no usable reset header)
+                    // falls back to the plain error message.
+                    Err(error) => match error.downcast_ref::<rate_limit::RateLimited>() {
+                        Some(rate_limit::RateLimited {
+                            reset_at: Some(reset_at),
+                        }) => TimelineState::RateLimited {
+                            reset_at: *reset_at,
+                        },
+                        _ => TimelineState::Failed(format!("{error:#}").into()),
+                    },
                 };
                 cx.notify();
             });
@@ -206,11 +222,19 @@ impl TimelineView {
 
     fn header(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let (label, busy, action) = match self.state {
-            TimelineState::Loading => ("Loading…", true, PrimaryAction::Reload),
-            TimelineState::SigningIn => ("Signing in…", true, PrimaryAction::SignIn),
-            TimelineState::NotAuthenticated => ("Sign in with X", false, PrimaryAction::SignIn),
+            TimelineState::Loading => ("Loading…".to_string(), true, PrimaryAction::Reload),
+            TimelineState::SigningIn => ("Signing in…".to_string(), true, PrimaryAction::SignIn),
+            TimelineState::NotAuthenticated => {
+                ("Sign in with X".to_string(), false, PrimaryAction::SignIn)
+            }
+            // Still wired to `PrimaryAction::Reload`: re-clicking just
+            // re-runs the (network-free) rate-limit decision — #10 forbids
+            // sleeping out the window, not retrying the cheap local check.
+            TimelineState::RateLimited { reset_at } => {
+                (cooldown_label(reset_at, oauth::unix_now()), true, PrimaryAction::Reload)
+            }
             TimelineState::Loaded(_) | TimelineState::Failed(_) => {
-                ("Reload", false, PrimaryAction::Reload)
+                ("Reload".to_string(), false, PrimaryAction::Reload)
             }
         };
 
@@ -265,6 +289,10 @@ impl TimelineView {
                 TEXT_MUTED,
             )),
             TimelineState::Loading => content.child(notice("Fetching the timeline…", TEXT_MUTED)),
+            TimelineState::RateLimited { reset_at } => content.child(notice(
+                cooldown_label(*reset_at, oauth::unix_now()),
+                DANGER,
+            )),
             TimelineState::Failed(message) => content.child(notice(message.clone(), DANGER)),
             TimelineState::Loaded(items) if items.is_empty() => {
                 content.child(notice("No posts were returned.", TEXT_MUTED))
@@ -336,6 +364,14 @@ fn post_row(item: &TimelineItem) -> impl IntoElement {
         .child(div().child(item.text.clone()))
 }
 
+/// Countdown text for the reload button while blocked by #10's rate-limit
+/// decision. `remaining` is clamped to zero rather than going negative if
+/// `reset_at` has (just) passed by the time this renders.
+fn cooldown_label(_reset_at: i64, _now: i64) -> String {
+    // TODO(#10): stub for the red phase of TDD.
+    String::new()
+}
+
 /// Turn `2026-08-16T09:00:00.000Z` into `2026-08-16 09:00`.
 ///
 /// The API always returns UTC in RFC 3339, so slicing beats pulling in a date
@@ -352,7 +388,7 @@ fn format_timestamp(created_at: Option<&str>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{byline, format_timestamp};
+    use super::{byline, cooldown_label, format_timestamp};
 
     #[test]
     fn prefixes_a_byline_with_an_at_sign() {
@@ -386,5 +422,17 @@ mod tests {
     #[test]
     fn renders_a_missing_timestamp_as_empty() {
         assert_eq!(format_timestamp(None), "");
+    }
+
+    #[test]
+    fn cooldown_label_counts_down_to_the_reset_time() {
+        assert_eq!(cooldown_label(1_060, 1_000), "Rate limited — retry in 60s");
+    }
+
+    #[test]
+    fn cooldown_label_clamps_a_reset_time_already_passed() {
+        // #10: a countdown that's just crossed zero must read "0s", never a
+        // confusing negative number.
+        assert_eq!(cooldown_label(1_000, 1_060), "Rate limited — retry in 0s");
     }
 }

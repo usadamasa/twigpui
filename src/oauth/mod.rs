@@ -156,6 +156,7 @@ mod tests {
             oauth_client_id: oauth_client_id.map(str::to_string),
             target_username: "someone".to_string(),
             max_results: 20,
+            min_fetch_interval_seconds: 60,
         }
     }
 

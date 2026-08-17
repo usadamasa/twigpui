@@ -211,14 +211,14 @@ pub(crate) fn reload(
     let (user_id, user_id_cache_hit) = if let Some(id) = cached_user_id(paths, username, now)? {
         (id, true)
     } else {
-        let id = client.user_id_by_username(username)?;
+        let id = client.user_id_by_username(paths, username, now)?;
         save_user_id(paths, username, &id, now)?;
         (id, false)
     };
 
     let cached = load_timeline(paths, &user_id)?.unwrap_or_default();
     let since = since_id(&cached);
-    let fresh = client.timeline(&user_id, max_results, since)?;
+    let fresh = client.timeline(paths, &user_id, max_results, since, now)?;
     let items = merge_timeline(fresh, cached);
     save_timeline(paths, &user_id, &items, now)?;
     Ok(Reloaded {

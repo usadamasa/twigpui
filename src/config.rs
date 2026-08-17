@@ -22,11 +22,20 @@ pub(crate) struct Config {
     pub target_username: String,
     /// Posts requested per fetch. The X API accepts 5..=100.
     pub max_results: u32,
+    /// Floor on how often a fetch may run, in seconds (#10). Not enforced by
+    /// this crate's own reload path yet — #21's auto-refresh is what
+    /// consumes it — but it's plumbed through here now so both the manual
+    /// reload cooldown and #21 read the same setting.
+    pub min_fetch_interval_seconds: u32,
 }
 
 const DEFAULT_USERNAME: &str = "XDevelopers";
 const DEFAULT_MAX_RESULTS: u32 = 20;
 const MAX_RESULTS_RANGE: std::ops::RangeInclusive<u32> = 5..=100;
+/// 60s: comfortably above the per-window cost of a single reload (one or
+/// two requests) against even X's tighter per-endpoint rate-limit windows,
+/// while still being responsive to a human clicking the reload button.
+const DEFAULT_MIN_FETCH_INTERVAL_SECONDS: u32 = 60;
 
 /// The file-level settings loaded from `config.toml`.
 ///
@@ -40,6 +49,8 @@ struct FileSettings {
     target_username: Option<String>,
     #[serde(default)]
     max_results: Option<u32>,
+    #[serde(default)]
+    min_fetch_interval_seconds: Option<u32>,
     /// Non-secret (see [`Config::oauth_client_id`]), so — unlike
     /// `bearer_token` below — this key is allowed in `config.toml`.
     #[serde(default)]
@@ -151,11 +162,18 @@ impl Config {
             );
         }
 
+        // TODO(#10): stub for the red phase of TDD — ignores env/file and
+        // always reports the built-in default.
+        let _ = var("X_MIN_FETCH_INTERVAL_SECONDS");
+        let _ = file.min_fetch_interval_seconds;
+        let min_fetch_interval_seconds = DEFAULT_MIN_FETCH_INTERVAL_SECONDS;
+
         Ok(Self {
             bearer_token,
             oauth_client_id,
             target_username,
             max_results,
+            min_fetch_interval_seconds,
         })
     }
 }
@@ -184,6 +202,10 @@ mod tests {
         assert_eq!(config.bearer_token.as_deref(), Some("token"));
         assert_eq!(config.target_username, DEFAULT_USERNAME);
         assert_eq!(config.max_results, DEFAULT_MAX_RESULTS);
+        assert_eq!(
+            config.min_fetch_interval_seconds,
+            super::DEFAULT_MIN_FETCH_INTERVAL_SECONDS
+        );
     }
 
     // Since #7, a bearer token is one of *two* valid credentials (the other
@@ -429,6 +451,63 @@ mod tests {
             .to_string();
         assert!(error.contains("X_BEARER_TOKEN"), "{error}");
         assert!(!error.contains("leaked"), "{error}");
+    }
+
+    // --- min_fetch_interval_seconds layering (env > file > default, #10) ---
+
+    #[test]
+    fn resolve_reads_min_fetch_interval_from_the_file_when_env_is_unset() {
+        let file = FileSettings {
+            min_fetch_interval_seconds: Some(120),
+            ..FileSettings::default()
+        };
+        let config = Config::resolve(vars(&[("X_BEARER_TOKEN", "token")]), file).unwrap();
+        assert_eq!(config.min_fetch_interval_seconds, 120);
+    }
+
+    #[test]
+    fn resolve_prefers_the_env_min_fetch_interval_over_the_file() {
+        let file = FileSettings {
+            min_fetch_interval_seconds: Some(120),
+            ..FileSettings::default()
+        };
+        let config = Config::resolve(
+            vars(&[
+                ("X_BEARER_TOKEN", "token"),
+                ("X_MIN_FETCH_INTERVAL_SECONDS", "30"),
+            ]),
+            file,
+        )
+        .unwrap();
+        assert_eq!(config.min_fetch_interval_seconds, 30);
+    }
+
+    #[test]
+    fn resolve_rejects_a_min_fetch_interval_of_zero() {
+        let error = Config::resolve(
+            vars(&[
+                ("X_BEARER_TOKEN", "token"),
+                ("X_MIN_FETCH_INTERVAL_SECONDS", "0"),
+            ]),
+            FileSettings::default(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("X_MIN_FETCH_INTERVAL_SECONDS"), "{error}");
+    }
+
+    #[test]
+    fn resolve_rejects_a_non_numeric_min_fetch_interval() {
+        let error = Config::resolve(
+            vars(&[
+                ("X_BEARER_TOKEN", "token"),
+                ("X_MIN_FETCH_INTERVAL_SECONDS", "soon"),
+            ]),
+            FileSettings::default(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("not a number"), "{error}");
     }
 
     #[test]

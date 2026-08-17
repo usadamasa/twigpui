@@ -74,6 +74,15 @@ impl Paths {
         self.cache_dir.join(format!("timeline-{user_id}.json"))
     }
 
+    /// Path to the tracked rate-limit state, under `state_dir` (#10). State,
+    /// not cache: a process restart does not reset X's rate-limit window, so
+    /// losing this file risks firing a request straight into an
+    /// already-exhausted window and wasting a paid request, rather than just
+    /// costing a slower cold start the way a lost cache entry would.
+    pub(crate) fn rate_limit_file(&self) -> PathBuf {
+        self.state_dir.join("rate_limit.json")
+    }
+
     /// Create all three directories (recursively) if they do not already
     /// exist.
     ///
@@ -267,6 +276,15 @@ mod tests {
         assert_eq!(
             paths.timeline_file("2244994945"),
             PathBuf::from("/home/alice/.cache/twigpui/timeline-2244994945.json")
+        );
+    }
+
+    #[test]
+    fn rate_limit_file_is_under_the_state_dir() {
+        let paths = Paths::from_vars(vars(&[("HOME", "/home/alice")])).unwrap();
+        assert_eq!(
+            paths.rate_limit_file(),
+            PathBuf::from("/home/alice/.local/state/twigpui/rate_limit.json")
         );
     }
 
