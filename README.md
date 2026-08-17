@@ -186,9 +186,11 @@ once its window resets. twigpui tells them apart and treats each accordingly:
 - **Minimum fetch interval.** `X_MIN_FETCH_INTERVAL_SECONDS` (or
   `min_fetch_interval_seconds` in `config.toml`, default `60`) is a
   client-side floor on how often the reload button itself may fire,
-  independent of what the tracked API state above says — the reload button
-  shows the same countdown while waiting it out. #21's auto-refresh will use
-  the same setting once it lands.
+  independent of what the tracked API state above says. The button counts
+  down for this too, but says so in different words — "Waiting out the fetch
+  interval" rather than "Rate limited by X" — because in this case nothing
+  was sent and X has said nothing. #21's auto-refresh will use the same
+  setting once it lands.
 
 ## Local cache (#9)
 

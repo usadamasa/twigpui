@@ -25,13 +25,27 @@ enum TimelineState {
     SigningIn,
     Loading,
     Loaded(Vec<TimelineItem>),
-    /// Blocked by #10's rate-limit decision — no request was sent at all.
-    /// Carries the tracked window's reset time so the header can render a
-    /// countdown instead of a bare error message.
+    /// Blocked before any request went out (#10). Carries when it becomes
+    /// allowed again so the header can render a countdown instead of a bare
+    /// error message, and which side imposed the wait — see [`Cooldown`].
     RateLimited {
         reset_at: i64,
+        cooldown: Cooldown,
     },
     Failed(SharedString),
+}
+
+/// Which side is making the app wait. Both render a countdown, but they are
+/// different facts and must not be described with the same words: saying "X
+/// rate limited you" when the app is really just honouring its own configured
+/// fetch interval would be a plain misstatement of what happened.
+#[derive(Clone, Copy)]
+enum Cooldown {
+    /// `config.min_fetch_interval_seconds` — self-imposed, nothing was sent
+    /// and X has said nothing.
+    LocalInterval,
+    /// X's own rate-limit window, per the tracked `x-rate-limit-*` headers.
+    ApiRateLimit,
 }
 
 /// What the header's primary button does, independent of its current label —
@@ -162,7 +176,10 @@ impl TimelineView {
             self.config.min_fetch_interval_seconds,
             now,
         ) {
-            self.state = TimelineState::RateLimited { reset_at };
+            self.state = TimelineState::RateLimited {
+                reset_at,
+                cooldown: Cooldown::LocalInterval,
+            };
             cx.notify();
             return;
         }
@@ -195,6 +212,7 @@ impl TimelineView {
                             reset_at: Some(reset_at),
                         }) => TimelineState::RateLimited {
                             reset_at: *reset_at,
+                            cooldown: Cooldown::ApiRateLimit,
                         },
                         _ => TimelineState::Failed(format!("{error:#}").into()),
                     },
@@ -257,8 +275,8 @@ impl TimelineView {
             // Still wired to `PrimaryAction::Reload`: re-clicking just
             // re-runs the (network-free) rate-limit decision — #10 forbids
             // sleeping out the window, not retrying the cheap local check.
-            TimelineState::RateLimited { reset_at } => (
-                cooldown_label(reset_at, oauth::unix_now()),
+            TimelineState::RateLimited { reset_at, cooldown } => (
+                cooldown_label(cooldown, reset_at, oauth::unix_now()),
                 true,
                 PrimaryAction::Reload,
             ),
@@ -318,9 +336,10 @@ impl TimelineView {
                 TEXT_MUTED,
             )),
             TimelineState::Loading => content.child(notice("Fetching the timeline…", TEXT_MUTED)),
-            TimelineState::RateLimited { reset_at } => {
-                content.child(notice(cooldown_label(*reset_at, oauth::unix_now()), DANGER))
-            }
+            TimelineState::RateLimited { reset_at, cooldown } => content.child(notice(
+                cooldown_label(*cooldown, *reset_at, oauth::unix_now()),
+                DANGER,
+            )),
             TimelineState::Failed(message) => content.child(notice(message.clone(), DANGER)),
             TimelineState::Loaded(items) if items.is_empty() => {
                 content.child(notice("No posts were returned.", TEXT_MUTED))
@@ -395,9 +414,16 @@ fn post_row(item: &TimelineItem) -> impl IntoElement {
 /// Countdown text for the reload button while blocked by #10's rate-limit
 /// decision. `remaining` is clamped to zero rather than going negative if
 /// `reset_at` has (just) passed by the time this renders.
-fn cooldown_label(reset_at: i64, now: i64) -> String {
+///
+/// The two cooldowns read differently on purpose: only one of them is X
+/// actually rate limiting this app, and reporting the self-imposed interval
+/// as a rate limit would misdescribe what happened.
+fn cooldown_label(cooldown: Cooldown, reset_at: i64, now: i64) -> String {
     let remaining = (reset_at - now).max(0);
-    format!("Rate limited — retry in {remaining}s")
+    match cooldown {
+        Cooldown::LocalInterval => format!("Waiting out the fetch interval — {remaining}s"),
+        Cooldown::ApiRateLimit => format!("Rate limited by X — retry in {remaining}s"),
+    }
 }
 
 /// Whether [`TimelineView::reload`] should refuse to run right now, per
@@ -431,7 +457,7 @@ fn format_timestamp(created_at: Option<&str>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{byline, cooldown_label, format_timestamp, reload_cooldown};
+    use super::{Cooldown, byline, cooldown_label, format_timestamp, reload_cooldown};
 
     #[test]
     fn prefixes_a_byline_with_an_at_sign() {
@@ -469,14 +495,30 @@ mod tests {
 
     #[test]
     fn cooldown_label_counts_down_to_the_reset_time() {
-        assert_eq!(cooldown_label(1_060, 1_000), "Rate limited — retry in 60s");
+        assert_eq!(
+            cooldown_label(Cooldown::ApiRateLimit, 1_060, 1_000),
+            "Rate limited by X — retry in 60s"
+        );
     }
 
     #[test]
     fn cooldown_label_clamps_a_reset_time_already_passed() {
         // #10: a countdown that's just crossed zero must read "0s", never a
         // confusing negative number.
-        assert_eq!(cooldown_label(1_000, 1_060), "Rate limited — retry in 0s");
+        assert_eq!(
+            cooldown_label(Cooldown::ApiRateLimit, 1_000, 1_060),
+            "Rate limited by X — retry in 0s"
+        );
+    }
+
+    #[test]
+    fn cooldown_label_does_not_blame_x_for_the_local_fetch_interval() {
+        // The self-imposed interval blocks a reload before anything is sent,
+        // so X has said nothing — calling it a rate limit would be a plain
+        // misstatement of what happened.
+        let label = cooldown_label(Cooldown::LocalInterval, 1_060, 1_000);
+        assert_eq!(label, "Waiting out the fetch interval — 60s");
+        assert!(!label.contains("Rate limited"), "{label}");
     }
 
     #[test]
