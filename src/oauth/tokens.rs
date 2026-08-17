@@ -26,6 +26,13 @@ pub(crate) struct TokenResponse {
     #[serde(default)]
     pub refresh_token: Option<String>,
     pub expires_in: u64,
+    /// The scope X actually granted (#14) — space-separated, RFC 6749
+    /// §5.1. `#[serde(default)]` since the token endpoint may omit it when
+    /// unchanged from the request (see `oauth::carried_scope` for how a
+    /// refresh response's omission is handled) and, more generally, to keep
+    /// this struct tolerant of a token endpoint that omits it altogether.
+    #[serde(default)]
+    pub scope: Option<String>,
 }
 
 /// The `error` JSON body the token endpoint returns on failure (RFC 6749
@@ -62,6 +69,25 @@ pub(crate) struct TokenSet {
     #[serde(default)]
     pub refresh_token: Option<String>,
     pub expires_at: i64,
+    /// The scope granted alongside this token (#14), space-separated per
+    /// RFC 6749 §3.3. `#[serde(default)]` here matches every other
+    /// `Option<T>` field in this struct/crate (see `refresh_token` above),
+    /// even though `serde_derive` already treats a struct field of type
+    /// `Option<T>` as implicitly optional — missing key deserializes to
+    /// `None` — with or without the attribute; verified directly by
+    /// `parses_a_pre_14_token_set_without_a_scope_field` below, which pastes
+    /// an old-format `TokenSet` literal with no `scope` key at all and
+    /// still parses. What the issue actually warns about — a new field
+    /// silently making `tokens::load` fail and logging every already-
+    /// signed-in user out — is real for a non-`Option` field (`access_token`,
+    /// `expires_at` above would both break the same way), just not the
+    /// specific shape this field happens to take. The attribute stays for
+    /// the same reason `refresh_token`'s does: it says "missing is a valid,
+    /// expected state" explicitly, rather than relying on a serde default
+    /// a future refactor (e.g. switching this to a non-`Option` type) could
+    /// silently stop providing.
+    #[serde(default)]
+    pub scope: Option<String>,
 }
 
 impl TokenSet {
@@ -73,6 +99,7 @@ impl TokenSet {
             access_token: response.access_token,
             refresh_token: response.refresh_token,
             expires_at: now.saturating_add(expires_in),
+            scope: response.scope,
         }
     }
 
@@ -81,6 +108,23 @@ impl TokenSet {
     pub(crate) fn needs_refresh(&self, now: i64) -> bool {
         now + REFRESH_SKEW_SECONDS >= self.expires_at
     }
+}
+
+/// The scope #14's composer needs (`POST /2/tweets`), requested at
+/// authorize time by `oauth::pkce`'s `SCOPES` constant and checked here
+/// before letting a submit go out.
+pub(crate) const TWEET_WRITE_SCOPE: &str = "tweet.write";
+
+/// Whether a granted scope string includes `required`, per RFC 6749 §3.3's
+/// space-separated list — matched by exact token, not a substring check, so
+/// e.g. a hypothetical `tweet.write.extra` scope wouldn't false-match a
+/// check for `tweet.write`. `granted: None` (an unrecorded/unknown scope —
+/// see [`TokenSet::scope`]'s doc) is always insufficient: the conservative
+/// choice, since a pre-#14 token might or might not actually carry
+/// `tweet.write`, and the safe assumption is "prompt before writing" rather
+/// than "assume it's fine".
+pub(crate) fn has_scope(granted: Option<&str>, required: &str) -> bool {
+    granted.is_some_and(|scopes| scopes.split_whitespace().any(|scope| scope == required))
 }
 
 /// Write `tokens` to [`Paths::oauth_token_file`], `0600` (owner read/write
@@ -135,6 +179,10 @@ mod tests {
         assert_eq!(response.access_token, "access-abc");
         assert_eq!(response.refresh_token.as_deref(), Some("refresh-xyz"));
         assert_eq!(response.expires_in, 7200);
+        assert_eq!(
+            response.scope.as_deref(),
+            Some("tweet.read users.read offline.access")
+        );
     }
 
     #[test]
@@ -143,6 +191,10 @@ mod tests {
         let tokens = TokenSet::from_response(response, 1_000);
         assert_eq!(tokens.expires_at, 1_000 + 7200);
         assert_eq!(tokens.access_token, "access-abc");
+        assert_eq!(
+            tokens.scope.as_deref(),
+            Some("tweet.read users.read offline.access")
+        );
     }
 
     #[test]
@@ -151,6 +203,7 @@ mod tests {
             access_token: "a".into(),
             refresh_token: None,
             expires_at: 10_000,
+            scope: None,
         };
         assert!(!tokens.needs_refresh(0));
     }
@@ -161,6 +214,7 @@ mod tests {
             access_token: "a".into(),
             refresh_token: None,
             expires_at: 10_000,
+            scope: None,
         };
         assert!(tokens.needs_refresh(10_000 - REFRESH_SKEW_SECONDS));
     }
@@ -171,8 +225,56 @@ mod tests {
             access_token: "a".into(),
             refresh_token: None,
             expires_at: 10_000,
+            scope: None,
         };
         assert!(tokens.needs_refresh(20_000));
+    }
+
+    // --- has_scope ---
+
+    #[test]
+    fn has_scope_is_true_when_the_required_scope_is_present() {
+        assert!(has_scope(Some("tweet.read tweet.write"), TWEET_WRITE_SCOPE));
+    }
+
+    #[test]
+    fn has_scope_is_false_when_the_required_scope_is_missing() {
+        assert!(!has_scope(
+            Some("tweet.read users.read offline.access"),
+            TWEET_WRITE_SCOPE
+        ));
+    }
+
+    #[test]
+    fn has_scope_is_false_for_an_unrecorded_unknown_scope() {
+        // #14: a pre-#14 token has no recorded scope at all — treated as
+        // insufficient, never as "assume it's fine".
+        assert!(!has_scope(None, TWEET_WRITE_SCOPE));
+    }
+
+    #[test]
+    fn has_scope_does_not_substring_match() {
+        assert!(!has_scope(Some("tweet.write.extra"), TWEET_WRITE_SCOPE));
+    }
+
+    #[test]
+    fn parses_a_pre_14_token_set_without_a_scope_field() {
+        // #14: a token file written before this field existed — must
+        // deserialize cleanly (see `TokenSet::scope`'s doc for why a
+        // missing `#[serde(default)]` would silently log the user out)
+        // rather than failing `tokens::load` and dropping the whole
+        // session. Deliberately a raw literal rather than trusting
+        // `#[serde(default)]` at a glance, mirroring the convention already
+        // used for `x_api::model`'s own pre-#13/#12 cache-compat tests.
+        let old_format = r#"{
+            "access_token": "access-abc",
+            "refresh_token": "refresh-xyz",
+            "expires_at": 1700000000
+        }"#;
+        let tokens: TokenSet = serde_json::from_str(old_format).unwrap();
+        assert_eq!(tokens.access_token, "access-abc");
+        assert_eq!(tokens.refresh_token.as_deref(), Some("refresh-xyz"));
+        assert_eq!(tokens.scope, None);
     }
 
     #[test]
@@ -218,6 +320,7 @@ mod tests {
             access_token: "access".to_string(),
             refresh_token: Some("refresh".to_string()),
             expires_at: 123_456,
+            scope: Some("tweet.read tweet.write".to_string()),
         };
         save(&paths, &tokens).unwrap();
         let loaded = load(&paths).unwrap();
@@ -240,6 +343,7 @@ mod tests {
                 access_token: "a".into(),
                 refresh_token: None,
                 expires_at: 1,
+                scope: None,
             },
         )
         .unwrap();

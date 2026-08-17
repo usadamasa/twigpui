@@ -12,9 +12,12 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use sha2::{Digest as _, Sha256};
 
-/// Scopes requested at authorize time. Deliberately minimal: no
-/// `tweet.write` until #14 needs it.
-const SCOPES: &str = "tweet.read users.read offline.access";
+/// Scopes requested at authorize time. `tweet.write` was added by #14 — #7
+/// deliberately left it out until posting needed it. Already-signed-in
+/// users from before #14 hold a token without it, which is exactly what
+/// `oauth::tokens::has_scope` plus the header's "Re-authorize" button (#14)
+/// exist to detect and fix.
+const SCOPES: &str = "tweet.read users.read tweet.write offline.access";
 
 /// `https://x.com/i/oauth2/authorize` per the issue's confirmed design.
 const AUTHORIZE_URL: &str = "https://x.com/i/oauth2/authorize";
@@ -207,9 +210,21 @@ mod tests {
             url,
             "https://x.com/i/oauth2/authorize?response_type=code&client_id=client-123\
              &redirect_uri=http%3A%2F%2F127.0.0.1%3A8733%2Fcallback\
-             &scope=tweet.read%20users.read%20offline.access&state=state-abc\
+             &scope=tweet.read%20users.read%20tweet.write%20offline.access&state=state-abc\
              &code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM\
              &code_challenge_method=S256"
+        );
+    }
+
+    #[test]
+    fn scopes_include_what_14s_composer_needs() {
+        // #14: posting requires `tweet.write`, added on top of #7's
+        // originally-minimal request — a substring check would false-match
+        // e.g. a hypothetical `tweet.write.extra`, so this splits first.
+        assert!(
+            SCOPES
+                .split_whitespace()
+                .any(|scope| scope == "tweet.write")
         );
     }
 }

@@ -216,6 +216,10 @@ pub(crate) enum Endpoint {
     /// would corrupt the tracked state for both, since X limits each
     /// endpoint on its own schedule.
     TweetById,
+    /// `POST /2/tweets` (#14) — the composer's submit action. X limits
+    /// posting separately from every read endpoint above, so sharing a
+    /// bucket with any of them would corrupt the tracked state for both.
+    CreatePost,
 }
 
 impl Endpoint {
@@ -241,6 +245,7 @@ impl Endpoint {
             Self::Me => "me",
             Self::HomeTimeline => "home_timeline",
             Self::TweetById => "tweet_by_id",
+            Self::CreatePost => "create_post",
         }
     }
 }
@@ -606,6 +611,36 @@ mod tests {
         assert_eq!(
             load(&paths, Endpoint::TweetById).unwrap(),
             tweet_by_id_state
+        );
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn create_post_endpoint_is_tracked_independently_of_the_others() {
+        // #14: `POST /2/tweets` gets its own bucket — reusing e.g.
+        // `Timeline`'s would corrupt the tracked state for both.
+        let root = temp_root("create-post-endpoint");
+        let paths = test_paths(&root);
+        paths.ensure_dirs().unwrap();
+
+        let timeline_state = RateLimitState {
+            limit: Some(15),
+            remaining: Some(10),
+            reset_at: Some(2_000),
+        };
+        let create_post_state = RateLimitState {
+            limit: Some(200),
+            remaining: Some(0),
+            reset_at: Some(6_000),
+        };
+        save(&paths, Endpoint::Timeline, timeline_state).unwrap();
+        save(&paths, Endpoint::CreatePost, create_post_state).unwrap();
+
+        assert_eq!(load(&paths, Endpoint::Timeline).unwrap(), timeline_state);
+        assert_eq!(
+            load(&paths, Endpoint::CreatePost).unwrap(),
+            create_post_state
         );
 
         std::fs::remove_dir_all(&root).unwrap();
