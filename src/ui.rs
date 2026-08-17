@@ -907,6 +907,8 @@ mod tests {
                 created_at: None,
                 author_name: String::new(),
                 author_username: String::new(),
+                reposted_by: None,
+                quoted: None,
             })
             .collect();
         let state = TimelineState::Loaded(full);

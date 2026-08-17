@@ -347,9 +347,11 @@ mod tests {
         // Spelled out on one line on purpose: the implementation splits the
         // query across `\` line continuations, and repeating that trick here
         // would hide exactly the stray-whitespace bug this guards against.
+        // #13 adds `referenced_tweets` so a repost's/quote's real content
+        // and author come back in `includes` without a second request.
         assert_eq!(
             timeline_url("2244994945", 20, None),
-            "https://api.x.com/2/users/2244994945/tweets?max_results=20&tweet.fields=created_at&expansions=author_id&user.fields=name,username"
+            "https://api.x.com/2/users/2244994945/tweets?max_results=20&tweet.fields=created_at,referenced_tweets&expansions=author_id,referenced_tweets.id,referenced_tweets.id.author_id&user.fields=name,username"
         );
     }
 
@@ -362,7 +364,7 @@ mod tests {
     fn builds_the_home_timeline_url_with_every_expansion() {
         assert_eq!(
             home_timeline_url("2244994945", 20, None, None),
-            "https://api.x.com/2/users/2244994945/timelines/reverse_chronological?max_results=20&tweet.fields=created_at&expansions=author_id&user.fields=name,username"
+            "https://api.x.com/2/users/2244994945/timelines/reverse_chronological?max_results=20&tweet.fields=created_at,referenced_tweets&expansions=author_id,referenced_tweets.id,referenced_tweets.id.author_id&user.fields=name,username"
         );
     }
 
@@ -370,7 +372,7 @@ mod tests {
     fn home_timeline_url_appends_since_id_for_an_incremental_reload() {
         assert_eq!(
             home_timeline_url("2244994945", 20, Some("1700000000000000001"), None),
-            "https://api.x.com/2/users/2244994945/timelines/reverse_chronological?max_results=20&tweet.fields=created_at&expansions=author_id&user.fields=name,username&since_id=1700000000000000001"
+            "https://api.x.com/2/users/2244994945/timelines/reverse_chronological?max_results=20&tweet.fields=created_at,referenced_tweets&expansions=author_id,referenced_tweets.id,referenced_tweets.id.author_id&user.fields=name,username&since_id=1700000000000000001"
         );
     }
 
@@ -380,7 +382,7 @@ mod tests {
         // response as `pagination_token`.
         assert_eq!(
             home_timeline_url("2244994945", 20, None, Some("cursor-abc")),
-            "https://api.x.com/2/users/2244994945/timelines/reverse_chronological?max_results=20&tweet.fields=created_at&expansions=author_id&user.fields=name,username&pagination_token=cursor-abc"
+            "https://api.x.com/2/users/2244994945/timelines/reverse_chronological?max_results=20&tweet.fields=created_at,referenced_tweets&expansions=author_id,referenced_tweets.id,referenced_tweets.id.author_id&user.fields=name,username&pagination_token=cursor-abc"
         );
     }
 
@@ -391,7 +393,7 @@ mod tests {
         // credit cost down.
         assert_eq!(
             timeline_url("2244994945", 20, Some("1700000000000000001")),
-            "https://api.x.com/2/users/2244994945/tweets?max_results=20&tweet.fields=created_at&expansions=author_id&user.fields=name,username&since_id=1700000000000000001"
+            "https://api.x.com/2/users/2244994945/tweets?max_results=20&tweet.fields=created_at,referenced_tweets&expansions=author_id,referenced_tweets.id,referenced_tweets.id.author_id&user.fields=name,username&since_id=1700000000000000001"
         );
     }
 
