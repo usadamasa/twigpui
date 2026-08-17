@@ -97,7 +97,11 @@ mod tests {
         let hops = vec![item("parent"), item("grandparent"), item("root")];
         let chain = assemble_chain(hops, false);
         assert_eq!(
-            chain.items.iter().map(|i| i.id.as_str()).collect::<Vec<_>>(),
+            chain
+                .items
+                .iter()
+                .map(|i| i.id.as_str())
+                .collect::<Vec<_>>(),
             vec!["root", "grandparent", "parent"]
         );
         assert!(!chain.capped);
@@ -110,14 +114,20 @@ mod tests {
         let hops = vec![item("a"), item("b"), item("a")];
         let chain = assemble_chain(hops, false);
         assert_eq!(
-            chain.items.iter().map(|i| i.id.as_str()).collect::<Vec<_>>(),
+            chain
+                .items
+                .iter()
+                .map(|i| i.id.as_str())
+                .collect::<Vec<_>>(),
             vec!["b", "a"]
         );
     }
 
     #[test]
     fn reports_uncapped_when_the_walk_ended_naturally_at_exactly_five_levels() {
-        let hops: Vec<ThreadItem> = (1..=MAX_THREAD_DEPTH).map(|n| item(&n.to_string())).collect();
+        let hops: Vec<ThreadItem> = (1..=MAX_THREAD_DEPTH)
+            .map(|n| item(&n.to_string()))
+            .collect();
         let chain = assemble_chain(hops, false);
         assert_eq!(chain.items.len(), MAX_THREAD_DEPTH);
         assert!(!chain.capped);
@@ -125,7 +135,9 @@ mod tests {
 
     #[test]
     fn reports_capped_when_the_walker_stopped_at_the_depth_limit() {
-        let hops: Vec<ThreadItem> = (1..=MAX_THREAD_DEPTH).map(|n| item(&n.to_string())).collect();
+        let hops: Vec<ThreadItem> = (1..=MAX_THREAD_DEPTH)
+            .map(|n| item(&n.to_string()))
+            .collect();
         let chain = assemble_chain(hops, true);
         assert_eq!(chain.items.len(), MAX_THREAD_DEPTH);
         assert!(chain.capped);
@@ -135,7 +147,9 @@ mod tests {
     fn truncates_and_forces_capped_if_handed_more_than_the_depth_limit() {
         // Defensive: the walker's own loop should never produce more than
         // `MAX_THREAD_DEPTH` hops, but the invariant holds even if it did.
-        let hops: Vec<ThreadItem> = (1..=MAX_THREAD_DEPTH + 2).map(|n| item(&n.to_string())).collect();
+        let hops: Vec<ThreadItem> = (1..=MAX_THREAD_DEPTH + 2)
+            .map(|n| item(&n.to_string()))
+            .collect();
         let chain = assemble_chain(hops, false);
         assert_eq!(chain.items.len(), MAX_THREAD_DEPTH);
         assert!(chain.capped);
