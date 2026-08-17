@@ -10,6 +10,7 @@ mod rate_limit;
 mod theme;
 mod thread;
 mod ui;
+mod usage;
 mod x_api;
 
 use gpui::{
@@ -38,6 +39,13 @@ fn main() {
     // Headless fetch, for checking credentials and connectivity without a window.
     if std::env::args().any(|arg| arg == "--fetch-only") {
         std::process::exit(fetch_only(&config, &paths));
+    }
+
+    // Print the same usage numbers the header shows, as JSON (#18). Reads
+    // only `usage.json` under `state_dir` — no network call, so this is
+    // safe to run at any time, including while credits are exhausted.
+    if std::env::args().any(|arg| arg == "--usage") {
+        std::process::exit(usage_only(&config, &paths));
     }
 
     Application::new().run(move |cx| {
@@ -134,6 +142,41 @@ fn fetch_only(config: &config::Config, paths: &paths::Paths) -> i32 {
         }
         Err(error) => {
             eprintln!("fetch failed: {error:#}");
+            1
+        }
+    }
+}
+
+/// Print `usage::build_report`'s numbers as JSON to stdout (#18) — the
+/// point of persisting request counts under `state_dir` in the first place
+/// is that an external tool can read the same numbers the header shows,
+/// without opening a window. JSON rather than a bespoke text format: the
+/// project already depends on `serde_json` for everything else it
+/// persists, and a machine-readable consumer needs structure to parse
+/// rather than a format it has to scrape.
+fn usage_only(config: &config::Config, paths: &paths::Paths) -> i32 {
+    let entries = match usage::load_all(paths) {
+        Ok(entries) => entries,
+        Err(error) => {
+            eprintln!("could not read usage data: {error:#}");
+            return 1;
+        }
+    };
+
+    let report = usage::build_report(
+        &entries,
+        oauth::unix_now(),
+        config.request_price,
+        config.daily_request_budget,
+    );
+
+    match serde_json::to_string_pretty(&report) {
+        Ok(json) => {
+            println!("{json}");
+            0
+        }
+        Err(error) => {
+            eprintln!("could not serialize the usage report: {error:#}");
             1
         }
     }
