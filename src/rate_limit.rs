@@ -220,6 +220,14 @@ pub(crate) enum Endpoint {
     /// posting separately from every read endpoint above, so sharing a
     /// bucket with any of them would corrupt the tracked state for both.
     CreatePost,
+    /// `POST /2/users/:id/retweets` (#15) — creating a repost. Tracked
+    /// independently of `DeleteRepost`: X limits create and delete
+    /// separately, and reusing either's bucket for the other would corrupt
+    /// the tracked state for both.
+    CreateRepost,
+    /// `DELETE /2/users/:id/retweets/:source_tweet_id` (#15) — undoing a
+    /// repost. See `CreateRepost`'s doc for why this needs its own bucket.
+    DeleteRepost,
 }
 
 impl Endpoint {
@@ -227,12 +235,20 @@ impl Endpoint {
     /// of them rather than one at a time — `usage`'s `--usage`/header
     /// totals (#18) is the current user, so the list lives here rather than
     /// being duplicated wherever it's needed.
-    pub(crate) const ALL: [Self; 5] = [
+    /// Every write endpoint counts too: a post or a repost is billed exactly
+    /// like a read, so omitting one under-reports spend — which is the one
+    /// failure #18 exists to prevent. `CreatePost` was missing here until
+    /// #50; the test below now fails to compile rather than silently pass if
+    /// a new variant is left out again.
+    pub(crate) const ALL: [Self; 8] = [
         Self::UserLookup,
         Self::Timeline,
         Self::Me,
         Self::HomeTimeline,
         Self::TweetById,
+        Self::CreatePost,
+        Self::CreateRepost,
+        Self::DeleteRepost,
     ];
 
     /// `pub(crate)` rather than private (unlike before #18): `usage.rs`
@@ -246,6 +262,8 @@ impl Endpoint {
             Self::HomeTimeline => "home_timeline",
             Self::TweetById => "tweet_by_id",
             Self::CreatePost => "create_post",
+            Self::CreateRepost => "create_repost",
+            Self::DeleteRepost => "delete_repost",
         }
     }
 }
@@ -647,6 +665,47 @@ mod tests {
     }
 
     #[test]
+    fn create_repost_and_delete_repost_endpoints_are_tracked_independently() {
+        // #15: create and delete each get their own bucket — reusing
+        // either's for the other, or for an existing endpoint, would
+        // corrupt the tracked state for both.
+        let root = temp_root("repost-endpoints");
+        let paths = test_paths(&root);
+        paths.ensure_dirs().unwrap();
+
+        let timeline_state = RateLimitState {
+            limit: Some(15),
+            remaining: Some(10),
+            reset_at: Some(2_000),
+        };
+        let create_repost_state = RateLimitState {
+            limit: Some(50),
+            remaining: Some(49),
+            reset_at: Some(7_000),
+        };
+        let delete_repost_state = RateLimitState {
+            limit: Some(50),
+            remaining: Some(0),
+            reset_at: Some(8_000),
+        };
+        save(&paths, Endpoint::Timeline, timeline_state).unwrap();
+        save(&paths, Endpoint::CreateRepost, create_repost_state).unwrap();
+        save(&paths, Endpoint::DeleteRepost, delete_repost_state).unwrap();
+
+        assert_eq!(load(&paths, Endpoint::Timeline).unwrap(), timeline_state);
+        assert_eq!(
+            load(&paths, Endpoint::CreateRepost).unwrap(),
+            create_repost_state
+        );
+        assert_eq!(
+            load(&paths, Endpoint::DeleteRepost).unwrap(),
+            delete_repost_state
+        );
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
     fn a_corrupted_rate_limit_file_is_a_clean_miss_not_an_error() {
         let root = temp_root("corrupt");
         let paths = test_paths(&root);
@@ -682,8 +741,45 @@ mod tests {
     #[test]
     fn endpoint_all_lists_every_variant_with_a_unique_key() {
         // #18's usage tracker iterates `Endpoint::ALL` to summarize across
-        // every endpoint — a missing or duplicated variant here would
-        // silently under- or double-count.
+        // every endpoint, so a variant missing from it is silently
+        // under-counted spend. The previous version of this test asserted
+        // only that the keys were unique, which is why `CreatePost` could go
+        // missing for a whole release without anything failing (#50).
+        //
+        // The match below is the actual guard: it is exhaustive, so adding a
+        // variant stops this file compiling until the new arm is written —
+        // and the arm sits directly beside the list that must grow with it.
+        // Uniqueness alone, or a bare length check, would both still pass on
+        // an omission.
+        let every = [
+            Endpoint::UserLookup,
+            Endpoint::Timeline,
+            Endpoint::Me,
+            Endpoint::HomeTimeline,
+            Endpoint::TweetById,
+            Endpoint::CreatePost,
+            Endpoint::CreateRepost,
+            Endpoint::DeleteRepost,
+        ];
+        for endpoint in every {
+            match endpoint {
+                Endpoint::UserLookup
+                | Endpoint::Timeline
+                | Endpoint::Me
+                | Endpoint::HomeTimeline
+                | Endpoint::TweetById
+                | Endpoint::CreatePost
+                | Endpoint::CreateRepost
+                | Endpoint::DeleteRepost => {}
+            }
+            assert!(
+                Endpoint::ALL.contains(&endpoint),
+                "{endpoint:?} is missing from Endpoint::ALL, so its requests \
+                 would not be counted as spend"
+            );
+        }
+        assert_eq!(Endpoint::ALL.len(), every.len());
+
         let keys: std::collections::HashSet<&str> = Endpoint::ALL
             .iter()
             .map(|endpoint| endpoint.key())

@@ -4,7 +4,8 @@ use anyhow::{Context as _, Result, bail};
 use ureq::Agent;
 
 use super::model::{
-    ApiProblem, PostTweetRequest, TimelineItem, TimelineResponse, User, UserLookupResponse,
+    ApiProblem, PostTweetRequest, RepostRequest, TimelineItem, TimelineResponse, User,
+    UserLookupResponse,
 };
 use crate::paths::Paths;
 use crate::rate_limit::{self, Endpoint, RateLimitState};
@@ -79,6 +80,15 @@ impl XClient {
         now: i64,
     ) -> Result<String> {
         Self::send_with_retry(paths, endpoint, now, || self.send_post_once(url, text))
+    }
+
+    /// Perform one DELETE (#15's un-repost), sharing every rate-limit/retry
+    /// rule [`Self::get`]/[`Self::post`] already follow via
+    /// [`Self::send_with_retry`] — #10's central rule applies identically
+    /// regardless of HTTP method, and DELETE gains it here rather than a
+    /// parallel retry loop being written just for un-reposting.
+    fn delete(&self, paths: &Paths, endpoint: Endpoint, url: &str, now: i64) -> Result<String> {
+        Self::send_with_retry(paths, endpoint, now, || self.send_delete_once(url))
     }
 
     /// The retry/persist loop shared by [`Self::get`] and [`Self::post`]:
@@ -223,6 +233,81 @@ impl XClient {
         Ok((status, body, state))
     }
 
+    /// One raw HTTP DELETE (#15), mirroring [`Self::send_once`]'s shape
+    /// exactly so [`Self::send_with_retry`] can treat it identically — no
+    /// request body, unlike [`Self::send_post_once`]/[`Self::send_repost_once`].
+    fn send_delete_once(&self, url: &str) -> Result<(u16, String, RateLimitState)> {
+        let mut response = self
+            .agent
+            .delete(url)
+            .header("Authorization", format!("Bearer {}", self.bearer_token))
+            .call()
+            .with_context(|| format!("request to {url} failed"))?;
+
+        let header = |name: &str| -> Option<String> {
+            response
+                .headers()
+                .get(name)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string)
+        };
+        let state = rate_limit::parse_headers(
+            header("x-rate-limit-limit").as_deref(),
+            header("x-rate-limit-remaining").as_deref(),
+            header("x-rate-limit-reset").as_deref(),
+        );
+
+        let status = response.status().as_u16();
+        let body = response
+            .body_mut()
+            .read_to_string()
+            .context("could not read the response body")?;
+        Ok((status, body, state))
+    }
+
+    /// One raw HTTP POST for `POST /2/users/:id/retweets` (#15), mirroring
+    /// [`Self::send_post_once`]'s shape but serializing [`RepostRequest`]
+    /// instead of [`PostTweetRequest`] — kept as its own method rather than
+    /// parameterizing [`Self::send_post_once`] over the body type, since the
+    /// two request shapes belong to unrelated endpoints and the duplication
+    /// here is a handful of lines, not the retry/rate-limit logic #15
+    /// actually needs shared (that lives in [`Self::send_with_retry`], used
+    /// identically by both).
+    fn send_repost_once(
+        &self,
+        url: &str,
+        source_tweet_id: &str,
+    ) -> Result<(u16, String, RateLimitState)> {
+        let mut response = self
+            .agent
+            .post(url)
+            .header("Authorization", format!("Bearer {}", self.bearer_token))
+            .send_json(RepostRequest {
+                tweet_id: source_tweet_id,
+            })
+            .with_context(|| format!("request to {url} failed"))?;
+
+        let header = |name: &str| -> Option<String> {
+            response
+                .headers()
+                .get(name)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string)
+        };
+        let state = rate_limit::parse_headers(
+            header("x-rate-limit-limit").as_deref(),
+            header("x-rate-limit-remaining").as_deref(),
+            header("x-rate-limit-reset").as_deref(),
+        );
+
+        let status = response.status().as_u16();
+        let body = response
+            .body_mut()
+            .read_to_string()
+            .context("could not read the response body")?;
+        Ok((status, body, state))
+    }
+
     /// Resolve a screen name to the numeric user id the timeline endpoint needs.
     pub(crate) fn user_id_by_username(
         &self,
@@ -342,6 +427,45 @@ impl XClient {
         self.post(paths, Endpoint::CreatePost, &url, text, now)?;
         Ok(())
     }
+
+    /// `POST /2/users/:id/retweets` (#15) — repost `source_tweet_id` as
+    /// `user_id` (the signed-in account's own id, from `/me` — #11).
+    /// Tracked under its own `Endpoint::CreateRepost` (#10): X limits
+    /// creating a repost separately from every other endpoint, so sharing a
+    /// bucket with any of them would corrupt the tracked state for both.
+    /// Returns nothing on success — `repost::create` decides what to
+    /// persist from whether this call succeeded or, on a recognized
+    /// conflict, from `repost::reconcile_from_error`.
+    pub(crate) fn create_repost(
+        &self,
+        paths: &Paths,
+        user_id: &str,
+        source_tweet_id: &str,
+        now: i64,
+    ) -> Result<()> {
+        let url = create_repost_url(user_id);
+        Self::send_with_retry(paths, Endpoint::CreateRepost, now, || {
+            self.send_repost_once(&url, source_tweet_id)
+        })?;
+        Ok(())
+    }
+
+    /// `DELETE /2/users/:id/retweets/:source_tweet_id` (#15) — undo a
+    /// repost. Tracked under its own `Endpoint::DeleteRepost` (#10),
+    /// independent of `CreateRepost`: X limits create and delete
+    /// separately, and #18's usage tracking needs independent counts for
+    /// the same reason.
+    pub(crate) fn delete_repost(
+        &self,
+        paths: &Paths,
+        user_id: &str,
+        source_tweet_id: &str,
+        now: i64,
+    ) -> Result<()> {
+        let url = delete_repost_url(user_id, source_tweet_id);
+        self.delete(paths, Endpoint::DeleteRepost, &url, now)?;
+        Ok(())
+    }
 }
 
 /// Whether a status is worth retrying: server-side (5xx) failures only.
@@ -427,6 +551,20 @@ fn tweets_by_id_url(id: &str) -> String {
 /// `POST /2/tweets` (#14) — no query string, unlike every `GET` above.
 fn create_post_url() -> String {
     format!("{API_BASE}/tweets")
+}
+
+/// `POST /2/users/:id/retweets` (#15) — `user_id` is the signed-in
+/// account's own id (`/me`, #11); the target post's id travels in the JSON
+/// body ([`RepostRequest`]), not the URL.
+fn create_repost_url(user_id: &str) -> String {
+    format!("{API_BASE}/users/{user_id}/retweets")
+}
+
+/// `DELETE /2/users/:id/retweets/:source_tweet_id` (#15) — the only
+/// endpoint in this crate where the *acted-on* resource's own id is a URL
+/// path segment rather than a query parameter or JSON body field.
+fn delete_repost_url(user_id: &str, source_tweet_id: &str) -> String {
+    format!("{API_BASE}/users/{user_id}/retweets/{source_tweet_id}")
 }
 
 /// Pull the API's own error text out of a response body, if it has any.
@@ -523,6 +661,22 @@ mod tests {
         // #14: unlike every GET above, POST /2/tweets takes no query
         // parameters — the post text travels in the JSON body instead.
         assert_eq!(create_post_url(), "https://api.x.com/2/tweets");
+    }
+
+    #[test]
+    fn builds_the_create_repost_url() {
+        assert_eq!(
+            create_repost_url("2244994945"),
+            "https://api.x.com/2/users/2244994945/retweets"
+        );
+    }
+
+    #[test]
+    fn builds_the_delete_repost_url_with_the_source_tweet_id_as_a_path_segment() {
+        assert_eq!(
+            delete_repost_url("2244994945", "1700000000000000001"),
+            "https://api.x.com/2/users/2244994945/retweets/1700000000000000001"
+        );
     }
 
     #[test]

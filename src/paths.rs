@@ -119,6 +119,19 @@ impl Paths {
         self.state_dir.join("usage.json")
     }
 
+    /// Path to the local record of post ids the signed-in user has reposted
+    /// from this app, under `state_dir` (#15). State, not cache: the X API
+    /// v2 timeline response carries no field for "did I repost this" (no
+    /// v1.1-style `retweeted`), so this file is the *only* source of truth
+    /// twigpui has for the repost button's initial state — unlike a lost
+    /// cache entry, which just costs a slower cold start, losing this file
+    /// means every post reposted before the loss shows as "not reposted"
+    /// again, risking a duplicate repost on the next click (recoverable via
+    /// #15's own error-reconciliation, but not silently harmless).
+    pub(crate) fn reposted_posts_file(&self) -> PathBuf {
+        self.state_dir.join("reposted_posts.json")
+    }
+
     /// Create all three directories (recursively) if they do not already
     /// exist.
     ///
@@ -368,6 +381,15 @@ mod tests {
         assert_eq!(
             paths.usage_file(),
             PathBuf::from("/home/alice/.local/state/twigpui/usage.json")
+        );
+    }
+
+    #[test]
+    fn reposted_posts_file_is_under_the_state_dir() {
+        let paths = Paths::from_vars(vars(&[("HOME", "/home/alice")])).unwrap();
+        assert_eq!(
+            paths.reposted_posts_file(),
+            PathBuf::from("/home/alice/.local/state/twigpui/reposted_posts.json")
         );
     }
 
