@@ -68,6 +68,96 @@ The `macos-blade` feature is enabled so the build does not need `xcrun metal`,
 which ships with full Xcode rather than the Command Line Tools. Rendering goes
 through blade instead.
 
+## Building the `.app` bundle (#40)
+
+`cargo run` only opens a window from a terminal, in this checkout. For
+something Spotlight, Launchpad, and the Dock can all see:
+
+```sh
+./scripts/build-app-bundle.sh
+```
+
+This builds a release binary, assembles `dist/twigpui.app`, writes an
+`Info.plist` (bundle id, name, executable, package type,
+`NSHighResolutionCapable`, and `CFBundleVersion` /
+`CFBundleShortVersionString` read straight from `Cargo.toml`'s `version` via
+`cargo metadata` — never hand-duplicated), and signs it ad hoc
+(`codesign -s -`). Ad-hoc signing only, per this project's non-goals
+(macOS-only, development use — no notarization, no Developer ID): it exists
+solely so Gatekeeper doesn't refuse a bundle built on your own machine, not
+to make it distributable. Move the result wherever you like, e.g.:
+
+```sh
+mv dist/twigpui.app /Applications/
+```
+
+**Icon.** The script looks for `assets/AppIcon.icns` (used as-is) or
+`assets/AppIcon.png` (a 1024×1024 source it turns into a full `.icns` via
+`sips`/`iconutil`). Neither exists in this repository — producing real
+artwork wasn't practical without a design tool — so a bundle built as-is has
+no `CFBundleIconFile` and macOS shows it with the generic app icon rather
+than a dangling reference to a file that isn't there. Drop either file into
+`assets/` and rebuild to get a custom one.
+
+### Configuration for a bundled launch — read this before double-clicking
+
+**A process launched from Finder, Spotlight, or the Dock does not inherit
+your shell's environment**, and its working directory is not this
+checkout — so `X_OAUTH_CLIENT_ID`, `X_TARGET_USERNAME`, and friends being
+exported in your shell profile, or sitting in this repo's `.env`, has no
+effect on a bundled launch. Two things follow:
+
+- **`oauth_client_id`** is non-secret (see "`config.toml`" below) and
+  already works from `$XDG_CONFIG_HOME/twigpui/config.toml` (default
+  `~/.config/twigpui/config.toml`) regardless of how twigpui is started —
+  `HOME` is set for every process launchd starts on your behalf, which is
+  all `Paths::from_env` needs (`XDG_*` being unset just falls back to the
+  same defaults a terminal launch with no `XDG_*` exported would use). Put
+  your client id there and "Sign in with X" works from the bundle with zero
+  environment setup. Once signed in, the session persists to
+  `$XDG_STATE_HOME/twigpui/oauth_tokens.json` and needs no environment
+  variable on the next bundled launch either.
+- **`X_BEARER_TOKEN` cannot go in `config.toml`.** It's a secret, and
+  `config.toml` is a plain file people check into dotfiles repos — putting a
+  bearer token there is rejected with an explicit error rather than silently
+  accepted. If you only have a bearer token and no OAuth client id, a
+  bundled launch genuinely has no dotfiles-safe place left to read it from.
+  The workaround is `launchctl setenv X_BEARER_TOKEN '…'`, which injects it
+  into every GUI app's environment for the rest of the login session (not
+  just twigpui's, and not persisted across logout or reboot) — or keep
+  running the plain binary from a terminal, where `.env` and the shell
+  environment still apply. The clean fix is signing in with OAuth instead,
+  which needs nothing but the client id above; #33 tracks retiring the
+  bearer token entirely, which this issue does not implement.
+- **A missing or invalid configuration now names where to look.**
+  Previously, a configuration error before the window opened only printed
+  to stderr — which a bundled launch has no terminal to show, so the
+  process just silently exited. It now also raises a native alert
+  (`osascript … display alert`) that names the resolved `config.toml` path,
+  whenever stderr isn't a terminal.
+
+### What a bundled launch changes, and what it doesn't
+
+- **The OAuth loopback listener** binds `127.0.0.1:8733` the same way
+  whether twigpui is bundled or not — nothing in `oauth::callback` depends
+  on the current working directory or the shell environment, only on the
+  port being free. macOS may still prompt ("twigpui would like to accept
+  incoming network connections") the first time a *newly signed* binary
+  binds a listening socket, and since ad-hoc-signed builds get a fresh
+  signing identity on every rebuild (the same reason Keychain isn't used for
+  token storage — see "Where tokens are stored" below), that prompt can
+  reappear after each rebuild rather than being remembered once and for all.
+- **`macos-blade` and WindowServer.** A bundled `.app` launched by
+  Finder/Dock/Spotlight has a normal user WindowServer session, the same as
+  a binary launched from Terminal.app — nothing about being bundled changes
+  that connection. This could not be verified from the environment that
+  wrote this bundling script: it runs under a sandbox with no WindowServer
+  access (`gpui` panics there with `NoSupportedDeviceFound` even for
+  `cargo run`), so building `dist/twigpui.app` and inspecting its layout,
+  `Info.plist`, and code signature was possible, but actually launching it
+  was not. A human double-clicking the built `.app` is the only way to
+  confirm the window opens.
+
 ## Why the single-user fallback exists
 
 `GET /2/users/:id/timelines/reverse_chronological` (the home timeline) only
