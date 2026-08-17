@@ -29,7 +29,11 @@ const USER_ID_TTL_SECONDS: i64 = 30 * 24 * 60 * 60;
 /// Per-user cap on how many cached posts are kept, oldest dropped first.
 /// `~/.cache` is not purged automatically by macOS the way `~/Library/Caches`
 /// is, so without this an actively reloaded user's cache would grow forever.
-const MAX_CACHED_POSTS: usize = 500;
+///
+/// `ui.rs` reads this too: at the cap, [`append_older`] would throw away
+/// everything a "Load older" request bought, so the button has to be
+/// withheld rather than left to spend credits for nothing.
+pub(crate) const MAX_CACHED_POSTS: usize = 500;
 
 /// One cached screen-name → user-id mapping.
 #[derive(Debug, Clone, Serialize, Deserialize)]

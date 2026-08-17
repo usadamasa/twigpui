@@ -562,11 +562,22 @@ impl TimelineView {
             TimelineState::Loaded(items) => content
                 .children(items.iter().map(|item| post_row(item, theme)))
                 // #11: only offered once a response has actually carried a
-                // `meta.next_token` to resume from.
+                // `meta.next_token` to resume from, and only while there is
+                // room under the cap for the page it would fetch.
                 .when(
                     offers_load_older(self.next_page_token.as_deref(), &self.state),
                     |list| list.child(load_older_row(theme, cx)),
-                ),
+                )
+                .when(at_the_post_cap(&self.state), |list| {
+                    list.child(notice(
+                        format!(
+                            "Showing the most recent {} posts — that is as far back as \
+                             twigpui keeps.",
+                            cache::MAX_CACHED_POSTS
+                        ),
+                        theme.text_muted,
+                    ))
+                }),
         }
     }
 }
@@ -730,8 +741,26 @@ fn header_title(
 /// Whether the header should offer a "Load older" button (#11): only once a
 /// response has actually carried a `meta.next_token` to resume from, and
 /// only while the timeline is in a state where clicking it makes sense.
+///
+/// Withheld at the post cap, which is the part that matters for money.
+/// `cache::append_older` truncates back down to `MAX_CACHED_POSTS`, so at the
+/// cap a click would spend a real API request and then discard every post it
+/// bought — a paid no-op, in a project whose entire cache exists to avoid
+/// exactly that. [`at_the_post_cap`] renders an explanation in its place so
+/// the button does not just silently vanish.
 fn offers_load_older(next_page_token: Option<&str>, state: &TimelineState) -> bool {
-    next_page_token.is_some() && matches!(state, TimelineState::Loaded(_))
+    match state {
+        TimelineState::Loaded(items) => {
+            next_page_token.is_some() && items.len() < cache::MAX_CACHED_POSTS
+        }
+        _ => false,
+    }
+}
+
+/// Whether the loaded timeline has hit the cap that [`offers_load_older`]
+/// stops at, so the body can say why there is nothing further back.
+fn at_the_post_cap(state: &TimelineState) -> bool {
+    matches!(state, TimelineState::Loaded(items) if items.len() >= cache::MAX_CACHED_POSTS)
 }
 
 /// Whether [`TimelineView::reload`] should refuse to run right now, per
@@ -766,8 +795,9 @@ fn format_timestamp(created_at: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        Cooldown, TimelineSource, TimelineState, byline, cooldown_label, format_timestamp,
-        header_title, offers_load_older, offers_sign_in, reload_cooldown,
+        Cooldown, TimelineItem, TimelineSource, TimelineState, at_the_post_cap, byline,
+        cooldown_label, format_timestamp, header_title, offers_load_older, offers_sign_in,
+        reload_cooldown,
     };
 
     #[test]
@@ -864,6 +894,32 @@ mod tests {
     #[test]
     fn does_not_offer_load_older_without_a_next_page_token() {
         assert!(!offers_load_older(None, &TimelineState::Loaded(Vec::new())));
+    }
+
+    #[test]
+    fn does_not_offer_load_older_at_the_post_cap() {
+        // `cache::append_older` truncates back to the cap, so a click here
+        // would spend a real API request and discard everything it bought.
+        let full: Vec<_> = (0..crate::cache::MAX_CACHED_POSTS)
+            .map(|n| TimelineItem {
+                id: n.to_string(),
+                text: String::new(),
+                created_at: None,
+                author_name: String::new(),
+                author_username: String::new(),
+            })
+            .collect();
+        let state = TimelineState::Loaded(full);
+
+        assert!(!offers_load_older(Some("cursor-abc"), &state));
+        // ...and the body explains itself rather than the button just
+        // disappearing.
+        assert!(at_the_post_cap(&state));
+    }
+
+    #[test]
+    fn is_not_at_the_post_cap_below_it() {
+        assert!(!at_the_post_cap(&TimelineState::Loaded(Vec::new())));
     }
 
     #[test]
