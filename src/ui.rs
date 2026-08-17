@@ -1,8 +1,12 @@
 use std::collections::HashMap;
 
-use gpui::{AnyElement, Context, FontWeight, SharedString, Task, Window, div, prelude::*, rgb};
+use gpui::{
+    AnyElement, Context, FocusHandle, FontWeight, KeyDownEvent, SharedString, Task, Window, div,
+    prelude::*, rgb,
+};
 
 use crate::cache;
+use crate::compose::{self, ComposeState, ComposeStatus};
 use crate::config::Config;
 use crate::oauth::{self, TimelineSource};
 use crate::paths::Paths;
@@ -141,6 +145,27 @@ pub(crate) struct TimelineView {
     /// `fetch`'s cancel-on-drop contract: dropping the view cancels every
     /// still-running walk along with it.
     thread_fetches: HashMap<String, Task<()>>,
+    /// The post composer's draft text and submit status (#14) — see
+    /// `compose.rs`'s module doc for why this is its own pure type rather
+    /// than fields scattered across this struct.
+    compose: ComposeState,
+    /// Focus target for the composer's key-capture draft area — see
+    /// [`Self::handle_compose_key`]'s doc for what "key-capture" means here
+    /// and its limits (no IME composition, no cursor, no selection).
+    compose_focus: FocusHandle,
+    /// Holding this keeps an in-flight `POST /2/tweets` alive, mirroring
+    /// `fetch`'s cancel-on-drop contract. In practice this is only ever
+    /// assigned once per submit cycle: [`ComposeState::can_submit`] is
+    /// false for the entire time one is outstanding, and it's checked
+    /// synchronously at the top of [`Self::submit_post`] before anything
+    /// here is touched — see that method's doc for why that's what actually
+    /// rules out a second submission reaching this field at all.
+    submit_task: Option<Task<()>>,
+    /// The signed-in session's granted scope, mirrored from the resolved
+    /// credential (#14) — `None` for a bearer credential or an OAuth
+    /// session whose scope wasn't recorded. Feeds [`offers_reauthorize`]
+    /// and [`Self::submit_post`]'s own scope check.
+    oauth_scope: Option<String>,
 }
 
 impl TimelineView {
@@ -172,6 +197,10 @@ impl TimelineView {
             next_page_token: None,
             threads: HashMap::new(),
             thread_fetches: HashMap::new(),
+            compose: ComposeState::new(),
+            compose_focus: cx.focus_handle(),
+            submit_task: None,
+            oauth_scope: None,
         };
         this.start(cx);
         this
@@ -223,6 +252,7 @@ impl TimelineView {
                 }
                 Ok(StartOutcome::SingleUser { credential, cached }) => {
                     this.signed_in_with_oauth = credential.is_oauth();
+                    this.oauth_scope = credential.scope().map(str::to_string);
                     this.source = Some(TimelineSource::SingleUser);
                     this.client = Some(XClient::new(credential.token().to_string()));
                     match cached {
@@ -235,6 +265,7 @@ impl TimelineView {
                 }
                 Ok(StartOutcome::Home { credential, cached }) => {
                     this.signed_in_with_oauth = credential.is_oauth();
+                    this.oauth_scope = credential.scope().map(str::to_string);
                     this.source = Some(TimelineSource::Home);
                     this.client = Some(XClient::new(credential.token().to_string()));
                     match cached {
@@ -497,6 +528,10 @@ impl TimelineView {
             let _ = this.update(cx, |this, cx| match result {
                 Ok(tokens) => {
                     this.signed_in_with_oauth = true;
+                    // #14: the freshly granted scope — this is what makes
+                    // `offers_reauthorize` stop offering the button right
+                    // after a successful re-authorization.
+                    this.oauth_scope.clone_from(&tokens.scope);
                     // #11: a stored OAuth session always maps to the home
                     // timeline — see `TimelineSource::for_credential`.
                     this.source = Some(TimelineSource::Home);
@@ -511,6 +546,220 @@ impl TimelineView {
         }));
 
         cx.notify();
+    }
+
+    /// Key handling for the composer's draft area (#14).
+    ///
+    /// gpui 0.2.2 has no ready-made text-input element — the only text-entry
+    /// primitive it ships is [`gpui::EntityInputHandler`], the raw
+    /// IME/cursor/selection protocol a real widget would implement (see the
+    /// crate's own `examples/input.rs`, ~750 lines, for what that actually
+    /// takes: a custom `Element` with paint-time cursor/selection
+    /// rendering, an action/keybinding table, and the full
+    /// `replace_and_mark_text_in_range` marked-text dance macOS's IME talks
+    /// to `NSTextInputClient` through). Building that from scratch is out
+    /// of proportion for what #14 needs, so this instead reads
+    /// [`gpui::Keystroke`] straight off `on_key_down`: `key_char` (when the
+    /// OS hands one back — see `platform/mac/events.rs::parse_keystroke`)
+    /// is appended to the draft, and `"backspace"` pops the last character.
+    ///
+    /// **What this does not support**, as a direct consequence of skipping
+    /// `EntityInputHandler`: no multi-keystroke IME composition (typing
+    /// Japanese/Chinese/Korean through a system input method — the OS talks
+    /// to the marked-text protocol, not raw key events, for that), no
+    /// cursor positioning or mid-string editing (characters only ever
+    /// append/pop at the end), and no text selection or copy/paste. It is
+    /// enough to type and correct a short draft one character at a time;
+    /// it is not a real text field.
+    fn handle_compose_key(
+        &mut self,
+        event: &KeyDownEvent,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if self.compose.is_submitting() {
+            // Refuse to mutate the draft while a submit is in flight, for
+            // the same reason the submit button itself is disabled — see
+            // `ComposeState::can_submit`'s doc.
+            return;
+        }
+
+        if event.keystroke.key == "backspace" {
+            let mut text = self.compose.text().to_string();
+            text.pop();
+            self.compose.set_text(text);
+            cx.notify();
+            return;
+        }
+
+        if let Some(input) = &event.keystroke.key_char {
+            let mut text = self.compose.text().to_string();
+            text.push_str(input);
+            self.compose.set_text(text);
+            cx.notify();
+        }
+    }
+
+    /// The post composer (#14): a key-capture draft area, character
+    /// counter, and submit button. Shown whenever the session is signed in
+    /// with OAuth — see [`Render::render`]'s doc on why a missing
+    /// `tweet.write` scope doesn't hide this entirely.
+    fn composer(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        let theme = self.theme;
+        let text = self.compose.text().to_string();
+        let length = compose::weighted_length(&text);
+        let over_limit = length > compose::MAX_WEIGHTED_LENGTH;
+        let can_submit = self.compose.can_submit();
+        let counter_color = if over_limit {
+            theme.danger
+        } else {
+            theme.text_muted
+        };
+
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .px_4()
+            .py_3()
+            .border_b_1()
+            .border_color(rgb(theme.border))
+            .child(
+                div()
+                    .id("compose-input")
+                    .track_focus(&self.compose_focus)
+                    .min_h(gpui::px(64.0))
+                    .p_2()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(rgb(theme.border))
+                    .bg(rgb(theme.bg_header))
+                    .text_color(rgb(theme.text))
+                    .on_key_down(cx.listener(Self::handle_compose_key))
+                    .on_click(cx.listener(|this, _event, window, _cx| {
+                        window.focus(&this.compose_focus);
+                    }))
+                    .child(if text.is_empty() {
+                        div()
+                            .text_color(rgb(theme.text_muted))
+                            .child("What's happening?")
+                            .into_any_element()
+                    } else {
+                        div().child(text.clone()).into_any_element()
+                    }),
+            )
+            .when_some(
+                compose_error_message(self.compose.status()),
+                |column, message| column.child(div().text_color(rgb(theme.danger)).child(message)),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_color(rgb(counter_color))
+                            .child(format!("{length}/{}", compose::MAX_WEIGHTED_LENGTH)),
+                    )
+                    .child(
+                        div()
+                            .id("compose-submit")
+                            .px_3()
+                            .py_1()
+                            .rounded_full()
+                            .bg(rgb(if can_submit {
+                                theme.accent
+                            } else {
+                                theme.button_busy_bg
+                            }))
+                            .text_color(rgb(theme.button_label))
+                            .child(if self.compose.is_submitting() {
+                                "Posting…"
+                            } else {
+                                "Post"
+                            })
+                            // #14's double-submit guard, part two: while a
+                            // submit is in flight (or the draft is blank/
+                            // over-length) the button carries no click
+                            // handler at all, not just a disabled-looking
+                            // style — `submit_post` re-checks the same
+                            // condition regardless, but this is what stops
+                            // the click from ever reaching it.
+                            .when(can_submit, |button| {
+                                button.on_click(
+                                    cx.listener(|this, _event, _window, cx| this.submit_post(cx)),
+                                )
+                            }),
+                    ),
+            )
+    }
+
+    /// Submit the composer's current draft as a new post (#14).
+    ///
+    /// Refuses to do anything — without spawning a task or touching the
+    /// network — unless [`ComposeState::can_submit`] says yes. This is
+    /// also what rules out a double submit: `can_submit` depends on
+    /// `compose.status`, and the very next statement below (once every
+    /// guard has passed) sets that status to `Submitting` *synchronously*,
+    /// before this function returns to gpui's event loop or yields to the
+    /// background executor via `cx.spawn`. gpui runs one click handler to
+    /// completion before dispatching the next input event, so a second
+    /// click — however fast — calls `submit_post` again only after this
+    /// one has already returned, by which point `can_submit` is false and
+    /// the function returns immediately at the top. No task is spawned, and
+    /// `submit_task` is never overwritten mid-flight.
+    ///
+    /// The scope check below is deliberately not part of `ComposeState`:
+    /// that type only knows about the draft *text*, not the session's
+    /// OAuth scope, so a missing `tweet.write` is refused here — before
+    /// spending a request that's guaranteed to 403 — via
+    /// `ComposeState::refuse` rather than `can_submit`. The header's
+    /// "Re-authorize" button (see `offers_reauthorize`) is the actual fix.
+    fn submit_post(&mut self, cx: &mut Context<'_, Self>) {
+        if !self.compose.can_submit() {
+            return;
+        }
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        if !oauth::tokens::has_scope(
+            self.oauth_scope.as_deref(),
+            oauth::tokens::TWEET_WRITE_SCOPE,
+        ) {
+            self.compose.refuse(
+                "This session can't post yet — click \"Re-authorize\" above first.".to_string(),
+            );
+            cx.notify();
+            return;
+        }
+
+        self.compose.start_submitting();
+        cx.notify();
+
+        let paths = self.paths.clone();
+        let text = self.compose.text().to_string();
+
+        self.submit_task = Some(cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { client.create_post(&paths, &text, oauth::unix_now()) })
+                .await;
+
+            let _ = this.update(cx, |this, cx| {
+                let succeeded = result.is_ok();
+                this.compose
+                    .apply_result(result.map_err(|error| format!("{error:#}")));
+                if succeeded {
+                    // A successful post changes the timeline, so fall into
+                    // a normal reload — subject to #10's own interval limit
+                    // like any other reload, never a special-cased extra
+                    // fetch.
+                    this.reload(cx);
+                }
+                cx.notify();
+            });
+        }));
     }
 
     fn header(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
@@ -577,6 +826,30 @@ impl TimelineView {
                                     .border_color(rgb(theme.accent))
                                     .text_color(rgb(theme.accent))
                                     .child("Sign in with X")
+                                    .on_click(
+                                        cx.listener(|this, _event, _window, cx| this.sign_in(cx)),
+                                    ),
+                            )
+                        },
+                    )
+                    // #14: an already-signed-in session from before #14
+                    // holds no `tweet.write` scope — #31's exact lesson
+                    // repeats here (an already-active session hides its own
+                    // upgrade path) unless this stays reachable regardless
+                    // of what the primary button currently says.
+                    .when(
+                        offers_reauthorize(self.signed_in_with_oauth, self.oauth_scope.as_deref()),
+                        |row| {
+                            row.child(
+                                div()
+                                    .id("reauthorize")
+                                    .px_3()
+                                    .py_1()
+                                    .rounded_full()
+                                    .border_1()
+                                    .border_color(rgb(theme.accent))
+                                    .text_color(rgb(theme.accent))
+                                    .child("Re-authorize")
                                     .on_click(
                                         cx.listener(|this, _event, _window, cx| this.sign_in(cx)),
                                     ),
@@ -808,6 +1081,14 @@ impl Render for TimelineView {
             .text_color(rgb(theme.text))
             .text_sm()
             .child(self.header(cx))
+            // #14: posting requires OAuth regardless of scope — a missing
+            // `tweet.write` scope is caught inside `submit_post` itself
+            // (with the header's "Re-authorize" button as the fix), rather
+            // than hiding the whole composer and leaving no way to
+            // discover why it's gone.
+            .when(self.signed_in_with_oauth, |column| {
+                column.child(self.composer(cx))
+            })
             .child(self.body(cx))
     }
 }
@@ -993,6 +1274,16 @@ fn cooldown_label(cooldown: Cooldown, reset_at: i64, now: i64) -> String {
     }
 }
 
+/// The composer's error line, if its status has one to show (#14) — `None`
+/// for `Idle`/`Submitting`, so the composer renders no extra row in either
+/// of those states.
+fn compose_error_message(status: &ComposeStatus) -> Option<SharedString> {
+    match status {
+        ComposeStatus::Failed(message) => Some(SharedString::from(message.clone())),
+        ComposeStatus::Idle | ComposeStatus::Submitting => None,
+    }
+}
+
 /// Whether the header should offer a separate "Sign in with X" button (#31).
 ///
 /// True only when signing in is both possible and would change something: a
@@ -1012,6 +1303,20 @@ fn offers_sign_in(
         state,
         TimelineState::NotAuthenticated | TimelineState::SigningIn
     )
+}
+
+/// Whether the header should offer to re-authorize (#14): the session is
+/// already an OAuth one — `offers_sign_in` already covers "not OAuth at
+/// all" — but its recorded scope doesn't include what posting needs.
+/// Mirrors `offers_sign_in`'s shape rather than folding into it: the two
+/// affordances are mutually exclusive by construction (this requires
+/// `signed_in_with_oauth`, `offers_sign_in` requires its opposite) and read
+/// differently ("Sign in" vs "Re-authorize") — #31's actual lesson was
+/// "don't hide the affordance", not "there must be only one button".
+fn offers_reauthorize(signed_in_with_oauth: bool, oauth_scope: Option<&str>) -> bool {
+    // Stub for the TDD red phase.
+    let _ = (signed_in_with_oauth, oauth_scope);
+    false
 }
 
 /// Map a failed reload/load-older's error to the state that should show it —
@@ -1114,10 +1419,10 @@ fn format_timestamp(created_at: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        Cooldown, RepliedTo, ThreadFetchState, TimelineItem, TimelineSource, TimelineState,
-        at_the_post_cap, byline, cooldown_label, format_timestamp, header_title, offers_load_older,
-        offers_sign_in, reload_cooldown, reply_banner_label, repost_banner_label,
-        thread_action_label,
+        ComposeStatus, Cooldown, RepliedTo, ThreadFetchState, TimelineItem, TimelineSource,
+        TimelineState, at_the_post_cap, byline, compose_error_message, cooldown_label,
+        format_timestamp, header_title, offers_load_older, offers_reauthorize, offers_sign_in,
+        reload_cooldown, reply_banner_label, repost_banner_label, thread_action_label,
     };
 
     #[test]
@@ -1170,6 +1475,60 @@ mod tests {
             false,
             &TimelineState::SigningIn
         ));
+    }
+
+    // --- offers_reauthorize (#14) ---
+
+    #[test]
+    fn offers_reauthorize_when_signed_in_with_oauth_but_missing_the_write_scope() {
+        // #14: the exact scenario #7's originally-minimal scope request
+        // creates — a real, working OAuth session that simply can't post.
+        assert!(offers_reauthorize(
+            true,
+            Some("tweet.read users.read offline.access")
+        ));
+    }
+
+    #[test]
+    fn offers_reauthorize_when_the_scope_was_never_recorded() {
+        // A pre-#14 token: "unknown" is treated the same as "insufficient".
+        assert!(offers_reauthorize(true, None));
+    }
+
+    #[test]
+    fn does_not_offer_reauthorize_once_the_write_scope_is_granted() {
+        assert!(!offers_reauthorize(
+            true,
+            Some("tweet.read tweet.write offline.access")
+        ));
+    }
+
+    #[test]
+    fn does_not_offer_reauthorize_without_an_oauth_session() {
+        // Not signed in with OAuth at all — `offers_sign_in` is the
+        // relevant affordance here, not this one.
+        assert!(!offers_reauthorize(false, None));
+    }
+
+    // --- compose_error_message (#14) ---
+
+    #[test]
+    fn compose_error_message_is_none_while_idle() {
+        assert_eq!(compose_error_message(&ComposeStatus::Idle), None);
+    }
+
+    #[test]
+    fn compose_error_message_is_none_while_submitting() {
+        assert_eq!(compose_error_message(&ComposeStatus::Submitting), None);
+    }
+
+    #[test]
+    fn compose_error_message_surfaces_a_failed_submits_message() {
+        let status = ComposeStatus::Failed("network error".to_string());
+        assert_eq!(
+            compose_error_message(&status).map(|message| message.to_string()),
+            Some("network error".to_string())
+        );
     }
 
     #[test]

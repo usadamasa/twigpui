@@ -3,6 +3,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 mod cache;
+mod compose;
 mod config;
 mod oauth;
 mod paths;

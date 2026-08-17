@@ -127,8 +127,14 @@ fn request_token(form: &[(&str, &str)]) -> Result<TokenResponse> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Credential {
     /// A user-context access token from a stored (or just-refreshed) OAuth
-    /// session.
-    OAuth(String),
+    /// session, plus the scope X granted it (#14). `scope: None` means
+    /// unrecorded/unknown — a pre-#14 token, or one whose token-endpoint
+    /// response carried no `scope` at all — which `tokens::has_scope`
+    /// treats as insufficient for anything scope-gated.
+    OAuth {
+        token: String,
+        scope: Option<String>,
+    },
     /// The app-only bearer token from configuration.
     Bearer(String),
 }
@@ -136,14 +142,25 @@ pub(crate) enum Credential {
 impl Credential {
     pub(crate) fn token(&self) -> &str {
         match self {
-            Self::OAuth(token) | Self::Bearer(token) => token,
+            Self::OAuth { token, .. } | Self::Bearer(token) => token,
         }
     }
 
     /// Whether this is a user-context credential. `false` means the app is
     /// running app-only and signing in would strictly widen what it can do.
     pub(crate) fn is_oauth(&self) -> bool {
-        matches!(self, Self::OAuth(_))
+        matches!(self, Self::OAuth { .. })
+    }
+
+    /// The granted scope for an OAuth session — `None` for a bearer
+    /// credential (meaningless there) or an OAuth session whose scope
+    /// wasn't recorded. `ui.rs` feeds this to `tokens::has_scope` to decide
+    /// whether to offer re-authorization (#14).
+    pub(crate) fn scope(&self) -> Option<&str> {
+        match self {
+            Self::OAuth { scope, .. } => scope.as_deref(),
+            Self::Bearer(_) => None,
+        }
     }
 }
 
@@ -184,13 +201,25 @@ pub(crate) fn resolve_credential(
 ) -> Result<Option<Credential>> {
     if let Some(stored) = tokens::load(paths)? {
         if !stored.needs_refresh(now) {
-            return Ok(Some(Credential::OAuth(stored.access_token)));
+            return Ok(Some(Credential::OAuth {
+                token: stored.access_token,
+                scope: stored.scope,
+            }));
         }
         if let (Some(client_id), Some(refresh)) = (&config.oauth_client_id, &stored.refresh_token) {
             let response = refresh_access_token(client_id, refresh)?;
-            let refreshed = TokenSet::from_response(response, now);
+            let mut refreshed = TokenSet::from_response(response, now);
+            // RFC 6749 §5.1 lets the token endpoint omit `scope` on a
+            // refresh when it's unchanged from what's already granted —
+            // `carried_scope` is what keeps a working `tweet.write` session
+            // from silently reverting to "unknown" (and spuriously reviving
+            // the re-authorize banner) on every routine refresh.
+            refreshed.scope = carried_scope(refreshed.scope, stored.scope.as_deref());
             tokens::save(paths, &refreshed)?;
-            return Ok(Some(Credential::OAuth(refreshed.access_token)));
+            return Ok(Some(Credential::OAuth {
+                token: refreshed.access_token,
+                scope: refreshed.scope,
+            }));
         }
         // Stale and unrefreshable (no client id configured, or X issued no
         // refresh token) — fall through to the bearer token rather than
@@ -198,6 +227,19 @@ pub(crate) fn resolve_credential(
     }
 
     Ok(config.bearer_token.clone().map(Credential::Bearer))
+}
+
+/// What scope to persist across a refresh (#14): the freshly-returned scope
+/// if the token endpoint sent one, otherwise whatever was already recorded.
+/// Pure and tested directly rather than only through `resolve_credential`'s
+/// full path, since exercising the real refresh branch needs a live HTTP
+/// call this crate's tests never make (see the module doc).
+fn carried_scope(
+    _refreshed_scope: Option<String>,
+    _previous_scope: Option<&str>,
+) -> Option<String> {
+    // Stub for the TDD red phase — ignores the fallback entirely.
+    None
 }
 
 #[cfg(test)]
@@ -232,9 +274,52 @@ mod tests {
     #[test]
     fn timeline_source_is_home_for_an_oauth_credential() {
         assert_eq!(
-            TimelineSource::for_credential(&Credential::OAuth("token".into())),
+            TimelineSource::for_credential(&Credential::OAuth {
+                token: "token".into(),
+                scope: None
+            }),
             TimelineSource::Home
         );
+    }
+
+    #[test]
+    fn credential_scope_is_none_for_a_bearer_token() {
+        assert_eq!(Credential::Bearer("token".into()).scope(), None);
+    }
+
+    #[test]
+    fn credential_scope_reflects_the_oauth_sessions_recorded_scope() {
+        let credential = Credential::OAuth {
+            token: "token".into(),
+            scope: Some("tweet.read tweet.write".into()),
+        };
+        assert_eq!(credential.scope(), Some("tweet.read tweet.write"));
+    }
+
+    // --- carried_scope ---
+
+    #[test]
+    fn carried_scope_prefers_the_freshly_returned_scope() {
+        assert_eq!(
+            carried_scope(Some("tweet.read tweet.write".into()), Some("tweet.read")),
+            Some("tweet.read tweet.write".into())
+        );
+    }
+
+    #[test]
+    fn carried_scope_falls_back_to_the_previous_scope_when_the_refresh_omitted_it() {
+        // RFC 6749 §5.1: the token endpoint may omit `scope` on a refresh
+        // when unchanged — this must not silently downgrade a working
+        // `tweet.write` session back to "unknown".
+        assert_eq!(
+            carried_scope(None, Some("tweet.read tweet.write")),
+            Some("tweet.read tweet.write".into())
+        );
+    }
+
+    #[test]
+    fn carried_scope_is_none_when_neither_side_has_one() {
+        assert_eq!(carried_scope(None, None), None);
     }
 
     #[test]
@@ -256,13 +341,20 @@ mod tests {
                 access_token: "oauth-token".into(),
                 refresh_token: None,
                 expires_at: 1_000_000,
+                scope: Some("tweet.read tweet.write".into()),
             },
         )
         .unwrap();
 
         let config = test_config(Some("bearer-token"), None);
         let credential = resolve_credential(&config, &paths, 0).unwrap();
-        assert_eq!(credential, Some(Credential::OAuth("oauth-token".into())));
+        assert_eq!(
+            credential,
+            Some(Credential::OAuth {
+                token: "oauth-token".into(),
+                scope: Some("tweet.read tweet.write".into()),
+            })
+        );
 
         std::fs::remove_dir_all(&root).unwrap();
     }
@@ -279,6 +371,7 @@ mod tests {
                 access_token: "oauth-token".into(),
                 refresh_token: None,
                 expires_at: 0,
+                scope: None,
             },
         )
         .unwrap();
