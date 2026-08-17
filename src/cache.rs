@@ -18,6 +18,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::paths::Paths;
+use crate::thread::{self, ThreadChain};
 use crate::x_api::{TimelineItem, XClient};
 
 /// How long a cached screen-name → user-id mapping stays usable before a
@@ -422,6 +423,103 @@ pub(crate) fn load_older_home(
     Ok((items, next_token))
 }
 
+/// The whole contents of one [`Paths::thread_file`]: a cached parent chain
+/// for one reply (#12).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ThreadCacheFile {
+    fetched_at: i64,
+    chain: ThreadChain,
+}
+
+/// The cached parent chain for `reply_post_id`, if one is on file (#12).
+/// Unlike [`load_timeline`], there is no refresh path here at all — a
+/// thread's parents are immutable once posted (aside from deletion, which
+/// [`thread::assemble_chain`] already renders sensibly), so a cache hit is
+/// trusted forever, matching [`load_timeline`]'s own "no TTL" rule for
+/// materially the same reason.
+pub(crate) fn load_thread(paths: &Paths, reply_post_id: &str) -> Result<Option<ThreadChain>> {
+    // STUB (TDD red phase): always a miss.
+    let _ = (paths, reply_post_id);
+    Ok(None)
+}
+
+/// Persist `chain` as `reply_post_id`'s cached parent chain (#12).
+pub(crate) fn save_thread(
+    paths: &Paths,
+    reply_post_id: &str,
+    chain: &ThreadChain,
+    now: i64,
+) -> Result<()> {
+    let file = ThreadCacheFile {
+        fetched_at: now,
+        chain: chain.clone(),
+    };
+    save_json(&paths.thread_file(reply_post_id), &file)
+}
+
+/// Spend the credits "Show thread" (#12) is allowed to spend: if a chain for
+/// `reply_post_id` is already cached, render it for free; otherwise walk
+/// upward one `GET /2/tweets?ids=` request per level — starting from
+/// `first_parent_id` (the reply's own `TimelineItem::replied_to.post_id`,
+/// already known at zero request cost) — stopping at
+/// [`thread::MAX_THREAD_DEPTH`] levels or the first missing/absent parent,
+/// then cache and return the assembled result.
+///
+/// The loop below checks the depth cap *before* each fetch, never after, so
+/// the worst case is exactly [`thread::MAX_THREAD_DEPTH`] requests: hitting
+/// the cap is detected from data already in hand (the last fetched post's
+/// own `replied_to`), never by spending one more request to find out.
+///
+/// Not unit-tested directly — it makes real HTTP requests through `client`,
+/// the same way [`reload`] isn't. The pure seam that carries this
+/// function's ordering/dedup/cap logic is [`thread::assemble_chain`];
+/// [`load_thread`]/[`save_thread`] are tested standalone like the rest of
+/// this module's cache accessors.
+pub(crate) fn fetch_thread(
+    paths: &Paths,
+    client: &XClient,
+    reply_post_id: &str,
+    first_parent_id: &str,
+    now: i64,
+) -> Result<ThreadChain> {
+    if let Some(cached) = load_thread(paths, reply_post_id)? {
+        return Ok(cached);
+    }
+
+    let mut hops: Vec<thread::ThreadItem> = Vec::new();
+    let mut next_id = Some(first_parent_id.to_string());
+    let mut reached_cap = false;
+
+    while let Some(id) = next_id.take() {
+        if hops.len() >= thread::MAX_THREAD_DEPTH {
+            // A further parent is known (`id`) but the cap was already hit
+            // by the previous iteration — stop without spending a request
+            // to confirm what's already known.
+            reached_cap = true;
+            break;
+        }
+
+        let items = client.tweets_by_id(paths, &id, now)?;
+        let Some(fetched) = items.into_iter().next() else {
+            // Deleted, protected, or otherwise absent from the response —
+            // the walk stops cleanly here rather than erroring (#12).
+            break;
+        };
+
+        next_id = fetched.replied_to.as_ref().map(|r| r.post_id.clone());
+        hops.push(thread::ThreadItem {
+            id: fetched.id,
+            text: fetched.text,
+            author_name: fetched.author_name,
+            author_username: fetched.author_username,
+        });
+    }
+
+    let chain = thread::assemble_chain(hops, reached_cap);
+    save_thread(paths, reply_post_id, &chain, now)?;
+    Ok(chain)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -435,6 +533,7 @@ mod tests {
             author_username: String::new(),
             reposted_by: None,
             quoted: None,
+            replied_to: None,
         }
     }
 
@@ -855,6 +954,53 @@ mod tests {
         save_me(&paths, "2244994945", "alice", 0).unwrap();
 
         assert!(startup_home(&paths, 0).unwrap().is_none());
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    // --- load_thread / save_thread ---
+
+    #[test]
+    fn load_thread_is_none_when_the_file_is_missing() {
+        let root = temp_root("thread-missing");
+        let paths = test_paths(&root);
+        paths.ensure_dirs().unwrap();
+
+        assert_eq!(load_thread(&paths, "1800000000000000003").unwrap(), None);
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn save_thread_then_load_thread_roundtrips() {
+        let root = temp_root("thread-roundtrip");
+        let paths = test_paths(&root);
+        paths.ensure_dirs().unwrap();
+
+        let chain = ThreadChain {
+            items: vec![thread::ThreadItem {
+                id: "1700000000000000001".to_string(),
+                text: "hello from the timeline".to_string(),
+                author_name: "Developers".to_string(),
+                author_username: "XDevelopers".to_string(),
+            }],
+            capped: false,
+        };
+        save_thread(&paths, "1800000000000000003", &chain, 1_000).unwrap();
+        let loaded = load_thread(&paths, "1800000000000000003").unwrap();
+        assert_eq!(loaded, Some(chain));
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_corrupted_thread_cache_file_is_a_clean_miss_not_an_error() {
+        let root = temp_root("thread-corrupt");
+        let paths = test_paths(&root);
+        paths.ensure_dirs().unwrap();
+        std::fs::write(paths.thread_file("1800000000000000003"), b"not json at all").unwrap();
+
+        assert_eq!(load_thread(&paths, "1800000000000000003").unwrap(), None);
 
         std::fs::remove_dir_all(&root).unwrap();
     }

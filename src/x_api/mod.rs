@@ -2,4 +2,4 @@ mod client;
 pub(crate) mod model;
 
 pub(crate) use client::XClient;
-pub(crate) use model::{QuotedPost, TimelineItem};
+pub(crate) use model::{QuotedPost, RepliedTo, TimelineItem};

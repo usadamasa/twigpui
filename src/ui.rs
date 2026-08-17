@@ -968,6 +968,7 @@ mod tests {
                 author_username: String::new(),
                 reposted_by: None,
                 quoted: None,
+                replied_to: None,
             })
             .collect();
         let state = TimelineState::Loaded(full);
