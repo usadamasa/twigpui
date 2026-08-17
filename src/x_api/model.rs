@@ -173,13 +173,23 @@ impl TimelineResponse {
     /// Join each post with its author from `includes.users`, and — #13 —
     /// with whatever it references from `includes.tweets`.
     ///
-    /// TODO(#13): the join below is a stub — it always leaves `reposted_by`
-    /// and `quoted` at `None`. Implemented in the follow-up commit; this
-    /// exists only so the new fixture tests compile and fail on behavior
-    /// rather than on a missing type.
+    /// Precedence when a post's `referenced_tweets` carries more than one
+    /// entry (X allows this — e.g. quoting a tweet from inside a reply
+    /// thread produces both a `quoted` and a `replied_to` entry on the same
+    /// post): `retweeted` wins over `quoted`, which wins over `replied_to`.
+    /// A repost fully replaces the rendered body with the original post, so
+    /// it takes priority over a quote card, which only adds to the body
+    /// rather than replacing it; a bare reply reference carries no
+    /// rendering of its own yet (thread display is #12), so it never wins
+    /// against either. See [`build_item`] and [`quote_of`] for where this
+    /// is applied.
     ///
-    /// Posts whose author is absent from the expansion still render, with the
-    /// author fields left empty — dropping them would silently hide content.
+    /// Posts whose author is absent from the expansion still render, with
+    /// the author fields left empty — dropping them would silently hide
+    /// content. The same is true of a repost whose original is missing from
+    /// `includes` (deleted, protected, or simply not expanded): rather than
+    /// an empty row, it falls back to the outer post's own — possibly
+    /// truncated — text.
     pub(crate) fn into_items(self) -> Vec<TimelineItem> {
         let users: HashMap<&str, &User> = self
             .includes
@@ -187,26 +197,111 @@ impl TimelineResponse {
             .iter()
             .map(|u| (u.id.as_str(), u))
             .collect();
+        let referenced: HashMap<&str, &Post> = self
+            .includes
+            .tweets
+            .iter()
+            .map(|post| (post.id.as_str(), post))
+            .collect();
 
         self.data
             .iter()
-            .map(|post| {
-                let author = post
-                    .author_id
-                    .as_deref()
-                    .and_then(|id| users.get(id).copied());
-                TimelineItem {
-                    id: post.id.clone(),
-                    text: post.text.clone(),
-                    created_at: post.created_at.clone(),
-                    author_name: author.map(|u| u.name.clone()).unwrap_or_default(),
-                    author_username: author.map(|u| u.username.clone()).unwrap_or_default(),
-                    reposted_by: None,
-                    quoted: None,
-                }
-            })
+            .map(|post| build_item(post, &users, &referenced))
             .collect()
     }
+}
+
+/// A post's author name/username from `includes.users`, or a pair of empty
+/// strings when the author id is absent or wasn't expanded — the shared
+/// lookup behind every author field [`build_item`] and [`quote_of`] fill in.
+fn author_fields(post: &Post, users: &HashMap<&str, &User>) -> (String, String) {
+    let author = post
+        .author_id
+        .as_deref()
+        .and_then(|id| users.get(id).copied());
+    (
+        author.map(|u| u.name.clone()).unwrap_or_default(),
+        author.map(|u| u.username.clone()).unwrap_or_default(),
+    )
+}
+
+/// Join one post with its author, and — if it references another post —
+/// with that reference too, per the precedence documented on
+/// [`TimelineResponse::into_items`].
+fn build_item(
+    post: &Post,
+    users: &HashMap<&str, &User>,
+    referenced: &HashMap<&str, &Post>,
+) -> TimelineItem {
+    let (author_name, author_username) = author_fields(post, users);
+    let mut item = TimelineItem {
+        id: post.id.clone(),
+        text: post.text.clone(),
+        created_at: post.created_at.clone(),
+        author_name,
+        author_username,
+        reposted_by: None,
+        quoted: None,
+    };
+
+    if let Some(retweet_ref) = post
+        .referenced_tweets
+        .iter()
+        .find(|r| r.kind == ReferenceKind::Retweeted)
+    {
+        // The outer post's own author is whoever reposted — captured before
+        // it's overwritten below with the original's author.
+        item.reposted_by = Some(item.author_username.clone());
+
+        if let Some(original) = referenced.get(retweet_ref.id.as_str()).copied() {
+            let (author_name, author_username) = author_fields(original, users);
+            item.text.clone_from(&original.text);
+            item.author_name = author_name;
+            item.author_username = author_username;
+            // A repost of a quote: the quote card belongs to the original
+            // post being shown as the body, not to the (already-consumed)
+            // retweet reference on the outer post.
+            item.quoted = quote_of(original, users, referenced);
+        } else {
+            // Original is gone from `includes` — keep the outer post's own
+            // (possibly truncated `RT @user: …`) text already set above
+            // rather than blanking the row, but drop the author fields the
+            // same way a post whose author never expanded already does: we
+            // know who reposted, not who wrote it.
+            item.author_name = String::new();
+            item.author_username = String::new();
+        }
+    } else if post
+        .referenced_tweets
+        .iter()
+        .any(|r| r.kind == ReferenceKind::Quoted)
+    {
+        item.quoted = quote_of(post, users, referenced);
+    }
+
+    item
+}
+
+/// The post `post` quotes, if it has a `quoted` reference and that post is
+/// present in `includes.tweets`. `None` either way is a legitimate outcome
+/// for [`build_item`] to fall back on (no card, not an error) — a quoted
+/// post can be deleted, protected, or simply absent from the expansion.
+fn quote_of(
+    post: &Post,
+    users: &HashMap<&str, &User>,
+    referenced: &HashMap<&str, &Post>,
+) -> Option<QuotedPost> {
+    let quote_ref = post
+        .referenced_tweets
+        .iter()
+        .find(|r| r.kind == ReferenceKind::Quoted)?;
+    let quoted_post = referenced.get(quote_ref.id.as_str())?;
+    let (author_name, author_username) = author_fields(quoted_post, users);
+    Some(QuotedPost {
+        author_name,
+        author_username,
+        text: quoted_post.text.clone(),
+    })
 }
 
 #[cfg(test)]

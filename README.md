@@ -21,6 +21,21 @@ The app shows one of two timelines, depending on which credential is active
 Either way, results render in a scrollable list with a reload button, and the
 header names which mode is showing.
 
+**Reposts and quotes are expanded (#13).** The API's raw response truncates a
+repost to `RT @user: …`; both timeline requests now also ask for
+`referenced_tweets` (`expansions=referenced_tweets.id,referenced_tweets.id.author_id`
+plus `tweet.fields=referenced_tweets`), so the referenced post's real text
+and author come back in the same response, at no extra request cost. A
+repost renders as a small "`@user reposted`" line above the original
+author and full text; a quote embeds the quoted post as a bordered card
+under its own text. A repost of a quote shows both: the original author's
+text as the body, and the quote card the original itself carried. If the
+referenced post is deleted, protected, or otherwise missing from the
+response's `includes`, the row still renders — a repost falls back to the
+API's own (possibly truncated) text with the author left blank, and a quote
+just omits the card. A reply reference is recognized but not otherwise
+rendered — thread display is #12.
+
 `--fetch-only` runs the same fetch headlessly (always the single-user view,
 regardless of credential) and prints the posts, which is useful for checking
 credentials without opening a window:
@@ -277,12 +292,15 @@ OAuth PKCE math, callback parsing, and token-file handling, the local
 cache's TTL, merge, and corruption-recovery logic (including #11's
 merge-ahead-vs-append-behind distinction between a normal reload and "Load
 older", and that the home-timeline and single-user caches for the same id
-never collide), which timeline mode a credential resolves to (#11), and the
-rate-limit tracker's header parsing, send/don't-send decision, `429`
-classification, jittered backoff schedule, and persistence (#10), so they
-make no network calls, open no browser, and spend no credits. The actual code
-exchange, X's live response shapes (including `/users/me` and the home
-timeline's `meta.next_token`), refresh-token rotation, and the real
+never collide), which timeline mode a credential resolves to (#11), the
+repost/quote join against `includes.tweets`/`includes.users` and its
+precedence when a post carries more than one reference, including a missing
+referenced post and a repost-of-a-quote (#13), and the rate-limit tracker's
+header parsing, send/don't-send decision, `429` classification, jittered
+backoff schedule, and persistence (#10), so they make no network calls, open
+no browser, and spend no credits. The actual code exchange, X's live response
+shapes (including `/users/me`, the home timeline's `meta.next_token`, and
+#13's `referenced_tweets` expansion), refresh-token rotation, and the real
 rate-limit header values X sends aren't covered by tests — those need a real
 Developer Portal registration, a one-time manual sign-in, and (for the last)
 actually hitting a live rate limit.

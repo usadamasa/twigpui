@@ -6,7 +6,7 @@ use crate::oauth::{self, TimelineSource};
 use crate::paths::Paths;
 use crate::rate_limit;
 use crate::theme::Theme;
-use crate::x_api::{TimelineItem, XClient};
+use crate::x_api::{QuotedPost, TimelineItem, XClient};
 
 enum TimelineState {
     /// No usable credential yet: no fresh/refreshable stored OAuth session
@@ -640,6 +640,17 @@ fn post_row(item: &TimelineItem, theme: Theme) -> impl IntoElement {
         .py_3()
         .border_b_1()
         .border_color(rgb(theme.border))
+        // #13: a repost shows who reposted it as a small line above the
+        // body, which by this point already holds the *original* post
+        // (see `TimelineResponse::into_items`'s join) — not the outer
+        // post's own author/text.
+        .when_some(item.reposted_by.as_deref(), |row, reposted_by| {
+            row.child(
+                div()
+                    .text_color(rgb(theme.text_muted))
+                    .child(repost_banner_label(reposted_by)),
+            )
+        })
         .child(
             div()
                 .flex()
@@ -657,6 +668,54 @@ fn post_row(item: &TimelineItem, theme: Theme) -> impl IntoElement {
                 ),
         )
         .child(div().child(item.text.clone()))
+        // #13: a quote (including a repost of a quote) embeds its source as
+        // a bordered card under the text.
+        .when_some(item.quoted.as_ref(), |column, quoted| {
+            column.child(quote_card(quoted, theme))
+        })
+}
+
+/// "@name reposted", or "Reposted" alone when the reposting user's screen
+/// name was missing from the expansion — mirrors [`byline`]'s empty-author
+/// fallback rather than rendering a bare `@`.
+fn repost_banner_label(reposted_by: &str) -> String {
+    if reposted_by.is_empty() {
+        "Reposted".to_string()
+    } else {
+        format!("@{reposted_by} reposted")
+    }
+}
+
+/// The quoted source, embedded as a bordered card under a quote's own text
+/// (#13). Reuses `bg_header` for the fill rather than adding a new color
+/// slot — it's already the app's "distinct region" background (the header
+/// bar), and the card sits directly on `theme.bg`, so it reads as a clearly
+/// separate block without needing its own palette entry.
+fn quote_card(quoted: &QuotedPost, theme: Theme) -> impl IntoElement {
+    let byline = byline(&quoted.author_username);
+
+    div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .p_2()
+        .mt_1()
+        .rounded_md()
+        .border_1()
+        .border_color(rgb(theme.border))
+        .bg(rgb(theme.bg_header))
+        .child(
+            div()
+                .flex()
+                .gap_2()
+                .child(
+                    div()
+                        .font_weight(FontWeight::BOLD)
+                        .child(quoted.author_name.clone()),
+                )
+                .child(div().text_color(rgb(theme.text_muted)).child(byline)),
+        )
+        .child(div().child(quoted.text.clone()))
 }
 
 /// Countdown text for the reload button while blocked by #10's rate-limit
@@ -797,7 +856,7 @@ mod tests {
     use super::{
         Cooldown, TimelineItem, TimelineSource, TimelineState, at_the_post_cap, byline,
         cooldown_label, format_timestamp, header_title, offers_load_older, offers_sign_in,
-        reload_cooldown,
+        reload_cooldown, repost_banner_label,
     };
 
     #[test]
@@ -940,6 +999,18 @@ mod tests {
     #[test]
     fn renders_a_missing_author_as_nothing_rather_than_a_bare_at() {
         assert_eq!(byline(""), "");
+    }
+
+    #[test]
+    fn labels_a_repost_with_who_reposted_it() {
+        assert_eq!(repost_banner_label("reposter1"), "@reposter1 reposted");
+    }
+
+    #[test]
+    fn labels_a_repost_generically_when_the_reposter_is_missing() {
+        // Mirrors byline's empty-author fallback (#13): a bare "@ reposted"
+        // would read as broken.
+        assert_eq!(repost_banner_label(""), "Reposted");
     }
 
     #[test]

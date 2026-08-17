@@ -249,8 +249,8 @@ fn home_timeline_url(
     let mut url = format!(
         "{API_BASE}/users/{user_id}/timelines/reverse_chronological\
          ?max_results={max_results}\
-         &tweet.fields=created_at\
-         &expansions=author_id\
+         &tweet.fields=created_at,referenced_tweets\
+         &expansions=author_id,referenced_tweets.id,referenced_tweets.id.author_id\
          &user.fields=name,username"
     );
     if let Some(id) = since_id {
@@ -268,8 +268,8 @@ fn timeline_url(user_id: &str, max_results: u32, since_id: Option<&str>) -> Stri
     let base = format!(
         "{API_BASE}/users/{user_id}/tweets\
          ?max_results={max_results}\
-         &tweet.fields=created_at\
-         &expansions=author_id\
+         &tweet.fields=created_at,referenced_tweets\
+         &expansions=author_id,referenced_tweets.id,referenced_tweets.id.author_id\
          &user.fields=name,username"
     );
     match since_id {
