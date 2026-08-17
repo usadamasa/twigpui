@@ -70,7 +70,13 @@ fn main() {
         };
 
         let opened = cx.open_window(options, |window, cx| {
-            cx.new(|cx| ui::TimelineView::new(config, paths, window, cx))
+            let timeline = cx.new(|cx| ui::TimelineView::new(config, paths, window, cx));
+            // #38: gpui-component's widgets reach back up to the window's
+            // root expecting to find its `Root` there — its text input asks
+            // for it on the very first render, and `Root::read` panics
+            // outright if the root view is anything else. Making the
+            // timeline the root directly aborted the app at startup.
+            cx.new(|cx| gpui_component::Root::new(timeline, window, cx))
         });
         if let Err(error) = opened {
             eprintln!("could not open the window: {error:#}");
