@@ -14,6 +14,7 @@ use crate::paths::Paths;
 use crate::rate_limit;
 use crate::theme::{self, Theme};
 use crate::thread::{self, ThreadChain};
+use crate::usage;
 use crate::x_api::{QuotedPost, RepliedTo, TimelineItem, XClient};
 
 /// What's known about one reply's "Show thread" walk (#12), keyed by the
@@ -187,6 +188,16 @@ pub(crate) struct TimelineView {
     /// session whose scope wasn't recorded. Feeds [`offers_reauthorize`]
     /// and [`Self::submit_post`]'s own scope check.
     oauth_scope: Option<String>,
+    /// Request-count totals across every tracked endpoint (#18), shown in
+    /// the header — see [`Self::refresh_usage`]. Zero until the first
+    /// refresh completes, which is a truthful "nothing observed yet" rather
+    /// than a placeholder, since `usage::Totals::default()` is exactly what
+    /// an empty `usage.json` reads as too.
+    usage_totals: usage::Totals,
+    /// Holding this keeps the header's usage refresh alive; mirrors `fetch`'s
+    /// cancel-on-drop contract. Reassigning it (another refresh) drops and
+    /// so cancels whatever read was still running.
+    usage_refresh: Option<Task<()>>,
 }
 
 impl TimelineView {
@@ -236,8 +247,11 @@ impl TimelineView {
             _compose_input_subscription: compose_input_subscription,
             submit_task: None,
             oauth_scope: None,
+            usage_totals: usage::Totals::default(),
+            usage_refresh: None,
         };
         this.start(cx);
+        this.refresh_usage(cx);
         this
     }
 
@@ -280,42 +294,45 @@ impl TimelineView {
                 })
                 .await;
 
-            let _ = this.update(cx, |this, cx| match result {
-                Ok(StartOutcome::NotAuthenticated) => {
-                    this.state = TimelineState::NotAuthenticated;
-                    cx.notify();
-                }
-                Ok(StartOutcome::SingleUser { credential, cached }) => {
-                    this.signed_in_with_oauth = credential.is_oauth();
-                    this.oauth_scope = credential.scope().map(str::to_string);
-                    this.source = Some(TimelineSource::SingleUser);
-                    this.client = Some(XClient::new(credential.token().to_string()));
-                    match cached {
-                        Some(items) => {
-                            this.state = TimelineState::Loaded(items);
-                            cx.notify();
-                        }
-                        None => this.reload(cx),
+            let _ = this.update(cx, |this, cx| {
+                this.refresh_usage(cx);
+                match result {
+                    Ok(StartOutcome::NotAuthenticated) => {
+                        this.state = TimelineState::NotAuthenticated;
+                        cx.notify();
                     }
-                }
-                Ok(StartOutcome::Home { credential, cached }) => {
-                    this.signed_in_with_oauth = credential.is_oauth();
-                    this.oauth_scope = credential.scope().map(str::to_string);
-                    this.source = Some(TimelineSource::Home);
-                    this.client = Some(XClient::new(credential.token().to_string()));
-                    match cached {
-                        Some((me, items)) => {
-                            this.home_user_id = Some(me.id);
-                            this.home_username = Some(me.username);
-                            this.state = TimelineState::Loaded(items);
-                            cx.notify();
+                    Ok(StartOutcome::SingleUser { credential, cached }) => {
+                        this.signed_in_with_oauth = credential.is_oauth();
+                        this.oauth_scope = credential.scope().map(str::to_string);
+                        this.source = Some(TimelineSource::SingleUser);
+                        this.client = Some(XClient::new(credential.token().to_string()));
+                        match cached {
+                            Some(items) => {
+                                this.state = TimelineState::Loaded(items);
+                                cx.notify();
+                            }
+                            None => this.reload(cx),
                         }
-                        None => this.reload(cx),
                     }
-                }
-                Err(error) => {
-                    this.state = TimelineState::Failed(format!("{error:#}").into());
-                    cx.notify();
+                    Ok(StartOutcome::Home { credential, cached }) => {
+                        this.signed_in_with_oauth = credential.is_oauth();
+                        this.oauth_scope = credential.scope().map(str::to_string);
+                        this.source = Some(TimelineSource::Home);
+                        this.client = Some(XClient::new(credential.token().to_string()));
+                        match cached {
+                            Some((me, items)) => {
+                                this.home_user_id = Some(me.id);
+                                this.home_username = Some(me.username);
+                                this.state = TimelineState::Loaded(items);
+                                cx.notify();
+                            }
+                            None => this.reload(cx),
+                        }
+                    }
+                    Err(error) => {
+                        this.state = TimelineState::Failed(format!("{error:#}").into());
+                        cx.notify();
+                    }
                 }
             });
         }));
@@ -390,6 +407,7 @@ impl TimelineView {
                         .await;
 
                     let _ = this.update(cx, |this, cx| {
+                        this.refresh_usage(cx);
                         this.state = match result {
                             Ok(reloaded) => {
                                 // Single-user mode has no pagination cursor —
@@ -414,6 +432,7 @@ impl TimelineView {
                         .await;
 
                     let _ = this.update(cx, |this, cx| {
+                        this.refresh_usage(cx);
                         this.state = match result {
                             Ok(reloaded) => {
                                 this.home_user_id = Some(reloaded.me.id);
@@ -467,6 +486,7 @@ impl TimelineView {
                 .await;
 
             let _ = this.update(cx, |this, cx| {
+                this.refresh_usage(cx);
                 this.state = match result {
                     Ok((items, next_token)) => {
                         this.next_page_token = next_token;
@@ -522,6 +542,7 @@ impl TimelineView {
                 .await;
 
             let _ = this.update(cx, |this, cx| {
+                this.refresh_usage(cx);
                 let state = match result {
                     Ok(chain) => ThreadFetchState::Loaded(chain),
                     Err(error) => ThreadFetchState::Failed(format!("{error:#}").into()),
@@ -532,6 +553,34 @@ impl TimelineView {
             });
         });
         self.thread_fetches.insert(fetch_key, task);
+    }
+
+    /// Refresh the header's usage summary from disk (#18), independent of
+    /// whatever triggered it — every fetch path (a reload, "Load older", a
+    /// "Show thread" walk) can have moved the tracked counts, since
+    /// `x_api::client::XClient::get` records every actual HTTP send
+    /// regardless of whether the request itself succeeded. Spawned on its
+    /// own rather than folded into the fetch that triggered it: if reading
+    /// `usage.json` fails, the header just keeps showing whatever it showed
+    /// before, rather than failing the fetch along with it.
+    fn refresh_usage(&mut self, cx: &mut Context<'_, Self>) {
+        let paths = self.paths.clone();
+        self.usage_refresh = Some(cx.spawn(async move |this, cx| {
+            let now = oauth::unix_now();
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    usage::load_all(&paths).map(|entries| usage::totals(&entries, now))
+                })
+                .await;
+
+            if let Ok(totals) = result {
+                let _ = this.update(cx, |this, cx| {
+                    this.usage_totals = totals;
+                    cx.notify();
+                });
+            }
+        }));
     }
 
     /// Run the interactive PKCE sign-in flow: open the browser, wait for the
@@ -780,6 +829,19 @@ impl TimelineView {
 
         let theme = self.theme;
 
+        // #18: request counts are always shown; an estimated amount is
+        // appended only when `request_price` is configured (see
+        // `usage_label`'s doc), and the line's color escalates as today's
+        // count approaches or crosses `daily_request_budget` (see
+        // `usage_color`'s doc).
+        let usage_status =
+            usage::budget_status(self.usage_totals.today, self.config.daily_request_budget);
+        let usage_text = usage_label(
+            self.usage_totals.today,
+            self.usage_totals.total,
+            self.config.request_price,
+        );
+
         div()
             .flex()
             .items_center()
@@ -790,11 +852,22 @@ impl TimelineView {
             .bg(rgb(theme.bg_header))
             .border_b_1()
             .border_color(rgb(theme.border))
-            .child(div().font_weight(FontWeight::BOLD).child(header_title(
-                self.source,
-                self.home_username.as_deref(),
-                &self.config.target_username,
-            )))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(div().font_weight(FontWeight::BOLD).child(header_title(
+                        self.source,
+                        self.home_username.as_deref(),
+                        &self.config.target_username,
+                    )))
+                    .child(
+                        div()
+                            .text_color(rgb(usage_color(usage_status, theme)))
+                            .child(usage_text),
+                    ),
+            )
             .child(
                 div()
                     .flex()
@@ -811,22 +884,7 @@ impl TimelineView {
                             self.signed_in_with_oauth,
                             &self.state,
                         ),
-                        |row| {
-                            row.child(
-                                div()
-                                    .id("sign-in")
-                                    .px_3()
-                                    .py_1()
-                                    .rounded_full()
-                                    .border_1()
-                                    .border_color(rgb(theme.accent))
-                                    .text_color(rgb(theme.accent))
-                                    .child("Sign in with X")
-                                    .on_click(
-                                        cx.listener(|this, _event, _window, cx| this.sign_in(cx)),
-                                    ),
-                            )
-                        },
+                        |row| row.child(sign_in_pill("sign-in", "Sign in with X", theme, cx)),
                     )
                     // #14: an already-signed-in session from before #14
                     // holds no `tweet.write` scope — #31's exact lesson
@@ -835,22 +893,7 @@ impl TimelineView {
                     // of what the primary button currently says.
                     .when(
                         offers_reauthorize(self.signed_in_with_oauth, self.oauth_scope.as_deref()),
-                        |row| {
-                            row.child(
-                                div()
-                                    .id("reauthorize")
-                                    .px_3()
-                                    .py_1()
-                                    .rounded_full()
-                                    .border_1()
-                                    .border_color(rgb(theme.accent))
-                                    .text_color(rgb(theme.accent))
-                                    .child("Re-authorize")
-                                    .on_click(
-                                        cx.listener(|this, _event, _window, cx| this.sign_in(cx)),
-                                    ),
-                            )
-                        },
+                        |row| row.child(sign_in_pill("reauthorize", "Re-authorize", theme, cx)),
                     )
                     .child(
                         div()
@@ -1089,6 +1132,30 @@ impl Render for TimelineView {
     }
 }
 
+/// An outlined pill in the header that starts the sign-in flow.
+///
+/// #31 (upgrade away from the app-only bearer token) and #14 (the session
+/// predates `tweet.write`) are different reasons to reach the same place, so
+/// the two buttons differ only in their label — worth one helper rather than
+/// two near-identical builder chains that have to be kept in step.
+fn sign_in_pill(
+    id: &'static str,
+    label: &'static str,
+    theme: Theme,
+    cx: &mut Context<'_, TimelineView>,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .px_3()
+        .py_1()
+        .rounded_full()
+        .border_1()
+        .border_color(rgb(theme.accent))
+        .text_color(rgb(theme.accent))
+        .child(label)
+        .on_click(cx.listener(|this, _event, _window, cx| this.sign_in(cx)))
+}
+
 fn notice(message: impl Into<SharedString>, color: u32) -> impl IntoElement {
     div()
         .px_4()
@@ -1255,6 +1322,29 @@ fn thread_row(thread_item: &thread::ThreadItem, theme: Theme) -> impl IntoElemen
         .child(div().child(thread_item.text.clone()))
 }
 
+/// The header's compact usage summary (#18): request counts are always
+/// shown, unconditionally — an estimated amount is appended only once
+/// `request_price` is configured, per the issue's core rule that a guessed
+/// price is worse than showing no price at all.
+fn usage_label(today: u64, total: u64, request_price: Option<f64>) -> String {
+    match usage::estimated_amount(today, request_price) {
+        Some(amount) => format!("Today: {today} req (~{amount:.2}) · Total: {total} req"),
+        None => format!("Today: {today} req · Total: {total} req"),
+    }
+}
+
+/// Which theme slot the usage line renders in: `warning`/`danger` as
+/// today's count approaches or crosses `daily_request_budget`, matching the
+/// severities [`usage::budget_status`] returns; the same muted slot
+/// timestamps and bylines already use once there is nothing to flag.
+fn usage_color(status: usage::BudgetStatus, theme: Theme) -> u32 {
+    match status {
+        usage::BudgetStatus::Ok => theme.text_muted,
+        usage::BudgetStatus::Near => theme.warning,
+        usage::BudgetStatus::Exceeded => theme.danger,
+    }
+}
+
 /// Countdown text for the reload button while blocked by #10's rate-limit
 /// decision. `remaining` is clamped to zero rather than going negative if
 /// `reset_at` has (just) passed by the time this renders.
@@ -1413,10 +1503,11 @@ fn format_timestamp(created_at: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        ComposeStatus, Cooldown, RepliedTo, ThreadFetchState, TimelineItem, TimelineSource,
+        ComposeStatus, Cooldown, RepliedTo, Theme, ThreadFetchState, TimelineItem, TimelineSource,
         TimelineState, at_the_post_cap, byline, compose_error_message, cooldown_label,
         format_timestamp, header_title, offers_load_older, offers_reauthorize, offers_sign_in,
-        reload_cooldown, reply_banner_label, repost_banner_label, thread_action_label,
+        reload_cooldown, reply_banner_label, repost_banner_label, thread_action_label, usage,
+        usage_color, usage_label,
     };
 
     #[test]
@@ -1739,5 +1830,49 @@ mod tests {
         assert_eq!(thread_action_label(Some(&ThreadFetchState::Loading)), None);
         let loaded = ThreadFetchState::Loaded(crate::thread::ThreadChain::default());
         assert_eq!(thread_action_label(Some(&loaded)), None);
+    }
+
+    // --- usage_label / usage_color (#18) ---
+
+    #[test]
+    fn usage_label_shows_counts_only_without_a_configured_price() {
+        assert_eq!(usage_label(3, 42, None), "Today: 3 req · Total: 42 req");
+    }
+
+    #[test]
+    fn usage_label_appends_an_estimated_amount_once_a_price_is_configured() {
+        assert_eq!(
+            usage_label(4, 40, Some(2.5)),
+            "Today: 4 req (~10.00) · Total: 40 req"
+        );
+    }
+
+    #[test]
+    fn usage_label_shows_zero_counts_plainly() {
+        assert_eq!(usage_label(0, 0, None), "Today: 0 req · Total: 0 req");
+    }
+
+    #[test]
+    fn usage_color_is_muted_within_budget() {
+        let theme = Theme::light();
+        assert_eq!(
+            usage_color(usage::BudgetStatus::Ok, theme),
+            theme.text_muted
+        );
+    }
+
+    #[test]
+    fn usage_color_is_the_warning_slot_near_the_budget() {
+        let theme = Theme::light();
+        assert_eq!(usage_color(usage::BudgetStatus::Near, theme), theme.warning);
+    }
+
+    #[test]
+    fn usage_color_is_the_danger_slot_once_the_budget_is_exceeded() {
+        let theme = Theme::light();
+        assert_eq!(
+            usage_color(usage::BudgetStatus::Exceeded, theme),
+            theme.danger
+        );
     }
 }

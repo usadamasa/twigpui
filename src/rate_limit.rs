@@ -223,7 +223,22 @@ pub(crate) enum Endpoint {
 }
 
 impl Endpoint {
-    fn key(self) -> &'static str {
+    /// Every tracked endpoint, for callers that need to summarize across all
+    /// of them rather than one at a time — `usage`'s `--usage`/header
+    /// totals (#18) is the current user, so the list lives here rather than
+    /// being duplicated wherever it's needed.
+    pub(crate) const ALL: [Self; 5] = [
+        Self::UserLookup,
+        Self::Timeline,
+        Self::Me,
+        Self::HomeTimeline,
+        Self::TweetById,
+    ];
+
+    /// `pub(crate)` rather than private (unlike before #18): `usage.rs`
+    /// keys its own per-endpoint file by this same string, so the two
+    /// modules' on-disk keys for the same endpoint never drift apart.
+    pub(crate) fn key(self) -> &'static str {
         match self {
             Self::UserLookup => "user_lookup",
             Self::Timeline => "timeline",
@@ -662,6 +677,18 @@ mod tests {
         assert_eq!(load(&paths, Endpoint::Timeline).unwrap(), state);
 
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn endpoint_all_lists_every_variant_with_a_unique_key() {
+        // #18's usage tracker iterates `Endpoint::ALL` to summarize across
+        // every endpoint — a missing or duplicated variant here would
+        // silently under- or double-count.
+        let keys: std::collections::HashSet<&str> = Endpoint::ALL
+            .iter()
+            .map(|endpoint| endpoint.key())
+            .collect();
+        assert_eq!(keys.len(), Endpoint::ALL.len());
     }
 
     #[test]
