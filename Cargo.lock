@@ -5332,10 +5332,13 @@ name = "twigpui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.23.1",
  "dotenvy",
+ "getrandom 0.4.3",
  "gpui",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "toml 1.1.4+spec-1.1.0",
  "ureq",
 ]

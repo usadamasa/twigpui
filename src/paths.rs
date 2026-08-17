@@ -4,9 +4,9 @@
 //! convention going forward is that every file twigpui persists gets its own
 //! accessor here (like [`Paths::settings_file`]) — callers never join paths
 //! themselves. Accessors are added incrementally as the files that need them
-//! land: the OAuth token store (#7), the response cache (#9), and the panel
-//! layout (#24) each add their own accessor with their own issue rather than
-//! being anticipated here.
+//! land: the OAuth token store ([`Paths::oauth_token_file`], #7), the
+//! response cache (#9), and the panel layout (#24) each add their own
+//! accessor with their own issue rather than being anticipated here.
 
 use anyhow::{Context as _, Result};
 use std::path::{Path, PathBuf};
@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 // The shared `_dir` postfix is the point, not redundancy — it names what each
 // field is (a directory) alongside which XDG category it resolves.
 #[allow(clippy::struct_field_names)]
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct Paths {
     config_dir: PathBuf,
     cache_dir: PathBuf,
@@ -33,7 +33,11 @@ impl Paths {
     /// Split out from [`Paths::from_env`] so the resolution rules can be
     /// tested without `set_var`, which is `unsafe` and races the other test
     /// threads. Mirrors the split used by [`crate::config::Config`].
-    fn from_vars(var: impl Fn(&str) -> Option<String>) -> Result<Self> {
+    ///
+    /// `pub(crate)` (rather than private) because `oauth::tokens`'s own
+    /// tests need a `Paths` pointed at a scratch directory too, and this is
+    /// the same seam `paths.rs`'s own tests already use.
+    pub(crate) fn from_vars(var: impl Fn(&str) -> Option<String>) -> Result<Self> {
         let config_dir = resolve_dir(&var, "XDG_CONFIG_HOME", ".config")?;
         let cache_dir = resolve_dir(&var, "XDG_CACHE_HOME", ".cache")?;
         let state_dir = resolve_dir(&var, "XDG_STATE_HOME", ".local/state")?;
@@ -47,6 +51,13 @@ impl Paths {
     /// Path to the `config.toml` settings file, under `config_dir`.
     pub(crate) fn settings_file(&self) -> PathBuf {
         self.config_dir.join("config.toml")
+    }
+
+    /// Path to the OAuth token store, under `state_dir`. Written `0600` by
+    /// [`crate::oauth::tokens::save`] — state, not config, because it holds
+    /// a credential rather than a hand-edited setting.
+    pub(crate) fn oauth_token_file(&self) -> PathBuf {
+        self.state_dir.join("oauth_tokens.json")
     }
 
     /// Create all three directories (recursively) if they do not already
@@ -187,6 +198,15 @@ mod tests {
         assert_eq!(
             paths.settings_file(),
             PathBuf::from("/home/alice/.config/twigpui/config.toml")
+        );
+    }
+
+    #[test]
+    fn oauth_token_file_is_under_the_state_dir() {
+        let paths = Paths::from_vars(vars(&[("HOME", "/home/alice")])).unwrap();
+        assert_eq!(
+            paths.oauth_token_file(),
+            PathBuf::from("/home/alice/.local/state/twigpui/oauth_tokens.json")
         );
     }
 
