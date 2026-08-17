@@ -39,21 +39,28 @@ const URL_WEIGHT: usize = 23;
 /// the gaps above can only make it stop the user *earlier* than X's real
 /// counter would, never later.
 pub(crate) fn weighted_length(text: &str) -> usize {
-    // Stub for the TDD red phase — deliberately naive, wrong for both the
-    // URL and CJK cases the real implementation must handle.
-    text.chars().count()
+    let whitespace_weight = text.chars().filter(|c| c.is_whitespace()).count();
+    let word_weight: usize = text
+        .split_whitespace()
+        .map(|word| {
+            if is_url(word) {
+                URL_WEIGHT
+            } else {
+                word.chars().map(char_weight).sum()
+            }
+        })
+        .sum();
+    whitespace_weight + word_weight
 }
 
 /// Whether `word` looks like a URL X would shorten to a fixed-length t.co
 /// link. A plain prefix check — no validation of what follows — since a
 /// false positive here only ever rounds a token *up* to 23, the safe
 /// direction per [`weighted_length`]'s doc.
-#[allow(dead_code)]
 fn is_url(word: &str) -> bool {
     word.starts_with("http://") || word.starts_with("https://")
 }
 
-#[allow(dead_code)]
 fn char_weight(c: char) -> usize {
     if is_double_width(c) { 2 } else { 1 }
 }
@@ -65,7 +72,6 @@ fn char_weight(c: char) -> usize {
 /// fullwidth forms/signs. Deliberately not exhaustive — see
 /// [`weighted_length`]'s doc for what's left out and why that's an
 /// acceptable gap here.
-#[allow(dead_code)]
 fn is_double_width(c: char) -> bool {
     matches!(u32::from(c),
         0x1100..=0x115F
@@ -98,8 +104,14 @@ pub(crate) enum ComposeValidationError {
 /// for blankness — a draft of pure whitespace has nothing to say — but the
 /// *length* check runs against the untrimmed text, matching what X will
 /// actually receive.
-pub(crate) fn validate(_text: &str) -> Result<(), ComposeValidationError> {
-    // Stub for the TDD red phase.
+pub(crate) fn validate(text: &str) -> Result<(), ComposeValidationError> {
+    if text.trim().is_empty() {
+        return Err(ComposeValidationError::Empty);
+    }
+    let weighted_length = weighted_length(text);
+    if weighted_length > MAX_WEIGHTED_LENGTH {
+        return Err(ComposeValidationError::TooLong { weighted_length });
+    }
     Ok(())
 }
 
@@ -159,9 +171,7 @@ impl ComposeState {
     /// retryable, which is the entire point of never clearing the text on
     /// failure.
     pub(crate) fn can_submit(&self) -> bool {
-        // Stub for the TDD red phase — deliberately ignores both the
-        // in-flight guard and text validation.
-        true
+        !self.is_submitting() && validate(&self.text).is_ok()
     }
 
     /// Move to `Submitting`, keeping the text untouched. Callers must have
@@ -184,8 +194,14 @@ impl ComposeState {
     /// Apply a finished submit's outcome (#14's core guarantee): success
     /// clears the draft, failure leaves `text` completely untouched and
     /// records `message` in its place.
-    pub(crate) fn apply_result(&mut self, _result: Result<(), String>) {
-        // Stub for the TDD red phase — never actually applies the outcome.
+    pub(crate) fn apply_result(&mut self, result: Result<(), String>) {
+        match result {
+            Ok(()) => {
+                self.text.clear();
+                self.status = ComposeStatus::Idle;
+            }
+            Err(message) => self.refuse(message),
+        }
     }
 }
 

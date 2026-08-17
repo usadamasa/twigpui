@@ -130,10 +130,19 @@ registration verbatim.
 public client has no secret to protect — so unlike the bearer token it's
 fine to check into a dotfiles repo.
 
-**Scopes.** twigpui requests exactly `tweet.read users.read offline.access`:
-enough to read posts, resolve user context, and refresh the session without
-re-prompting. `tweet.write` (posting) is not requested — least privilege
-until #14 actually needs it.
+**Scopes.** twigpui requests `tweet.read users.read tweet.write
+offline.access`: enough to read posts, resolve user context, post (#14), and
+refresh the session without re-prompting.
+
+**If you signed in before #14,** your stored session predates `tweet.write`
+and can't post yet — the API rejects `POST /2/tweets` with a 403 it has no
+way to fix on its own. twigpui records the scope granted with each session
+(and treats a session from before that existed as "unknown," never as "assume
+it's fine"), so the header shows a **"Re-authorize"** button next to the
+usual reload/sign-in controls whenever the current session is missing
+`tweet.write`. Clicking it re-runs the same sign-in flow above end to end —
+new browser consent screen, new tokens — and nothing else in the app changes
+as a result.
 
 **What happens when you click "Sign in with X":** the app opens your default
 browser at X's consent screen, and a short-lived HTTP listener on
@@ -201,6 +210,49 @@ env > file > default precedence as everything else above. It defaults to
 typo'd theme is cosmetic, not worth blocking the app over — it falls back to
 `light` and prints a warning to stderr naming the value it ignored.
 
+## Posting (#14)
+
+Signed in with OAuth and re-authorized per the "Scopes" note above, a
+composer appears under the header: a draft area, a `weighted/280` character
+counter, and a "Post" button. Submitting calls `POST /2/tweets`; success
+clears the draft and falls into a normal reload (subject to the fetch
+interval below, like any other reload) so the new post shows up; failure —
+network error, rate limit, character limit, missing scope — leaves the draft
+exactly as typed. There is no way to lose what you wrote by a request
+failing.
+
+**Typing.** gpui 0.2.2 ships no ready-made text-input widget — only the raw
+IME/cursor/selection protocol (`EntityInputHandler`) a real one would be
+built on top of, which is a few hundred lines of custom painting and
+keybindings the crate's own example spends to implement it properly.
+twigpui's composer instead reads typed characters directly off key events:
+enough to type and correct a short draft, but **not** a real text field —
+there is no cursor to move, no text selection, no copy/paste, and no
+multi-keystroke IME composition (typing Japanese/Chinese/Korean through a
+system input method does not work; only characters a keystroke hands back
+directly are captured).
+
+**Character counting.** X's 280-character limit is enforced client-side
+before anything is sent, using an approximation of X's own "weighted
+length" — not the exact `twitter-text` algorithm. Any `http://`/`https://`
+token counts as a flat 23 regardless of its real length (matching X's
+own link-shortening), and characters in the common CJK/hangul/fullwidth
+Unicode blocks count double; everything else counts as one character per
+codepoint. This does not reproduce every range `twitter-text` weights
+doubly (a few rarer supplementary-plane CJK extensions and symbol blocks
+are left out), but it never *undercounts* relative to a plain character
+count, so the one thing this exists to prevent — spending a request on a
+post X will reject outright — still holds; the gap can only make it stop a
+draft earlier than X's own counter would, never later.
+
+**Double submission.** The submit button is only clickable at all while
+there's something postable and nothing already in flight; a click sets the
+composer to "Submitting" synchronously, before any network call starts, so
+a second click before the first request resolves has nothing to do.
+
+**Rate limiting.** `POST /2/tweets` is tracked as its own endpoint (#10) —
+see "Rate limits" below.
+
 ## API cost
 
 The X API bills per request against prepaid credits. A cold reload spends two
@@ -226,8 +278,9 @@ once its window resets. twigpui tells them apart and treats each accordingly:
 - **What's tracked.** Every response's `x-rate-limit-limit` /
   `-remaining` / `-reset` headers are parsed and kept per endpoint: the
   username lookup, the single-user timeline fetch, `/users/me`, the home
-  timeline (#11), and `GET /2/tweets?ids=` (#12, "Show thread") are all
-  tracked separately, since X limits each of them separately.
+  timeline (#11), `GET /2/tweets?ids=` (#12, "Show thread"), and
+  `POST /2/tweets` (#14, posting) are all tracked separately, since X limits
+  each of them separately.
 - **The app refuses to send rather than waiting.** If the tracked remaining
   count is zero and the reset time hasn't arrived yet, twigpui does **not**
   send the request — a GUI app has no business sleeping a background thread
@@ -323,11 +376,18 @@ recovery, and `thread::assemble_chain`'s ordering, dedup, and 5-level cutoff
 — including a partial walk stopped by a missing parent — entirely without
 network or disk (#12), and the rate-limit tracker's header parsing,
 send/don't-send decision, `429` classification, jittered backoff schedule,
-and persistence (#10), so they make no network calls, open no browser, and
-spend no credits. The actual code exchange, X's live response shapes
-(including `/users/me`, the home timeline's `meta.next_token`, #13's
-`referenced_tweets` expansion, and #12's `GET /2/tweets?ids=` response
-shape), refresh-token rotation, and the real rate-limit header values X sends
-aren't covered by tests — those need a real Developer Portal registration, a
-one-time manual sign-in, and (for the last) actually hitting a live rate
-limit.
+and persistence (#10), the scope check behind #14's "Re-authorize" button
+(sufficient / insufficient / never-recorded scope), that an old-format
+`TokenSet` with no `scope` field at all still deserializes rather than
+logging the user out, the composer's weighted-length character counter and
+draft validation (boundary length, over-limit, empty, whitespace-only), its
+submit state machine (a failed submit keeps the draft and stays retryable;
+a successful one clears it), and the `POST /2/tweets` request body, so they
+make no network calls, open no browser, and spend no credits. The actual
+code exchange, X's live response shapes (including `/users/me`, the home
+timeline's `meta.next_token`, #13's `referenced_tweets` expansion, #12's
+`GET /2/tweets?ids=` response shape, and #14's live `POST /2/tweets`
+response), refresh-token rotation, and the real rate-limit header values X
+sends aren't covered by tests — those need a real Developer Portal
+registration, a one-time manual sign-in, and (for the last) actually
+hitting a live rate limit.

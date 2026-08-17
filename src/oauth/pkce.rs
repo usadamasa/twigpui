@@ -17,7 +17,7 @@ use sha2::{Digest as _, Sha256};
 /// users from before #14 hold a token without it, which is exactly what
 /// `oauth::tokens::has_scope` plus the header's "Re-authorize" button (#14)
 /// exist to detect and fix.
-const SCOPES: &str = "tweet.read users.read offline.access";
+const SCOPES: &str = "tweet.read users.read tweet.write offline.access";
 
 /// `https://x.com/i/oauth2/authorize` per the issue's confirmed design.
 const AUTHORIZE_URL: &str = "https://x.com/i/oauth2/authorize";

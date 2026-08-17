@@ -234,12 +234,8 @@ pub(crate) fn resolve_credential(
 /// Pure and tested directly rather than only through `resolve_credential`'s
 /// full path, since exercising the real refresh branch needs a live HTTP
 /// call this crate's tests never make (see the module doc).
-fn carried_scope(
-    _refreshed_scope: Option<String>,
-    _previous_scope: Option<&str>,
-) -> Option<String> {
-    // Stub for the TDD red phase — ignores the fallback entirely.
-    None
+fn carried_scope(refreshed_scope: Option<String>, previous_scope: Option<&str>) -> Option<String> {
+    refreshed_scope.or_else(|| previous_scope.map(str::to_string))
 }
 
 #[cfg(test)]

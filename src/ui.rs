@@ -1314,9 +1314,7 @@ fn offers_sign_in(
 /// differently ("Sign in" vs "Re-authorize") — #31's actual lesson was
 /// "don't hide the affordance", not "there must be only one button".
 fn offers_reauthorize(signed_in_with_oauth: bool, oauth_scope: Option<&str>) -> bool {
-    // Stub for the TDD red phase.
-    let _ = (signed_in_with_oauth, oauth_scope);
-    false
+    signed_in_with_oauth && !oauth::tokens::has_scope(oauth_scope, oauth::tokens::TWEET_WRITE_SCOPE)
 }
 
 /// Map a failed reload/load-older's error to the state that should show it —

@@ -123,9 +123,8 @@ pub(crate) const TWEET_WRITE_SCOPE: &str = "tweet.write";
 /// choice, since a pre-#14 token might or might not actually carry
 /// `tweet.write`, and the safe assumption is "prompt before writing" rather
 /// than "assume it's fine".
-pub(crate) fn has_scope(_granted: Option<&str>, _required: &str) -> bool {
-    // Stub for the TDD red phase.
-    false
+pub(crate) fn has_scope(granted: Option<&str>, required: &str) -> bool {
+    granted.is_some_and(|scopes| scopes.split_whitespace().any(|scope| scope == required))
 }
 
 /// Write `tokens` to [`Paths::oauth_token_file`], `0600` (owner read/write
