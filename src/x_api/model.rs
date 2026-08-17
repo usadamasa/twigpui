@@ -105,6 +105,13 @@ pub(crate) struct UserLookupResponse {
     pub data: Option<User>,
 }
 
+/// The `POST /2/tweets` request body (#14) — just the post text; no
+/// reply/quote/poll support yet (see #12/#15/#16).
+#[derive(Debug, Serialize)]
+pub(crate) struct PostTweetRequest<'a> {
+    pub text: &'a str,
+}
+
 /// Pagination info returned alongside `data`. Only `next_token` matters to
 /// this crate — it's the cursor `x_api::client::home_timeline_url` sends back
 /// as `pagination_token` to fetch the next (older) page, driving #11's "Load
@@ -869,6 +876,18 @@ mod tests {
         assert_eq!(item.reposted_by.as_deref(), Some("reposter1"));
         assert_eq!(item.quoted, None);
         assert_eq!(item.replied_to, None);
+    }
+
+    #[test]
+    fn serializes_the_post_tweet_request_body() {
+        // #14: the whole request body `x_api::client::XClient::create_post`
+        // sends — no reply/quote/poll fields, matching the "just text"
+        // scope this issue keeps to.
+        let request = PostTweetRequest { text: "hello" };
+        assert_eq!(
+            serde_json::to_string(&request).unwrap(),
+            r#"{"text":"hello"}"#
+        );
     }
 
     #[test]

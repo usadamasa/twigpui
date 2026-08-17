@@ -3,9 +3,12 @@ use std::time::Duration;
 use anyhow::{Context as _, Result, bail};
 use ureq::Agent;
 
-use super::model::{ApiProblem, TimelineItem, TimelineResponse, User, UserLookupResponse};
+use super::model::{
+    ApiProblem, PostTweetRequest, TimelineItem, TimelineResponse, User, UserLookupResponse,
+};
 use crate::paths::Paths;
 use crate::rate_limit::{self, Endpoint, RateLimitState};
+use crate::usage;
 
 const API_BASE: &str = "https://api.x.com/2";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
@@ -43,20 +46,80 @@ impl XClient {
     /// recovers on its own schedule (never sooner for having retried), and
     /// a usage-cap 429 never recovers at all.
     ///
+    /// #18: every actual HTTP send is counted via [`usage::record_request`],
+    /// right before [`Self::send_once`] — including retries. X bills each
+    /// send it receives regardless of the outcome (a 5xx still reached the
+    /// server), so a retried request is counted once per attempt, not once
+    /// per logical call. A request refused before ever sending by
+    /// [`rate_limit::decision`] above is not counted, since nothing went
+    /// out. This is the one place in the whole crate `usage.rs` is written
+    /// from, by design: nothing can spend a request without going through
+    /// this method first.
+    ///
     /// Not unit-tested directly — it touches the network and, via `paths`,
     /// the filesystem, the same way `cache::reload` isn't. The pure seams
     /// that carry this behavior's actual test coverage are
     /// `rate_limit::decision`, `rate_limit::backoff_delay`,
-    /// `rate_limit::parse_headers`, and `rate_limit::classify_429` (via
-    /// [`check_status`], below).
+    /// `rate_limit::parse_headers`, `rate_limit::classify_429` (via
+    /// [`check_status`], below), and `usage::record`.
     fn get(&self, paths: &Paths, endpoint: Endpoint, url: &str, now: i64) -> Result<String> {
+        Self::send_with_retry(paths, endpoint, now, || self.send_once(url))
+    }
+
+    /// Perform one `POST /2/tweets` (#14), sharing every rate-limit and
+    /// retry rule [`Self::get`] already follows — see
+    /// [`Self::send_with_retry`], which the two now share so #10's central
+    /// rule stays in exactly one place regardless of HTTP method.
+    fn post(
+        &self,
+        paths: &Paths,
+        endpoint: Endpoint,
+        url: &str,
+        text: &str,
+        now: i64,
+    ) -> Result<String> {
+        Self::send_with_retry(paths, endpoint, now, || self.send_post_once(url, text))
+    }
+
+    /// The retry/persist loop shared by [`Self::get`] and [`Self::post`]:
+    /// enforce #10's rate-limit decision before sending anything, then
+    /// retry a network error or 5xx with backoff (never either kind of
+    /// 429 — see the doc on [`is_retryable_status`]), persisting whatever
+    /// the tracked window looks like after every attempt whether or not it
+    /// succeeded.
+    ///
+    /// Not unit-tested directly for the same reason `get`/`post` aren't —
+    /// it touches the network and, via `paths`, the filesystem. The pure
+    /// seams that carry this behavior's actual test coverage are
+    /// `rate_limit::decision`, `rate_limit::backoff_delay`,
+    /// `rate_limit::parse_headers`, and `rate_limit::classify_429` (via
+    /// [`check_status`]).
+    fn send_with_retry(
+        paths: &Paths,
+        endpoint: Endpoint,
+        now: i64,
+        send_once: impl Fn() -> Result<(u16, String, RateLimitState)>,
+    ) -> Result<String> {
         let tracked = rate_limit::load(paths, endpoint)?;
         rate_limit::decision(tracked, now).map_err(anyhow::Error::from)?;
 
         let mut attempt = 0u32;
         loop {
-            match self.send_once(url) {
+            match send_once() {
                 Ok((status, body, state)) => {
+                    // Counted here rather than before the send, because a
+                    // response coming back is the only evidence available
+                    // that X actually processed (and so billed) the request.
+                    // Counting up front would charge the user for every
+                    // connection that never arrived — and a flaky network
+                    // retries up to `MAX_RETRIES` times, so one reload could
+                    // invent five requests that were never made. Counted per
+                    // send, not per call, since a retried request is billed
+                    // again. The remaining inaccuracy is the opposite case: a
+                    // request X processed whose response was lost in transit
+                    // is billed but not counted here.
+                    usage::record_request(paths, endpoint, now)?;
+
                     // Persisted even on a non-2xx response — an exhausted
                     // window's own 429 is exactly the information #10 needs
                     // tracked so the *next* call refuses to send at all.
@@ -105,6 +168,40 @@ impl XClient {
         // without needing to name ureq's response type: the borrow ends
         // once the last call below returns, freeing `response` for the
         // `body_mut()` call that follows.
+        let header = |name: &str| -> Option<String> {
+            response
+                .headers()
+                .get(name)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string)
+        };
+        let state = rate_limit::parse_headers(
+            header("x-rate-limit-limit").as_deref(),
+            header("x-rate-limit-remaining").as_deref(),
+            header("x-rate-limit-reset").as_deref(),
+        );
+
+        let status = response.status().as_u16();
+        let body = response
+            .body_mut()
+            .read_to_string()
+            .context("could not read the response body")?;
+        Ok((status, body, state))
+    }
+
+    /// One raw HTTP POST for `POST /2/tweets` (#14), mirroring
+    /// [`Self::send_once`]'s shape so [`Self::send_with_retry`] can treat
+    /// the two identically. `send_json` (the `ureq` `json` feature, already
+    /// a dependency) both serializes [`PostTweetRequest`] and sets
+    /// `Content-Type: application/json`.
+    fn send_post_once(&self, url: &str, text: &str) -> Result<(u16, String, RateLimitState)> {
+        let mut response = self
+            .agent
+            .post(url)
+            .header("Authorization", format!("Bearer {}", self.bearer_token))
+            .send_json(PostTweetRequest { text })
+            .with_context(|| format!("request to {url} failed"))?;
+
         let header = |name: &str| -> Option<String> {
             response
                 .headers()
@@ -232,6 +329,19 @@ impl XClient {
             serde_json::from_str(&body).context("could not parse the tweets-by-id response")?;
         Ok(response.into_items())
     }
+
+    /// `POST /2/tweets` (#14) — submit the composer's draft as a new post.
+    /// Tracked under its own `Endpoint::CreatePost` (#10): X limits posting
+    /// separately from every read endpoint above, so sharing a bucket with
+    /// any of them would corrupt both. Returns nothing on success — `ui.rs`
+    /// falls into a normal reload afterward (subject to #10's own interval,
+    /// like any other reload) rather than this call handing back the
+    /// created post's own fields, which nothing here currently needs.
+    pub(crate) fn create_post(&self, paths: &Paths, text: &str, now: i64) -> Result<()> {
+        let url = create_post_url();
+        self.post(paths, Endpoint::CreatePost, &url, text, now)?;
+        Ok(())
+    }
 }
 
 /// Whether a status is worth retrying: server-side (5xx) failures only.
@@ -312,6 +422,11 @@ fn tweets_by_id_url(id: &str) -> String {
          &expansions=author_id,referenced_tweets.id,referenced_tweets.id.author_id\
          &user.fields=name,username"
     )
+}
+
+/// `POST /2/tweets` (#14) — no query string, unlike every `GET` above.
+fn create_post_url() -> String {
+    format!("{API_BASE}/tweets")
 }
 
 /// Pull the API's own error text out of a response body, if it has any.
@@ -401,6 +516,13 @@ mod tests {
             tweets_by_id_url("1700000000000000001"),
             "https://api.x.com/2/tweets?ids=1700000000000000001&tweet.fields=created_at,referenced_tweets&expansions=author_id,referenced_tweets.id,referenced_tweets.id.author_id&user.fields=name,username"
         );
+    }
+
+    #[test]
+    fn builds_the_create_post_url_with_no_query_string() {
+        // #14: unlike every GET above, POST /2/tweets takes no query
+        // parameters — the post text travels in the JSON body instead.
+        assert_eq!(create_post_url(), "https://api.x.com/2/tweets");
     }
 
     #[test]

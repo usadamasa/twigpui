@@ -216,16 +216,36 @@ pub(crate) enum Endpoint {
     /// would corrupt the tracked state for both, since X limits each
     /// endpoint on its own schedule.
     TweetById,
+    /// `POST /2/tweets` (#14) — the composer's submit action. X limits
+    /// posting separately from every read endpoint above, so sharing a
+    /// bucket with any of them would corrupt the tracked state for both.
+    CreatePost,
 }
 
 impl Endpoint {
-    fn key(self) -> &'static str {
+    /// Every tracked endpoint, for callers that need to summarize across all
+    /// of them rather than one at a time — `usage`'s `--usage`/header
+    /// totals (#18) is the current user, so the list lives here rather than
+    /// being duplicated wherever it's needed.
+    pub(crate) const ALL: [Self; 5] = [
+        Self::UserLookup,
+        Self::Timeline,
+        Self::Me,
+        Self::HomeTimeline,
+        Self::TweetById,
+    ];
+
+    /// `pub(crate)` rather than private (unlike before #18): `usage.rs`
+    /// keys its own per-endpoint file by this same string, so the two
+    /// modules' on-disk keys for the same endpoint never drift apart.
+    pub(crate) fn key(self) -> &'static str {
         match self {
             Self::UserLookup => "user_lookup",
             Self::Timeline => "timeline",
             Self::Me => "me",
             Self::HomeTimeline => "home_timeline",
             Self::TweetById => "tweet_by_id",
+            Self::CreatePost => "create_post",
         }
     }
 }
@@ -597,6 +617,36 @@ mod tests {
     }
 
     #[test]
+    fn create_post_endpoint_is_tracked_independently_of_the_others() {
+        // #14: `POST /2/tweets` gets its own bucket — reusing e.g.
+        // `Timeline`'s would corrupt the tracked state for both.
+        let root = temp_root("create-post-endpoint");
+        let paths = test_paths(&root);
+        paths.ensure_dirs().unwrap();
+
+        let timeline_state = RateLimitState {
+            limit: Some(15),
+            remaining: Some(10),
+            reset_at: Some(2_000),
+        };
+        let create_post_state = RateLimitState {
+            limit: Some(200),
+            remaining: Some(0),
+            reset_at: Some(6_000),
+        };
+        save(&paths, Endpoint::Timeline, timeline_state).unwrap();
+        save(&paths, Endpoint::CreatePost, create_post_state).unwrap();
+
+        assert_eq!(load(&paths, Endpoint::Timeline).unwrap(), timeline_state);
+        assert_eq!(
+            load(&paths, Endpoint::CreatePost).unwrap(),
+            create_post_state
+        );
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
     fn a_corrupted_rate_limit_file_is_a_clean_miss_not_an_error() {
         let root = temp_root("corrupt");
         let paths = test_paths(&root);
@@ -627,6 +677,18 @@ mod tests {
         assert_eq!(load(&paths, Endpoint::Timeline).unwrap(), state);
 
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn endpoint_all_lists_every_variant_with_a_unique_key() {
+        // #18's usage tracker iterates `Endpoint::ALL` to summarize across
+        // every endpoint — a missing or duplicated variant here would
+        // silently under- or double-count.
+        let keys: std::collections::HashSet<&str> = Endpoint::ALL
+            .iter()
+            .map(|endpoint| endpoint.key())
+            .collect();
+        assert_eq!(keys.len(), Endpoint::ALL.len());
     }
 
     #[test]
