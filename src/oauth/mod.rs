@@ -157,6 +157,7 @@ mod tests {
             target_username: "someone".to_string(),
             max_results: 20,
             min_fetch_interval_seconds: 60,
+            theme: crate::theme::ThemeMode::default(),
         }
     }
 

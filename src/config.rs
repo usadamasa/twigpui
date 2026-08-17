@@ -3,6 +3,7 @@ use serde::Deserialize;
 use std::path::Path;
 
 use crate::paths::Paths;
+use crate::theme::ThemeMode;
 
 /// Runtime configuration, resolved with environment variable > `config.toml`
 /// > built-in default precedence.
@@ -27,6 +28,10 @@ pub(crate) struct Config {
     /// consumes it — but it's plumbed through here now so both the manual
     /// reload cooldown and #21 read the same setting.
     pub min_fetch_interval_seconds: u32,
+    /// Color theme (#19): `light`, `dark`, or `system` (follows the OS
+    /// appearance). Defaults to `light`; an unrecognized value falls back to
+    /// the default rather than failing startup — see [`Config::resolve`].
+    pub theme: ThemeMode,
 }
 
 const DEFAULT_USERNAME: &str = "XDevelopers";
@@ -55,6 +60,11 @@ struct FileSettings {
     /// `bearer_token` below — this key is allowed in `config.toml`.
     #[serde(default)]
     oauth_client_id: Option<String>,
+    /// Raw `theme` value (#19), parsed by [`Config::resolve`] rather than
+    /// here so an unrecognized value can fall back to the default instead of
+    /// failing the whole file load.
+    #[serde(default)]
+    theme: Option<String>,
     /// Present only so [`Config::resolve`] can detect and reject a bearer
     /// token accidentally checked into `config.toml`. Kept as an untyped
     /// `toml::Value` so any shape (string, table, array, ...) under this key
@@ -177,12 +187,45 @@ impl Config {
             );
         }
 
+        // env > config.toml > default, same layering as everything else
+        // above. Unlike the numeric settings, an unrecognized value here
+        // must not `bail!` — a typo'd theme is cosmetic, not a reason to
+        // block startup (#19) — so it falls back to the default and warns
+        // via eprintln!, the project's established pattern for
+        // non-fatal notices (see main.rs).
+        // env > config.toml > default, same layering as everything else
+        // above. Unlike the numeric settings, an unrecognized value here
+        // must not `bail!` — a typo'd theme is cosmetic, not a reason to
+        // block startup (#19) — so it falls back to the default and warns
+        // via eprintln!, the project's established pattern for
+        // non-fatal notices (see main.rs).
+        let theme = var("X_THEME")
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty())
+            .or_else(|| {
+                file.theme
+                    .map(|t| t.trim().to_string())
+                    .filter(|t| !t.is_empty())
+            })
+            .and_then(|raw| {
+                ThemeMode::parse(&raw).or_else(|| {
+                    eprintln!(
+                        "warning: unrecognized theme {raw:?} (expected light, dark, or \
+                         system); using {} instead",
+                        ThemeMode::default()
+                    );
+                    None
+                })
+            })
+            .unwrap_or_default();
+
         Ok(Self {
             bearer_token,
             oauth_client_id,
             target_username,
             max_results,
             min_fetch_interval_seconds,
+            theme,
         })
     }
 }
@@ -190,6 +233,7 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::{Config, DEFAULT_MAX_RESULTS, DEFAULT_USERNAME, FileSettings};
+    use crate::theme::ThemeMode;
 
     /// Build a lookup over a fixed `(key, value)` table.
     fn vars(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> + use<> {
@@ -215,6 +259,7 @@ mod tests {
             config.min_fetch_interval_seconds,
             super::DEFAULT_MIN_FETCH_INTERVAL_SECONDS
         );
+        assert_eq!(config.theme, ThemeMode::default());
     }
 
     // Since #7, a bearer token is one of *two* valid credentials (the other
@@ -517,6 +562,101 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(error.contains("not a number"), "{error}");
+    }
+
+    // --- theme layering (env > file > default, #19) ---
+
+    #[test]
+    fn resolve_parses_the_theme_from_env() {
+        for (raw, expected) in [
+            ("light", ThemeMode::Light),
+            ("dark", ThemeMode::Dark),
+            ("system", ThemeMode::System),
+        ] {
+            let config = Config::resolve(
+                vars(&[("X_BEARER_TOKEN", "token"), ("X_THEME", raw)]),
+                FileSettings::default(),
+            )
+            .unwrap();
+            assert_eq!(config.theme, expected, "{raw}");
+        }
+    }
+
+    #[test]
+    fn resolve_theme_is_case_insensitive_and_trims_whitespace() {
+        let config = Config::resolve(
+            vars(&[("X_BEARER_TOKEN", "token"), ("X_THEME", "  DARK\n")]),
+            FileSettings::default(),
+        )
+        .unwrap();
+        assert_eq!(config.theme, ThemeMode::Dark);
+    }
+
+    #[test]
+    fn resolve_reads_the_theme_from_the_file_when_env_is_unset() {
+        let file = FileSettings {
+            theme: Some("dark".to_string()),
+            ..FileSettings::default()
+        };
+        let config = Config::resolve(vars(&[("X_BEARER_TOKEN", "token")]), file).unwrap();
+        assert_eq!(config.theme, ThemeMode::Dark);
+    }
+
+    #[test]
+    fn resolve_prefers_the_env_theme_over_the_file() {
+        let file = FileSettings {
+            theme: Some("dark".to_string()),
+            ..FileSettings::default()
+        };
+        let config = Config::resolve(
+            vars(&[("X_BEARER_TOKEN", "token"), ("X_THEME", "light")]),
+            file,
+        )
+        .unwrap();
+        assert_eq!(config.theme, ThemeMode::Light);
+    }
+
+    #[test]
+    fn resolve_falls_back_to_the_default_theme_when_unset() {
+        let config = Config::resolve(
+            vars(&[("X_BEARER_TOKEN", "token")]),
+            FileSettings::default(),
+        )
+        .unwrap();
+        assert_eq!(config.theme, ThemeMode::default());
+    }
+
+    // An unrecognized theme must not fail startup (#19) — it falls back to
+    // the default. This must hold for both the env and the file source.
+
+    #[test]
+    fn resolve_falls_back_to_the_default_theme_on_an_unrecognized_env_value() {
+        let config = Config::resolve(
+            vars(&[("X_BEARER_TOKEN", "token"), ("X_THEME", "solarized")]),
+            FileSettings::default(),
+        )
+        .unwrap();
+        assert_eq!(config.theme, ThemeMode::default());
+    }
+
+    #[test]
+    fn resolve_falls_back_to_the_default_theme_on_an_unrecognized_file_value() {
+        let file = FileSettings {
+            theme: Some("solarized".to_string()),
+            ..FileSettings::default()
+        };
+        let config = Config::resolve(vars(&[("X_BEARER_TOKEN", "token")]), file).unwrap();
+        assert_eq!(config.theme, ThemeMode::default());
+    }
+
+    #[test]
+    fn resolve_falls_back_to_the_default_theme_when_blank() {
+        let config = Config::resolve(
+            vars(&[("X_BEARER_TOKEN", "token"), ("X_THEME", "   ")]),
+            FileSettings::default(),
+        )
+        .unwrap();
+        assert_eq!(config.theme, ThemeMode::default());
     }
 
     #[test]
