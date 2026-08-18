@@ -7,6 +7,7 @@ use gpui::{
 };
 use gpui_component::input::{Input, InputEvent, InputState};
 
+use crate::browser;
 use crate::cache;
 use crate::compose::{self, ComposeState, ComposeStatus};
 use crate::config::Config;
@@ -19,7 +20,7 @@ use crate::theme::{self, Theme};
 use crate::thread::{self, ThreadChain};
 use crate::toggle::{ToggleState, ToggleStatus};
 use crate::usage;
-use crate::x_api::{PostMetrics, QuotedPost, RepliedTo, TimelineItem, XClient};
+use crate::x_api::{PostLink, PostMetrics, QuotedPost, RepliedTo, TimelineItem, XClient};
 
 /// What's known about one reply's "Show thread" walk (#12), keyed by the
 /// reply's own post id in [`TimelineView::threads`]. Absent from that map
@@ -326,6 +327,15 @@ pub(crate) struct TimelineView {
     /// In-flight create/delete like requests, keyed by post id — see
     /// `repost_tasks`.
     like_tasks: HashMap<String, Task<()>>,
+    /// Holds the in-flight `open(1)` spawn alive (#70); mirrors
+    /// `usage_refresh`'s cancel-on-drop contract. Only one is kept: opening
+    /// a second link while the first is still spawning is not something
+    /// worth queueing.
+    open_task: Option<Task<()>>,
+    /// Why the last open attempt failed (#70), shown in the header until
+    /// the next attempt clears it. `None` is the ordinary case — a
+    /// successful open leaves the app with nothing to say.
+    open_failure: Option<String>,
 }
 
 impl TimelineView {
@@ -389,6 +399,8 @@ impl TimelineView {
             liked_ids_refresh: None,
             like_overrides: HashMap::new(),
             like_tasks: HashMap::new(),
+            open_task: None,
+            open_failure: None,
         };
         this.start(cx);
         this.refresh_usage(cx);
@@ -1030,6 +1042,30 @@ impl TimelineView {
         self.like_tasks.insert(task_key, task);
     }
 
+    /// Hand `url` to the system browser (#70).
+    ///
+    /// Runs on the background executor rather than in the click handler:
+    /// spawning a process is a syscall the UI thread has no reason to wait
+    /// on. A refusal or a failure to launch is reported through
+    /// `open_failure`, which the row renders — a click that silently does
+    /// nothing is the one outcome worth avoiding here.
+    fn open_in_browser(&mut self, url: String, cx: &mut Context<'_, Self>) {
+        self.open_failure = None;
+        self.open_task = Some(cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { browser::open(&url) })
+                .await;
+
+            if let Err(error) = result {
+                let _ = this.update(cx, |this, cx| {
+                    this.open_failure = Some(format!("{error:#}"));
+                    cx.notify();
+                });
+            }
+        }));
+    }
+
     /// The like/unlike toggle for one post (#68), rendered whenever
     /// [`offers_like`] allows it for `item`.
     fn like_button(&self, item: &TimelineItem, cx: &mut Context<'_, Self>) -> AnyElement {
@@ -1560,17 +1596,19 @@ impl TimelineView {
                 div()
                     .flex()
                     .gap_2()
-                    .child(
-                        div()
-                            .font_weight(FontWeight::BOLD)
-                            .child(item.author_name.clone()),
-                    )
+                    // #70: the author name and handle open the profile on
+                    // x.com. `profile_url` returns `None` when the username
+                    // never expanded, in which case they stay plain text
+                    // rather than becoming a link to nowhere.
+                    .child(author_link(item, theme, cx))
                     .child(div().text_color(rgb(theme.text_muted)).child(byline))
                     .child(
                         div()
                             .text_color(rgb(theme.text_muted))
                             .child(format_timestamp(item.created_at.as_deref())),
-                    ),
+                    )
+                    // #70: the post itself, on x.com.
+                    .child(open_post_link(item, theme, cx)),
             )
             .child(div().child(item.text.clone()))
             // #67: reply/repost/like counts, muted and only when there is
@@ -1581,6 +1619,12 @@ impl TimelineView {
                 item.metrics.as_ref().and_then(metrics_label),
                 |column, label| column.child(div().text_color(rgb(theme.text_muted)).child(label)),
             )
+            // #70: the links in the body, expanded out of the `t.co`
+            // shortlinks the text carries — see `link_row`'s doc for why
+            // they sit under the text rather than inside it.
+            .when(!item.links.is_empty(), |column| {
+                column.child(link_row(&item.links, theme, cx))
+            })
             // #13: a quote (including a repost of a quote) embeds its source
             // as a bordered card under the text.
             .when_some(item.quoted.as_ref(), |column, quoted| {
@@ -1774,6 +1818,13 @@ impl Render for TimelineView {
             // this point may well still be showing the previous posts.
             .when_some(self.reload_notice.clone(), |column, notice| {
                 column.child(reload_notice_banner(&notice, theme, oauth::unix_now()))
+            })
+            // #70: a link that failed to open. Same banner treatment as the
+            // two above, for the same reason: a click that appears to do
+            // nothing is the outcome worth ruling out, and the timeline
+            // below has nothing to say about it.
+            .when_some(self.open_failure.clone(), |column, message| {
+                column.child(session_notice_banner(SharedString::from(message), theme))
             })
             // #14: posting requires OAuth regardless of scope — a missing
             // `tweet.write` scope is caught inside `submit_post` itself
@@ -2281,6 +2332,76 @@ fn offers_like(
     signed_in_with_oauth && home_user_id.is_some() && item.reposted_by.is_none()
 }
 
+/// The author's name, as a link to their profile on x.com (#70) — or as
+/// plain bold text when the username never expanded and [`profile_url`]
+/// has nowhere to point.
+fn author_link(
+    item: &TimelineItem,
+    theme: Theme,
+    cx: &mut Context<'_, TimelineView>,
+) -> AnyElement {
+    let name = div()
+        .font_weight(FontWeight::BOLD)
+        .child(item.author_name.clone());
+
+    match profile_url(&item.author_username) {
+        Some(url) => name
+            .id(SharedString::from(format!("profile-{}", item.id)))
+            .text_color(rgb(theme.accent))
+            .on_click(cx.listener(move |this, _event, _window, cx| {
+                this.open_in_browser(url.clone(), cx);
+            }))
+            .into_any_element(),
+        None => name.into_any_element(),
+    }
+}
+
+/// The "Open in X" affordance on one post's byline row (#70) — always
+/// offered, since [`post_permalink`] has an id-only fallback for a post
+/// whose author never expanded.
+fn open_post_link(
+    item: &TimelineItem,
+    theme: Theme,
+    cx: &mut Context<'_, TimelineView>,
+) -> impl IntoElement {
+    let url = post_permalink(&item.author_username, &item.id);
+    div()
+        .id(SharedString::from(format!("open-{}", item.id)))
+        .text_color(rgb(theme.text_muted))
+        .child("Open in X")
+        .on_click(cx.listener(move |this, _event, _window, cx| {
+            this.open_in_browser(url.clone(), cx);
+        }))
+}
+
+/// The links from one post's text, as clickable chips under the body (#70).
+///
+/// Under the text rather than inside it: X's own text carries `t.co`
+/// shortlinks, so making the link clickable *in place* would mean splitting
+/// the body into interleaved text and link elements, and gpui lays each
+/// child out as its own block — the paragraph would stop wrapping as one
+/// piece. A row of chips beneath keeps the body intact and still gets the
+/// user to the destination, which is what the issue asks for. Each chip is
+/// labelled with X's own `display_url` (`example.com/a/b…`), so what is
+/// shown matches what the text says even though what is opened is the
+/// expanded destination.
+fn link_row(links: &[PostLink], theme: Theme, cx: &mut Context<'_, TimelineView>) -> AnyElement {
+    let mut row = div().flex().flex_col().gap_1();
+    for link in links {
+        let url = link.url.clone();
+        row = row.child(
+            div()
+                .id(SharedString::from(format!("link-{url}")))
+                .text_color(rgb(theme.accent))
+                .child(link.label.clone())
+                .on_click(cx.listener(move |this, _event, _window, cx| {
+                    this.open_in_browser(url.clone(), cx);
+                })),
+        );
+    }
+    row.into_any_element()
+}
+
 /// Whether post `item` should offer a "Quote" action (#16).
 ///
 /// Requires the composer to even be reachable — `signed_in_with_oauth`,
@@ -2523,6 +2644,30 @@ fn cooldown_tick(notice: Option<&ReloadNotice>, now: i64) -> CooldownTick {
     }
 }
 
+/// x.com's canonical URL for one post (#70), built from what
+/// [`TimelineItem`] already carries — no request, no API involvement at
+/// all.
+///
+/// `author_username` is empty for a post whose author never expanded (see
+/// `x_api::model::build_item`), and `x.com//status/…` would 404. X's own
+/// id-only form, `x.com/i/web/status/:id`, resolves the author server-side,
+/// so the link still works rather than being withheld exactly when the app
+/// knows least about the post.
+fn post_permalink(author_username: &str, post_id: &str) -> String {
+    if author_username.is_empty() {
+        format!("https://x.com/i/web/status/{post_id}")
+    } else {
+        format!("https://x.com/{author_username}/status/{post_id}")
+    }
+}
+
+/// x.com's URL for one account (#70), or `None` when the username never
+/// resolved — unlike a post there is no id-only fallback to reach for, so
+/// the affordance is withheld instead of pointing somewhere wrong.
+fn profile_url(author_username: &str) -> Option<String> {
+    (!author_username.is_empty()).then(|| format!("https://x.com/{author_username}"))
+}
+
 /// The engagement line shown under a post's body (#67), or `None` when the
 /// post has no engagement at all — three zeros on every fresh post would be
 /// noise, and #67 asks for counts that stay out of the way.
@@ -2594,14 +2739,14 @@ fn format_timestamp(created_at: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        ComposeStatus, Cooldown, CooldownTick, PostMetrics, ReloadNotice, ReloadTrigger, RepliedTo,
-        Theme, ThreadFetchState, TimelineItem, TimelineSource, TimelineState, ToggleState,
-        at_the_post_cap, byline, compose_error_message, cooldown_label, cooldown_tick,
+        ComposeStatus, Cooldown, CooldownTick, PostLink, PostMetrics, ReloadNotice, ReloadTrigger,
+        RepliedTo, Theme, ThreadFetchState, TimelineItem, TimelineSource, TimelineState,
+        ToggleState, at_the_post_cap, byline, compose_error_message, cooldown_label, cooldown_tick,
         format_timestamp, header_title, is_own_post, like_action_label, metrics_label, offers_like,
         offers_load_older, offers_quote, offers_reauthorize, offers_repost, offers_sign_in,
-        rate_limit, reload_cooldown, reload_failure_outcome, reload_gate, reload_start_state,
-        reply_banner_label, repost_action_label, repost_banner_label, thread_action_label, usage,
-        usage_color, usage_label,
+        post_permalink, profile_url, rate_limit, reload_cooldown, reload_failure_outcome,
+        reload_gate, reload_start_state, reply_banner_label, repost_action_label,
+        repost_banner_label, thread_action_label, usage, usage_color, usage_label,
     };
 
     fn item_with(id: &str, author_username: &str, reposted_by: Option<&str>) -> TimelineItem {
@@ -2615,6 +2760,7 @@ mod tests {
             quoted: None,
             replied_to: None,
             metrics: None,
+            links: Vec::new(),
         }
     }
 
@@ -2677,6 +2823,55 @@ mod tests {
             .as_deref(),
             Some("1K replies · 12.3K reposts · 2.4M likes")
         );
+    }
+
+    // --- #70: opening links ---
+
+    #[test]
+    fn a_post_permalink_uses_the_authors_handle() {
+        assert_eq!(
+            post_permalink("XDevelopers", "1700000000000000001"),
+            "https://x.com/XDevelopers/status/1700000000000000001"
+        );
+    }
+
+    #[test]
+    fn a_post_permalink_falls_back_to_the_id_only_form() {
+        // A post whose author never expanded still has to be reachable —
+        // `x.com//status/…` would 404, X's own `/i/web/` form does not.
+        assert_eq!(
+            post_permalink("", "1700000000000000001"),
+            "https://x.com/i/web/status/1700000000000000001"
+        );
+    }
+
+    #[test]
+    fn a_permalink_is_something_the_browser_helper_will_actually_open() {
+        // The two halves have to agree: a URL this builds and `browser`
+        // then refuses would be a click that does nothing.
+        assert!(crate::browser::is_openable(&post_permalink(
+            "XDevelopers",
+            "1"
+        )));
+        assert!(crate::browser::is_openable(&post_permalink("", "1")));
+        assert!(crate::browser::is_openable(
+            &profile_url("XDevelopers").unwrap()
+        ));
+    }
+
+    #[test]
+    fn a_profile_url_uses_the_handle() {
+        assert_eq!(
+            profile_url("XDevelopers").as_deref(),
+            Some("https://x.com/XDevelopers")
+        );
+    }
+
+    #[test]
+    fn there_is_no_profile_url_without_a_handle() {
+        // Unlike a post there is no id-only fallback, so the affordance is
+        // withheld rather than pointed somewhere wrong.
+        assert_eq!(profile_url(""), None);
     }
 
     // --- #68: like ---
@@ -2926,6 +3121,7 @@ mod tests {
                 quoted: None,
                 replied_to: None,
                 metrics: None,
+                links: Vec::new(),
             })
             .collect();
         let state = TimelineState::Loaded(full);
@@ -3535,6 +3731,10 @@ mod tests {
                         reposts: 34,
                         likes: 5600,
                     }),
+                    links: vec![PostLink {
+                        url: "https://example.com/an-article".to_string(),
+                        label: "example.com/an-article".to_string(),
+                    }],
                 }]);
                 cx.notify();
             });

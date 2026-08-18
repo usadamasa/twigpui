@@ -34,6 +34,37 @@ pub(crate) struct Post {
     /// declines to report counts for.
     #[serde(default)]
     pub public_metrics: Option<PostMetrics>,
+    /// The `entities` object (#70), present only because `tweet.fields`
+    /// asks for it. Its `urls` are the only part this crate reads: a post's
+    /// text carries `t.co` shortlinks, and `expanded_url` is the only way
+    /// to reach the real destination without following a redirect.
+    #[serde(default)]
+    pub entities: Option<Entities>,
+}
+
+/// The subset of X's `entities` object twigpui reads (#70) — just the URLs.
+/// Mentions, hashtags and annotations are also in there; serde drops what
+/// is not listed, so adding them later is additive.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub(crate) struct Entities {
+    #[serde(default)]
+    pub urls: Vec<UrlEntity>,
+}
+
+/// One entry in `entities.urls` (#70). `expanded_url` is the destination
+/// the `t.co` shortlink in the post's text stands for; `display_url` is
+/// X's own shortened-for-humans rendering of it (`example.com/a/b…`).
+///
+/// Both are optional on the wire: X omits `expanded_url` for some entities
+/// (a media attachment's own `t.co`, notably), and a link with nowhere to
+/// go is dropped rather than rendered as a dead chip — see
+/// [`post_links`].
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct UrlEntity {
+    #[serde(default)]
+    pub expanded_url: Option<String>,
+    #[serde(default)]
+    pub display_url: Option<String>,
 }
 
 /// A post's reply/repost/like counts (#67).
@@ -225,6 +256,22 @@ pub(crate) struct TimelineItem {
     /// files written before #67 deserialize cleanly.
     #[serde(default)]
     pub metrics: Option<PostMetrics>,
+    /// The links in this post's text (#70), expanded out of the `t.co`
+    /// shortlinks the text itself carries — for whichever post the body
+    /// actually holds, so a repost gets the original's. Empty for a post
+    /// with no links, and `#[serde(default)]` so cache files written before
+    /// #70 deserialize cleanly, exactly like `metrics` above.
+    #[serde(default)]
+    pub links: Vec<PostLink>,
+}
+
+/// One openable link from a post's text (#70), flattened out of
+/// [`UrlEntity`] with both halves resolved: `url` is where it actually
+/// goes, `label` is what to show for it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct PostLink {
+    pub url: String,
+    pub label: String,
 }
 
 /// Who a reply is replying to (#12), joined from `includes` the same way a
@@ -332,6 +379,7 @@ fn build_item(
         quoted: None,
         replied_to: None,
         metrics: post.public_metrics,
+        links: post_links(post),
     };
 
     if let Some(retweet_ref) = post
@@ -356,6 +404,8 @@ fn build_item(
             // #67: the body is the original's, so the counts under it have
             // to be the original's too — the outer repost carries its own.
             item.metrics = original.public_metrics;
+            // #70: the links belong to the body, which is the original's.
+            item.links = post_links(original);
         } else {
             // Original is gone from `includes` — keep the outer post's own
             // (possibly truncated `RT @user: …`) text already set above
@@ -367,6 +417,7 @@ fn build_item(
             // Blanked for the same reason as the author fields above: the
             // outer repost's own counts are not the original's (#67).
             item.metrics = None;
+            item.links.clear();
         }
     } else {
         if post
@@ -410,6 +461,34 @@ fn reply_target(
         author_name,
         author_username,
     })
+}
+
+/// The openable links in `post`'s text (#70).
+///
+/// An entity with no `expanded_url` is dropped: without it there is nothing
+/// to open but the `t.co` shortlink already sitting in the text, and a chip
+/// that just re-states the shortlink is worse than no chip. Duplicates are
+/// dropped too — X repeats an entity when the same link appears twice —
+/// keeping the first occurrence, so the order matches the text. The label
+/// falls back to the URL itself when X sends no `display_url`.
+fn post_links(post: &Post) -> Vec<PostLink> {
+    let mut seen: Vec<PostLink> = Vec::new();
+    let Some(entities) = post.entities.as_ref() else {
+        return seen;
+    };
+    for entity in &entities.urls {
+        let Some(url) = entity.expanded_url.as_ref() else {
+            continue;
+        };
+        if seen.iter().any(|link| &link.url == url) {
+            continue;
+        }
+        seen.push(PostLink {
+            url: url.clone(),
+            label: entity.display_url.clone().unwrap_or_else(|| url.clone()),
+        });
+    }
+    seen
 }
 
 /// The post `post` quotes, if it has a `quoted` reference and that post is
@@ -1115,6 +1194,154 @@ mod tests {
         }"#;
         let response: TimelineResponse = serde_json::from_str(json).unwrap();
         assert_eq!(response.into_items()[0].metrics, None);
+    }
+
+    const LINKS_JSON: &str = r#"{
+      "data": [
+        {
+          "id": "1700000000000000001",
+          "text": "read this https://t.co/abc and this https://t.co/abc again",
+          "author_id": "2244994945",
+          "entities": {
+            "urls": [
+              {
+                "url": "https://t.co/abc",
+                "expanded_url": "https://example.com/an-article",
+                "display_url": "example.com/an-article"
+              },
+              {
+                "url": "https://t.co/abc",
+                "expanded_url": "https://example.com/an-article",
+                "display_url": "example.com/an-article"
+              },
+              { "url": "https://t.co/xyz" }
+            ]
+          }
+        },
+        {
+          "id": "1700000000000000002",
+          "text": "no links here",
+          "author_id": "2244994945"
+        }
+      ]
+    }"#;
+
+    #[test]
+    fn expands_the_links_in_a_posts_text() {
+        // #70: the text carries t.co shortlinks; `expanded_url` is the only
+        // way to the real destination without following a redirect.
+        let response: TimelineResponse = serde_json::from_str(LINKS_JSON).unwrap();
+        let items = response.into_items();
+
+        assert_eq!(
+            items[0].links,
+            vec![PostLink {
+                url: "https://example.com/an-article".to_string(),
+                label: "example.com/an-article".to_string(),
+            }],
+            "the repeated entity must collapse, and the one with no \
+             expanded_url must be dropped"
+        );
+    }
+
+    #[test]
+    fn a_post_with_no_entities_has_no_links() {
+        let response: TimelineResponse = serde_json::from_str(LINKS_JSON).unwrap();
+        assert!(response.into_items()[1].links.is_empty());
+    }
+
+    #[test]
+    fn a_link_without_a_display_url_falls_back_to_the_url_itself() {
+        let json = r#"{
+          "data": [
+            {
+              "id": "1",
+              "text": "t",
+              "entities": { "urls": [{ "expanded_url": "https://example.com/x" }] }
+            }
+          ]
+        }"#;
+        let response: TimelineResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            response.into_items()[0].links,
+            vec![PostLink {
+                url: "https://example.com/x".to_string(),
+                label: "https://example.com/x".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn a_repost_carries_the_originals_links() {
+        // The body is the original's text, so its t.co links are the ones
+        // the row can actually resolve.
+        let json = r#"{
+          "data": [
+            {
+              "id": "10",
+              "text": "RT @XDevelopers: read this https://t.co/abc",
+              "author_id": "1000000000",
+              "referenced_tweets": [{ "type": "retweeted", "id": "11" }]
+            }
+          ],
+          "includes": {
+            "users": [
+              { "id": "1000000000", "name": "Reposter", "username": "reposter" },
+              { "id": "2244994945", "name": "Developers", "username": "XDevelopers" }
+            ],
+            "tweets": [
+              {
+                "id": "11",
+                "text": "read this https://t.co/abc",
+                "author_id": "2244994945",
+                "entities": {
+                  "urls": [
+                    {
+                      "expanded_url": "https://example.com/original",
+                      "display_url": "example.com/original"
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        }"#;
+        let response: TimelineResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            response.into_items()[0].links,
+            vec![PostLink {
+                url: "https://example.com/original".to_string(),
+                label: "example.com/original".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn a_repost_whose_original_is_missing_reports_no_links() {
+        let json = r#"{
+          "data": [
+            {
+              "id": "10",
+              "text": "RT @XDevelopers: read this https://t.co/abc",
+              "author_id": "1000000000",
+              "entities": {
+                "urls": [{ "expanded_url": "https://example.com/outer" }]
+              },
+              "referenced_tweets": [{ "type": "retweeted", "id": "11" }]
+            }
+          ]
+        }"#;
+        let response: TimelineResponse = serde_json::from_str(json).unwrap();
+        assert!(response.into_items()[0].links.is_empty());
+    }
+
+    #[test]
+    fn a_cache_file_written_before_links_existed_still_loads() {
+        let item: TimelineItem = serde_json::from_str(
+            r#"{"id":"1","text":"cached","created_at":null,"author_name":"a","author_username":"b"}"#,
+        )
+        .unwrap();
+        assert!(item.links.is_empty());
     }
 
     #[test]

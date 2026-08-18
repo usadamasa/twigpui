@@ -545,6 +545,7 @@ mod tests {
             quoted: None,
             replied_to: None,
             metrics: None,
+            links: Vec::new(),
         }
     }
 
