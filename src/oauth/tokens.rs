@@ -115,6 +115,12 @@ impl TokenSet {
 /// before letting a submit go out.
 pub(crate) const TWEET_WRITE_SCOPE: &str = "tweet.write";
 
+/// The scope #68's like button needs (`POST`/`DELETE /2/users/:id/likes`).
+/// X grants this separately from `tweet.write`, so a session authorized
+/// before #68 can post and repost but not like — [`has_scope`] plus the
+/// header's "Re-authorize" button is the fix, exactly as for #14.
+pub(crate) const LIKE_WRITE_SCOPE: &str = "like.write";
+
 /// Whether a granted scope string includes `required`, per RFC 6749 §3.3's
 /// space-separated list — matched by exact token, not a substring check, so
 /// e.g. a hypothetical `tweet.write.extra` scope wouldn't false-match a
@@ -231,6 +237,16 @@ mod tests {
     }
 
     // --- has_scope ---
+
+    #[test]
+    fn has_scope_distinguishes_like_write_from_tweet_write() {
+        // #68: a pre-#68 session holds `tweet.write` but not `like.write`,
+        // and must be told to re-authorize rather than spending a request
+        // that is guaranteed to 403.
+        let pre_68 = Some("tweet.read users.read tweet.write offline.access");
+        assert!(has_scope(pre_68, TWEET_WRITE_SCOPE));
+        assert!(!has_scope(pre_68, LIKE_WRITE_SCOPE));
+    }
 
     #[test]
     fn has_scope_is_true_when_the_required_scope_is_present() {

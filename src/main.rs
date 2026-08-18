@@ -5,6 +5,7 @@
 mod cache;
 mod compose;
 mod config;
+mod like;
 mod oauth;
 mod paths;
 mod rate_limit;

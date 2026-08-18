@@ -272,19 +272,20 @@ registration verbatim.
 public client has no secret to protect — so unlike the bearer token it's
 fine to check into a dotfiles repo.
 
-**Scopes.** twigpui requests `tweet.read users.read tweet.write
-offline.access`: enough to read posts, resolve user context, post (#14), and
-refresh the session without re-prompting.
+**Scopes.** twigpui requests `tweet.read users.read tweet.write like.write
+offline.access`: enough to read posts, resolve user context, post (#14),
+like (#68), and refresh the session without re-prompting.
 
-**If you signed in before #14,** your stored session predates `tweet.write`
-and can't post yet — the API rejects `POST /2/tweets` with a 403 it has no
-way to fix on its own. twigpui records the scope granted with each session
-(and treats a session from before that existed as "unknown," never as "assume
-it's fine"), so the header shows a **"Re-authorize"** button next to the
-usual reload/sign-in controls whenever the current session is missing
-`tweet.write`. Clicking it re-runs the same sign-in flow above end to end —
-new browser consent screen, new tokens — and nothing else in the app changes
-as a result.
+**If you signed in before #14 or #68,** your stored session predates
+`tweet.write` or `like.write` and can't post or like yet — the API rejects
+the write with a 403 it has no way to fix on its own. twigpui records the
+scope granted with each session (and treats a session from before that
+existed as "unknown," never as "assume it's fine"), so the header shows a
+**"Re-authorize"** button next to the usual reload/sign-in controls whenever
+the current session is missing any write scope the app needs. Clicking it
+re-runs the same sign-in flow above end to end — new browser consent screen,
+new tokens, every scope at once — and nothing else in the app changes as a
+result.
 
 **What happens when you click "Sign in with X":** the app opens your default
 browser at X's consent screen, and a short-lived HTTP listener on
@@ -314,7 +315,7 @@ created (mode `0700`) on startup:
 | --- | --- | --- |
 | `XDG_CONFIG_HOME` | `~/.config/twigpui/` | `config.toml` |
 | `XDG_CACHE_HOME` | `~/.cache/twigpui/` | Response cache: `user_ids.json`, `timeline-<user_id>.json` (#9), `me.json`, `home-timeline-<user_id>.json` (#11), `thread-<reply_id>.json` (#12) |
-| `XDG_STATE_HOME` | `~/.local/state/twigpui/` | `oauth_tokens.json` (mode `0600`), `rate_limit.json` (#10), `usage.json` (#18), `reposted_posts.json` (#15) |
+| `XDG_STATE_HOME` | `~/.local/state/twigpui/` | `oauth_tokens.json` (mode `0600`), `rate_limit.json` (#10), `usage.json` (#18), `reposted_posts.json` (#15), `liked_posts.json` (#68) |
 
 An `XDG_*` variable is only honored if it is set to a non-blank absolute
 path; a relative or blank value falls back to the default, per spec.
@@ -487,6 +488,32 @@ resolve that original id for a displayed repost row, so it withholds the
 button there rather than risk sending the wrong id. Reposting the original
 post directly, wherever else it appears in the timeline, is unaffected.
 
+## Liking and unliking (#68)
+
+Most posts show a "Like" / "Liked" toggle. Clicking "Like" sends
+`POST /2/users/:id/likes`; clicking "Liked" (to undo it) sends
+`DELETE /2/users/:id/likes/:tweet_id`. It behaves exactly like the repost
+toggle above — optimistic flip on click, rollback on failure, no
+confirmation dialog — and shares its machinery with it (`src/toggle.rs`).
+
+Everything the repost section says about the local record applies here
+verbatim, with `liked_posts.json` in place of `reposted_posts.json`: X API
+v2 reports no "did I like this" field either, likes made in other clients
+are never reflected, and a stale record is corrected from the API's own
+error text ("already liked" / "have not liked") rather than surfacing as a
+failure.
+
+**Two differences from reposting.** Your own posts *do* get a Like button —
+X rejects reposting yourself but accepts liking yourself. And liking needs
+the `like.write` scope, which X grants separately from `tweet.write`: a
+session authorized before #68 can post and repost but not like, and the
+header's "Re-authorize" button (#14) is what fixes it. Re-running the
+sign-in flow requests every scope at once.
+
+A post that is itself a repost in your timeline gets no Like button, for
+exactly the reason it gets no Repost button — its own post id is the
+retweet activity's, not the original content's (#52).
+
 ## API cost
 
 The X API bills per request against prepaid credits. A cold reload spends two
@@ -499,7 +526,8 @@ explicit action — there is no polling or auto-refresh, and since #9,
 **opening the app spends nothing at all**: startup renders straight from the
 local cache below whenever one exists, with no request in the loop.
 
-Reposting spends one request; un-reposting spends one more.
+Reposting spends one request; un-reposting spends one more. Liking and
+unliking (#68) cost the same, one request each.
 
 When credits run out the API answers `429` with a `UsageCapExceeded` problem
 body; the app surfaces that text directly in the window.
@@ -515,10 +543,12 @@ once its window resets. twigpui tells them apart and treats each accordingly:
   `-remaining` / `-reset` headers are parsed and kept per endpoint: the
   username lookup, the single-user timeline fetch, `/users/me`, the home
   timeline (#11), `GET /2/tweets?ids=` (#12, "Show thread"),
-  `POST /2/tweets` (#14, posting), and reposting/un-reposting (#15,
+  `POST /2/tweets` (#14, posting), reposting/un-reposting (#15,
   `POST`/`DELETE /2/users/:id/retweets…`, tracked as two separate endpoints
-  since X limits creating and deleting a repost independently) are all
-  tracked separately, since X limits each of them separately.
+  since X limits creating and deleting a repost independently), and
+  liking/unliking (#68, `POST`/`DELETE /2/users/:id/likes…`, two endpoints
+  for the same reason) are all tracked separately, since X limits each of
+  them separately.
 - **The app refuses to send rather than waiting.** If the tracked remaining
   count is zero and the reset time hasn't arrived yet, twigpui does **not**
   send the request — a GUI app has no business sleeping a background thread

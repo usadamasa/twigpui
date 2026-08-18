@@ -4,7 +4,7 @@ use anyhow::{Context as _, Result, bail};
 use ureq::Agent;
 
 use super::model::{
-    ApiProblem, PostTweetRequest, RepostRequest, TimelineItem, TimelineResponse, User,
+    ApiProblem, PostTweetRequest, TimelineItem, TimelineResponse, TweetIdRequest, User,
     UserLookupResponse,
 };
 use crate::paths::Paths;
@@ -246,7 +246,7 @@ impl XClient {
 
     /// One raw HTTP DELETE (#15), mirroring [`Self::send_once`]'s shape
     /// exactly so [`Self::send_with_retry`] can treat it identically — no
-    /// request body, unlike [`Self::send_post_once`]/[`Self::send_repost_once`].
+    /// request body, unlike [`Self::send_post_once`]/[`Self::send_tweet_id_once`].
     fn send_delete_once(&self, url: &str) -> Result<(u16, String, RateLimitState)> {
         let mut response = self
             .agent
@@ -276,26 +276,25 @@ impl XClient {
         Ok((status, body, state))
     }
 
-    /// One raw HTTP POST for `POST /2/users/:id/retweets` (#15), mirroring
-    /// [`Self::send_post_once`]'s shape but serializing [`RepostRequest`]
-    /// instead of [`PostTweetRequest`] — kept as its own method rather than
-    /// parameterizing [`Self::send_post_once`] over the body type, since the
-    /// two request shapes belong to unrelated endpoints and the duplication
-    /// here is a handful of lines, not the retry/rate-limit logic #15
-    /// actually needs shared (that lives in [`Self::send_with_retry`], used
-    /// identically by both).
-    fn send_repost_once(
+    /// One raw HTTP POST for the two endpoints whose body is a single
+    /// `tweet_id` — `POST /2/users/:id/retweets` (#15) and
+    /// `POST /2/users/:id/likes` (#68) — mirroring [`Self::send_post_once`]'s
+    /// shape but serializing [`TweetIdRequest`] instead of
+    /// [`PostTweetRequest`]. Kept separate from `send_post_once` rather than
+    /// parameterizing it over the body type: the duplication here is a
+    /// handful of lines, not the retry/rate-limit logic that actually needs
+    /// sharing (that lives in [`Self::send_with_retry`], used identically by
+    /// all three).
+    fn send_tweet_id_once(
         &self,
         url: &str,
-        source_tweet_id: &str,
+        tweet_id: &str,
     ) -> Result<(u16, String, RateLimitState)> {
         let mut response = self
             .agent
             .post(url)
             .header("Authorization", format!("Bearer {}", self.bearer_token))
-            .send_json(RepostRequest {
-                tweet_id: source_tweet_id,
-            })
+            .send_json(TweetIdRequest { tweet_id })
             .with_context(|| format!("request to {url} failed"))?;
 
         let header = |name: &str| -> Option<String> {
@@ -466,7 +465,7 @@ impl XClient {
     ) -> Result<()> {
         let url = create_repost_url(user_id);
         Self::send_with_retry(paths, Endpoint::CreateRepost, now, || {
-            self.send_repost_once(&url, source_tweet_id)
+            self.send_tweet_id_once(&url, source_tweet_id)
         })?;
         Ok(())
     }
@@ -485,6 +484,42 @@ impl XClient {
     ) -> Result<()> {
         let url = delete_repost_url(user_id, source_tweet_id);
         self.delete(paths, Endpoint::DeleteRepost, &url, now)?;
+        Ok(())
+    }
+
+    /// `POST /2/users/:id/likes` (#68) — like a post as `user_id`. Tracked
+    /// under its own `Endpoint::CreateLike` (#10, #18) for the same reason
+    /// every other write endpoint is: X limits each on its own schedule,
+    /// and a like is billed exactly like a read, so it has to be counted.
+    ///
+    /// Requires the `like.write` scope; a session without it gets a 403,
+    /// which `ui.rs` heads off before spending the request.
+    pub(crate) fn create_like(
+        &self,
+        paths: &Paths,
+        user_id: &str,
+        tweet_id: &str,
+        now: i64,
+    ) -> Result<()> {
+        let url = create_like_url(user_id);
+        Self::send_with_retry(paths, Endpoint::CreateLike, now, || {
+            self.send_tweet_id_once(&url, tweet_id)
+        })?;
+        Ok(())
+    }
+
+    /// `DELETE /2/users/:id/likes/:tweet_id` (#68) — unlike. See
+    /// [`Self::create_like`]; tracked independently under
+    /// `Endpoint::DeleteLike`.
+    pub(crate) fn delete_like(
+        &self,
+        paths: &Paths,
+        user_id: &str,
+        tweet_id: &str,
+        now: i64,
+    ) -> Result<()> {
+        let url = delete_like_url(user_id, tweet_id);
+        self.delete(paths, Endpoint::DeleteLike, &url, now)?;
         Ok(())
     }
 }
@@ -580,7 +615,7 @@ fn create_post_url() -> String {
 
 /// `POST /2/users/:id/retweets` (#15) — `user_id` is the signed-in
 /// account's own id (`/me`, #11); the target post's id travels in the JSON
-/// body ([`RepostRequest`]), not the URL.
+/// body ([`TweetIdRequest`]), not the URL.
 fn create_repost_url(user_id: &str) -> String {
     format!("{API_BASE}/users/{user_id}/retweets")
 }
@@ -590,6 +625,19 @@ fn create_repost_url(user_id: &str) -> String {
 /// path segment rather than a query parameter or JSON body field.
 fn delete_repost_url(user_id: &str, source_tweet_id: &str) -> String {
     format!("{API_BASE}/users/{user_id}/retweets/{source_tweet_id}")
+}
+
+/// `POST /2/users/:id/likes` (#68) — `user_id` is the signed-in account's
+/// own id (`/me`, #11); the target post's id travels in the JSON body
+/// ([`TweetIdRequest`]), not the URL, exactly as for a repost.
+fn create_like_url(user_id: &str) -> String {
+    format!("{API_BASE}/users/{user_id}/likes")
+}
+
+/// `DELETE /2/users/:id/likes/:tweet_id` (#68) — the acted-on post's id is
+/// a URL path segment here, mirroring [`delete_repost_url`].
+fn delete_like_url(user_id: &str, tweet_id: &str) -> String {
+    format!("{API_BASE}/users/{user_id}/likes/{tweet_id}")
 }
 
 /// Pull the API's own error text out of a response body, if it has any.
@@ -701,6 +749,22 @@ mod tests {
         assert_eq!(
             delete_repost_url("2244994945", "1700000000000000001"),
             "https://api.x.com/2/users/2244994945/retweets/1700000000000000001"
+        );
+    }
+
+    #[test]
+    fn builds_the_create_like_url() {
+        assert_eq!(
+            create_like_url("2244994945"),
+            "https://api.x.com/2/users/2244994945/likes"
+        );
+    }
+
+    #[test]
+    fn builds_the_delete_like_url_with_the_tweet_id_as_a_path_segment() {
+        assert_eq!(
+            delete_like_url("2244994945", "1700000000000000001"),
+            "https://api.x.com/2/users/2244994945/likes/1700000000000000001"
         );
     }
 
