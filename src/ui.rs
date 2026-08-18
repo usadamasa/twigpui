@@ -13,9 +13,10 @@ use crate::config::Config;
 use crate::oauth::{self, TimelineSource};
 use crate::paths::Paths;
 use crate::rate_limit;
-use crate::repost::{self, RepostState, RepostStatus};
+use crate::repost;
 use crate::theme::{self, Theme};
 use crate::thread::{self, ThreadChain};
+use crate::toggle::{ToggleState, ToggleStatus};
 use crate::usage;
 use crate::x_api::{PostMetrics, QuotedPost, RepliedTo, TimelineItem, XClient};
 
@@ -306,7 +307,7 @@ pub(crate) struct TimelineView {
     /// confirmed and so is authoritative over `reposted_ids` until the next
     /// refresh catches up. Absent means "use `reposted_ids`'s plain on/off
     /// value" — see [`Self::repost_state_for`].
-    repost_overrides: HashMap<String, RepostState>,
+    repost_overrides: HashMap<String, ToggleState>,
     /// In-flight create/delete repost requests, keyed by post id, mirroring
     /// `thread_fetches`'s cancel-on-drop contract: dropping the view
     /// cancels every still-running toggle along with it.
@@ -912,11 +913,11 @@ impl TimelineView {
     /// session already knows (in flight, failed, or a value a finished
     /// request already confirmed) if there is one, else the plain on/off
     /// value from the local record `refresh_reposted_ids` last read.
-    fn repost_state_for(&self, post_id: &str) -> RepostState {
+    fn repost_state_for(&self, post_id: &str) -> ToggleState {
         self.repost_overrides
             .get(post_id)
             .cloned()
-            .unwrap_or_else(|| RepostState::new(self.reposted_ids.contains(post_id)))
+            .unwrap_or_else(|| ToggleState::new(self.reposted_ids.contains(post_id)))
     }
 
     /// Toggle one post's repost state (#15): flip the button immediately
@@ -958,7 +959,7 @@ impl TimelineView {
             return;
         }
 
-        let creating = !state.is_reposted();
+        let creating = !state.is_on();
         state.start_toggle();
         self.repost_overrides.insert(post_id.clone(), state);
         cx.notify();
@@ -984,7 +985,7 @@ impl TimelineView {
                 let mut state = this
                     .repost_overrides
                     .remove(&update_key)
-                    .unwrap_or_else(|| RepostState::new(!creating));
+                    .unwrap_or_else(|| ToggleState::new(!creating));
                 state.apply_result(result.map_err(|error| format!("{error:#}")));
                 this.repost_overrides.insert(update_key.clone(), state);
                 this.repost_tasks.remove(&update_key);
@@ -2003,12 +2004,12 @@ fn is_own_post(home_username: Option<&str>, author_username: &str) -> bool {
 /// retry.
 fn repost_row(
     post_id: &str,
-    state: &RepostState,
+    state: &ToggleState,
     theme: Theme,
     cx: &mut Context<'_, TimelineView>,
 ) -> AnyElement {
     let label = repost_action_label(state);
-    let color = if state.is_reposted() {
+    let color = if state.is_on() {
         theme.accent
     } else {
         theme.text_muted
@@ -2025,7 +2026,7 @@ fn repost_row(
             }))
         });
 
-    if let RepostStatus::Failed(message) = state.status() {
+    if let ToggleStatus::Failed(message) = state.status() {
         div()
             .flex()
             .flex_col()
@@ -2040,14 +2041,14 @@ fn repost_row(
 
 /// The clickable label for [`repost_row`] (#15): the pending direction
 /// while a request is in flight, else the plain on/off label.
-fn repost_action_label(state: &RepostState) -> &'static str {
-    if matches!(state.status(), RepostStatus::Pending) {
-        if state.is_reposted() {
+fn repost_action_label(state: &ToggleState) -> &'static str {
+    if matches!(state.status(), ToggleStatus::Pending) {
+        if state.is_on() {
             "Reposting…"
         } else {
             "Removing repost…"
         }
-    } else if state.is_reposted() {
+    } else if state.is_on() {
         "Reposted"
     } else {
         "Repost"
@@ -2368,7 +2369,7 @@ fn format_timestamp(created_at: Option<&str>) -> String {
 mod tests {
     use super::{
         ComposeStatus, Cooldown, CooldownTick, PostMetrics, ReloadNotice, ReloadTrigger, RepliedTo,
-        RepostState, Theme, ThreadFetchState, TimelineItem, TimelineSource, TimelineState,
+        Theme, ThreadFetchState, TimelineItem, TimelineSource, TimelineState, ToggleState,
         at_the_post_cap, byline, compose_error_message, cooldown_label, cooldown_tick,
         format_timestamp, header_title, is_own_post, metrics_label, offers_load_older,
         offers_quote, offers_reauthorize, offers_repost, offers_sign_in, rate_limit,
@@ -3113,21 +3114,21 @@ mod tests {
 
     #[test]
     fn repost_action_label_offers_to_repost_when_not_reposted() {
-        assert_eq!(repost_action_label(&RepostState::new(false)), "Repost");
+        assert_eq!(repost_action_label(&ToggleState::new(false)), "Repost");
     }
 
     #[test]
     fn repost_action_label_shows_reposted_once_it_is() {
-        assert_eq!(repost_action_label(&RepostState::new(true)), "Reposted");
+        assert_eq!(repost_action_label(&ToggleState::new(true)), "Reposted");
     }
 
     #[test]
     fn repost_action_label_shows_the_pending_direction() {
-        let mut creating = RepostState::new(false);
+        let mut creating = ToggleState::new(false);
         creating.start_toggle();
         assert_eq!(repost_action_label(&creating), "Reposting…");
 
-        let mut deleting = RepostState::new(true);
+        let mut deleting = ToggleState::new(true);
         deleting.start_toggle();
         assert_eq!(repost_action_label(&deleting), "Removing repost…");
     }
