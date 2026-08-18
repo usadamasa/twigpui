@@ -5,12 +5,14 @@
 mod cache;
 mod compose;
 mod config;
+mod like;
 mod oauth;
 mod paths;
 mod rate_limit;
 mod repost;
 mod theme;
 mod thread;
+mod toggle;
 mod ui;
 mod usage;
 mod x_api;

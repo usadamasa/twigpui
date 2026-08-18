@@ -132,6 +132,19 @@ impl Paths {
         self.state_dir.join("reposted_posts.json")
     }
 
+    /// Path to the local record of post ids the signed-in user has liked
+    /// from this app, under `state_dir` (#68). Separate from
+    /// [`Self::reposted_posts_file`] rather than one combined file: the two
+    /// records are written by independent toggles, and a corrupt or lost
+    /// file already degrades to "nothing recorded" — sharing one would make
+    /// that degradation hit both features at once. Everything
+    /// `reposted_posts_file`'s doc says about *why* this is state and not
+    /// cache applies here identically: X API v2's timeline response carries
+    /// no "did I like this" field either.
+    pub(crate) fn liked_posts_file(&self) -> PathBuf {
+        self.state_dir.join("liked_posts.json")
+    }
+
     /// Create all three directories (recursively) if they do not already
     /// exist.
     ///
@@ -382,6 +395,21 @@ mod tests {
             paths.usage_file(),
             PathBuf::from("/home/alice/.local/state/twigpui/usage.json")
         );
+    }
+
+    #[test]
+    fn liked_posts_file_is_under_the_state_dir() {
+        let paths = Paths::from_vars(vars(&[("HOME", "/home/alice")])).unwrap();
+        assert_eq!(
+            paths.liked_posts_file(),
+            PathBuf::from("/home/alice/.local/state/twigpui/liked_posts.json")
+        );
+    }
+
+    #[test]
+    fn liked_and_reposted_records_are_separate_files() {
+        let paths = Paths::from_vars(vars(&[("HOME", "/home/alice")])).unwrap();
+        assert_ne!(paths.liked_posts_file(), paths.reposted_posts_file());
     }
 
     #[test]

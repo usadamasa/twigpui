@@ -228,6 +228,13 @@ pub(crate) enum Endpoint {
     /// `DELETE /2/users/:id/retweets/:source_tweet_id` (#15) — undoing a
     /// repost. See `CreateRepost`'s doc for why this needs its own bucket.
     DeleteRepost,
+    /// `POST /2/users/:id/likes` (#68) — liking a post. Tracked
+    /// independently of `DeleteLike` for exactly the reason `CreateRepost`
+    /// and `DeleteRepost` are tracked apart.
+    CreateLike,
+    /// `DELETE /2/users/:id/likes/:tweet_id` (#68) — unliking. See
+    /// `CreateLike`'s doc.
+    DeleteLike,
 }
 
 impl Endpoint {
@@ -240,7 +247,7 @@ impl Endpoint {
     /// failure #18 exists to prevent. `CreatePost` was missing here until
     /// #50; the test below now fails to compile rather than silently pass if
     /// a new variant is left out again.
-    pub(crate) const ALL: [Self; 8] = [
+    pub(crate) const ALL: [Self; 10] = [
         Self::UserLookup,
         Self::Timeline,
         Self::Me,
@@ -249,6 +256,8 @@ impl Endpoint {
         Self::CreatePost,
         Self::CreateRepost,
         Self::DeleteRepost,
+        Self::CreateLike,
+        Self::DeleteLike,
     ];
 
     /// `pub(crate)` rather than private (unlike before #18): `usage.rs`
@@ -264,6 +273,8 @@ impl Endpoint {
             Self::CreatePost => "create_post",
             Self::CreateRepost => "create_repost",
             Self::DeleteRepost => "delete_repost",
+            Self::CreateLike => "create_like",
+            Self::DeleteLike => "delete_like",
         }
     }
 }
@@ -760,6 +771,8 @@ mod tests {
             Endpoint::CreatePost,
             Endpoint::CreateRepost,
             Endpoint::DeleteRepost,
+            Endpoint::CreateLike,
+            Endpoint::DeleteLike,
         ];
         for endpoint in every {
             match endpoint {
@@ -770,7 +783,9 @@ mod tests {
                 | Endpoint::TweetById
                 | Endpoint::CreatePost
                 | Endpoint::CreateRepost
-                | Endpoint::DeleteRepost => {}
+                | Endpoint::DeleteRepost
+                | Endpoint::CreateLike
+                | Endpoint::DeleteLike => {}
             }
             assert!(
                 Endpoint::ALL.contains(&endpoint),

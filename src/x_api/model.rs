@@ -155,11 +155,13 @@ pub(crate) struct PostTweetRequest<'a> {
     pub quote_tweet_id: Option<&'a str>,
 }
 
-/// The `POST /2/users/:id/retweets` request body (#15) — the id of the post
-/// being reposted; `user_id` (whose retweets are being created) travels in
-/// the URL, not here.
+/// The request body shared by `POST /2/users/:id/retweets` (#15) and
+/// `POST /2/users/:id/likes` (#68) — the id of the post being acted on;
+/// `user_id` (whose repost or like is being created) travels in the URL,
+/// not here. One type rather than two identical ones: X specifies the same
+/// single-field body for both, so a second copy could only ever drift.
 #[derive(Debug, Serialize)]
-pub(crate) struct RepostRequest<'a> {
+pub(crate) struct TweetIdRequest<'a> {
     pub tweet_id: &'a str,
 }
 
@@ -975,10 +977,10 @@ mod tests {
     }
 
     #[test]
-    fn serializes_the_repost_request_body() {
+    fn serializes_the_shared_tweet_id_request_body() {
         // #15: the whole request body `x_api::client::XClient::create_repost`
         // sends.
-        let request = RepostRequest {
+        let request = TweetIdRequest {
             tweet_id: "1700000000000000001",
         };
         assert_eq!(

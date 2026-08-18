@@ -10,12 +10,14 @@ use gpui_component::input::{Input, InputEvent, InputState};
 use crate::cache;
 use crate::compose::{self, ComposeState, ComposeStatus};
 use crate::config::Config;
+use crate::like;
 use crate::oauth::{self, TimelineSource};
 use crate::paths::Paths;
 use crate::rate_limit;
-use crate::repost::{self, RepostState, RepostStatus};
+use crate::repost;
 use crate::theme::{self, Theme};
 use crate::thread::{self, ThreadChain};
+use crate::toggle::{ToggleState, ToggleStatus};
 use crate::usage;
 use crate::x_api::{PostMetrics, QuotedPost, RepliedTo, TimelineItem, XClient};
 
@@ -306,11 +308,24 @@ pub(crate) struct TimelineView {
     /// confirmed and so is authoritative over `reposted_ids` until the next
     /// refresh catches up. Absent means "use `reposted_ids`'s plain on/off
     /// value" — see [`Self::repost_state_for`].
-    repost_overrides: HashMap<String, RepostState>,
+    repost_overrides: HashMap<String, ToggleState>,
     /// In-flight create/delete repost requests, keyed by post id, mirroring
     /// `thread_fetches`'s cancel-on-drop contract: dropping the view
     /// cancels every still-running toggle along with it.
     repost_tasks: HashMap<String, Task<()>>,
+    /// Every post id this app has liked, per the local record (#68) — the
+    /// like-side counterpart of `reposted_ids`, kept as its own set because
+    /// the two records are separate files written by independent toggles.
+    liked_ids: HashSet<String>,
+    /// Holds the in-flight read from [`Self::refresh_liked_ids`] alive;
+    /// mirrors `reposted_ids_refresh`.
+    liked_ids_refresh: Option<Task<()>>,
+    /// Per-post like button state (#68) — see `repost_overrides`, which
+    /// this mirrors exactly.
+    like_overrides: HashMap<String, ToggleState>,
+    /// In-flight create/delete like requests, keyed by post id — see
+    /// `repost_tasks`.
+    like_tasks: HashMap<String, Task<()>>,
 }
 
 impl TimelineView {
@@ -370,6 +385,10 @@ impl TimelineView {
             reposted_ids_refresh: None,
             repost_overrides: HashMap::new(),
             repost_tasks: HashMap::new(),
+            liked_ids: HashSet::new(),
+            liked_ids_refresh: None,
+            like_overrides: HashMap::new(),
+            like_tasks: HashMap::new(),
         };
         this.start(cx);
         this.refresh_usage(cx);
@@ -435,6 +454,7 @@ impl TimelineView {
             let _ = this.update(cx, |this, cx| {
                 this.refresh_usage(cx);
                 this.refresh_reposted_ids(cx);
+                this.refresh_liked_ids(cx);
                 match result {
                     Ok(StartOutcome::NotAuthenticated { session_notice }) => {
                         this.session_notice = session_notice.map(SharedString::from);
@@ -589,6 +609,7 @@ impl TimelineView {
                     let _ = this.update(cx, |this, cx| {
                         this.refresh_usage(cx);
                         this.refresh_reposted_ids(cx);
+                        this.refresh_liked_ids(cx);
                         this.reloading = false;
                         match result {
                             Ok(reloaded) => {
@@ -623,6 +644,7 @@ impl TimelineView {
                     let _ = this.update(cx, |this, cx| {
                         this.refresh_usage(cx);
                         this.refresh_reposted_ids(cx);
+                        this.refresh_liked_ids(cx);
                         this.reloading = false;
                         match result {
                             Ok(reloaded) => {
@@ -781,6 +803,7 @@ impl TimelineView {
             let _ = this.update(cx, |this, cx| {
                 this.refresh_usage(cx);
                 this.refresh_reposted_ids(cx);
+                this.refresh_liked_ids(cx);
                 this.reloading = false;
                 match result {
                     Ok((items, next_token)) => {
@@ -908,15 +931,121 @@ impl TimelineView {
         }));
     }
 
+    /// Refresh `self.liked_ids` from the local like record (#68) — the
+    /// like-side twin of [`Self::refresh_reposted_ids`], with the same
+    /// read-off-the-main-thread and failure-is-not-fatal contract. Called
+    /// from exactly the same places, so a row's like button and its repost
+    /// button are never seeded from different points in time.
+    fn refresh_liked_ids(&mut self, cx: &mut Context<'_, Self>) {
+        let paths = self.paths.clone();
+        self.liked_ids_refresh = Some(cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { like::load_all(&paths) })
+                .await;
+
+            if let Ok(ids) = result {
+                let _ = this.update(cx, |this, cx| {
+                    this.liked_ids = ids;
+                    cx.notify();
+                });
+            }
+        }));
+    }
+
+    /// The like button state to render for `post_id` (#68) — see
+    /// [`Self::repost_state_for`], which this mirrors.
+    fn like_state_for(&self, post_id: &str) -> ToggleState {
+        self.like_overrides
+            .get(post_id)
+            .cloned()
+            .unwrap_or_else(|| ToggleState::new(self.liked_ids.contains(post_id)))
+    }
+
+    /// Toggle one post's like state (#68) — the like-side twin of
+    /// [`Self::toggle_repost`], down to the optimistic flip, the background
+    /// request, and folding the result (including `like::create`/
+    /// `like::remove`'s own reconciliation) back onto the same per-post
+    /// state.
+    ///
+    /// The scope checked here is `like.write`, not `tweet.write`: X grants
+    /// them separately, so a session authorized before #68 can post and
+    /// repost but not like. It reuses #14's "Re-authorize" affordance all
+    /// the same, since re-running the flow requests every scope at once.
+    fn toggle_like(&mut self, post_id: String, cx: &mut Context<'_, Self>) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        let Some(user_id) = self.home_user_id.clone() else {
+            return;
+        };
+
+        let mut state = self.like_state_for(&post_id);
+        if !state.can_toggle() {
+            return;
+        }
+
+        if !oauth::tokens::has_scope(self.oauth_scope.as_deref(), oauth::tokens::LIKE_WRITE_SCOPE) {
+            state.refuse(
+                "This session can't like yet — click \"Re-authorize\" above first.".to_string(),
+            );
+            self.like_overrides.insert(post_id, state);
+            cx.notify();
+            return;
+        }
+
+        let creating = !state.is_on();
+        state.start_toggle();
+        self.like_overrides.insert(post_id.clone(), state);
+        cx.notify();
+
+        let paths = self.paths.clone();
+        let update_key = post_id.clone();
+        let task_key = post_id.clone();
+
+        let task = cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    if creating {
+                        like::create(&paths, &client, &user_id, &post_id, oauth::unix_now())
+                    } else {
+                        like::remove(&paths, &client, &user_id, &post_id, oauth::unix_now())
+                    }
+                })
+                .await;
+
+            let _ = this.update(cx, |this, cx| {
+                this.refresh_usage(cx);
+                let mut state = this
+                    .like_overrides
+                    .remove(&update_key)
+                    .unwrap_or_else(|| ToggleState::new(!creating));
+                state.apply_result(result.map_err(|error| format!("{error:#}")));
+                this.like_overrides.insert(update_key.clone(), state);
+                this.like_tasks.remove(&update_key);
+                cx.notify();
+            });
+        });
+        self.like_tasks.insert(task_key, task);
+    }
+
+    /// The like/unlike toggle for one post (#68), rendered whenever
+    /// [`offers_like`] allows it for `item`.
+    fn like_button(&self, item: &TimelineItem, cx: &mut Context<'_, Self>) -> AnyElement {
+        let state = self.like_state_for(&item.id);
+        like_row(&item.id, &state, self.theme, cx)
+    }
+
     /// The button state to render for `post_id` (#15): whatever this
     /// session already knows (in flight, failed, or a value a finished
     /// request already confirmed) if there is one, else the plain on/off
     /// value from the local record `refresh_reposted_ids` last read.
-    fn repost_state_for(&self, post_id: &str) -> RepostState {
+    fn repost_state_for(&self, post_id: &str) -> ToggleState {
         self.repost_overrides
             .get(post_id)
             .cloned()
-            .unwrap_or_else(|| RepostState::new(self.reposted_ids.contains(post_id)))
+            .unwrap_or_else(|| ToggleState::new(self.reposted_ids.contains(post_id)))
     }
 
     /// Toggle one post's repost state (#15): flip the button immediately
@@ -958,7 +1087,7 @@ impl TimelineView {
             return;
         }
 
-        let creating = !state.is_reposted();
+        let creating = !state.is_on();
         state.start_toggle();
         self.repost_overrides.insert(post_id.clone(), state);
         cx.notify();
@@ -984,7 +1113,7 @@ impl TimelineView {
                 let mut state = this
                     .repost_overrides
                     .remove(&update_key)
-                    .unwrap_or_else(|| RepostState::new(!creating));
+                    .unwrap_or_else(|| ToggleState::new(!creating));
                 state.apply_result(result.map_err(|error| format!("{error:#}")));
                 this.repost_overrides.insert(update_key.clone(), state);
                 this.repost_tasks.remove(&update_key);
@@ -1479,6 +1608,16 @@ impl TimelineView {
             .when(offers_quote(self.signed_in_with_oauth, item), |column| {
                 column.child(quote_row(item, theme, cx))
             })
+            // #68: like/unlike — see `offers_like`'s doc for which posts
+            // get one. Unlike repost, this is offered on one's own posts.
+            .when(
+                offers_like(
+                    self.signed_in_with_oauth,
+                    self.home_user_id.as_deref(),
+                    item,
+                ),
+                |column| column.child(self.like_button(item, cx)),
+            )
             .into_any_element()
     }
 
@@ -1952,8 +2091,15 @@ fn offers_sign_in(
 /// `signed_in_with_oauth`, `offers_sign_in` requires its opposite) and read
 /// differently ("Sign in" vs "Re-authorize") — #31's actual lesson was
 /// "don't hide the affordance", not "there must be only one button".
+///
+/// Checks every write scope the app can need, not just #14's: #68 added
+/// `like.write`, which X grants separately, so a session authorized before
+/// #68 holds `tweet.write` alone. Without this, `toggle_like`'s refusal
+/// would point at a "Re-authorize" button that was not being rendered.
 fn offers_reauthorize(signed_in_with_oauth: bool, oauth_scope: Option<&str>) -> bool {
-    signed_in_with_oauth && !oauth::tokens::has_scope(oauth_scope, oauth::tokens::TWEET_WRITE_SCOPE)
+    signed_in_with_oauth
+        && !(oauth::tokens::has_scope(oauth_scope, oauth::tokens::TWEET_WRITE_SCOPE)
+            && oauth::tokens::has_scope(oauth_scope, oauth::tokens::LIKE_WRITE_SCOPE))
 }
 
 /// Whether post `item` should offer a repost/un-repost toggle (#15).
@@ -2003,12 +2149,12 @@ fn is_own_post(home_username: Option<&str>, author_username: &str) -> bool {
 /// retry.
 fn repost_row(
     post_id: &str,
-    state: &RepostState,
+    state: &ToggleState,
     theme: Theme,
     cx: &mut Context<'_, TimelineView>,
 ) -> AnyElement {
     let label = repost_action_label(state);
-    let color = if state.is_reposted() {
+    let color = if state.is_on() {
         theme.accent
     } else {
         theme.text_muted
@@ -2025,7 +2171,7 @@ fn repost_row(
             }))
         });
 
-    if let RepostStatus::Failed(message) = state.status() {
+    if let ToggleStatus::Failed(message) = state.status() {
         div()
             .flex()
             .flex_col()
@@ -2040,18 +2186,99 @@ fn repost_row(
 
 /// The clickable label for [`repost_row`] (#15): the pending direction
 /// while a request is in flight, else the plain on/off label.
-fn repost_action_label(state: &RepostState) -> &'static str {
-    if matches!(state.status(), RepostStatus::Pending) {
-        if state.is_reposted() {
+fn repost_action_label(state: &ToggleState) -> &'static str {
+    if matches!(state.status(), ToggleStatus::Pending) {
+        if state.is_on() {
             "Reposting…"
         } else {
             "Removing repost…"
         }
-    } else if state.is_reposted() {
+    } else if state.is_on() {
         "Reposted"
     } else {
         "Repost"
     }
+}
+
+/// The like/unlike toggle for one post (#68): "Like" when not liked,
+/// "Liked" once it is — both clickable, styled like [`repost_row`], which
+/// this mirrors down to the disabled-while-pending rule and the failure
+/// message rendered above a still-clickable toggle.
+fn like_row(
+    post_id: &str,
+    state: &ToggleState,
+    theme: Theme,
+    cx: &mut Context<'_, TimelineView>,
+) -> AnyElement {
+    let label = like_action_label(state);
+    let color = if state.is_on() {
+        theme.accent
+    } else {
+        theme.text_muted
+    };
+
+    let toggle = div()
+        .id(SharedString::from(format!("like-{post_id}")))
+        .text_color(rgb(color))
+        .child(label)
+        .when(state.can_toggle(), |element| {
+            let id = post_id.to_string();
+            element.on_click(cx.listener(move |this, _event, _window, cx| {
+                this.toggle_like(id.clone(), cx);
+            }))
+        });
+
+    if let ToggleStatus::Failed(message) = state.status() {
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(div().text_color(rgb(theme.danger)).child(message.clone()))
+            .child(toggle)
+            .into_any_element()
+    } else {
+        toggle.into_any_element()
+    }
+}
+
+/// The clickable label for [`like_row`] (#68): the pending direction while
+/// a request is in flight, else the plain on/off label.
+fn like_action_label(state: &ToggleState) -> &'static str {
+    if matches!(state.status(), ToggleStatus::Pending) {
+        if state.is_on() {
+            "Liking…"
+        } else {
+            "Unliking…"
+        }
+    } else if state.is_on() {
+        "Liked"
+    } else {
+        "Like"
+    }
+}
+
+/// Whether post `item` should offer a like/unlike toggle (#68).
+///
+/// Requires a signed-in OAuth session whose own id has resolved
+/// (`home_user_id`, via `/me` — #11), for the same reason [`offers_repost`]
+/// does: the likes endpoints act as *this* account.
+///
+/// Two deliberate differences from [`offers_repost`]:
+///
+/// - **No [`is_own_post`] check.** X rejects reposting your own post but
+///   accepts liking it, so #68 explicitly instructs against carrying #15's
+///   guard over.
+/// - **The repost-row guard stays.** A row that is itself a repost
+///   (`item.reposted_by.is_some()`) still gets no button: `item.id` is the
+///   retweet activity's own id, not the original content's, and
+///   `TimelineItem` carries no separate field for the original — liking it
+///   would send the wrong id. That gap is #52, shared with #15/#16.
+fn offers_like(
+    signed_in_with_oauth: bool,
+    home_user_id: Option<&str>,
+    item: &TimelineItem,
+) -> bool {
+    signed_in_with_oauth && home_user_id.is_some() && item.reposted_by.is_none()
 }
 
 /// Whether post `item` should offer a "Quote" action (#16).
@@ -2368,11 +2595,11 @@ fn format_timestamp(created_at: Option<&str>) -> String {
 mod tests {
     use super::{
         ComposeStatus, Cooldown, CooldownTick, PostMetrics, ReloadNotice, ReloadTrigger, RepliedTo,
-        RepostState, Theme, ThreadFetchState, TimelineItem, TimelineSource, TimelineState,
+        Theme, ThreadFetchState, TimelineItem, TimelineSource, TimelineState, ToggleState,
         at_the_post_cap, byline, compose_error_message, cooldown_label, cooldown_tick,
-        format_timestamp, header_title, is_own_post, metrics_label, offers_load_older,
-        offers_quote, offers_reauthorize, offers_repost, offers_sign_in, rate_limit,
-        reload_cooldown, reload_failure_outcome, reload_gate, reload_start_state,
+        format_timestamp, header_title, is_own_post, like_action_label, metrics_label, offers_like,
+        offers_load_older, offers_quote, offers_reauthorize, offers_repost, offers_sign_in,
+        rate_limit, reload_cooldown, reload_failure_outcome, reload_gate, reload_start_state,
         reply_banner_label, repost_action_label, repost_banner_label, thread_action_label, usage,
         usage_color, usage_label,
     };
@@ -2452,6 +2679,85 @@ mod tests {
         );
     }
 
+    // --- #68: like ---
+
+    #[test]
+    fn offers_like_on_an_ordinary_post() {
+        assert!(offers_like(
+            true,
+            Some("me-id"),
+            &item_with("1", "alice", None)
+        ));
+    }
+
+    #[test]
+    fn offers_like_on_ones_own_post() {
+        // #68 is explicit: X rejects reposting your own post but accepts
+        // liking it, so `is_own_post` must not be carried over from #15.
+        assert!(offers_like(
+            true,
+            Some("me-id"),
+            &item_with("1", "me", None)
+        ));
+    }
+
+    #[test]
+    fn does_not_offer_like_on_a_row_that_is_itself_a_repost() {
+        // `item.id` is the retweet activity's id, not the original's — the
+        // same gap (#52) that withholds the repost and quote buttons here.
+        assert!(!offers_like(
+            true,
+            Some("me-id"),
+            &item_with("1", "alice", Some("bob"))
+        ));
+    }
+
+    #[test]
+    fn does_not_offer_like_before_the_signed_in_id_resolves() {
+        assert!(!offers_like(true, None, &item_with("1", "alice", None)));
+    }
+
+    #[test]
+    fn does_not_offer_like_without_an_oauth_session() {
+        assert!(!offers_like(
+            false,
+            Some("me-id"),
+            &item_with("1", "alice", None)
+        ));
+    }
+
+    #[test]
+    fn like_action_label_offers_to_like_when_not_liked() {
+        assert_eq!(like_action_label(&ToggleState::new(false)), "Like");
+    }
+
+    #[test]
+    fn like_action_label_shows_liked_once_it_is() {
+        assert_eq!(like_action_label(&ToggleState::new(true)), "Liked");
+    }
+
+    #[test]
+    fn like_action_label_shows_the_pending_direction() {
+        let mut liking = ToggleState::new(false);
+        liking.start_toggle();
+        assert_eq!(like_action_label(&liking), "Liking…");
+
+        let mut unliking = ToggleState::new(true);
+        unliking.start_toggle();
+        assert_eq!(like_action_label(&unliking), "Unliking…");
+    }
+
+    #[test]
+    fn offers_reauthorize_for_a_session_that_predates_the_like_scope() {
+        // #68: `like.write` is granted separately, so a session from before
+        // it can post and repost but not like — and must be told how to fix
+        // that, since `toggle_like`'s refusal points at this very button.
+        assert!(offers_reauthorize(
+            true,
+            Some("tweet.read users.read tweet.write offline.access")
+        ));
+    }
+
     #[test]
     fn offers_sign_in_while_running_on_the_app_only_bearer_token() {
         // #31: the whole point — a bearer token makes the app work, so the
@@ -2523,10 +2829,13 @@ mod tests {
     }
 
     #[test]
-    fn does_not_offer_reauthorize_once_the_write_scope_is_granted() {
+    fn does_not_offer_reauthorize_once_every_write_scope_is_granted() {
+        // `like.write` joined the set in #68; a session holding only
+        // `tweet.write` is now genuinely under-scoped, which the test above
+        // pins down.
         assert!(!offers_reauthorize(
             true,
-            Some("tweet.read tweet.write offline.access")
+            Some("tweet.read tweet.write like.write offline.access")
         ));
     }
 
@@ -3113,21 +3422,21 @@ mod tests {
 
     #[test]
     fn repost_action_label_offers_to_repost_when_not_reposted() {
-        assert_eq!(repost_action_label(&RepostState::new(false)), "Repost");
+        assert_eq!(repost_action_label(&ToggleState::new(false)), "Repost");
     }
 
     #[test]
     fn repost_action_label_shows_reposted_once_it_is() {
-        assert_eq!(repost_action_label(&RepostState::new(true)), "Reposted");
+        assert_eq!(repost_action_label(&ToggleState::new(true)), "Reposted");
     }
 
     #[test]
     fn repost_action_label_shows_the_pending_direction() {
-        let mut creating = RepostState::new(false);
+        let mut creating = ToggleState::new(false);
         creating.start_toggle();
         assert_eq!(repost_action_label(&creating), "Reposting…");
 
-        let mut deleting = RepostState::new(true);
+        let mut deleting = ToggleState::new(true);
         deleting.start_toggle();
         assert_eq!(repost_action_label(&deleting), "Removing repost…");
     }
@@ -3177,6 +3486,11 @@ mod tests {
                     // rendered for an OAuth session, so every run on a bearer
                     // token missed it.
                     view.signed_in_with_oauth = true;
+                    // Resolving the signed-in id is what unlocks the
+                    // per-row action buttons (`offers_repost`,
+                    // `offers_like`), so without it the walk below skips
+                    // them entirely.
+                    view.home_user_id = Some("2244994945".to_string());
                     view
                 });
                 *slot.borrow_mut() = Some(timeline.clone());
