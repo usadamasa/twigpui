@@ -3339,9 +3339,16 @@ fn format_timestamp(created_at: Option<&str>) -> String {
     let Some(raw) = created_at else {
         return String::new();
     };
+    // `get`, not `&time[..5]` (#47, `clippy::string_slice`): that is a byte
+    // range, and a `time` half whose fifth byte falls inside a multi-byte
+    // character would panic rather than fall through to the raw string.
+    // `created_at` comes from the API, so this is remote input.
     match raw.split_once('T') {
-        Some((date, time)) if time.len() >= 5 => format!("{date} {}", &time[..5]),
-        _ => raw.to_string(),
+        Some((date, time)) => match time.get(..5) {
+            Some(hhmm) => format!("{date} {hhmm}"),
+            None => raw.to_string(),
+        },
+        None => raw.to_string(),
     }
 }
 

@@ -4,20 +4,54 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
-# `-D warnings` in CI turns every one of these into a build failure.
+# `deny`, not `warn` (#47). CI runs `cargo clippy -- -D warnings`, so every
+# one of these was already a build failure there while passing locally —
+# the asymmetry meant finding out on CI what could have been found on the
+# machine that wrote the code.
 [lints.rust]
 unsafe_code = "forbid"
-missing_debug_implementations = "warn"
-unreachable_pub = "warn"
-unused_qualifications = "warn"
-rust_2018_idioms = { level = "warn", priority = -1 }
+missing_debug_implementations = "deny"
+unreachable_pub = "deny"
+unused_qualifications = "deny"
+rust_2018_idioms = { level = "deny", priority = -1 }
+# Adopted by #47 after measuring: each of these fires zero times on the
+# current tree, so they cost nothing today and catch the first occurrence.
+missing_docs = "deny"
+trivial_casts = "deny"
+trivial_numeric_casts = "deny"
+unused_lifetimes = "deny"
+unused_macro_rules = "deny"
+unused_crate_dependencies = "deny"
+variant_size_differences = "deny"
 
+# Not adopted by #47, with the measurement that decided it:
+#
+# - `let_underscore_drop` (26 hits in `src/`): every one is a deliberate
+#   `let _ = this.update(cx, …)` — gpui's own way of saying "the entity may
+#   already be gone". Adopting it would mean 26 `#[allow]`s, which is the
+#   issue's own stated reason not to adopt a lint.
+# - `clippy::arithmetic_side_effects` (17 hits in `src/`): worth doing, but
+#   each hit is a real decision about saturating vs checked arithmetic, not
+#   a mechanical rewrite. Its own change.
 [lints.clippy]
-pedantic = { level = "warn", priority = -1 }
-unwrap_used = "warn"
-expect_used = "warn"
-todo = "warn"
-dbg_macro = "warn"
+pedantic = { level = "deny", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+todo = "deny"
+dbg_macro = "deny"
+# Adopted by #47. `indexing_slicing` and `string_slice` were not free —
+# they found a real panic on remote input in `browser::strip_scheme` and
+# two more reachable ones in `ui::format_timestamp` and
+# `oauth::callback::percent_decode`. The rest fire zero times.
+indexing_slicing = "deny"
+string_slice = "deny"
+panic = "deny"
+unwrap_in_result = "deny"
+float_cmp = "deny"
+verbose_file_reads = "deny"
+same_name_method = "deny"
+missing_assert_message = "deny"
+redundant_type_annotations = "deny"
 
 [dependencies]
 anyhow = "1.0.104"

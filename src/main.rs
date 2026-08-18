@@ -1,6 +1,28 @@
+//! twigpui — a development-only X (Twitter) timeline viewer for macOS,
+//! built with gpui.
+//!
+//! This binary crate is the whole application: `ui` renders the window,
+//! `x_api` talks to X, `cache`/`usage`/`rate_limit` keep the per-request
+//! billing under control, and this module is the entry point plus the
+//! headless `--fetch-only` / `--fetch-post` / `--usage` paths.
+
 // `unwrap` in a test is a legible assertion, not a lurking panic — the strict
-// lints in Cargo.toml are aimed at the code that actually ships.
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+// lints in Cargo.toml are aimed at the code that actually ships. #47 extends
+// the same reasoning to three more: indexing a fixture by a literal index,
+// slicing a literal string, and `panic!` in a `match` arm that must not be
+// reached are all *assertions* in a test. A test that panics is a test that
+// failed, which is the mechanism working — not a lurking crash on remote
+// input, which is what these lints exist to find in `src/`.
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::string_slice,
+        clippy::panic
+    )
+)]
 
 mod avatar;
 mod browser;

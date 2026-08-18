@@ -103,16 +103,22 @@ fn percent_decode(value: &str) -> String {
     let bytes = value.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%'
-            && i + 2 < bytes.len()
-            && let (Some(hi), Some(lo)) = (hex_digit(bytes[i + 1]), hex_digit(bytes[i + 2]))
+    // Indexed through `get` rather than `bytes[i]` (#47,
+    // `clippy::indexing_slicing`): the bounds here are already correct, but
+    // stating them as `Option`s means a future edit to the loop cannot turn
+    // this into a panic on a malformed redirect — which is remote input.
+    while let Some(&byte) = bytes.get(i) {
+        if byte == b'%'
+            && let (Some(Some(hi)), Some(Some(lo))) = (
+                bytes.get(i + 1).copied().map(hex_digit),
+                bytes.get(i + 2).copied().map(hex_digit),
+            )
         {
             out.push(hi * 16 + lo);
             i += 3;
             continue;
         }
-        out.push(bytes[i]);
+        out.push(byte);
         i += 1;
     }
     String::from_utf8_lossy(&out).into_owned()
