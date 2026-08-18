@@ -490,6 +490,19 @@ impl XClient {
         Ok(())
     }
 
+    /// `DELETE /2/tweets/:id` (#72) — delete one's own post.
+    ///
+    /// Irreversible, so `ui.rs` only calls this behind an explicit
+    /// confirmation. Nothing here enforces that the post is the signed-in
+    /// account's: X rejects deleting someone else's, and `offers_delete`
+    /// already withholds the affordance client-side rather than spending a
+    /// guaranteed-failing request.
+    pub(crate) fn delete_post(&self, paths: &Paths, post_id: &str, now: i64) -> Result<()> {
+        let url = delete_post_url(post_id);
+        self.delete(paths, Endpoint::DeletePost, &url, now)?;
+        Ok(())
+    }
+
     /// `DELETE /2/users/:id/likes/:tweet_id` (#68) — unlike. See
     /// [`Self::create_like`]; tracked independently under
     /// `Endpoint::DeleteLike`.
@@ -607,6 +620,13 @@ fn create_repost_url(user_id: &str) -> String {
 /// path segment rather than a query parameter or JSON body field.
 fn delete_repost_url(user_id: &str, source_tweet_id: &str) -> String {
     format!("{API_BASE}/users/{user_id}/retweets/{source_tweet_id}")
+}
+
+/// `DELETE /2/tweets/:id` (#72) — unlike every other write endpoint here,
+/// this one names no user: X infers the account from the credential and
+/// rejects a post that is not its own.
+fn delete_post_url(post_id: &str) -> String {
+    format!("{API_BASE}/tweets/{post_id}")
 }
 
 /// `POST /2/users/:id/likes` (#68) — `user_id` is the signed-in account's
@@ -731,6 +751,14 @@ mod tests {
         assert_eq!(
             delete_repost_url("2244994945", "1700000000000000001"),
             "https://api.x.com/2/users/2244994945/retweets/1700000000000000001"
+        );
+    }
+
+    #[test]
+    fn builds_the_delete_post_url() {
+        assert_eq!(
+            delete_post_url("1700000000000000001"),
+            "https://api.x.com/2/tweets/1700000000000000001"
         );
     }
 
