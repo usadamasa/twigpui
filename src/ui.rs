@@ -23,7 +23,7 @@ use crate::thread::{self, ThreadChain};
 use crate::toggle::{ToggleState, ToggleStatus};
 use crate::usage;
 use crate::x_api::{
-    PostLink, PostMetrics, QuotedPost, RepliedTo, TimelineItem, XClient, action_post_id,
+    Draft, PostLink, PostMetrics, QuotedPost, RepliedTo, TimelineItem, XClient, action_post_id,
 };
 
 /// What's known about one reply's "Show thread" walk (#12), keyed by the
@@ -346,6 +346,19 @@ pub(crate) struct TimelineView {
     /// reload) cancels whatever was still downloading, which the next call
     /// re-collects from the new timeline anyway.
     avatar_fetch: Option<Task<()>>,
+    /// The post whose delete confirmation is currently showing (#72), if
+    /// any. One at a time: a second "Delete" click elsewhere moves the
+    /// prompt rather than opening two. `None` means no row is asking.
+    ///
+    /// A two-step click rather than a modal because deleting is
+    /// irreversible and this app has no dialog machinery — what matters is
+    /// that no single click can destroy a post, which this guarantees.
+    pending_delete: Option<String>,
+    /// Holds an in-flight delete alive (#72).
+    delete_task: Option<Task<()>>,
+    /// Why the last delete failed (#72), shown on the row that asked.
+    /// Keyed by post id so a failure stays attached to its own row.
+    delete_failures: HashMap<String, String>,
     open_task: Option<Task<()>>,
     /// Why the last open attempt failed (#70), shown in the header until
     /// the next attempt clears it. `None` is the ordinary case — a
@@ -416,6 +429,9 @@ impl TimelineView {
             like_tasks: HashMap::new(),
             avatar_paths: HashMap::new(),
             avatar_fetch: None,
+            pending_delete: None,
+            delete_task: None,
+            delete_failures: HashMap::new(),
             open_task: None,
             open_failure: None,
         };
@@ -1132,6 +1148,129 @@ impl TimelineView {
         }
     }
 
+    /// Ask for confirmation before deleting `post_id` (#72) — the first
+    /// click of the two-step. Replaces any other row's pending prompt, so
+    /// only one post is ever a click away from being deleted.
+    fn ask_to_delete(&mut self, post_id: String, cx: &mut Context<'_, Self>) {
+        self.delete_failures.remove(&post_id);
+        self.pending_delete = Some(post_id);
+        cx.notify();
+    }
+
+    /// Dismiss the delete prompt without deleting anything (#72).
+    fn cancel_delete(&mut self, cx: &mut Context<'_, Self>) {
+        self.pending_delete = None;
+        cx.notify();
+    }
+
+    /// Delete `post_id` for real (#72) — the second click.
+    ///
+    /// On success the post is dropped from the rendered timeline *and* from
+    /// the cache file, and the cache is read back to confirm: a row that
+    /// vanishes now and returns on the next start is exactly the
+    /// looks-like-it-worked failure #54 was about, and the issue calls it
+    /// out by name.
+    ///
+    /// A failed delete leaves the row in place with the API's own message
+    /// attached, which is the honest outcome — the post still exists.
+    fn confirm_delete(&mut self, post_id: String, cx: &mut Context<'_, Self>) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        let Some(user_id) = self.home_user_id.clone() else {
+            return;
+        };
+        let home = matches!(self.source, Some(TimelineSource::Home));
+
+        self.pending_delete = None;
+        cx.notify();
+
+        let paths = self.paths.clone();
+        let request_id = post_id.clone();
+
+        self.delete_task = Some(cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    client.delete_post(&paths, &request_id, oauth::unix_now())?;
+                    // Only once X has confirmed the deletion: forgetting it
+                    // locally first would hide a post that still exists.
+                    cache::forget_post(&paths, home, &user_id, &request_id, oauth::unix_now())
+                })
+                .await;
+
+            let _ = this.update(cx, |this, cx| {
+                this.refresh_usage(cx);
+                match result {
+                    Ok(remaining) => {
+                        this.delete_failures.remove(&post_id);
+                        this.state = TimelineState::Loaded(remaining);
+                    }
+                    Err(error) => {
+                        this.delete_failures
+                            .insert(post_id.clone(), format!("{error:#}"));
+                    }
+                }
+                cx.notify();
+            });
+        }));
+    }
+
+    /// The delete affordance for one post (#72): "Delete", or the
+    /// confirmation pair once it has been clicked, plus whatever the last
+    /// attempt failed with.
+    fn delete_row(&self, item: &TimelineItem, cx: &mut Context<'_, Self>) -> AnyElement {
+        let theme = self.theme;
+        let asking = self.pending_delete.as_deref() == Some(item.id.as_str());
+
+        let controls = if asking {
+            let confirm_id = item.id.clone();
+            div()
+                .flex()
+                .gap_3()
+                .child(
+                    div()
+                        .id(SharedString::from(format!("delete-confirm-{}", item.id)))
+                        .text_color(rgb(theme.danger))
+                        .child("Delete permanently")
+                        .on_click(cx.listener(move |this, _event, _window, cx| {
+                            this.confirm_delete(confirm_id.clone(), cx);
+                        })),
+                )
+                .child(
+                    div()
+                        .id(SharedString::from(format!("delete-cancel-{}", item.id)))
+                        .text_color(rgb(theme.text_muted))
+                        .child("Cancel")
+                        .on_click(cx.listener(|this, _event, _window, cx| {
+                            this.cancel_delete(cx);
+                        })),
+                )
+        } else {
+            let ask_id = item.id.clone();
+            div().child(
+                div()
+                    .id(SharedString::from(format!("delete-{}", item.id)))
+                    .text_color(rgb(theme.text_muted))
+                    .child("Delete")
+                    .on_click(cx.listener(move |this, _event, _window, cx| {
+                        this.ask_to_delete(ask_id.clone(), cx);
+                    })),
+            )
+        };
+
+        match self.delete_failures.get(&item.id) {
+            Some(message) => div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(div().text_color(rgb(theme.danger)).child(message.clone()))
+                .child(controls)
+                .into_any_element(),
+            None => controls.into_any_element(),
+        }
+    }
+
     /// Hand `url` to the system browser (#70).
     ///
     /// Runs on the background executor rather than in the click handler:
@@ -1369,6 +1508,41 @@ impl TimelineView {
             )
     }
 
+    /// The reply target shown inside the composer, if `compose.reply()` has
+    /// one (#71).
+    ///
+    /// Uses the same [`quote_card`] rendering as a quote target, with an
+    /// explicit "Replying to" heading above it — the card alone cannot say
+    /// which of the two a draft is, and the difference is not visible after
+    /// the fact: a reply lands under a conversation, a quote does not.
+    fn composer_reply_card(
+        &self,
+        target: &compose::ReplyTarget,
+        cx: &mut Context<'_, Self>,
+    ) -> impl IntoElement {
+        let theme = self.theme;
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(
+                div()
+                    .text_color(rgb(theme.text_muted))
+                    .child(reply_target_label(&target.replying_to.author_username)),
+            )
+            .child(quote_card(&target.replying_to, theme))
+            .child(
+                div()
+                    .id("compose-remove-reply")
+                    .text_color(rgb(theme.accent))
+                    .child("Remove reply")
+                    .on_click(cx.listener(|this, _event, _window, cx| {
+                        this.compose.clear_reply();
+                        cx.notify();
+                    })),
+            )
+    }
+
     /// The post composer (#14): a real text input (#38), character counter,
     /// and submit button. Shown whenever the session is signed in with
     /// OAuth — see [`Render::render`]'s doc on why a missing `tweet.write`
@@ -1403,6 +1577,11 @@ impl TimelineView {
             // `composer_quote_card`'s doc.
             .when_some(self.compose.quote(), |column, target| {
                 column.child(self.composer_quote_card(target, cx))
+            })
+            // #71: the reply target, when "Reply" set one. Never both — see
+            // `ComposeState::set_reply`.
+            .when_some(self.compose.reply(), |column, target| {
+                column.child(self.composer_reply_card(target, cx))
             })
             .when_some(
                 compose_error_message(self.compose.status()),
@@ -1503,12 +1682,23 @@ impl TimelineView {
         // out before the closure below moves `self.compose` implicitly via
         // `apply_result`'s mutation, same as `text` above.
         let quote_tweet_id = self.compose.quote().map(|target| target.post_id.clone());
+        // #71: the post this reply answers, if "Reply" set one. Mutually
+        // exclusive with the quote above — see `ComposeState::set_reply`.
+        let reply_to_post_id = self.compose.reply().map(|target| target.post_id.clone());
 
         self.submit_task = Some(cx.spawn_in(window, async move |this, cx| {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    client.create_post(&paths, &text, quote_tweet_id.as_deref(), oauth::unix_now())
+                    client.create_post(
+                        &paths,
+                        Draft {
+                            text: &text,
+                            quote_tweet_id: quote_tweet_id.as_deref(),
+                            reply_to_post_id: reply_to_post_id.as_deref(),
+                        },
+                        oauth::unix_now(),
+                    )
                 })
                 .await;
 
@@ -1747,6 +1937,21 @@ impl TimelineView {
             .when(offers_quote(self.signed_in_with_oauth, item), |column| {
                 column.child(quote_row(item, theme, cx))
             })
+            // #71: "Reply" — sets the composer's target; nothing is sent
+            // until the draft is submitted.
+            .when(offers_reply(self.signed_in_with_oauth, item), |column| {
+                column.child(reply_row(item, theme, cx))
+            })
+            // #72: delete — own posts only, and never in one click.
+            .when(
+                offers_delete(
+                    self.signed_in_with_oauth,
+                    self.home_user_id.as_deref(),
+                    self.home_username.as_deref(),
+                    item,
+                ),
+                |column| column.child(self.delete_row(item, cx)),
+            )
             // #68: like/unlike — see `offers_like`'s doc for which posts
             // get one. Unlike repost, this is offered on one's own posts.
             .when(
@@ -2505,6 +2710,82 @@ fn link_row(links: &[PostLink], theme: Theme, cx: &mut Context<'_, TimelineView>
     row.into_any_element()
 }
 
+/// The "Reply" action for one post (#71), rendered whenever
+/// [`offers_reply`] allows it.
+///
+/// Sets the composer's reply target and nothing else — no request goes out
+/// until the draft is submitted, mirroring how [`quote_row`] works. The id
+/// it carries is `action_post_id`'s (#52): replying from a repost row must
+/// answer the *original* post, or the reply lands under a different
+/// conversation entirely.
+fn reply_row(item: &TimelineItem, theme: Theme, cx: &mut Context<'_, TimelineView>) -> AnyElement {
+    let post_id = action_post_id(item).to_string();
+    let replying_to = QuotedPost {
+        author_name: item.author_name.clone(),
+        author_username: item.author_username.clone(),
+        text: item.text.clone(),
+    };
+
+    div()
+        .id(SharedString::from(format!("reply-{}", item.id)))
+        .text_color(rgb(theme.text_muted))
+        .child("Reply")
+        .on_click(cx.listener(move |this, _event, _window, cx| {
+            this.compose.set_reply(compose::ReplyTarget {
+                post_id: post_id.clone(),
+                replying_to: replying_to.clone(),
+            });
+            cx.notify();
+        }))
+        .into_any_element()
+}
+
+/// Whether post `item` should offer a delete affordance (#72).
+///
+/// Own posts only — X rejects deleting anyone else's, and [`is_own_post`]
+/// already answers that question for #15. Requires a resolved
+/// `home_user_id` for the same reason the other write actions do: without
+/// `/me` the app does not yet know whose posts these are.
+///
+/// **Withheld on a repost row**, unlike every other action since #52. A
+/// repost row displays someone's original post; `is_own_post` compares
+/// against that original's author, so a repost of your own post would
+/// otherwise offer to delete the original from a row the user is reading
+/// as "my repost". Removing a repost is [`offers_repost`]'s toggle, and
+/// conflating the two on an irreversible action is not a risk worth taking.
+fn offers_delete(
+    signed_in_with_oauth: bool,
+    home_user_id: Option<&str>,
+    home_username: Option<&str>,
+    item: &TimelineItem,
+) -> bool {
+    signed_in_with_oauth
+        && home_user_id.is_some()
+        && item.reposted_by.is_none()
+        && is_own_post(home_username, &item.author_username)
+}
+
+/// Whether post `item` should offer a "Reply" action (#71).
+///
+/// Requires the composer to be reachable at all — `signed_in_with_oauth`,
+/// the same gate [`offers_quote`] uses, since a reply has nowhere to go
+/// without one. Nothing else: X accepts a reply to your own post, and a
+/// repost row is fine now that #52 resolves it to the original.
+fn offers_reply(signed_in_with_oauth: bool, _item: &TimelineItem) -> bool {
+    signed_in_with_oauth
+}
+
+/// The composer's heading above a reply target (#71) — "Replying to
+/// @someone", or the handle-less form when the author never expanded,
+/// mirroring [`reply_banner_label`]'s own treatment of the same gap.
+fn reply_target_label(author_username: &str) -> String {
+    if author_username.is_empty() {
+        "Replying to a post".to_string()
+    } else {
+        format!("Replying to @{author_username}")
+    }
+}
+
 /// Whether post `item` should offer a "Quote" action (#16).
 ///
 /// Requires the composer to even be reachable — `signed_in_with_oauth`,
@@ -2891,11 +3172,12 @@ mod tests {
         RepliedTo, Theme, ThreadFetchState, TimelineItem, TimelineSource, TimelineState,
         ToggleState, action_post_id, at_the_post_cap, avatar_initial, byline,
         compose_error_message, cooldown_label, cooldown_tick, format_timestamp, header_title,
-        is_own_post, like_action_label, metrics_label, offers_like, offers_load_older,
-        offers_quote, offers_reauthorize, offers_repost, offers_sign_in, post_permalink,
-        profile_url, rate_limit, reload_cooldown, reload_failure_outcome, reload_gate,
-        reload_start_state, reply_banner_label, repost_action_label, repost_banner_label,
-        thread_action_label, usage, usage_color, usage_label,
+        is_own_post, like_action_label, metrics_label, offers_delete, offers_like,
+        offers_load_older, offers_quote, offers_reauthorize, offers_reply, offers_repost,
+        offers_sign_in, post_permalink, profile_url, rate_limit, reload_cooldown,
+        reload_failure_outcome, reload_gate, reload_start_state, reply_banner_label,
+        reply_target_label, repost_action_label, repost_banner_label, thread_action_label, usage,
+        usage_color, usage_label,
     };
 
     fn item_with(id: &str, author_username: &str, reposted_by: Option<&str>) -> TimelineItem {
@@ -3124,6 +3406,108 @@ mod tests {
         item
     }
 
+    // --- #72: delete ---
+
+    #[test]
+    fn offers_delete_on_ones_own_post() {
+        assert!(offers_delete(
+            true,
+            Some("me-id"),
+            Some("bob"),
+            &item_with("1", "bob", None)
+        ));
+    }
+
+    #[test]
+    fn does_not_offer_delete_on_someone_elses_post() {
+        // X rejects it, and this is irreversible — no reason to offer a
+        // click that can only fail.
+        assert!(!offers_delete(
+            true,
+            Some("me-id"),
+            Some("bob"),
+            &item_with("1", "alice", None)
+        ));
+    }
+
+    #[test]
+    fn does_not_offer_delete_on_a_repost_row_even_of_ones_own_post() {
+        // Unlike every other action since #52, this one stays withheld: the
+        // row reads as "my repost", but the delete would destroy the
+        // original. Removing a repost is the repost toggle's job.
+        let mut item = item_with("activity-id", "bob", Some("bob"));
+        item.original_post_id = Some("original-id".to_string());
+        assert!(!offers_delete(true, Some("me-id"), Some("bob"), &item));
+    }
+
+    #[test]
+    fn does_not_offer_delete_before_the_signed_in_id_resolves() {
+        assert!(!offers_delete(
+            true,
+            None,
+            Some("bob"),
+            &item_with("1", "bob", None)
+        ));
+    }
+
+    #[test]
+    fn does_not_offer_delete_before_the_signed_in_handle_resolves() {
+        // `is_own_post` treats an unresolved handle as "not mine", which is
+        // the safe direction for an irreversible action.
+        assert!(!offers_delete(
+            true,
+            Some("me-id"),
+            None,
+            &item_with("1", "bob", None)
+        ));
+    }
+
+    #[test]
+    fn does_not_offer_delete_without_an_oauth_session() {
+        assert!(!offers_delete(
+            false,
+            Some("me-id"),
+            Some("bob"),
+            &item_with("1", "bob", None)
+        ));
+    }
+
+    // --- #71: reply ---
+
+    #[test]
+    fn offers_reply_once_signed_in_with_oauth() {
+        assert!(offers_reply(true, &item_with("1", "alice", None)));
+    }
+
+    #[test]
+    fn does_not_offer_reply_without_oauth() {
+        // The composer itself isn't reachable without OAuth — nowhere for a
+        // reply to go.
+        assert!(!offers_reply(false, &item_with("1", "alice", None)));
+    }
+
+    #[test]
+    fn offers_reply_on_ones_own_post() {
+        // X accepts replying to yourself, and self-threading is a normal
+        // way to write.
+        assert!(offers_reply(true, &item_with("1", "me", None)));
+    }
+
+    #[test]
+    fn reply_target_label_names_the_author() {
+        assert_eq!(
+            reply_target_label("XDevelopers"),
+            "Replying to @XDevelopers"
+        );
+    }
+
+    #[test]
+    fn reply_target_label_without_a_handle() {
+        // Same gap `reply_banner_label` already handles: an author who
+        // never expanded.
+        assert_eq!(reply_target_label(""), "Replying to a post");
+    }
+
     // --- #52: a repost row acts on the original ---
 
     #[test]
@@ -3165,6 +3549,16 @@ mod tests {
         // reposter's handle is irrelevant to what the API would reject.
         let item = repost_row_item("activity-id", "original-id", "bob");
         assert!(!offers_repost(true, Some("2244994945"), Some("bob"), &item));
+    }
+
+    #[test]
+    fn replying_from_a_repost_row_answers_the_original_post() {
+        // The trap #71 calls out: `in_reply_to_tweet_id` pointing at the
+        // retweet activity would hang the reply off a different
+        // conversation, and nothing about that failure is visible.
+        let item = repost_row_item("activity-id", "original-id", "alice");
+        assert_eq!(action_post_id(&item), "original-id");
+        assert!(offers_reply(true, &item));
     }
 
     #[test]

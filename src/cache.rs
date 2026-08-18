@@ -290,6 +290,61 @@ pub(crate) fn append_older(
     merged
 }
 
+/// Every item except `post_id` (#72), in the same order.
+///
+/// Pure, so the "what should be left" half of deleting a post is tested
+/// without touching disk — [`forget_post`] is the part that reads and
+/// writes files.
+pub(crate) fn without_post(items: Vec<TimelineItem>, post_id: &str) -> Vec<TimelineItem> {
+    items
+        .into_iter()
+        .filter(|item| item.id != post_id)
+        .collect()
+}
+
+/// Drop `post_id` from the cached timeline on disk and return what is left
+/// (#72).
+///
+/// Deleting a post from X but leaving it in the cache is the failure mode
+/// the issue warns about: the row disappears until the next start, then
+/// comes back — the app looking like it worked when it did not. So this
+/// rewrites the file and then **reads it back**, returning what is actually
+/// on disk rather than what was just written; a write that silently did
+/// nothing shows up as the post still being present.
+///
+/// `home` selects which of the two cache files to touch, mirroring the
+/// split [`load_timeline`]/[`load_home_timeline`] already keep — a repost
+/// of the same id can sit in both, and only the one being displayed is
+/// what the user just acted on.
+///
+/// A missing cache file is not an error: there is nothing to remove, and
+/// the post is gone from X either way.
+pub(crate) fn forget_post(
+    paths: &Paths,
+    home: bool,
+    user_id: &str,
+    post_id: &str,
+    now: i64,
+) -> Result<Vec<TimelineItem>> {
+    let cached = if home {
+        load_home_timeline(paths, user_id)?
+    } else {
+        load_timeline(paths, user_id)?
+    };
+    let Some(cached) = cached else {
+        return Ok(Vec::new());
+    };
+
+    let remaining = without_post(cached, post_id);
+    if home {
+        save_home_timeline(paths, user_id, &remaining, now)?;
+        Ok(load_home_timeline(paths, user_id)?.unwrap_or_default())
+    } else {
+        save_timeline(paths, user_id, &remaining, now)?;
+        Ok(load_timeline(paths, user_id)?.unwrap_or_default())
+    }
+}
+
 /// What a reload spent: the merged, capped timeline to render, and whether
 /// the user-id lookup was skipped because it was already cached (in which
 /// case the reload cost one request instead of two).
@@ -580,6 +635,88 @@ mod tests {
     }
 
     // --- since_id ---
+
+    // --- #72: deleting a post ---
+
+    #[test]
+    fn without_post_drops_only_the_named_post() {
+        let items = vec![item("1"), item("2"), item("3")];
+        assert_eq!(ids(&without_post(items, "2")), ["1", "3"]);
+    }
+
+    #[test]
+    fn without_post_leaves_an_unknown_id_alone() {
+        let items = vec![item("1"), item("2")];
+        assert_eq!(ids(&without_post(items, "nonexistent")), ["1", "2"]);
+    }
+
+    #[test]
+    fn forget_post_rewrites_the_home_cache_and_reads_it_back() {
+        // The issue's actual completion criterion: gone from the cache too,
+        // so it cannot come back on the next start. Asserted by reading the
+        // file again rather than trusting the write.
+        let root = temp_root("forget-home");
+        let paths = test_paths(&root);
+        paths.ensure_dirs().unwrap();
+        save_home_timeline(&paths, "me", &[item("1"), item("2")], 0).unwrap();
+
+        let remaining = forget_post(&paths, true, "me", "1", 1).unwrap();
+        assert_eq!(ids(&remaining), ["2"]);
+        assert_eq!(
+            ids(&load_home_timeline(&paths, "me").unwrap().unwrap()),
+            ["2"]
+        );
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn forget_post_rewrites_the_single_user_cache() {
+        let root = temp_root("forget-single");
+        let paths = test_paths(&root);
+        paths.ensure_dirs().unwrap();
+        save_timeline(&paths, "me", &[item("1"), item("2")], 0).unwrap();
+
+        let remaining = forget_post(&paths, false, "me", "2", 1).unwrap();
+        assert_eq!(ids(&remaining), ["1"]);
+        assert_eq!(ids(&load_timeline(&paths, "me").unwrap().unwrap()), ["1"]);
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn forget_post_touches_only_the_displayed_timelines_file() {
+        // The same post can sit in both caches; only the one the user was
+        // looking at is what they acted on.
+        let root = temp_root("forget-one-file");
+        let paths = test_paths(&root);
+        paths.ensure_dirs().unwrap();
+        save_home_timeline(&paths, "me", &[item("1")], 0).unwrap();
+        save_timeline(&paths, "me", &[item("1")], 0).unwrap();
+
+        forget_post(&paths, true, "me", "1", 1).unwrap();
+
+        assert!(
+            load_home_timeline(&paths, "me")
+                .unwrap()
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(ids(&load_timeline(&paths, "me").unwrap().unwrap()), ["1"]);
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn forget_post_is_not_an_error_when_no_cache_file_exists() {
+        let root = temp_root("forget-missing");
+        let paths = test_paths(&root);
+        paths.ensure_dirs().unwrap();
+
+        assert!(forget_post(&paths, true, "me", "1", 1).unwrap().is_empty());
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 
     #[test]
     fn since_id_is_none_for_an_empty_cache() {

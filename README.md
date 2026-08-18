@@ -461,6 +461,62 @@ client-side either.
 **Quoting a repost row quotes the original** (#52) — which is also the text
 and author the quote card would show, since that is what the row renders.
 
+## Deleting your own posts (#72)
+
+Your own posts show a "Delete" action; nobody else's does, since X rejects
+deleting someone else's and there is no point spending a request that can
+only fail.
+
+**Deleting takes two clicks, never one.** "Delete" replaces itself with
+"Delete permanently" / "Cancel". The action is irreversible, so no single
+click can destroy a post. Only one row can be asking at a time — clicking
+"Delete" elsewhere moves the prompt rather than opening a second one.
+
+**It leaves the cache too.** A post deleted from X but left in
+`timeline-<id>.json` disappears from the window and comes back on the next
+start: the app looking like it worked when it didn't. So a successful
+delete rewrites the cache file and then **reads it back**, rendering what is
+actually on disk rather than what was just written. The local cache is only
+touched after X has confirmed the deletion — forgetting it first would hide
+a post that still exists.
+
+**A repost row gets no Delete**, unlike every other action since #52. Such
+a row displays someone's original post, so on a repost of your *own* post
+the delete would destroy the original from a row that reads as "my repost".
+Removing a repost is the repost toggle's job (#15), and conflating the two
+on an irreversible action is not worth the risk.
+
+`DELETE /2/tweets/:id`, `tweet.write` scope, one request, counted as spend
+like every other write.
+
+## Replying (#71)
+
+Every post shows a "Reply" action. Clicking it sets the composer's target
+and nothing else — no request goes out until the draft is submitted, the
+same way "Quote" works. The composer then shows "Replying to @someone"
+above a card of the post being answered, with "Remove reply" to clear it
+without losing what was already typed. Submitting sends the same
+`POST /2/tweets` as an ordinary post, with a nested
+`reply.in_reply_to_tweet_id`; the scope (`tweet.write`) and the cost (one
+request) are identical.
+
+**A draft is a reply or a quote, never both.** X's API would accept one that
+is both, but this composer refuses to build it: the two look almost
+identical in a small composer, and sending the wrong one is not a visible
+mistake — a reply lands under a conversation, a quote does not. Clicking
+"Reply" while a quote is set is therefore a switch, not an addition, and the
+draft text survives either way.
+
+**Replying from a repost row answers the original post** (#52) — the id sent
+as `in_reply_to_tweet_id` is the original's, not the retweet activity's.
+Getting that wrong would hang the reply off a different conversation
+entirely, with nothing about the failure visible afterwards.
+
+**Nothing is re-fetched afterwards beyond the usual reload.** "Show thread"
+(#12) walks a post's *ancestors*, and a new reply is a descendant, so no
+cached chain becomes stale by posting one. The reply itself shows up in the
+timeline reload that every successful post already triggers.
+
 ## Reposting and un-reposting (#15)
 
 Every post but your own shows a "Repost" / "Reposted" toggle — see "Which
@@ -616,7 +672,8 @@ explicit action — there is no polling or auto-refresh, and since #9,
 local cache below whenever one exists, with no request in the loop.
 
 Reposting spends one request; un-reposting spends one more. Liking and
-unliking (#68) cost the same, one request each.
+unliking (#68) cost the same, one request each, and so does deleting a post
+(#72).
 
 `--fetch-post` (#42) spends exactly one request per run, however many post
 ids are given — they all ride in a single `GET /2/tweets?ids=` request's
