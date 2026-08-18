@@ -29,7 +29,10 @@ const URL_WEIGHT: usize = 23;
 /// adjustments from a plain `chars().count()`:
 ///
 /// - A whitespace-delimited token starting with `http://` or `https://`
-///   counts as [`URL_WEIGHT`] regardless of its actual length.
+///   counts as [`URL_WEIGHT`] regardless of its actual length. The
+///   whitespace *between* tokens is weighed by the same rule as any other
+///   character, not assumed to be weight 1 — an ideographic space (U+3000)
+///   weighs 2.
 /// - A codepoint outside `twitter-text`'s "weight 1" ranges — see
 ///   [`is_low_weight`] — counts as 2; everything inside them (plain ASCII,
 ///   Latin-1, the rest of the Latin/Greek/Cyrillic block, and a few
@@ -50,7 +53,15 @@ const URL_WEIGHT: usize = 23;
 /// the safe (2) weight by default, so there is no longer a gap left to
 /// undercount through.
 pub(crate) fn weighted_length(text: &str) -> usize {
-    let whitespace_weight = text.chars().filter(|c| c.is_whitespace()).count();
+    // Whitespace is weighed the same way as everything else (#61): an
+    // ideographic space (U+3000) is weight 2 to `twitter-text`, and
+    // counting every whitespace character as 1 here would reopen exactly
+    // the undercount this function's doc says is closed.
+    let whitespace_weight: usize = text
+        .chars()
+        .filter(|c| c.is_whitespace())
+        .map(char_weight)
+        .sum();
     let word_weight: usize = text
         .split_whitespace()
         .map(|word| {
@@ -363,6 +374,20 @@ mod tests {
         // weight 1, same as plain ASCII.
         assert_eq!(weighted_length("é"), 1);
         assert_eq!(weighted_length("И"), 1);
+    }
+
+    #[test]
+    fn counts_an_ideographic_space_double() {
+        // The same undercount #61 is about, in the one place the rewritten
+        // range table did not reach: whitespace was summed separately at a
+        // flat 1 each, so U+3000 — weight 2 to `twitter-text` — slipped
+        // through even after the table was inverted.
+        assert_eq!(weighted_length("\u{3000}"), 2);
+    }
+
+    #[test]
+    fn still_counts_an_ordinary_space_single() {
+        assert_eq!(weighted_length("a b"), 3);
     }
 
     // --- validate ---
