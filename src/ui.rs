@@ -1,12 +1,14 @@
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use gpui::{
-    AnyElement, Context, Entity, FontWeight, SharedString, Subscription, Task, Window, div,
-    prelude::*, rgb,
+    AnyElement, Context, Entity, FontWeight, SharedString, Subscription, Task, Window, div, img,
+    prelude::*, px, rgb,
 };
 use gpui_component::input::{Input, InputEvent, InputState};
 
+use crate::avatar;
 use crate::browser;
 use crate::cache;
 use crate::compose::{self, ComposeState, ComposeStatus};
@@ -331,6 +333,17 @@ pub(crate) struct TimelineView {
     /// `usage_refresh`'s cancel-on-drop contract. Only one is kept: opening
     /// a second link while the first is still spawning is not something
     /// worth queueing.
+    /// Downloaded avatars (#64), keyed by the API's own `profile_image_url`
+    /// — the key is the URL as it arrived, not the larger variant actually
+    /// fetched, so a row can look itself up without repeating
+    /// `avatar::preferred_url`'s guess. Absent means "not downloaded yet",
+    /// which renders the placeholder.
+    avatar_paths: HashMap<String, PathBuf>,
+    /// Holds the in-flight avatar downloads alive (#64). One task walks the
+    /// whole visible timeline rather than one per row; reassigning it (a
+    /// reload) cancels whatever was still downloading, which the next call
+    /// re-collects from the new timeline anyway.
+    avatar_fetch: Option<Task<()>>,
     open_task: Option<Task<()>>,
     /// Why the last open attempt failed (#70), shown in the header until
     /// the next attempt clears it. `None` is the ordinary case — a
@@ -399,6 +412,8 @@ impl TimelineView {
             liked_ids_refresh: None,
             like_overrides: HashMap::new(),
             like_tasks: HashMap::new(),
+            avatar_paths: HashMap::new(),
+            avatar_fetch: None,
             open_task: None,
             open_failure: None,
         };
@@ -467,6 +482,7 @@ impl TimelineView {
                 this.refresh_usage(cx);
                 this.refresh_reposted_ids(cx);
                 this.refresh_liked_ids(cx);
+                this.refresh_avatars(cx);
                 match result {
                     Ok(StartOutcome::NotAuthenticated { session_notice }) => {
                         this.session_notice = session_notice.map(SharedString::from);
@@ -622,6 +638,7 @@ impl TimelineView {
                         this.refresh_usage(cx);
                         this.refresh_reposted_ids(cx);
                         this.refresh_liked_ids(cx);
+                        this.refresh_avatars(cx);
                         this.reloading = false;
                         match result {
                             Ok(reloaded) => {
@@ -657,6 +674,7 @@ impl TimelineView {
                         this.refresh_usage(cx);
                         this.refresh_reposted_ids(cx);
                         this.refresh_liked_ids(cx);
+                        this.refresh_avatars(cx);
                         this.reloading = false;
                         match result {
                             Ok(reloaded) => {
@@ -816,6 +834,7 @@ impl TimelineView {
                 this.refresh_usage(cx);
                 this.refresh_reposted_ids(cx);
                 this.refresh_liked_ids(cx);
+                this.refresh_avatars(cx);
                 this.reloading = false;
                 match result {
                     Ok((items, next_token)) => {
@@ -1040,6 +1059,75 @@ impl TimelineView {
             });
         });
         self.like_tasks.insert(task_key, task);
+    }
+
+    /// Download whatever avatars the visible timeline needs and don't have
+    /// yet (#64).
+    ///
+    /// Called wherever [`Self::refresh_reposted_ids`] is, so a row's avatar
+    /// and its buttons come from the same point in time. Fetching happens on
+    /// the background executor one URL at a time, updating the map (and so
+    /// the view) after each — an avatar appearing as it arrives beats the
+    /// whole timeline waiting for the slowest one. A URL that fails is
+    /// simply left absent, so the row keeps its placeholder and the next
+    /// reload retries it; there is nothing useful to say to the user about
+    /// an avatar that didn't load.
+    ///
+    /// These requests go to `pbs.twimg.com`, not the X API: no quota, no
+    /// credits, nothing for #18's usage tracking to count.
+    fn refresh_avatars(&mut self, cx: &mut Context<'_, Self>) {
+        let TimelineState::Loaded(items) = &self.state else {
+            return;
+        };
+        let mut wanted: Vec<String> = Vec::new();
+        for url in items
+            .iter()
+            .filter_map(|item| item.author_avatar_url.as_deref())
+        {
+            if !self.avatar_paths.contains_key(url) && !wanted.iter().any(|seen| seen == url) {
+                wanted.push(url.to_string());
+            }
+        }
+        if wanted.is_empty() {
+            return;
+        }
+
+        let paths = self.paths.clone();
+        self.avatar_fetch = Some(cx.spawn(async move |this, cx| {
+            for url in wanted {
+                let paths = paths.clone();
+                let fetch_url = url.clone();
+                let result = cx
+                    .background_executor()
+                    .spawn(async move { avatar::ensure_cached(&paths, &fetch_url) })
+                    .await;
+
+                if let Ok(path) = result {
+                    let _ = this.update(cx, |this, cx| {
+                        this.avatar_paths.insert(url.clone(), path);
+                        cx.notify();
+                    });
+                }
+            }
+        }));
+    }
+
+    /// One post's author avatar (#64): the downloaded image once it is on
+    /// disk, else [`avatar_placeholder`] — the two are the same size, so a
+    /// row does not reflow when the image lands.
+    fn avatar(&self, item: &TimelineItem, theme: Theme) -> AnyElement {
+        let cached = item
+            .author_avatar_url
+            .as_deref()
+            .and_then(|url| self.avatar_paths.get(url));
+
+        match cached {
+            Some(path) => img(path.clone())
+                .size(AVATAR_SIZE)
+                .rounded_full()
+                .into_any_element(),
+            None => avatar_placeholder(&item.author_name, theme),
+        }
     }
 
     /// Hand `url` to the system browser (#70).
@@ -1563,14 +1651,13 @@ impl TimelineView {
         let theme = self.theme;
         let byline = byline(&item.author_username);
 
-        div()
+        // #64: the avatar sits in its own column to the left, so the body
+        // below is built separately and then placed beside it.
+        let body = div()
             .flex()
             .flex_col()
+            .flex_1()
             .gap_1()
-            .px_4()
-            .py_3()
-            .border_b_1()
-            .border_color(rgb(theme.border))
             // #13: a repost shows who reposted it as a small line above the
             // body, which by this point already holds the *original* post
             // (see `TimelineResponse::into_items`'s join) — not the outer
@@ -1661,7 +1748,17 @@ impl TimelineView {
                     item,
                 ),
                 |column| column.child(self.like_button(item, cx)),
-            )
+            );
+
+        div()
+            .flex()
+            .gap_3()
+            .px_4()
+            .py_3()
+            .border_b_1()
+            .border_color(rgb(theme.border))
+            .child(self.avatar(item, theme))
+            .child(body)
             .into_any_element()
     }
 
@@ -2644,6 +2741,52 @@ fn cooldown_tick(notice: Option<&ReloadNotice>, now: i64) -> CooldownTick {
     }
 }
 
+/// How big an author avatar renders (#64). One constant because the
+/// placeholder has to match the image exactly — a row that reflows when the
+/// download lands is worse than no avatar at all.
+const AVATAR_SIZE: gpui::Pixels = px(44.0);
+
+/// What stands in for an avatar that hasn't downloaded, failed, or never
+/// existed (#64): a filled circle carrying the author's initial.
+///
+/// An initial rather than a blank disc, since it already distinguishes most
+/// consecutive authors in a timeline — which is the whole point of #64 —
+/// before any image arrives. An author whose name never expanded gets the
+/// bare circle; there is no character to show and inventing one would be
+/// worse than the gap.
+fn avatar_placeholder(author_name: &str, theme: Theme) -> AnyElement {
+    let initial = avatar_initial(author_name);
+
+    div()
+        .size(AVATAR_SIZE)
+        .rounded_full()
+        .bg(rgb(theme.border))
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_color(rgb(theme.text_muted))
+        .child(initial)
+        .into_any_element()
+}
+
+/// The character an avatar placeholder shows for `author_name` (#64):
+/// its first, uppercased. Empty for an author whose name never expanded —
+/// the circle then stands alone rather than showing a made-up initial.
+///
+/// `char`-wise, not byte-wise, so a name starting with a multi-byte
+/// character (which plenty do) is neither split mid-character nor skipped.
+/// `to_uppercase` is the Unicode one, which can yield more than one
+/// character for some scripts; that is left as-is rather than truncated,
+/// since cutting a cased expansion in half produces something wrong rather
+/// than something short.
+fn avatar_initial(author_name: &str) -> String {
+    author_name
+        .chars()
+        .next()
+        .map(|first| first.to_uppercase().to_string())
+        .unwrap_or_default()
+}
+
 /// x.com's canonical URL for one post (#70), built from what
 /// [`TimelineItem`] already carries — no request, no API involvement at
 /// all.
@@ -2741,12 +2884,13 @@ mod tests {
     use super::{
         ComposeStatus, Cooldown, CooldownTick, PostLink, PostMetrics, ReloadNotice, ReloadTrigger,
         RepliedTo, Theme, ThreadFetchState, TimelineItem, TimelineSource, TimelineState,
-        ToggleState, at_the_post_cap, byline, compose_error_message, cooldown_label, cooldown_tick,
-        format_timestamp, header_title, is_own_post, like_action_label, metrics_label, offers_like,
-        offers_load_older, offers_quote, offers_reauthorize, offers_repost, offers_sign_in,
-        post_permalink, profile_url, rate_limit, reload_cooldown, reload_failure_outcome,
-        reload_gate, reload_start_state, reply_banner_label, repost_action_label,
-        repost_banner_label, thread_action_label, usage, usage_color, usage_label,
+        ToggleState, at_the_post_cap, avatar_initial, byline, compose_error_message,
+        cooldown_label, cooldown_tick, format_timestamp, header_title, is_own_post,
+        like_action_label, metrics_label, offers_like, offers_load_older, offers_quote,
+        offers_reauthorize, offers_repost, offers_sign_in, post_permalink, profile_url, rate_limit,
+        reload_cooldown, reload_failure_outcome, reload_gate, reload_start_state,
+        reply_banner_label, repost_action_label, repost_banner_label, thread_action_label, usage,
+        usage_color, usage_label,
     };
 
     fn item_with(id: &str, author_username: &str, reposted_by: Option<&str>) -> TimelineItem {
@@ -2761,6 +2905,7 @@ mod tests {
             replied_to: None,
             metrics: None,
             links: Vec::new(),
+            author_avatar_url: None,
         }
     }
 
@@ -2823,6 +2968,28 @@ mod tests {
             .as_deref(),
             Some("1K replies · 12.3K reposts · 2.4M likes")
         );
+    }
+
+    // --- #64: avatars ---
+
+    #[test]
+    fn an_avatar_initial_is_the_uppercased_first_character() {
+        assert_eq!(avatar_initial("Developers"), "D");
+        assert_eq!(avatar_initial("developers"), "D");
+    }
+
+    #[test]
+    fn an_avatar_initial_handles_a_multi_byte_first_character() {
+        // Byte-slicing here would panic or produce mojibake.
+        assert_eq!(avatar_initial("うさだ"), "う");
+        assert_eq!(avatar_initial("Émile"), "É");
+    }
+
+    #[test]
+    fn there_is_no_avatar_initial_without_a_name() {
+        // An author whose name never expanded — the circle stands alone
+        // rather than showing an invented character.
+        assert_eq!(avatar_initial(""), "");
     }
 
     // --- #70: opening links ---
@@ -3122,6 +3289,7 @@ mod tests {
                 replied_to: None,
                 metrics: None,
                 links: Vec::new(),
+                author_avatar_url: None,
             })
             .collect();
         let state = TimelineState::Loaded(full);
@@ -3735,6 +3903,9 @@ mod tests {
                         url: "https://example.com/an-article".to_string(),
                         label: "example.com/an-article".to_string(),
                     }],
+                    author_avatar_url: Some(
+                        "https://pbs.twimg.com/profile_images/1/a_normal.jpg".to_string(),
+                    ),
                 }]);
                 cx.notify();
             });

@@ -546,6 +546,7 @@ mod tests {
             replied_to: None,
             metrics: None,
             links: Vec::new(),
+            author_avatar_url: None,
         }
     }
 

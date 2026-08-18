@@ -8,6 +8,11 @@ pub(crate) struct User {
     pub id: String,
     pub name: String,
     pub username: String,
+    /// The account's avatar (#64), present only because `user.fields` asks
+    /// for `profile_image_url`. `#[serde(default)]` since an account can
+    /// have none, and every fixture that predates #64 omits it.
+    #[serde(default)]
+    pub profile_image_url: Option<String>,
 }
 
 /// A post object as returned under `data`.
@@ -263,6 +268,13 @@ pub(crate) struct TimelineItem {
     /// #70 deserialize cleanly, exactly like `metrics` above.
     #[serde(default)]
     pub links: Vec<PostLink>,
+    /// The avatar URL for whoever's post the body holds (#64) — the
+    /// original's for a repost, matching `author_name`/`author_username`.
+    /// `None` when the author never expanded or has no avatar.
+    /// `#[serde(default)]` for the same cache-compatibility reason as
+    /// `links` above.
+    #[serde(default)]
+    pub author_avatar_url: Option<String>,
 }
 
 /// One openable link from a post's text (#70), flattened out of
@@ -349,7 +361,7 @@ impl TimelineResponse {
 /// A post's author name/username from `includes.users`, or a pair of empty
 /// strings when the author id is absent or wasn't expanded — the shared
 /// lookup behind every author field [`build_item`] and [`quote_of`] fill in.
-fn author_fields(post: &Post, users: &HashMap<&str, &User>) -> (String, String) {
+fn author_fields(post: &Post, users: &HashMap<&str, &User>) -> (String, String, Option<String>) {
     let author = post
         .author_id
         .as_deref()
@@ -357,6 +369,7 @@ fn author_fields(post: &Post, users: &HashMap<&str, &User>) -> (String, String) 
     (
         author.map(|u| u.name.clone()).unwrap_or_default(),
         author.map(|u| u.username.clone()).unwrap_or_default(),
+        author.and_then(|u| u.profile_image_url.clone()),
     )
 }
 
@@ -368,7 +381,7 @@ fn build_item(
     users: &HashMap<&str, &User>,
     referenced: &HashMap<&str, &Post>,
 ) -> TimelineItem {
-    let (author_name, author_username) = author_fields(post, users);
+    let (author_name, author_username, author_avatar_url) = author_fields(post, users);
     let mut item = TimelineItem {
         id: post.id.clone(),
         text: post.text.clone(),
@@ -380,6 +393,7 @@ fn build_item(
         replied_to: None,
         metrics: post.public_metrics,
         links: post_links(post),
+        author_avatar_url,
     };
 
     if let Some(retweet_ref) = post
@@ -392,10 +406,11 @@ fn build_item(
         item.reposted_by = Some(item.author_username.clone());
 
         if let Some(original) = referenced.get(retweet_ref.id.as_str()).copied() {
-            let (author_name, author_username) = author_fields(original, users);
+            let (author_name, author_username, avatar) = author_fields(original, users);
             item.text.clone_from(&original.text);
             item.author_name = author_name;
             item.author_username = author_username;
+            item.author_avatar_url = avatar;
             // A repost of a quote — or of a reply — carries context that
             // belongs to the original post now shown as the body, not to
             // the (already-consumed) retweet reference on the outer post.
@@ -414,6 +429,7 @@ fn build_item(
             // know who reposted, not who wrote it.
             item.author_name = String::new();
             item.author_username = String::new();
+            item.author_avatar_url = None;
             // Blanked for the same reason as the author fields above: the
             // outer repost's own counts are not the original's (#67).
             item.metrics = None;
@@ -452,7 +468,7 @@ fn reply_target(
         .referenced_tweets
         .iter()
         .find(|r| r.kind == ReferenceKind::RepliedTo)?;
-    let (author_name, author_username) = referenced
+    let (author_name, author_username, _avatar) = referenced
         .get(reply_ref.id.as_str())
         .map(|parent| author_fields(parent, users))
         .unwrap_or_default();
@@ -505,7 +521,7 @@ fn quote_of(
         .iter()
         .find(|r| r.kind == ReferenceKind::Quoted)?;
     let quoted_post = referenced.get(quote_ref.id.as_str())?;
-    let (author_name, author_username) = author_fields(quoted_post, users);
+    let (author_name, author_username, _avatar) = author_fields(quoted_post, users);
     Some(QuotedPost {
         author_name,
         author_username,
@@ -1333,6 +1349,71 @@ mod tests {
         }"#;
         let response: TimelineResponse = serde_json::from_str(json).unwrap();
         assert!(response.into_items()[0].links.is_empty());
+    }
+
+    #[test]
+    fn reads_the_authors_avatar_url() {
+        // #64: `user.fields=profile_image_url` puts this in `includes.users`,
+        // where the author join already looks.
+        let response: TimelineResponse = serde_json::from_str(TIMELINE_JSON).unwrap();
+        let items = response.into_items();
+
+        assert_eq!(
+            items[0].author_avatar_url.as_deref(),
+            Some("https://pbs.twimg.com/profile_images/x.jpg")
+        );
+        // The second post's author was never expanded, so there is no
+        // avatar to show either.
+        assert_eq!(items[1].author_avatar_url, None);
+    }
+
+    #[test]
+    fn a_repost_shows_the_original_authors_avatar() {
+        // The byline is the original author's (#13), so the face beside it
+        // has to be theirs too.
+        let json = r#"{
+          "data": [
+            {
+              "id": "10",
+              "text": "RT @XDevelopers: the original",
+              "author_id": "1000000000",
+              "referenced_tweets": [{ "type": "retweeted", "id": "11" }]
+            }
+          ],
+          "includes": {
+            "users": [
+              {
+                "id": "1000000000",
+                "name": "Reposter",
+                "username": "reposter",
+                "profile_image_url": "https://pbs.twimg.com/reposter_normal.jpg"
+              },
+              {
+                "id": "2244994945",
+                "name": "Developers",
+                "username": "XDevelopers",
+                "profile_image_url": "https://pbs.twimg.com/original_normal.jpg"
+              }
+            ],
+            "tweets": [
+              { "id": "11", "text": "the original", "author_id": "2244994945" }
+            ]
+          }
+        }"#;
+        let response: TimelineResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            response.into_items()[0].author_avatar_url.as_deref(),
+            Some("https://pbs.twimg.com/original_normal.jpg")
+        );
+    }
+
+    #[test]
+    fn a_cache_file_written_before_avatars_existed_still_loads() {
+        let item: TimelineItem = serde_json::from_str(
+            r#"{"id":"1","text":"cached","created_at":null,"author_name":"a","author_username":"b"}"#,
+        )
+        .unwrap();
+        assert_eq!(item.author_avatar_url, None);
     }
 
     #[test]

@@ -314,7 +314,7 @@ created (mode `0700`) on startup:
 | Variable | Default | Holds |
 | --- | --- | --- |
 | `XDG_CONFIG_HOME` | `~/.config/twigpui/` | `config.toml` |
-| `XDG_CACHE_HOME` | `~/.cache/twigpui/` | Response cache: `user_ids.json`, `timeline-<user_id>.json` (#9), `me.json`, `home-timeline-<user_id>.json` (#11), `thread-<reply_id>.json` (#12) |
+| `XDG_CACHE_HOME` | `~/.cache/twigpui/` | Response cache: `user_ids.json`, `timeline-<user_id>.json` (#9), `me.json`, `home-timeline-<user_id>.json` (#11), `thread-<reply_id>.json` (#12), `avatars/` (#64) |
 | `XDG_STATE_HOME` | `~/.local/state/twigpui/` | `oauth_tokens.json` (mode `0600`), `rate_limit.json` (#10), `usage.json` (#18), `reposted_posts.json` (#15), `liked_posts.json` (#68) |
 
 An `XDG_*` variable is only honored if it is set to a non-blank absolute
@@ -487,6 +487,37 @@ its own post id is still the retweet activity's, not the original content's
 resolve that original id for a displayed repost row, so it withholds the
 button there rather than risk sending the wrong id. Reposting the original
 post directly, wherever else it appears in the timeline, is unaffected.
+
+## Author avatars (#64)
+
+Each row shows the author's profile image, 44pt and circular, to the left of
+the byline. `user.fields=profile_image_url` rides along in the timeline
+request that was already being made, so the URL costs nothing extra; the
+image itself is fetched from `pbs.twimg.com`, which is **not** the X API —
+no quota, no credits, nothing for the usage tracking to count.
+
+**Downloaded once, off the UI thread.** Images are cached under
+`$XDG_CACHE_HOME/twigpui/avatars/`, keyed by a hash of the URL (X reuses the
+same basename across accounts, so anything shorter would collide). A
+timeline where one author posts ten times downloads one image. Fetching runs
+on the background executor one URL at a time, and each avatar appears as it
+lands rather than the timeline waiting for the slowest.
+
+**Until then — or if it fails — a placeholder** the exact same size holds
+the space, carrying the author's initial. A row never reflows when an image
+arrives, and an author whose name never expanded gets the bare circle rather
+than an invented character. A failed download is simply left absent and
+retried on the next reload; there is nothing useful to tell the user about
+an avatar that didn't load.
+
+**Size.** X's `profile_image_url` ends in `_normal` (48×48), which blurs on
+a Retina display, so twigpui asks for the `_400x400` variant instead. That
+suffix convention is X's own and not promised by the API, so a URL that
+doesn't match is used unchanged, and a rewritten URL that fails falls back
+to the original rather than leaving the row without a face.
+
+Losing the avatar cache costs one re-download per author and nothing else —
+it is cache, not state.
 
 ## Opening things in a browser (#70)
 
