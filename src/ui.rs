@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::time::Duration;
 
 use gpui::{
     AnyElement, Context, Entity, FontWeight, SharedString, Subscription, Task, Window, div,
@@ -29,6 +30,7 @@ enum ThreadFetchState {
     Failed(SharedString),
 }
 
+#[derive(Debug)]
 enum TimelineState {
     /// No usable credential yet: no fresh/refreshable stored OAuth session
     /// and no bearer token. Shown at startup before the sign-in flow runs.
@@ -38,9 +40,16 @@ enum TimelineState {
     SigningIn,
     Loading,
     Loaded(Vec<TimelineItem>),
-    /// Blocked before any request went out (#10). Carries when it becomes
-    /// allowed again so the header can render a countdown instead of a bare
-    /// error message, and which side imposed the wait — see [`Cooldown`].
+    /// Nothing has ever loaded, and the most recent attempt to fetch
+    /// something ran into a rate limit with a known reset time (#10) — see
+    /// [`Cooldown`] for which side imposed it. Since #57, this is no longer
+    /// how a cooldown *or a failed reload* is reported while there are
+    /// already posts on screen: [`TimelineView::reload_notice`] carries that
+    /// independently of `state` instead (mirroring #54's `session_notice`),
+    /// so the timeline is never evicted just to make room for a countdown or
+    /// an error line. This variant only remains reachable as the fallback
+    /// for the narrow case where there is nothing else the body could
+    /// render — see [`reload_failure_outcome`].
     RateLimited {
         reset_at: i64,
         cooldown: Cooldown,
@@ -52,13 +61,36 @@ enum TimelineState {
 /// different facts and must not be described with the same words: saying "X
 /// rate limited you" when the app is really just honouring its own configured
 /// fetch interval would be a plain misstatement of what happened.
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Cooldown {
     /// `config.min_fetch_interval_seconds` — self-imposed, nothing was sent
     /// and X has said nothing.
     LocalInterval,
     /// X's own rate-limit window, per the tracked `x-rate-limit-*` headers.
     ApiRateLimit,
+}
+
+/// A transient notice about the most recent reload attempt, kept
+/// independent of `state` for exactly the reason #54's `session_notice`
+/// field is (see its doc): a cooldown that blocked the request, or a
+/// failure once it ran, describes what just happened to the *request*, not
+/// to whatever posts are already on screen — collapsing the two into one
+/// `state` is what made #57 possible (a countdown, or an error, evicting a
+/// timeline that never actually changed). Cleared the instant a reload
+/// succeeds — see [`TimelineView::reload`]'s result handling — so unlike
+/// `session_notice` this never outlives what it was reporting.
+#[derive(Debug, Clone, PartialEq)]
+enum ReloadNotice {
+    /// Blocked by a cooldown (#10's own interval, or X's rate limit) before
+    /// or while the request was in flight. Carries the same
+    /// `reset_at`/`cooldown` pair [`cooldown_label`] already renders from,
+    /// so the countdown text is computed fresh at render time rather than
+    /// stored — #57's item 3 (making the countdown actually tick) is a
+    /// separate, still-open concern.
+    Cooldown { reset_at: i64, cooldown: Cooldown },
+    /// The request went out and failed for a reason with no known reset
+    /// time.
+    Failed(SharedString),
 }
 
 /// What the header's primary button does, independent of its current label —
@@ -68,6 +100,24 @@ enum Cooldown {
 enum PrimaryAction {
     Reload,
     SignIn,
+}
+
+/// Whether [`TimelineView::reload`] should honor `config.min_fetch_interval_seconds`
+/// (#10) at all. The interval exists to suppress *polling* — it was never
+/// meant to block confirming the result of something the user just did on
+/// purpose, and #57 was exactly that bug: a post or a sign-in, each already
+/// having spent its own request, immediately blocked on the interval it had
+/// no reason to observe.
+#[derive(Debug, Clone, Copy)]
+enum ReloadTrigger {
+    /// An unsolicited reload — the startup cache-miss path, or the "Reload"
+    /// button. Subject to the configured interval like any other fetch that
+    /// wasn't a direct response to a user action.
+    Polling,
+    /// The direct result of a user action that already spent its own
+    /// request (a successful sign-in, a successful post): must never wait
+    /// out an interval meant for polling.
+    UserAction,
 }
 
 /// What [`TimelineView::start`]'s background half found, carried back across
@@ -116,6 +166,14 @@ pub(crate) struct TimelineView {
     /// the tracked API rate-limit state says via `rate_limit::decision`.
     /// `None` until the first reload, which is therefore never throttled.
     last_reload_at: Option<i64>,
+    /// Whether a [`Self::reload`] is currently in flight (#57). Distinct
+    /// from `state == TimelineState::Loading`: that variant means *nothing
+    /// is displayed yet*, whereas this stays `true` while a reload runs even
+    /// when `state` is `Loaded` and keeps showing the previous posts — see
+    /// [`reload_start_state`]. Drives the header's busy label; `body` needs
+    /// no equivalent check since it renders straight off `state`, which this
+    /// flag deliberately leaves untouched.
+    reloading: bool,
     /// Whether the credential in `client` came from an OAuth session rather
     /// than the app-only bearer token (#31). Drives whether the header keeps
     /// offering "Sign in with X": running on a bearer token is a working
@@ -205,6 +263,25 @@ pub(crate) struct TimelineView {
     /// the moment a fresh sign-in or re-authorize succeeds, in
     /// [`Self::sign_in`].
     session_notice: Option<SharedString>,
+    /// A cooldown or a failed reload, kept independent of `state` (#57) —
+    /// see [`ReloadNotice`]'s doc for why. `None` whenever the most recent
+    /// reload attempt (if any) hasn't been blocked or hasn't failed; set in
+    /// [`Self::reload`]'s early-return, [`Self::load_older`]'s, and
+    /// [`Self::apply_reload_failure`]'s result-handling paths, cleared the
+    /// moment a reload starts or succeeds.
+    reload_notice: Option<ReloadNotice>,
+    /// Ticks `reload_notice`'s countdown once a second while it holds a live
+    /// `ReloadNotice::Cooldown` (#57's item 3) — [`cooldown_label`] only
+    /// recomputes its text at render time, so without a periodic
+    /// `cx.notify()` the banner would freeze at whatever second happened to
+    /// be showing when it was last drawn. `None` whenever no cooldown is
+    /// currently ticking. Same cancel-on-drop convention as `fetch`/
+    /// `sign_in_flow`: reassigning this (a fresh cooldown superseding a
+    /// still-running one) or clearing it (an immediate stop on success or on
+    /// a plain failure — see [`Self::apply_reload_failure`]) drops and so
+    /// cancels whatever loop was running. See
+    /// [`Self::start_cooldown_ticker`] for the loop itself.
+    cooldown_ticker: Option<Task<()>>,
     /// Request-count totals across every tracked endpoint (#18), shown in
     /// the header — see [`Self::refresh_usage`]. Zero until the first
     /// refresh completes, which is a truthful "nothing observed yet" rather
@@ -271,6 +348,7 @@ impl TimelineView {
             fetch: None,
             sign_in_flow: None,
             last_reload_at: None,
+            reloading: false,
             signed_in_with_oauth: false,
             source: None,
             home_user_id: None,
@@ -284,6 +362,8 @@ impl TimelineView {
             submit_task: None,
             oauth_scope: None,
             session_notice: None,
+            reload_notice: None,
+            cooldown_ticker: None,
             usage_totals: usage::Totals::default(),
             usage_refresh: None,
             reposted_ids: HashSet::new(),
@@ -376,7 +456,11 @@ impl TimelineView {
                                 this.state = TimelineState::Loaded(items);
                                 cx.notify();
                             }
-                            None => this.reload(cx),
+                            // A cache miss at startup, not a user action —
+                            // subject to #10's interval like any other
+                            // unsolicited fetch (though `last_reload_at` is
+                            // still `None` here, so it never actually waits).
+                            None => this.reload(ReloadTrigger::Polling, cx),
                         }
                     }
                     Ok(StartOutcome::Home {
@@ -396,7 +480,8 @@ impl TimelineView {
                                 this.state = TimelineState::Loaded(items);
                                 cx.notify();
                             }
-                            None => this.reload(cx),
+                            // Same reasoning as `SingleUser` above.
+                            None => this.reload(ReloadTrigger::Polling, cx),
                         }
                     }
                     Err(error) => {
@@ -420,11 +505,21 @@ impl TimelineView {
     /// replacing it outright.
     ///
     /// Also enforces `config.min_fetch_interval_seconds` (#10) before
-    /// spawning anything: [`reload_cooldown`] is a client-side throttle on
+    /// spawning anything, unless `trigger` is [`ReloadTrigger::UserAction`]
+    /// (#57) — see that variant's doc for why some callers must bypass it.
+    /// When it does apply, [`reload_cooldown`] is a client-side throttle on
     /// the button itself, checked without touching the network, on top of
     /// (not instead of) whatever the tracked API rate-limit state says once
     /// a request actually goes out.
-    fn reload(&mut self, cx: &mut Context<'_, Self>) {
+    ///
+    /// Neither a cooldown nor a failed fetch touches `state` while it
+    /// already holds posts (#57): [`reload_start_state`] and
+    /// [`reload_failure_outcome`] are the pure functions that decide this,
+    /// and `reload_notice` carries the cooldown/failure text independently —
+    /// see [`ReloadNotice`]'s doc. A reload that hasn't loaded anything yet
+    /// still falls back to `TimelineState::Loading`/`RateLimited`/`Failed`,
+    /// since there is nothing else the body could render in that case.
+    fn reload(&mut self, trigger: ReloadTrigger, cx: &mut Context<'_, Self>) {
         let Some(client) = self.client.clone() else {
             self.state = TimelineState::NotAuthenticated;
             cx.notify();
@@ -439,21 +534,36 @@ impl TimelineView {
         };
 
         let now = oauth::unix_now();
-        if let Some(reset_at) = reload_cooldown(
+        if let Some(reset_at) = reload_gate(
+            trigger,
             self.last_reload_at,
             self.config.min_fetch_interval_seconds,
             now,
         ) {
-            self.state = TimelineState::RateLimited {
+            // #57: the cooldown blocked the request before it was even
+            // sent, so whatever is already on screen is untouched — this is
+            // a notice, not a state change.
+            self.reload_notice = Some(ReloadNotice::Cooldown {
                 reset_at,
                 cooldown: Cooldown::LocalInterval,
-            };
+            });
+            // #57 item 3: without this the banner's countdown freezes at
+            // whatever second it happened to render on — see
+            // `start_cooldown_ticker`'s doc.
+            self.start_cooldown_ticker(cx);
             cx.notify();
             return;
         }
         self.last_reload_at = Some(now);
 
-        self.state = TimelineState::Loading;
+        self.reload_notice = None;
+        // A fresh reload actually going out supersedes whatever cooldown
+        // was being counted down (there is nothing left to wait for once
+        // the request is in flight) — stop it explicitly rather than
+        // leaving it to notice on its next tick, up to a second later.
+        self.cooldown_ticker = None;
+        self.reloading = true;
+        self.state = reload_start_state(std::mem::replace(&mut self.state, TimelineState::Loading));
 
         let paths = self.paths.clone();
         let max_results = self.config.max_results;
@@ -479,16 +589,24 @@ impl TimelineView {
                     let _ = this.update(cx, |this, cx| {
                         this.refresh_usage(cx);
                         this.refresh_reposted_ids(cx);
-                        this.state = match result {
+                        this.reloading = false;
+                        match result {
                             Ok(reloaded) => {
                                 // Single-user mode has no pagination cursor —
                                 // #11 keeps its "Load older" button reserved
                                 // for the home timeline.
                                 this.next_page_token = None;
-                                TimelineState::Loaded(reloaded.items)
+                                this.state = TimelineState::Loaded(reloaded.items);
+                                this.reload_notice = None;
+                                // #57 item 3: a success means there is
+                                // nothing left to count down — stop
+                                // immediately rather than let the ticker
+                                // notice on its next tick, up to a second
+                                // later.
+                                this.cooldown_ticker = None;
                             }
-                            Err(error) => map_reload_error(&error),
-                        };
+                            Err(error) => this.apply_reload_failure(&error, cx),
+                        }
                         cx.notify();
                     });
                 }));
@@ -505,15 +623,19 @@ impl TimelineView {
                     let _ = this.update(cx, |this, cx| {
                         this.refresh_usage(cx);
                         this.refresh_reposted_ids(cx);
-                        this.state = match result {
+                        this.reloading = false;
+                        match result {
                             Ok(reloaded) => {
                                 this.home_user_id = Some(reloaded.me.id);
                                 this.home_username = Some(reloaded.me.username);
                                 this.next_page_token = reloaded.next_token;
-                                TimelineState::Loaded(reloaded.items)
+                                this.state = TimelineState::Loaded(reloaded.items);
+                                this.reload_notice = None;
+                                // Same reasoning as the single-user branch above.
+                                this.cooldown_ticker = None;
                             }
-                            Err(error) => map_reload_error(&error),
-                        };
+                            Err(error) => this.apply_reload_failure(&error, cx),
+                        }
                         cx.notify();
                     });
                 }));
@@ -523,11 +645,104 @@ impl TimelineView {
         cx.notify();
     }
 
+    /// Shared `Err` handling for both of [`Self::reload`]'s fetch branches
+    /// and [`Self::load_older`] (#57): existing posts survive a failed
+    /// fetch via [`reload_failure_outcome`] — pulled into its own method
+    /// partly to keep `reload` itself under clippy's line-count lint, partly
+    /// so all three call sites apply the exact same `Option<ReloadNotice>`
+    /// (and, since #57's item 3, ticker) handling below rather than three
+    /// copies that could drift.
+    fn apply_reload_failure(&mut self, error: &anyhow::Error, cx: &mut Context<'_, Self>) {
+        let (state, notice) = reload_failure_outcome(
+            std::mem::replace(&mut self.state, TimelineState::Loading),
+            error,
+        );
+        self.state = state;
+        // #57: `reload_failure_outcome` already returns `None` when `state`
+        // itself now tells the failure story (`Failed`/`RateLimited`) — see
+        // its doc. Passing that straight through, rather than wrapping in
+        // `Some`, is what stops the same failure from showing twice.
+        self.reload_notice = notice;
+        // A rate-limited failure raises a fresh `Cooldown` notice (X's own
+        // window, not #10's local one, but the countdown still needs to
+        // tick the same way) — start/replace the ticker for it. Any other
+        // outcome (`Failed`, or no notice at all) has nothing left to count
+        // down, so stop whatever ticker might still be running rather than
+        // let it keep polling a notice it no longer applies to.
+        if matches!(self.reload_notice, Some(ReloadNotice::Cooldown { .. })) {
+            self.start_cooldown_ticker(cx);
+        } else {
+            self.cooldown_ticker = None;
+        }
+    }
+
+    /// Ticks `reload_notice`'s countdown once a second (#57's item 3) —
+    /// see [`cooldown_ticker`](Self::cooldown_ticker)'s doc for why this
+    /// exists at all. Started only when `reload_notice` is actually set to
+    /// `ReloadNotice::Cooldown` (there is nothing to count down for a
+    /// `Failed` notice), from [`Self::reload`]'s cooldown-gate branch and
+    /// from [`Self::apply_reload_failure`].
+    ///
+    /// The loop re-checks [`cooldown_tick`] against the *current*
+    /// `reload_notice` on every wake-up rather than trusting `reset_at`
+    /// captured at start time: `reload_notice` can change out from under a
+    /// running ticker (a reload succeeds and clears it, or a later failure
+    /// replaces it with `Failed`) without anyone reaching back in to cancel
+    /// this specific loop, and re-checking is what makes that safe — the
+    /// loop simply stops the next time it wakes rather than clobbering
+    /// whatever is there by then. It also always terminates: either
+    /// `cooldown_tick` returns `NotTicking`/`Elapsed`, or `this.update`
+    /// returns `Err` because the view itself has been dropped — there is no
+    /// path that loops forever.
+    fn start_cooldown_ticker(&mut self, cx: &mut Context<'_, Self>) {
+        self.cooldown_ticker = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_secs(1)).await;
+
+                let Ok(keep_going) = this.update(cx, |this, cx| {
+                    match cooldown_tick(this.reload_notice.as_ref(), oauth::unix_now()) {
+                        CooldownTick::StillWaiting => {
+                            cx.notify();
+                            true
+                        }
+                        CooldownTick::Elapsed => {
+                            this.reload_notice = None;
+                            cx.notify();
+                            false
+                        }
+                        CooldownTick::NotTicking => false,
+                    }
+                }) else {
+                    // The view has been dropped — nothing left to tick.
+                    return;
+                };
+
+                if !keep_going {
+                    return;
+                }
+            }
+        }));
+    }
+
     /// Fetch the page behind `next_page_token` and append it after what's
     /// already shown (#11's "Load older") — only ever meaningful in
     /// `TimelineSource::Home`, since `SingleUser` mode never sets a token in
     /// the first place. A no-op if any of the three prerequisites (a client,
     /// a known home user id, a token to resume from) is missing.
+    ///
+    /// Shares [`Self::reload`]'s "don't evict what's already on screen"
+    /// fix (#57) via the same pure functions, [`reload_start_state`] and
+    /// [`reload_failure_outcome`] — arguably *more* important here than for
+    /// a plain reload: this only ever runs once something is already
+    /// `Loaded` (see [`offers_load_older`]'s gate), and it's paging
+    /// *backwards* from what's currently shown, so losing it mid-request
+    /// would be strictly worse than a failed reload starting from nothing.
+    /// Reuses `self.reloading` for the busy indicator rather than a
+    /// dedicated flag — the header's "Loading…" label is an accurate
+    /// description of either fetch, and #57 only asked this call site to
+    /// stop discarding posts, not to grow "Load older"-specific chrome (the
+    /// row itself carries no separate busy/disabled styling, unchanged from
+    /// before this fix).
     fn load_older(&mut self, cx: &mut Context<'_, Self>) {
         let (Some(client), Some(user_id), Some(token)) = (
             self.client.clone(),
@@ -537,7 +752,13 @@ impl TimelineView {
             return;
         };
 
-        self.state = TimelineState::Loading;
+        self.reload_notice = None;
+        // Same reasoning as `reload`'s own gate-passed branch: a fetch is
+        // about to go out, so any cooldown countdown still ticking (from an
+        // unrelated blocked reload) no longer describes anything current.
+        self.cooldown_ticker = None;
+        self.reloading = true;
+        self.state = reload_start_state(std::mem::replace(&mut self.state, TimelineState::Loading));
 
         let paths = self.paths.clone();
         let max_results = self.config.max_results;
@@ -560,13 +781,17 @@ impl TimelineView {
             let _ = this.update(cx, |this, cx| {
                 this.refresh_usage(cx);
                 this.refresh_reposted_ids(cx);
-                this.state = match result {
+                this.reloading = false;
+                match result {
                     Ok((items, next_token)) => {
                         this.next_page_token = next_token;
-                        TimelineState::Loaded(items)
+                        this.state = TimelineState::Loaded(items);
+                        this.reload_notice = None;
+                        // Same reasoning as `reload`'s success branches above.
+                        this.cooldown_ticker = None;
                     }
-                    Err(error) => map_reload_error(&error),
-                };
+                    Err(error) => this.apply_reload_failure(&error, cx),
+                }
                 cx.notify();
             });
         }));
@@ -817,7 +1042,10 @@ impl TimelineView {
                     // timeline — see `TimelineSource::for_credential`.
                     this.source = Some(TimelineSource::Home);
                     this.client = Some(XClient::new(tokens.access_token));
-                    this.reload(cx);
+                    // #57: confirms what the user just did — must not wait
+                    // out #10's interval, which exists to suppress polling,
+                    // not to gate a direct response to a user action.
+                    this.reload(ReloadTrigger::UserAction, cx);
                 }
                 Err(error) => {
                     this.state = TimelineState::Failed(format!("{error:#}").into());
@@ -1036,10 +1264,11 @@ impl TimelineView {
                         state.set_value("", window, cx);
                     });
                     // A successful post changes the timeline, so fall into
-                    // a normal reload — subject to #10's own interval limit
-                    // like any other reload, never a special-cased extra
-                    // fetch.
-                    this.reload(cx);
+                    // a reload — but #57: this is confirming the result of
+                    // what the user just did (and the post itself already
+                    // spent a request), not polling, so it must bypass
+                    // #10's interval rather than risk being blocked by it.
+                    this.reload(ReloadTrigger::UserAction, cx);
                 }
                 cx.notify();
             });
@@ -1047,22 +1276,32 @@ impl TimelineView {
     }
 
     fn header(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
-        let (label, busy, action) = match self.state {
-            TimelineState::Loading => ("Loading…".to_string(), true, PrimaryAction::Reload),
-            TimelineState::SigningIn => ("Signing in…".to_string(), true, PrimaryAction::SignIn),
-            TimelineState::NotAuthenticated => {
-                ("Sign in with X".to_string(), false, PrimaryAction::SignIn)
-            }
-            // Still wired to `PrimaryAction::Reload`: re-clicking just
-            // re-runs the (network-free) rate-limit decision — #10 forbids
-            // sleeping out the window, not retrying the cheap local check.
-            TimelineState::RateLimited { reset_at, cooldown } => (
-                cooldown_label(cooldown, reset_at, oauth::unix_now()),
-                true,
-                PrimaryAction::Reload,
-            ),
-            TimelineState::Loaded(_) | TimelineState::Failed(_) => {
-                ("Reload".to_string(), false, PrimaryAction::Reload)
+        // #57: checked ahead of `state` rather than folded into its match —
+        // a reload in flight while posts are already showing leaves `state`
+        // as `Loaded` (see `reload_start_state`), so this is the only signal
+        // that a fetch is running in that case.
+        let (label, busy, action) = if self.reloading {
+            ("Loading…".to_string(), true, PrimaryAction::Reload)
+        } else {
+            match self.state {
+                TimelineState::Loading => ("Loading…".to_string(), true, PrimaryAction::Reload),
+                TimelineState::SigningIn => {
+                    ("Signing in…".to_string(), true, PrimaryAction::SignIn)
+                }
+                TimelineState::NotAuthenticated => {
+                    ("Sign in with X".to_string(), false, PrimaryAction::SignIn)
+                }
+                // Still wired to `PrimaryAction::Reload`: re-clicking just
+                // re-runs the (network-free) rate-limit decision — #10 forbids
+                // sleeping out the window, not retrying the cheap local check.
+                TimelineState::RateLimited { reset_at, cooldown } => (
+                    cooldown_label(cooldown, reset_at, oauth::unix_now()),
+                    true,
+                    PrimaryAction::Reload,
+                ),
+                TimelineState::Loaded(_) | TimelineState::Failed(_) => {
+                    ("Reload".to_string(), false, PrimaryAction::Reload)
+                }
             }
         };
 
@@ -1148,7 +1387,7 @@ impl TimelineView {
                             .text_color(rgb(theme.button_label))
                             .child(label)
                             .on_click(cx.listener(move |this, _event, _window, cx| match action {
-                                PrimaryAction::Reload => this.reload(cx),
+                                PrimaryAction::Reload => this.reload(ReloadTrigger::Polling, cx),
                                 PrimaryAction::SignIn => this.sign_in(cx),
                             })),
                     ),
@@ -1383,6 +1622,12 @@ impl Render for TimelineView {
             .when_some(self.session_notice.clone(), |column, message| {
                 column.child(session_notice_banner(message, theme))
             })
+            // #57: same reasoning as `session_notice` above — a cooldown or
+            // a failed reload must survive independently of `body`, which by
+            // this point may well still be showing the previous posts.
+            .when_some(self.reload_notice.clone(), |column, notice| {
+                column.child(reload_notice_banner(&notice, theme, oauth::unix_now()))
+            })
             // #14: posting requires OAuth regardless of scope — a missing
             // `tweet.write` scope is caught inside `submit_post` itself
             // (with the header's "Re-authorize" button as the fix), rather
@@ -1434,6 +1679,26 @@ fn notice(message: impl Into<SharedString>, color: u32) -> impl IntoElement {
 /// timeline (on the bearer-token fallback), which is exactly the state #54
 /// was filed from.
 fn session_notice_banner(message: SharedString, theme: Theme) -> impl IntoElement {
+    div()
+        .px_4()
+        .py_2()
+        .bg(rgb(theme.bg_header))
+        .border_b_1()
+        .border_color(rgb(theme.border))
+        .text_color(rgb(theme.danger))
+        .child(message)
+}
+
+/// The reload cooldown/failure banner (#57) — styled identically to, and
+/// drawn right next to, [`session_notice_banner`] for the same reason that
+/// one is independent of `body`: a cooldown or a failed refresh describes
+/// the most recent *request*, not whatever posts are (or aren't) currently
+/// shown, and must never read as "there is nothing here" when there is.
+fn reload_notice_banner(notice: &ReloadNotice, theme: Theme, now: i64) -> impl IntoElement {
+    let message = match *notice {
+        ReloadNotice::Cooldown { reset_at, cooldown } => cooldown_label(cooldown, reset_at, now),
+        ReloadNotice::Failed(ref message) => message.to_string(),
+    };
     div()
         .px_4()
         .py_2()
@@ -1826,23 +2091,67 @@ fn quote_row(item: &TimelineItem, theme: Theme, cx: &mut Context<'_, TimelineVie
         .into_any_element()
 }
 
-/// Map a failed reload/load-older's error to the state that should show it —
-/// shared by every fetch path in this file (single-user reload, home-timeline
-/// reload, and "Load older") so the #10 rate-limit-countdown behavior stays
-/// in exactly one place rather than being copy-pasted per branch.
+/// Classify a failed reload/load-older's error into the [`ReloadNotice`] it
+/// should raise (#57) — the single place that decides "rate limit with a
+/// known reset time" vs "plain failure", shared by [`map_reload_error`] (the
+/// fallback for when there's nothing else to show) and
+/// [`reload_failure_outcome`] (the common case, once there's a timeline that
+/// must survive the failure).
 ///
 /// #10: a blocked-send carries a known reset time and is shown as a
 /// countdown; everything else (including a rate limit whose 429 carried no
 /// usable reset header) falls back to the plain error message.
-fn map_reload_error(error: &anyhow::Error) -> TimelineState {
+fn reload_notice_for_error(error: &anyhow::Error) -> ReloadNotice {
     match error.downcast_ref::<rate_limit::RateLimited>() {
         Some(rate_limit::RateLimited {
             reset_at: Some(reset_at),
-        }) => TimelineState::RateLimited {
+        }) => ReloadNotice::Cooldown {
             reset_at: *reset_at,
             cooldown: Cooldown::ApiRateLimit,
         },
-        _ => TimelineState::Failed(format!("{error:#}").into()),
+        _ => ReloadNotice::Failed(format!("{error:#}").into()),
+    }
+}
+
+/// Map a failed reload's error to the state that should show it, for when
+/// there is nothing else on screen to fall back to. The only caller left as
+/// of #57 is [`reload_failure_outcome`], and only once it has confirmed
+/// there is no loaded timeline this failure would otherwise evict —
+/// `TimelineView::reload` and `TimelineView::load_older` both reach this
+/// exclusively through that path now, never directly.
+fn map_reload_error(error: &anyhow::Error) -> TimelineState {
+    match reload_notice_for_error(error) {
+        ReloadNotice::Cooldown { reset_at, cooldown } => {
+            TimelineState::RateLimited { reset_at, cooldown }
+        }
+        ReloadNotice::Failed(message) => TimelineState::Failed(message),
+    }
+}
+
+/// What a failed fetch should do to `state`, and which notice (if any) it
+/// should raise (#57) — shared by [`TimelineView::reload`] (via
+/// `TimelineView::apply_reload_failure`) and `TimelineView::load_older`, a
+/// pure function so "an existing timeline survives a failed fetch" can be
+/// unit tested without gpui. A failed refresh is not evidence that whatever
+/// is already loaded is wrong, so whenever `state` already holds posts, they
+/// are returned untouched and the failure becomes a notice, via
+/// [`reload_notice_for_error`] — this is the only branch that returns
+/// `Some`. When there is nothing being displayed yet, the failure instead
+/// becomes the state itself — the same [`map_reload_error`] mapping every
+/// other failed fetch in this file uses — and the notice comes back `None`:
+/// `state` (`Failed`/`RateLimited`) is already telling the body what
+/// happened, so a banner repeating the identical message would just be a
+/// duplicated failure on screen.
+fn reload_failure_outcome(
+    state: TimelineState,
+    error: &anyhow::Error,
+) -> (TimelineState, Option<ReloadNotice>) {
+    match state {
+        TimelineState::Loaded(items) => (
+            TimelineState::Loaded(items),
+            Some(reload_notice_for_error(error)),
+        ),
+        _ => (map_reload_error(error), None),
     }
 }
 
@@ -1909,6 +2218,76 @@ fn reload_cooldown(
     (reset_at > now).then_some(reset_at)
 }
 
+/// Whether [`TimelineView::reload`] should refuse to run right now, given
+/// `trigger` (#57). `ReloadTrigger::UserAction` bypasses [`reload_cooldown`]
+/// entirely and always returns `None` — see [`ReloadTrigger`]'s doc for why
+/// a post-submit or sign-in reload must never be blocked by an interval that
+/// exists to suppress polling, not to gate a direct response to something
+/// the user just did. `ReloadTrigger::Polling` defers to `reload_cooldown`
+/// unchanged.
+fn reload_gate(
+    trigger: ReloadTrigger,
+    last_reload_at: Option<i64>,
+    min_interval_seconds: u32,
+    now: i64,
+) -> Option<i64> {
+    match trigger {
+        ReloadTrigger::Polling => reload_cooldown(last_reload_at, min_interval_seconds, now),
+        ReloadTrigger::UserAction => None,
+    }
+}
+
+/// What `state` should become right before spawning a fetch (#57) — shared
+/// by [`TimelineView::reload`] and `TimelineView::load_older`, a pure
+/// function so "an existing timeline survives a fetch in progress" can be
+/// unit tested without gpui. Fetching a fresh copy is not evidence the
+/// previous one is stale or wrong, so whenever `previous` already holds
+/// posts, this leaves them in place; the header's busy indicator comes from
+/// `TimelineView::reloading` instead, set alongside this rather than folded
+/// into `state` (see that field's doc). Only when there is nothing loaded
+/// yet does this fall back to `TimelineState::Loading`, matching the
+/// pre-#57 behavior for the one case where there is nothing to lose.
+fn reload_start_state(previous: TimelineState) -> TimelineState {
+    match previous {
+        TimelineState::Loaded(items) => TimelineState::Loaded(items),
+        _ => TimelineState::Loading,
+    }
+}
+
+/// What one wake-up of [`TimelineView::start_cooldown_ticker`]'s loop should
+/// do (#57's item 3), given the current `reload_notice` and the time — the
+/// pure decision behind that loop, factored out so it's unit-testable
+/// without gpui's timer; the loop itself just matches on this and either
+/// keeps going or returns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CooldownTick {
+    /// Nothing to tick: `reload_notice` is `None`, or holds a `Failed`
+    /// notice with no countdown to advance — either it was never a
+    /// cooldown, or something else (a success, a plain failure) has
+    /// already replaced it since the ticker started. The loop should stop
+    /// without touching `reload_notice`.
+    NotTicking,
+    /// Still inside the cooldown window: re-notify so the banner's
+    /// countdown advances, then wait another second.
+    StillWaiting,
+    /// `reset_at` has passed. The loop should clear `reload_notice` — the
+    /// banner disappearing, and "Reload" becoming clickable again, is the
+    /// user-visible "done waiting" signal — and stop.
+    Elapsed,
+}
+
+/// Pure core of [`CooldownTick`]'s decision — see its doc for what each
+/// variant means the loop should do.
+fn cooldown_tick(notice: Option<&ReloadNotice>, now: i64) -> CooldownTick {
+    match notice {
+        Some(ReloadNotice::Cooldown { reset_at, .. }) if *reset_at > now => {
+            CooldownTick::StillWaiting
+        }
+        Some(ReloadNotice::Cooldown { .. }) => CooldownTick::Elapsed,
+        Some(ReloadNotice::Failed(_)) | None => CooldownTick::NotTicking,
+    }
+}
+
 /// Turn `2026-08-16T09:00:00.000Z` into `2026-08-16 09:00`.
 ///
 /// The API always returns UTC in RFC 3339, so slicing beats pulling in a date
@@ -1926,12 +2305,13 @@ fn format_timestamp(created_at: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        ComposeStatus, Cooldown, RepliedTo, RepostState, Theme, ThreadFetchState, TimelineItem,
-        TimelineSource, TimelineState, at_the_post_cap, byline, compose_error_message,
-        cooldown_label, format_timestamp, header_title, is_own_post, offers_load_older,
-        offers_quote, offers_reauthorize, offers_repost, offers_sign_in, reload_cooldown,
-        reply_banner_label, repost_action_label, repost_banner_label, thread_action_label, usage,
-        usage_color, usage_label,
+        ComposeStatus, Cooldown, CooldownTick, ReloadNotice, ReloadTrigger, RepliedTo, RepostState,
+        Theme, ThreadFetchState, TimelineItem, TimelineSource, TimelineState, at_the_post_cap,
+        byline, compose_error_message, cooldown_label, cooldown_tick, format_timestamp,
+        header_title, is_own_post, offers_load_older, offers_quote, offers_reauthorize,
+        offers_repost, offers_sign_in, rate_limit, reload_cooldown, reload_failure_outcome,
+        reload_gate, reload_start_state, reply_banner_label, repost_action_label,
+        repost_banner_label, thread_action_label, usage, usage_color, usage_label,
     };
 
     fn item_with(id: &str, author_username: &str, reposted_by: Option<&str>) -> TimelineItem {
@@ -2222,6 +2602,204 @@ mod tests {
     fn reload_cooldown_allows_once_the_interval_has_elapsed() {
         assert_eq!(reload_cooldown(Some(1_000), 60, 1_060), None);
         assert_eq!(reload_cooldown(Some(1_000), 60, 1_061), None);
+    }
+
+    // --- reload_gate (#57) ---
+
+    #[test]
+    fn reload_gate_polling_blocks_within_the_configured_interval() {
+        // Same shape `reload_cooldown` itself blocks on — `Polling` must
+        // defer to it unchanged.
+        assert_eq!(
+            reload_gate(ReloadTrigger::Polling, Some(1_000), 60, 1_030),
+            Some(1_060)
+        );
+    }
+
+    #[test]
+    fn reload_gate_user_action_bypasses_the_interval_even_when_polling_would_block() {
+        // The core fix for #57's primary symptom: a post-submit reload must
+        // go through immediately, even though the exact same
+        // `last_reload_at`/`now` pair blocks a `Polling` reload above.
+        assert_eq!(
+            reload_gate(ReloadTrigger::UserAction, Some(1_000), 60, 1_030),
+            None
+        );
+    }
+
+    // --- cooldown_tick (#57 item 3) ---
+
+    #[test]
+    fn cooldown_tick_keeps_waiting_before_reset_at() {
+        let notice = ReloadNotice::Cooldown {
+            reset_at: 1_060,
+            cooldown: Cooldown::LocalInterval,
+        };
+        assert_eq!(
+            cooldown_tick(Some(&notice), 1_030),
+            CooldownTick::StillWaiting
+        );
+    }
+
+    #[test]
+    fn cooldown_tick_has_elapsed_once_reset_at_has_passed() {
+        let notice = ReloadNotice::Cooldown {
+            reset_at: 1_060,
+            cooldown: Cooldown::ApiRateLimit,
+        };
+        assert_eq!(cooldown_tick(Some(&notice), 1_061), CooldownTick::Elapsed);
+    }
+
+    #[test]
+    fn cooldown_tick_has_elapsed_exactly_at_reset_at() {
+        // Mirrors `reload_cooldown`'s own `>` boundary: blocked strictly
+        // before `reset_at`, allowed (here: elapsed) from `reset_at` on.
+        let notice = ReloadNotice::Cooldown {
+            reset_at: 1_060,
+            cooldown: Cooldown::LocalInterval,
+        };
+        assert_eq!(cooldown_tick(Some(&notice), 1_060), CooldownTick::Elapsed);
+    }
+
+    #[test]
+    fn cooldown_tick_is_not_ticking_without_a_notice() {
+        assert_eq!(cooldown_tick(None, 1_000), CooldownTick::NotTicking);
+    }
+
+    #[test]
+    fn cooldown_tick_is_not_ticking_for_a_failed_notice() {
+        // A `Failed` notice carries no countdown to advance — the ticker
+        // must stop rather than poll it forever.
+        let notice = ReloadNotice::Failed("boom".into());
+        assert_eq!(
+            cooldown_tick(Some(&notice), 1_000),
+            CooldownTick::NotTicking
+        );
+    }
+
+    // --- reload_start_state (#57) ---
+
+    #[test]
+    fn reload_start_state_keeps_existing_posts_in_place() {
+        let items = vec![item_with("1", "alice", None)];
+        match reload_start_state(TimelineState::Loaded(items.clone())) {
+            TimelineState::Loaded(got) => assert_eq!(got, items),
+            other => panic!("expected existing posts to survive, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reload_start_state_falls_back_to_loading_when_nothing_was_shown() {
+        assert!(matches!(
+            reload_start_state(TimelineState::NotAuthenticated),
+            TimelineState::Loading
+        ));
+    }
+
+    // --- reload_failure_outcome (#57) ---
+
+    #[test]
+    fn reload_failure_outcome_keeps_existing_posts_on_a_plain_failure() {
+        let items = vec![item_with("1", "alice", None)];
+        let error = anyhow::anyhow!("network exploded");
+        let (state, notice) = reload_failure_outcome(TimelineState::Loaded(items.clone()), &error);
+        match state {
+            TimelineState::Loaded(got) => assert_eq!(got, items),
+            other => panic!("existing posts must survive a failed reload, got {other:?}"),
+        }
+        assert_eq!(
+            notice,
+            Some(ReloadNotice::Failed("network exploded".to_string().into()))
+        );
+    }
+
+    #[test]
+    fn reload_failure_outcome_keeps_existing_posts_on_a_rate_limited_failure() {
+        let items = vec![item_with("1", "alice", None)];
+        let error: anyhow::Error = rate_limit::RateLimited {
+            reset_at: Some(1_500),
+        }
+        .into();
+        let (state, notice) = reload_failure_outcome(TimelineState::Loaded(items.clone()), &error);
+        match state {
+            TimelineState::Loaded(got) => assert_eq!(got, items),
+            other => panic!("existing posts must survive a rate-limited reload, got {other:?}"),
+        }
+        assert_eq!(
+            notice,
+            Some(ReloadNotice::Cooldown {
+                reset_at: 1_500,
+                cooldown: Cooldown::ApiRateLimit,
+            })
+        );
+    }
+
+    #[test]
+    fn reload_failure_outcome_falls_back_to_failed_state_when_nothing_was_shown() {
+        let error = anyhow::anyhow!("network exploded");
+        let (state, notice) = reload_failure_outcome(TimelineState::Loading, &error);
+        assert!(matches!(state, TimelineState::Failed(_)));
+        // #57: the state itself already says what went wrong — a banner
+        // saying the exact same thing would be a duplicated failure.
+        assert_eq!(notice, None);
+    }
+
+    #[test]
+    fn reload_failure_outcome_falls_back_to_rate_limited_state_when_nothing_was_shown() {
+        let error: anyhow::Error = rate_limit::RateLimited {
+            reset_at: Some(1_500),
+        }
+        .into();
+        let (state, notice) = reload_failure_outcome(TimelineState::NotAuthenticated, &error);
+        assert!(matches!(
+            state,
+            TimelineState::RateLimited {
+                reset_at: 1_500,
+                cooldown: Cooldown::ApiRateLimit,
+            }
+        ));
+        // Same reasoning as the plain-failure case above: `RateLimited`
+        // already carries the countdown, so no separate notice is needed.
+        assert_eq!(notice, None);
+    }
+
+    // --- `TimelineView::load_older` reuses the same pure functions (#57) ---
+    //
+    // `load_older` only ever runs once `state` is already `Loaded` (see
+    // `offers_load_older`'s gate on the "Load older" row), so these pin the
+    // specific two-item, paging-backwards shape that call site actually
+    // hits, rather than re-asserting the single-item cases above.
+
+    #[test]
+    fn load_older_keeps_the_current_page_visible_while_its_fetch_is_in_flight() {
+        // Before #57, `load_older` set `state = TimelineState::Loading`
+        // unconditionally, which — via `TimelineView::body`'s match — wiped
+        // the page the user was paging through, and the "Load older" row
+        // along with it, for the whole request.
+        let items = vec![item_with("1", "alice", None), item_with("2", "bob", None)];
+        match reload_start_state(TimelineState::Loaded(items.clone())) {
+            TimelineState::Loaded(got) => assert_eq!(got, items),
+            other => panic!("load_older must keep the current page visible, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_older_keeps_the_current_page_when_paging_backwards_fails() {
+        // Before #57, a failed "Load older" request replaced `state` via
+        // `map_reload_error`, discarding everything the user had already
+        // paged through — worse than a plain reload failure, since nothing
+        // about the posts already shown was actually wrong.
+        let items = vec![item_with("1", "alice", None), item_with("2", "bob", None)];
+        let error = anyhow::anyhow!("network exploded");
+        let (state, notice) = reload_failure_outcome(TimelineState::Loaded(items.clone()), &error);
+        match state {
+            TimelineState::Loaded(got) => assert_eq!(got, items),
+            other => panic!("load_older must keep the current page, got {other:?}"),
+        }
+        assert_eq!(
+            notice,
+            Some(ReloadNotice::Failed("network exploded".to_string().into()))
+        );
     }
 
     #[test]

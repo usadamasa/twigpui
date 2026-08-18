@@ -306,6 +306,26 @@ mod tests {
         assert_eq!(weighted_length("hi 世界"), 7);
     }
 
+    #[test]
+    fn counts_koujaa_with_a_trailing_fullwidth_period_as_ten() {
+        // Regression check for a screen report that showed "こうじゃ。" as
+        // 9/280: five characters — こ (U+3053), う (U+3046), じ (U+3058),
+        // ゃ (U+3083), all inside `is_double_width`'s hiragana range, and
+        // 。 (U+3002) inside its CJK punctuation range — so the correct
+        // weighted length is 5 * 2 = 10. If this assertion ever fails,
+        // `weighted_length`/`is_double_width` has a bug, not the display.
+        assert_eq!(weighted_length("こうじゃ。"), 10);
+    }
+
+    #[test]
+    fn a_fullwidth_period_counts_double_while_a_halfwidth_period_counts_single() {
+        // U+3002 (fullwidth "。") falls inside `is_double_width`'s CJK
+        // punctuation range; U+002E (halfwidth ".") is plain ASCII and must
+        // not be — the two look similar but are not interchangeable here.
+        assert_eq!(weighted_length("。"), 2);
+        assert_eq!(weighted_length("."), 1);
+    }
+
     // --- validate ---
 
     #[test]
