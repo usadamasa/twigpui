@@ -547,6 +547,7 @@ mod tests {
             metrics: None,
             links: Vec::new(),
             author_avatar_url: None,
+            original_post_id: None,
         }
     }
 

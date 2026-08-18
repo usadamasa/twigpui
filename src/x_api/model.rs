@@ -275,6 +275,36 @@ pub(crate) struct TimelineItem {
     /// `links` above.
     #[serde(default)]
     pub author_avatar_url: Option<String>,
+    /// For a repost row (#52): the id of the *original* post, the one whose
+    /// text and author this row already displays.
+    ///
+    /// `id` above stays the retweet activity's own id — it is what keys the
+    /// row, the cache, and `replied_to`'s thread walk — but every write
+    /// endpoint (`POST /2/users/:id/retweets`, `POST /2/tweets`'s
+    /// `quote_tweet_id`, `POST /2/users/:id/likes`) acts on the original.
+    /// Without this field #15, #16 and #68 all had to withhold their
+    /// buttons on a repost row rather than risk sending the wrong id; see
+    /// [`action_post_id`]. Populated from the `retweeted` entry in
+    /// `referenced_tweets`, which #13's join already has in hand — no extra
+    /// request. `None` for every post that is not a repost.
+    ///
+    /// `#[serde(default)]` for the usual reason: `cache::load_json` treats
+    /// a parse failure as a silent miss, so a missing attribute here would
+    /// quietly discard every user's cache and re-fetch it at their expense.
+    #[serde(default)]
+    pub original_post_id: Option<String>,
+}
+
+/// The id of the post a write endpoint should act on for `item` (#52): the
+/// original for a repost row, the row's own id otherwise.
+///
+/// One function rather than the same `unwrap_or` at four call sites, so
+/// "which id does a repost act on" has exactly one answer in the codebase.
+/// Nested references need no special case: `original_post_id` is set from
+/// the `retweeted` reference, and a repost *of a quote* is still a repost
+/// of that quote post — acting on it is acting on the thing the row shows.
+pub(crate) fn action_post_id(item: &TimelineItem) -> &str {
+    item.original_post_id.as_deref().unwrap_or(&item.id)
 }
 
 /// One openable link from a post's text (#70), flattened out of
@@ -394,6 +424,7 @@ fn build_item(
         metrics: post.public_metrics,
         links: post_links(post),
         author_avatar_url,
+        original_post_id: None,
     };
 
     if let Some(retweet_ref) = post
@@ -404,6 +435,10 @@ fn build_item(
         // The outer post's own author is whoever reposted — captured before
         // it's overwritten below with the original's author.
         item.reposted_by = Some(item.author_username.clone());
+        // #52: the id every write endpoint needs, available here at no
+        // extra cost — set whether or not the original itself expanded,
+        // since the id is what was referenced, not what came back.
+        item.original_post_id = Some(retweet_ref.id.clone());
 
         if let Some(original) = referenced.get(retweet_ref.id.as_str()).copied() {
             let (author_name, author_username, avatar) = author_fields(original, users);
@@ -1405,6 +1440,83 @@ mod tests {
             response.into_items()[0].author_avatar_url.as_deref(),
             Some("https://pbs.twimg.com/original_normal.jpg")
         );
+    }
+
+    #[test]
+    fn a_repost_carries_the_original_posts_id() {
+        // #52: `id` stays the retweet activity's, but every write endpoint
+        // needs the original's — which the reference already names.
+        let json = r#"{
+          "data": [
+            {
+              "id": "1700000000000000010",
+              "text": "RT @XDevelopers: the original",
+              "author_id": "1000000000",
+              "referenced_tweets": [{ "type": "retweeted", "id": "1700000000000000011" }]
+            }
+          ],
+          "includes": {
+            "users": [
+              { "id": "1000000000", "name": "Reposter", "username": "reposter" },
+              { "id": "2244994945", "name": "Developers", "username": "XDevelopers" }
+            ],
+            "tweets": [
+              { "id": "1700000000000000011", "text": "the original", "author_id": "2244994945" }
+            ]
+          }
+        }"#;
+        let response: TimelineResponse = serde_json::from_str(json).unwrap();
+        let items = response.into_items();
+
+        assert_eq!(items[0].id, "1700000000000000010");
+        assert_eq!(
+            items[0].original_post_id.as_deref(),
+            Some("1700000000000000011")
+        );
+        assert_eq!(action_post_id(&items[0]), "1700000000000000011");
+    }
+
+    #[test]
+    fn a_repost_whose_original_is_missing_still_carries_its_id() {
+        // The id comes from the reference, not from the expansion, so a
+        // deleted or unexpanded original does not cost the button.
+        let json = r#"{
+          "data": [
+            {
+              "id": "10",
+              "text": "RT @XDevelopers: gone",
+              "author_id": "1000000000",
+              "referenced_tweets": [{ "type": "retweeted", "id": "11" }]
+            }
+          ]
+        }"#;
+        let response: TimelineResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            response.into_items()[0].original_post_id.as_deref(),
+            Some("11")
+        );
+    }
+
+    #[test]
+    fn an_ordinary_post_carries_no_original_id() {
+        let response: TimelineResponse = serde_json::from_str(TIMELINE_JSON).unwrap();
+        let items = response.into_items();
+        assert_eq!(items[0].original_post_id, None);
+        assert_eq!(action_post_id(&items[0]), items[0].id);
+    }
+
+    #[test]
+    fn a_cache_file_written_before_the_original_id_existed_still_loads() {
+        // Raw literal on purpose: `cache::load_json` turns a parse failure
+        // into a *silent* miss, so a missing `#[serde(default)]` would
+        // quietly discard every user's cache and re-fetch it at their
+        // expense. Eyeballing the attribute is not the same as checking.
+        let item: TimelineItem = serde_json::from_str(
+            r#"{"id":"1","text":"cached","created_at":null,"author_name":"a","author_username":"b","reposted_by":"c"}"#,
+        )
+        .unwrap();
+        assert_eq!(item.original_post_id, None);
+        assert_eq!(action_post_id(&item), "1");
     }
 
     #[test]

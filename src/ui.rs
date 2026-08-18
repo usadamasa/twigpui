@@ -22,7 +22,9 @@ use crate::theme::{self, Theme};
 use crate::thread::{self, ThreadChain};
 use crate::toggle::{ToggleState, ToggleStatus};
 use crate::usage;
-use crate::x_api::{PostLink, PostMetrics, QuotedPost, RepliedTo, TimelineItem, XClient};
+use crate::x_api::{
+    PostLink, PostMetrics, QuotedPost, RepliedTo, TimelineItem, XClient, action_post_id,
+};
 
 /// What's known about one reply's "Show thread" walk (#12), keyed by the
 /// reply's own post id in [`TimelineView::threads`]. Absent from that map
@@ -1157,8 +1159,12 @@ impl TimelineView {
     /// The like/unlike toggle for one post (#68), rendered whenever
     /// [`offers_like`] allows it for `item`.
     fn like_button(&self, item: &TimelineItem, cx: &mut Context<'_, Self>) -> AnyElement {
-        let state = self.like_state_for(&item.id);
-        like_row(&item.id, &state, self.theme, cx)
+        // #52: the row is keyed by its own id (unique per row, so two
+        // reposts of one original don't collide as elements), but the
+        // request acts on the original.
+        let target = action_post_id(item);
+        let state = self.like_state_for(target);
+        like_row(&item.id, target, &state, self.theme, cx)
     }
 
     /// The button state to render for `post_id` (#15): whatever this
@@ -1250,8 +1256,10 @@ impl TimelineView {
     /// The repost/un-repost toggle for one post (#15), rendered whenever
     /// [`offers_repost`] allows it for `item`.
     fn repost_button(&self, item: &TimelineItem, cx: &mut Context<'_, Self>) -> AnyElement {
-        let state = self.repost_state_for(&item.id);
-        repost_row(&item.id, &state, self.theme, cx)
+        // #52: element id from the row, request target from the original.
+        let target = action_post_id(item);
+        let state = self.repost_state_for(target);
+        repost_row(&item.id, target, &state, self.theme, cx)
     }
 
     /// Run the interactive PKCE sign-in flow: open the browser, wait for the
@@ -2254,15 +2262,15 @@ fn offers_reauthorize(signed_in_with_oauth: bool, oauth_scope: Option<&str>) -> 
 ///
 /// Requires a signed-in OAuth session whose own id has resolved
 /// (`home_user_id`, via `/me` — #11): the repost endpoints act as *this*
-/// account, and there is nothing to call without it. Withheld for a post
-/// that is itself already a repost (`item.reposted_by.is_some()`): a
-/// repost-of-a-repost row's `item.id` is the *retweet activity's own* post
-/// id (see `x_api::model::build_item`), not the original content's id the
-/// repost endpoints actually need, and `TimelineItem` currently carries no
-/// separate field for the original — offering the button there would risk
-/// sending the wrong id (see the implementation report for this
-/// deliberate, documented gap). Withheld for one's own post, matching the
-/// API's own rejection (#15) — see [`is_own_post`].
+/// account, and there is nothing to call without it. Withheld for one's own
+/// post, matching the API's own rejection (#15) — see [`is_own_post`],
+/// which for a repost row compares against the *original* author, since
+/// that is whose post the row displays and whose post would be reposted.
+///
+/// A repost row used to be withheld too, because `item.id` is the retweet
+/// activity's id rather than the original content's. #52 closed that: the
+/// original's id is carried on the item now, and `x_api::action_post_id`
+/// is what every caller sends.
 fn offers_repost(
     signed_in_with_oauth: bool,
     home_user_id: Option<&str>,
@@ -2271,7 +2279,6 @@ fn offers_repost(
 ) -> bool {
     signed_in_with_oauth
         && home_user_id.is_some()
-        && item.reposted_by.is_none()
         && !is_own_post(home_username, &item.author_username)
 }
 
@@ -2296,6 +2303,7 @@ fn is_own_post(home_username: Option<&str>, author_username: &str) -> bool {
 /// attempt shows its message above the (still clickable) toggle, offering a
 /// retry.
 fn repost_row(
+    row_id: &str,
     post_id: &str,
     state: &ToggleState,
     theme: Theme,
@@ -2309,7 +2317,7 @@ fn repost_row(
     };
 
     let toggle = div()
-        .id(SharedString::from(format!("repost-{post_id}")))
+        .id(SharedString::from(format!("repost-{row_id}")))
         .text_color(rgb(color))
         .child(label)
         .when(state.can_toggle(), |element| {
@@ -2353,6 +2361,7 @@ fn repost_action_label(state: &ToggleState) -> &'static str {
 /// this mirrors down to the disabled-while-pending rule and the failure
 /// message rendered above a still-clickable toggle.
 fn like_row(
+    row_id: &str,
     post_id: &str,
     state: &ToggleState,
     theme: Theme,
@@ -2366,7 +2375,7 @@ fn like_row(
     };
 
     let toggle = div()
-        .id(SharedString::from(format!("like-{post_id}")))
+        .id(SharedString::from(format!("like-{row_id}")))
         .text_color(rgb(color))
         .child(label)
         .when(state.can_toggle(), |element| {
@@ -2411,22 +2420,17 @@ fn like_action_label(state: &ToggleState) -> &'static str {
 /// (`home_user_id`, via `/me` — #11), for the same reason [`offers_repost`]
 /// does: the likes endpoints act as *this* account.
 ///
-/// Two deliberate differences from [`offers_repost`]:
-///
-/// - **No [`is_own_post`] check.** X rejects reposting your own post but
-///   accepts liking it, so #68 explicitly instructs against carrying #15's
-///   guard over.
-/// - **The repost-row guard stays.** A row that is itself a repost
-///   (`item.reposted_by.is_some()`) still gets no button: `item.id` is the
-///   retweet activity's own id, not the original content's, and
-///   `TimelineItem` carries no separate field for the original — liking it
-///   would send the wrong id. That gap is #52, shared with #15/#16.
+/// The one departure from [`offers_repost`]: no [`is_own_post`] check. X
+/// rejects reposting your own post but accepts liking it, so #68
+/// explicitly instructs against carrying #15's guard over. A repost row is
+/// offered a button like any other since #52 — the like lands on the
+/// original, via `x_api::action_post_id`.
 fn offers_like(
     signed_in_with_oauth: bool,
     home_user_id: Option<&str>,
-    item: &TimelineItem,
+    _item: &TimelineItem,
 ) -> bool {
-    signed_in_with_oauth && home_user_id.is_some() && item.reposted_by.is_none()
+    signed_in_with_oauth && home_user_id.is_some()
 }
 
 /// The author's name, as a link to their profile on x.com (#70) — or as
@@ -2461,7 +2465,9 @@ fn open_post_link(
     theme: Theme,
     cx: &mut Context<'_, TimelineView>,
 ) -> impl IntoElement {
-    let url = post_permalink(&item.author_username, &item.id);
+    // #52: a repost row's permalink is the original post's — that is what
+    // the row displays, and x.com would only redirect there anyway.
+    let url = post_permalink(&item.author_username, action_post_id(item));
     div()
         .id(SharedString::from(format!("open-{}", item.id)))
         .text_color(rgb(theme.text_muted))
@@ -2503,17 +2509,14 @@ fn link_row(links: &[PostLink], theme: Theme, cx: &mut Context<'_, TimelineView>
 ///
 /// Requires the composer to even be reachable — `signed_in_with_oauth`,
 /// mirroring [`Render::render`]'s own gate on `self.composer` — since
-/// quoting has nowhere to go without one. Withheld for a post that is
-/// itself already a repost (`item.reposted_by.is_some()`), for exactly the
-/// reason [`offers_repost`] withholds its own button there: `item.id` is
-/// the retweet activity's own id, not the original content's, and
-/// `TimelineItem` carries no separate field for the original — see
-/// [`offers_repost`]'s doc and #52, which tracks fixing that for both
-/// buttons together. Unlike [`offers_repost`], quoting one's own post *is*
-/// allowed (#16's design decision — the API doesn't reject it the way it
-/// rejects reposting yourself), so there is no `is_own_post` check here.
-fn offers_quote(signed_in_with_oauth: bool, item: &TimelineItem) -> bool {
-    signed_in_with_oauth && item.reposted_by.is_none()
+/// quoting has nowhere to go without one. A repost row is offered one like
+/// any other since #52 — `x_api::action_post_id` resolves it to the
+/// original, which is also the text and author the quote card would carry.
+/// Unlike [`offers_repost`], quoting one's own post *is* allowed (#16's
+/// design decision — the API doesn't reject it the way it rejects
+/// reposting yourself), so there is no `is_own_post` check here.
+fn offers_quote(signed_in_with_oauth: bool, _item: &TimelineItem) -> bool {
+    signed_in_with_oauth
 }
 
 /// The "Quote" action for one post (#16), rendered whenever [`offers_quote`]
@@ -2523,7 +2526,9 @@ fn offers_quote(signed_in_with_oauth: bool, item: &TimelineItem) -> bool {
 /// there — nothing is sent to X until the composer's own "Post" button is
 /// clicked, exactly like an ordinary draft.
 fn quote_row(item: &TimelineItem, theme: Theme, cx: &mut Context<'_, TimelineView>) -> AnyElement {
-    let post_id = item.id.clone();
+    // #52: quoting a repost row quotes the original, which is also the text
+    // and author the card below already shows.
+    let post_id = action_post_id(item).to_string();
     let quoted = QuotedPost {
         author_name: item.author_name.clone(),
         author_username: item.author_username.clone(),
@@ -2884,13 +2889,13 @@ mod tests {
     use super::{
         ComposeStatus, Cooldown, CooldownTick, PostLink, PostMetrics, ReloadNotice, ReloadTrigger,
         RepliedTo, Theme, ThreadFetchState, TimelineItem, TimelineSource, TimelineState,
-        ToggleState, at_the_post_cap, avatar_initial, byline, compose_error_message,
-        cooldown_label, cooldown_tick, format_timestamp, header_title, is_own_post,
-        like_action_label, metrics_label, offers_like, offers_load_older, offers_quote,
-        offers_reauthorize, offers_repost, offers_sign_in, post_permalink, profile_url, rate_limit,
-        reload_cooldown, reload_failure_outcome, reload_gate, reload_start_state,
-        reply_banner_label, repost_action_label, repost_banner_label, thread_action_label, usage,
-        usage_color, usage_label,
+        ToggleState, action_post_id, at_the_post_cap, avatar_initial, byline,
+        compose_error_message, cooldown_label, cooldown_tick, format_timestamp, header_title,
+        is_own_post, like_action_label, metrics_label, offers_like, offers_load_older,
+        offers_quote, offers_reauthorize, offers_repost, offers_sign_in, post_permalink,
+        profile_url, rate_limit, reload_cooldown, reload_failure_outcome, reload_gate,
+        reload_start_state, reply_banner_label, repost_action_label, repost_banner_label,
+        thread_action_label, usage, usage_color, usage_label,
     };
 
     fn item_with(id: &str, author_username: &str, reposted_by: Option<&str>) -> TimelineItem {
@@ -2906,6 +2911,7 @@ mod tests {
             metrics: None,
             links: Vec::new(),
             author_avatar_url: None,
+            original_post_id: None,
         }
     }
 
@@ -3064,17 +3070,6 @@ mod tests {
     }
 
     #[test]
-    fn does_not_offer_like_on_a_row_that_is_itself_a_repost() {
-        // `item.id` is the retweet activity's id, not the original's — the
-        // same gap (#52) that withholds the repost and quote buttons here.
-        assert!(!offers_like(
-            true,
-            Some("me-id"),
-            &item_with("1", "alice", Some("bob"))
-        ));
-    }
-
-    #[test]
     fn does_not_offer_like_before_the_signed_in_id_resolves() {
         assert!(!offers_like(true, None, &item_with("1", "alice", None)));
     }
@@ -3118,6 +3113,67 @@ mod tests {
             true,
             Some("tweet.read users.read tweet.write offline.access")
         ));
+    }
+
+    /// A repost row as #13's join builds one: the body is the original's,
+    /// `id` is the retweet activity's, and #52's `original_post_id` is what
+    /// every write endpoint should act on.
+    fn repost_row_item(row_id: &str, original_id: &str, original_author: &str) -> TimelineItem {
+        let mut item = item_with(row_id, original_author, Some("bob"));
+        item.original_post_id = Some(original_id.to_string());
+        item
+    }
+
+    // --- #52: a repost row acts on the original ---
+
+    #[test]
+    fn a_repost_row_acts_on_the_original_post_not_the_retweet_activity() {
+        let item = repost_row_item("activity-id", "original-id", "alice");
+        assert_eq!(action_post_id(&item), "original-id");
+    }
+
+    #[test]
+    fn an_ordinary_row_acts_on_its_own_id() {
+        assert_eq!(action_post_id(&item_with("1", "alice", None)), "1");
+    }
+
+    #[test]
+    fn offers_repost_on_a_repost_row_now_that_the_original_id_is_carried() {
+        // The workaround this replaces withheld the button here, because
+        // `item.id` is the retweet activity's id. #52 carries the
+        // original's, so the button is safe to offer.
+        let item = repost_row_item("activity-id", "original-id", "alice");
+        assert!(offers_repost(true, Some("2244994945"), Some("bob"), &item));
+    }
+
+    #[test]
+    fn offers_quote_on_a_repost_row() {
+        let item = repost_row_item("activity-id", "original-id", "alice");
+        assert!(offers_quote(true, &item));
+    }
+
+    #[test]
+    fn offers_like_on_a_repost_row() {
+        let item = repost_row_item("activity-id", "original-id", "alice");
+        assert!(offers_like(true, Some("me-id"), &item));
+    }
+
+    #[test]
+    fn a_repost_row_still_withholds_repost_when_the_original_is_ones_own_post() {
+        // The `is_own_post` guard now compares against the *original*
+        // author, which is whose post would actually be reposted — the
+        // reposter's handle is irrelevant to what the API would reject.
+        let item = repost_row_item("activity-id", "original-id", "bob");
+        assert!(!offers_repost(true, Some("2244994945"), Some("bob"), &item));
+    }
+
+    #[test]
+    fn a_repost_rows_permalink_points_at_the_original_post() {
+        let item = repost_row_item("activity-id", "original-id", "alice");
+        assert_eq!(
+            post_permalink(&item.author_username, action_post_id(&item)),
+            "https://x.com/alice/status/original-id"
+        );
     }
 
     #[test]
@@ -3290,6 +3346,7 @@ mod tests {
                 metrics: None,
                 links: Vec::new(),
                 author_avatar_url: None,
+                original_post_id: None,
             })
             .collect();
         let state = TimelineState::Loaded(full);
@@ -3718,15 +3775,6 @@ mod tests {
     }
 
     #[test]
-    fn does_not_offer_repost_on_a_row_that_is_itself_already_a_repost() {
-        // #15: the row's `item.id` is the retweet activity's own id, not the
-        // original content's — there's no id to call the endpoint with
-        // safely (see `offers_repost`'s doc).
-        let item = item_with("1", "alice", Some("bob"));
-        assert!(!offers_repost(true, Some("2244994945"), Some("bob"), &item));
-    }
-
-    #[test]
     fn does_not_offer_repost_on_ones_own_post() {
         let item = item_with("1", "bob", None);
         assert!(!offers_repost(true, Some("2244994945"), Some("bob"), &item));
@@ -3746,15 +3794,6 @@ mod tests {
         // `Render::render`'s gate) — nowhere for a quote to go.
         let item = item_with("1", "alice", None);
         assert!(!offers_quote(false, &item));
-    }
-
-    #[test]
-    fn does_not_offer_quote_on_a_row_that_is_itself_already_a_repost() {
-        // #16: same reason `offers_repost` withholds its own button —
-        // `item.id` is the retweet activity's own id, not the original
-        // content's `quote_tweet_id` would need.
-        let item = item_with("1", "alice", Some("bob"));
-        assert!(!offers_quote(true, &item));
     }
 
     #[test]
@@ -3906,6 +3945,7 @@ mod tests {
                     author_avatar_url: Some(
                         "https://pbs.twimg.com/profile_images/1/a_normal.jpg".to_string(),
                     ),
+                    original_post_id: None,
                 }]);
                 cx.notify();
             });
