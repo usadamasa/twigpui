@@ -132,6 +132,15 @@ impl Paths {
         self.state_dir.join("reposted_posts.json")
     }
 
+    /// Directory holding downloaded avatar images (#64), under `cache_dir`.
+    /// A directory rather than one file per-key at the top level: an active
+    /// timeline accumulates hundreds of these, and keeping them together
+    /// makes "delete the avatars" a single `rm -r` for the user. Cache, not
+    /// state: losing it costs one re-download per author, nothing more.
+    pub(crate) fn avatar_dir(&self) -> PathBuf {
+        self.cache_dir.join("avatars")
+    }
+
     /// Path to the local record of post ids the signed-in user has liked
     /// from this app, under `state_dir` (#68). Separate from
     /// [`Self::reposted_posts_file`] rather than one combined file: the two
