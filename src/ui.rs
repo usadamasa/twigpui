@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::time::Duration;
 
 use gpui::{
     AnyElement, Context, Entity, FontWeight, SharedString, Subscription, Task, Window, div,
@@ -265,9 +266,22 @@ pub(crate) struct TimelineView {
     /// A cooldown or a failed reload, kept independent of `state` (#57) —
     /// see [`ReloadNotice`]'s doc for why. `None` whenever the most recent
     /// reload attempt (if any) hasn't been blocked or hasn't failed; set in
-    /// [`Self::reload`]'s early-return and result-handling paths, cleared
-    /// the moment a reload starts or succeeds.
+    /// [`Self::reload`]'s early-return, [`Self::load_older`]'s, and
+    /// [`Self::apply_reload_failure`]'s result-handling paths, cleared the
+    /// moment a reload starts or succeeds.
     reload_notice: Option<ReloadNotice>,
+    /// Ticks `reload_notice`'s countdown once a second while it holds a live
+    /// `ReloadNotice::Cooldown` (#57's item 3) — [`cooldown_label`] only
+    /// recomputes its text at render time, so without a periodic
+    /// `cx.notify()` the banner would freeze at whatever second happened to
+    /// be showing when it was last drawn. `None` whenever no cooldown is
+    /// currently ticking. Same cancel-on-drop convention as `fetch`/
+    /// `sign_in_flow`: reassigning this (a fresh cooldown superseding a
+    /// still-running one) or clearing it (an immediate stop on success or on
+    /// a plain failure — see [`Self::apply_reload_failure`]) drops and so
+    /// cancels whatever loop was running. See
+    /// [`Self::start_cooldown_ticker`] for the loop itself.
+    cooldown_ticker: Option<Task<()>>,
     /// Request-count totals across every tracked endpoint (#18), shown in
     /// the header — see [`Self::refresh_usage`]. Zero until the first
     /// refresh completes, which is a truthful "nothing observed yet" rather
@@ -349,6 +363,7 @@ impl TimelineView {
             oauth_scope: None,
             session_notice: None,
             reload_notice: None,
+            cooldown_ticker: None,
             usage_totals: usage::Totals::default(),
             usage_refresh: None,
             reposted_ids: HashSet::new(),
@@ -532,12 +547,21 @@ impl TimelineView {
                 reset_at,
                 cooldown: Cooldown::LocalInterval,
             });
+            // #57 item 3: without this the banner's countdown freezes at
+            // whatever second it happened to render on — see
+            // `start_cooldown_ticker`'s doc.
+            self.start_cooldown_ticker(cx);
             cx.notify();
             return;
         }
         self.last_reload_at = Some(now);
 
         self.reload_notice = None;
+        // A fresh reload actually going out supersedes whatever cooldown
+        // was being counted down (there is nothing left to wait for once
+        // the request is in flight) — stop it explicitly rather than
+        // leaving it to notice on its next tick, up to a second later.
+        self.cooldown_ticker = None;
         self.reloading = true;
         self.state = reload_start_state(std::mem::replace(&mut self.state, TimelineState::Loading));
 
@@ -574,8 +598,14 @@ impl TimelineView {
                                 this.next_page_token = None;
                                 this.state = TimelineState::Loaded(reloaded.items);
                                 this.reload_notice = None;
+                                // #57 item 3: a success means there is
+                                // nothing left to count down — stop
+                                // immediately rather than let the ticker
+                                // notice on its next tick, up to a second
+                                // later.
+                                this.cooldown_ticker = None;
                             }
-                            Err(error) => this.apply_reload_failure(&error),
+                            Err(error) => this.apply_reload_failure(&error, cx),
                         }
                         cx.notify();
                     });
@@ -601,8 +631,10 @@ impl TimelineView {
                                 this.next_page_token = reloaded.next_token;
                                 this.state = TimelineState::Loaded(reloaded.items);
                                 this.reload_notice = None;
+                                // Same reasoning as the single-user branch above.
+                                this.cooldown_ticker = None;
                             }
-                            Err(error) => this.apply_reload_failure(&error),
+                            Err(error) => this.apply_reload_failure(&error, cx),
                         }
                         cx.notify();
                     });
@@ -618,8 +650,9 @@ impl TimelineView {
     /// fetch via [`reload_failure_outcome`] — pulled into its own method
     /// partly to keep `reload` itself under clippy's line-count lint, partly
     /// so all three call sites apply the exact same `Option<ReloadNotice>`
-    /// handling below rather than three copies that could drift.
-    fn apply_reload_failure(&mut self, error: &anyhow::Error) {
+    /// (and, since #57's item 3, ticker) handling below rather than three
+    /// copies that could drift.
+    fn apply_reload_failure(&mut self, error: &anyhow::Error, cx: &mut Context<'_, Self>) {
         let (state, notice) = reload_failure_outcome(
             std::mem::replace(&mut self.state, TimelineState::Loading),
             error,
@@ -630,6 +663,65 @@ impl TimelineView {
         // its doc. Passing that straight through, rather than wrapping in
         // `Some`, is what stops the same failure from showing twice.
         self.reload_notice = notice;
+        // A rate-limited failure raises a fresh `Cooldown` notice (X's own
+        // window, not #10's local one, but the countdown still needs to
+        // tick the same way) — start/replace the ticker for it. Any other
+        // outcome (`Failed`, or no notice at all) has nothing left to count
+        // down, so stop whatever ticker might still be running rather than
+        // let it keep polling a notice it no longer applies to.
+        if matches!(self.reload_notice, Some(ReloadNotice::Cooldown { .. })) {
+            self.start_cooldown_ticker(cx);
+        } else {
+            self.cooldown_ticker = None;
+        }
+    }
+
+    /// Ticks `reload_notice`'s countdown once a second (#57's item 3) —
+    /// see [`cooldown_ticker`](Self::cooldown_ticker)'s doc for why this
+    /// exists at all. Started only when `reload_notice` is actually set to
+    /// `ReloadNotice::Cooldown` (there is nothing to count down for a
+    /// `Failed` notice), from [`Self::reload`]'s cooldown-gate branch and
+    /// from [`Self::apply_reload_failure`].
+    ///
+    /// The loop re-checks [`cooldown_tick`] against the *current*
+    /// `reload_notice` on every wake-up rather than trusting `reset_at`
+    /// captured at start time: `reload_notice` can change out from under a
+    /// running ticker (a reload succeeds and clears it, or a later failure
+    /// replaces it with `Failed`) without anyone reaching back in to cancel
+    /// this specific loop, and re-checking is what makes that safe — the
+    /// loop simply stops the next time it wakes rather than clobbering
+    /// whatever is there by then. It also always terminates: either
+    /// `cooldown_tick` returns `NotTicking`/`Elapsed`, or `this.update`
+    /// returns `Err` because the view itself has been dropped — there is no
+    /// path that loops forever.
+    fn start_cooldown_ticker(&mut self, cx: &mut Context<'_, Self>) {
+        self.cooldown_ticker = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_secs(1)).await;
+
+                let Ok(keep_going) = this.update(cx, |this, cx| {
+                    match cooldown_tick(this.reload_notice.as_ref(), oauth::unix_now()) {
+                        CooldownTick::StillWaiting => {
+                            cx.notify();
+                            true
+                        }
+                        CooldownTick::Elapsed => {
+                            this.reload_notice = None;
+                            cx.notify();
+                            false
+                        }
+                        CooldownTick::NotTicking => false,
+                    }
+                }) else {
+                    // The view has been dropped — nothing left to tick.
+                    return;
+                };
+
+                if !keep_going {
+                    return;
+                }
+            }
+        }));
     }
 
     /// Fetch the page behind `next_page_token` and append it after what's
@@ -661,6 +753,10 @@ impl TimelineView {
         };
 
         self.reload_notice = None;
+        // Same reasoning as `reload`'s own gate-passed branch: a fetch is
+        // about to go out, so any cooldown countdown still ticking (from an
+        // unrelated blocked reload) no longer describes anything current.
+        self.cooldown_ticker = None;
         self.reloading = true;
         self.state = reload_start_state(std::mem::replace(&mut self.state, TimelineState::Loading));
 
@@ -691,8 +787,10 @@ impl TimelineView {
                         this.next_page_token = next_token;
                         this.state = TimelineState::Loaded(items);
                         this.reload_notice = None;
+                        // Same reasoning as `reload`'s success branches above.
+                        this.cooldown_ticker = None;
                     }
-                    Err(error) => this.apply_reload_failure(&error),
+                    Err(error) => this.apply_reload_failure(&error, cx),
                 }
                 cx.notify();
             });
@@ -2156,6 +2254,40 @@ fn reload_start_state(previous: TimelineState) -> TimelineState {
     }
 }
 
+/// What one wake-up of [`TimelineView::start_cooldown_ticker`]'s loop should
+/// do (#57's item 3), given the current `reload_notice` and the time — the
+/// pure decision behind that loop, factored out so it's unit-testable
+/// without gpui's timer; the loop itself just matches on this and either
+/// keeps going or returns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CooldownTick {
+    /// Nothing to tick: `reload_notice` is `None`, or holds a `Failed`
+    /// notice with no countdown to advance — either it was never a
+    /// cooldown, or something else (a success, a plain failure) has
+    /// already replaced it since the ticker started. The loop should stop
+    /// without touching `reload_notice`.
+    NotTicking,
+    /// Still inside the cooldown window: re-notify so the banner's
+    /// countdown advances, then wait another second.
+    StillWaiting,
+    /// `reset_at` has passed. The loop should clear `reload_notice` — the
+    /// banner disappearing, and "Reload" becoming clickable again, is the
+    /// user-visible "done waiting" signal — and stop.
+    Elapsed,
+}
+
+/// Pure core of [`CooldownTick`]'s decision — see its doc for what each
+/// variant means the loop should do.
+fn cooldown_tick(notice: Option<&ReloadNotice>, now: i64) -> CooldownTick {
+    match notice {
+        Some(ReloadNotice::Cooldown { reset_at, .. }) if *reset_at > now => {
+            CooldownTick::StillWaiting
+        }
+        Some(ReloadNotice::Cooldown { .. }) => CooldownTick::Elapsed,
+        Some(ReloadNotice::Failed(_)) | None => CooldownTick::NotTicking,
+    }
+}
+
 /// Turn `2026-08-16T09:00:00.000Z` into `2026-08-16 09:00`.
 ///
 /// The API always returns UTC in RFC 3339, so slicing beats pulling in a date
@@ -2173,13 +2305,13 @@ fn format_timestamp(created_at: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        ComposeStatus, Cooldown, ReloadNotice, ReloadTrigger, RepliedTo, RepostState, Theme,
-        ThreadFetchState, TimelineItem, TimelineSource, TimelineState, at_the_post_cap, byline,
-        compose_error_message, cooldown_label, format_timestamp, header_title, is_own_post,
-        offers_load_older, offers_quote, offers_reauthorize, offers_repost, offers_sign_in,
-        rate_limit, reload_cooldown, reload_failure_outcome, reload_gate, reload_start_state,
-        reply_banner_label, repost_action_label, repost_banner_label, thread_action_label, usage,
-        usage_color, usage_label,
+        ComposeStatus, Cooldown, CooldownTick, ReloadNotice, ReloadTrigger, RepliedTo, RepostState,
+        Theme, ThreadFetchState, TimelineItem, TimelineSource, TimelineState, at_the_post_cap,
+        byline, compose_error_message, cooldown_label, cooldown_tick, format_timestamp,
+        header_title, is_own_post, offers_load_older, offers_quote, offers_reauthorize,
+        offers_repost, offers_sign_in, rate_limit, reload_cooldown, reload_failure_outcome,
+        reload_gate, reload_start_state, reply_banner_label, repost_action_label,
+        repost_banner_label, thread_action_label, usage, usage_color, usage_label,
     };
 
     fn item_with(id: &str, author_username: &str, reposted_by: Option<&str>) -> TimelineItem {
@@ -2492,6 +2624,56 @@ mod tests {
         assert_eq!(
             reload_gate(ReloadTrigger::UserAction, Some(1_000), 60, 1_030),
             None
+        );
+    }
+
+    // --- cooldown_tick (#57 item 3) ---
+
+    #[test]
+    fn cooldown_tick_keeps_waiting_before_reset_at() {
+        let notice = ReloadNotice::Cooldown {
+            reset_at: 1_060,
+            cooldown: Cooldown::LocalInterval,
+        };
+        assert_eq!(
+            cooldown_tick(Some(&notice), 1_030),
+            CooldownTick::StillWaiting
+        );
+    }
+
+    #[test]
+    fn cooldown_tick_has_elapsed_once_reset_at_has_passed() {
+        let notice = ReloadNotice::Cooldown {
+            reset_at: 1_060,
+            cooldown: Cooldown::ApiRateLimit,
+        };
+        assert_eq!(cooldown_tick(Some(&notice), 1_061), CooldownTick::Elapsed);
+    }
+
+    #[test]
+    fn cooldown_tick_has_elapsed_exactly_at_reset_at() {
+        // Mirrors `reload_cooldown`'s own `>` boundary: blocked strictly
+        // before `reset_at`, allowed (here: elapsed) from `reset_at` on.
+        let notice = ReloadNotice::Cooldown {
+            reset_at: 1_060,
+            cooldown: Cooldown::LocalInterval,
+        };
+        assert_eq!(cooldown_tick(Some(&notice), 1_060), CooldownTick::Elapsed);
+    }
+
+    #[test]
+    fn cooldown_tick_is_not_ticking_without_a_notice() {
+        assert_eq!(cooldown_tick(None, 1_000), CooldownTick::NotTicking);
+    }
+
+    #[test]
+    fn cooldown_tick_is_not_ticking_for_a_failed_notice() {
+        // A `Failed` notice carries no countdown to advance — the ticker
+        // must stop rather than poll it forever.
+        let notice = ReloadNotice::Failed("boom".into());
+        assert_eq!(
+            cooldown_tick(Some(&notice), 1_000),
+            CooldownTick::NotTicking
         );
     }
 
