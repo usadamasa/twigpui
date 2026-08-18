@@ -544,6 +544,7 @@ mod tests {
             reposted_by: None,
             quoted: None,
             replied_to: None,
+            metrics: None,
         }
     }
 

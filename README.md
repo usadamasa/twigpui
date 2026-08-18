@@ -54,6 +54,21 @@ re-opening the same reply's thread — even after restarting the app — costs
 nothing further. Listing the replies *to* a post (the other direction) needs
 a different endpoint (`search/recent`) and is out of scope here — see #36.
 
+**Reply, repost and like counts (#67).** Each post shows how much
+engagement it got — `12 replies · 34 reposts · 5.6K likes` — in a muted line
+under the body. Like the reply context above, this costs no extra request:
+both timeline requests simply add `public_metrics` to `tweet.fields`, so the
+numbers arrive inside the response already being paid for. Counts that are
+zero are left out, and a post with no engagement at all gets no line, so a
+fresh timeline is not a wall of zeros. Large numbers are abbreviated
+(`12.3K`, `2.4M`) to keep a popular post from pushing the byline around.
+
+Note that these are a **snapshot from when the post was fetched**, and
+nothing refreshes them. A reload asks for posts newer than the newest one on
+file (`since_id`), so a row already in the cache is never returned again and
+keeps the counts it arrived with. Reposts show the *original* post's counts,
+matching the body, which is the original's text too.
+
 `--fetch-only` runs the same fetch headlessly (always the single-user view,
 regardless of credential) and prints the posts, which is useful for checking
 credentials without opening a window:

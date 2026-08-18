@@ -28,6 +28,40 @@ pub(crate) struct Post {
     /// carries more than one entry.
     #[serde(default)]
     pub referenced_tweets: Vec<ReferencedTweetRef>,
+    /// Engagement counts (#67), present only because `tweet.fields` asks for
+    /// `public_metrics` — see [`crate::x_api::client`]'s URL builders. `None`
+    /// for a response that predates that (fixtures included) or for a post X
+    /// declines to report counts for.
+    #[serde(default)]
+    pub public_metrics: Option<PostMetrics>,
+}
+
+/// A post's reply/repost/like counts (#67).
+///
+/// Deserialized from X's `public_metrics` object and serialized into the
+/// timeline cache file, the same way [`TimelineItem`] itself is. Every
+/// field is renamed on the wire: X spells them `reply_count`,
+/// `retweet_count` and `like_count`, but the crate says "repost" rather
+/// than "retweet" (#15), and the `_count` suffix reads as noise on a type
+/// that holds nothing else. The counts X also sends but this crate ignores
+/// (`quote_count`, `bookmark_count`, `impression_count`) are simply not
+/// listed — serde drops unknown fields.
+///
+/// These are a **snapshot taken when the post was fetched**, and nothing
+/// refreshes them: an incremental reload sends `since_id`, so a post already
+/// on file is never returned again (see `cache::merge_timeline`). A row's
+/// counts therefore show what was true when it first arrived. Rendering them
+/// with a per-row "as of" timestamp was considered and dropped — the row is
+/// already dense, and the drift matters less than the counts being visible
+/// at all, which is what #67 is about.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct PostMetrics {
+    #[serde(default, rename = "reply_count")]
+    pub replies: u64,
+    #[serde(default, rename = "retweet_count")]
+    pub reposts: u64,
+    #[serde(default, rename = "like_count")]
+    pub likes: u64,
 }
 
 /// One entry in a post's `referenced_tweets` (#13) — the API's own
@@ -182,6 +216,13 @@ pub(crate) struct TimelineItem {
     /// for the same cache-compatibility reason as `reposted_by`/`quoted`.
     #[serde(default)]
     pub replied_to: Option<RepliedTo>,
+    /// The counts shown under the body (#67), for whichever post the body
+    /// actually holds — the original, not the outer post, once this row is
+    /// a repost. `None` when the response carried none, and — like
+    /// `reposted_by`/`quoted`/`replied_to` — `#[serde(default)]` so cache
+    /// files written before #67 deserialize cleanly.
+    #[serde(default)]
+    pub metrics: Option<PostMetrics>,
 }
 
 /// Who a reply is replying to (#12), joined from `includes` the same way a
@@ -288,6 +329,7 @@ fn build_item(
         reposted_by: None,
         quoted: None,
         replied_to: None,
+        metrics: post.public_metrics,
     };
 
     if let Some(retweet_ref) = post
@@ -309,6 +351,9 @@ fn build_item(
             // the (already-consumed) retweet reference on the outer post.
             item.quoted = quote_of(original, users, referenced);
             item.replied_to = reply_target(original, users, referenced);
+            // #67: the body is the original's, so the counts under it have
+            // to be the original's too — the outer repost carries its own.
+            item.metrics = original.public_metrics;
         } else {
             // Original is gone from `includes` — keep the outer post's own
             // (possibly truncated `RT @user: …`) text already set above
@@ -317,6 +362,9 @@ fn build_item(
             // know who reposted, not who wrote it.
             item.author_name = String::new();
             item.author_username = String::new();
+            // Blanked for the same reason as the author fields above: the
+            // outer repost's own counts are not the original's (#67).
+            item.metrics = None;
         }
     } else {
         if post
@@ -949,5 +997,132 @@ mod tests {
             problem.message().as_deref(),
             Some("Not Found Error: Could not find user.")
         );
+    }
+
+    const METRICS_JSON: &str = r#"{
+      "data": [
+        {
+          "id": "1700000000000000001",
+          "text": "a post with engagement",
+          "created_at": "2026-08-16T09:00:00.000Z",
+          "author_id": "2244994945",
+          "public_metrics": {
+            "retweet_count": 34,
+            "reply_count": 12,
+            "like_count": 56,
+            "quote_count": 7,
+            "impression_count": 8900
+          }
+        },
+        {
+          "id": "1700000000000000002",
+          "text": "a post from a response that predates public_metrics",
+          "author_id": "2244994945"
+        }
+      ],
+      "includes": {
+        "users": [
+          { "id": "2244994945", "name": "Developers", "username": "XDevelopers" }
+        ]
+      }
+    }"#;
+
+    #[test]
+    fn reads_public_metrics_into_the_item() {
+        // #67: no extra request — these ride along in the timeline response
+        // once `tweet.fields` asks for `public_metrics`.
+        let response: TimelineResponse = serde_json::from_str(METRICS_JSON).unwrap();
+        let items = response.into_items();
+
+        assert_eq!(
+            items[0].metrics,
+            Some(PostMetrics {
+                replies: 12,
+                reposts: 34,
+                likes: 56,
+            })
+        );
+    }
+
+    #[test]
+    fn metrics_are_none_when_the_response_omits_them() {
+        // A response that predates #67's `tweet.fields` change — or a post
+        // X declines to report counts for — must parse, not fail.
+        let response: TimelineResponse = serde_json::from_str(METRICS_JSON).unwrap();
+        let items = response.into_items();
+
+        assert_eq!(items[1].metrics, None);
+    }
+
+    #[test]
+    fn a_repost_shows_the_originals_metrics() {
+        // The rendered body is the original post (#13), so the counts shown
+        // beneath it have to be the original's too.
+        let json = r#"{
+          "data": [
+            {
+              "id": "1700000000000000010",
+              "text": "RT @XDevelopers: the original",
+              "author_id": "1000000000",
+              "public_metrics": { "retweet_count": 1, "reply_count": 0, "like_count": 0 },
+              "referenced_tweets": [{ "type": "retweeted", "id": "1700000000000000011" }]
+            }
+          ],
+          "includes": {
+            "users": [
+              { "id": "1000000000", "name": "Reposter", "username": "reposter" },
+              { "id": "2244994945", "name": "Developers", "username": "XDevelopers" }
+            ],
+            "tweets": [
+              {
+                "id": "1700000000000000011",
+                "text": "the original",
+                "author_id": "2244994945",
+                "public_metrics": { "retweet_count": 99, "reply_count": 5, "like_count": 400 }
+              }
+            ]
+          }
+        }"#;
+        let items: TimelineResponse = serde_json::from_str(json).unwrap();
+        let items = items.into_items();
+
+        assert_eq!(
+            items[0].metrics,
+            Some(PostMetrics {
+                replies: 5,
+                reposts: 99,
+                likes: 400,
+            })
+        );
+    }
+
+    #[test]
+    fn a_repost_whose_original_is_missing_reports_no_metrics() {
+        // Same reasoning as the author fields `build_item` blanks in this
+        // case: the outer post's own counts are not the original's.
+        let json = r#"{
+          "data": [
+            {
+              "id": "1700000000000000010",
+              "text": "RT @XDevelopers: the original",
+              "author_id": "1000000000",
+              "public_metrics": { "retweet_count": 1, "reply_count": 0, "like_count": 0 },
+              "referenced_tweets": [{ "type": "retweeted", "id": "1700000000000000011" }]
+            }
+          ]
+        }"#;
+        let response: TimelineResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(response.into_items()[0].metrics, None);
+    }
+
+    #[test]
+    fn a_cache_file_written_before_metrics_existed_still_loads() {
+        // #9's cache file is this exact type, so a file on disk from before
+        // #67 must deserialize with the field simply absent.
+        let item: TimelineItem = serde_json::from_str(
+            r#"{"id":"1","text":"cached","created_at":null,"author_name":"a","author_username":"b"}"#,
+        )
+        .unwrap();
+        assert_eq!(item.metrics, None);
     }
 }
