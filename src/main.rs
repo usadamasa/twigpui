@@ -2,6 +2,7 @@
 // lints in Cargo.toml are aimed at the code that actually ships.
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
+mod browser;
 mod cache;
 mod compose;
 mod config;

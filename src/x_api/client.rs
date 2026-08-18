@@ -560,7 +560,7 @@ fn home_timeline_url(
     let mut url = format!(
         "{API_BASE}/users/{user_id}/timelines/reverse_chronological\
          ?max_results={max_results}\
-         &tweet.fields=created_at,public_metrics,referenced_tweets\
+         &tweet.fields=created_at,entities,public_metrics,referenced_tweets\
          &expansions=author_id,referenced_tweets.id,referenced_tweets.id.author_id\
          &user.fields=name,username"
     );
@@ -579,7 +579,7 @@ fn timeline_url(user_id: &str, max_results: u32, since_id: Option<&str>) -> Stri
     let base = format!(
         "{API_BASE}/users/{user_id}/tweets\
          ?max_results={max_results}\
-         &tweet.fields=created_at,public_metrics,referenced_tweets\
+         &tweet.fields=created_at,entities,public_metrics,referenced_tweets\
          &expansions=author_id,referenced_tweets.id,referenced_tweets.id.author_id\
          &user.fields=name,username"
     );
@@ -596,8 +596,8 @@ fn timeline_url(user_id: &str, max_results: u32, since_id: Option<&str>) -> Stri
 /// one resolves.
 ///
 /// Unlike the timeline builders above, this one does not ask for
-/// `public_metrics` (#67): a walked parent renders as a
-/// [`crate::thread::ThreadItem`], which shows no counts.
+/// `public_metrics` (#67) or `entities` (#70): a walked parent renders as a
+/// [`crate::thread::ThreadItem`], which shows neither counts nor links.
 fn tweets_by_id_url(id: &str) -> String {
     format!(
         "{API_BASE}/tweets\
@@ -713,7 +713,7 @@ mod tests {
         // and author come back in `includes` without a second request.
         assert_eq!(
             timeline_url("2244994945", 20, None),
-            "https://api.x.com/2/users/2244994945/tweets?max_results=20&tweet.fields=created_at,public_metrics,referenced_tweets&expansions=author_id,referenced_tweets.id,referenced_tweets.id.author_id&user.fields=name,username"
+            "https://api.x.com/2/users/2244994945/tweets?max_results=20&tweet.fields=created_at,entities,public_metrics,referenced_tweets&expansions=author_id,referenced_tweets.id,referenced_tweets.id.author_id&user.fields=name,username"
         );
     }
 
@@ -777,7 +777,7 @@ mod tests {
     fn builds_the_home_timeline_url_with_every_expansion() {
         assert_eq!(
             home_timeline_url("2244994945", 20, None, None),
-            "https://api.x.com/2/users/2244994945/timelines/reverse_chronological?max_results=20&tweet.fields=created_at,public_metrics,referenced_tweets&expansions=author_id,referenced_tweets.id,referenced_tweets.id.author_id&user.fields=name,username"
+            "https://api.x.com/2/users/2244994945/timelines/reverse_chronological?max_results=20&tweet.fields=created_at,entities,public_metrics,referenced_tweets&expansions=author_id,referenced_tweets.id,referenced_tweets.id.author_id&user.fields=name,username"
         );
     }
 
@@ -785,7 +785,7 @@ mod tests {
     fn home_timeline_url_appends_since_id_for_an_incremental_reload() {
         assert_eq!(
             home_timeline_url("2244994945", 20, Some("1700000000000000001"), None),
-            "https://api.x.com/2/users/2244994945/timelines/reverse_chronological?max_results=20&tweet.fields=created_at,public_metrics,referenced_tweets&expansions=author_id,referenced_tweets.id,referenced_tweets.id.author_id&user.fields=name,username&since_id=1700000000000000001"
+            "https://api.x.com/2/users/2244994945/timelines/reverse_chronological?max_results=20&tweet.fields=created_at,entities,public_metrics,referenced_tweets&expansions=author_id,referenced_tweets.id,referenced_tweets.id.author_id&user.fields=name,username&since_id=1700000000000000001"
         );
     }
 
@@ -795,7 +795,7 @@ mod tests {
         // response as `pagination_token`.
         assert_eq!(
             home_timeline_url("2244994945", 20, None, Some("cursor-abc")),
-            "https://api.x.com/2/users/2244994945/timelines/reverse_chronological?max_results=20&tweet.fields=created_at,public_metrics,referenced_tweets&expansions=author_id,referenced_tweets.id,referenced_tweets.id.author_id&user.fields=name,username&pagination_token=cursor-abc"
+            "https://api.x.com/2/users/2244994945/timelines/reverse_chronological?max_results=20&tweet.fields=created_at,entities,public_metrics,referenced_tweets&expansions=author_id,referenced_tweets.id,referenced_tweets.id.author_id&user.fields=name,username&pagination_token=cursor-abc"
         );
     }
 
@@ -806,7 +806,7 @@ mod tests {
         // credit cost down.
         assert_eq!(
             timeline_url("2244994945", 20, Some("1700000000000000001")),
-            "https://api.x.com/2/users/2244994945/tweets?max_results=20&tweet.fields=created_at,public_metrics,referenced_tweets&expansions=author_id,referenced_tweets.id,referenced_tweets.id.author_id&user.fields=name,username&since_id=1700000000000000001"
+            "https://api.x.com/2/users/2244994945/tweets?max_results=20&tweet.fields=created_at,entities,public_metrics,referenced_tweets&expansions=author_id,referenced_tweets.id,referenced_tweets.id.author_id&user.fields=name,username&since_id=1700000000000000001"
         );
     }
 

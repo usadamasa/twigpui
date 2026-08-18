@@ -488,6 +488,42 @@ resolve that original id for a displayed repost row, so it withholds the
 button there rather than risk sending the wrong id. Reposting the original
 post directly, wherever else it appears in the timeline, is unaffected.
 
+## Opening things in a browser (#70)
+
+Every post row carries three ways out of the app, and none of them costs an
+API request — the URLs are built from what the timeline response already
+carried:
+
+- **"Open in X"** on the byline row opens the post itself
+  (`x.com/{handle}/status/{id}`; for a post whose author never expanded,
+  X's own id-only form `x.com/i/web/status/{id}`, which resolves the author
+  server-side rather than leaving the row with no way out).
+- **The author's name** opens their profile (`x.com/{handle}`). It stays
+  plain text when the handle never expanded, since there is no id-only
+  fallback to point at.
+- **Links in the post's text** appear as clickable lines under the body.
+
+**Why the links sit under the text rather than inside it.** X's post text
+carries `t.co` shortlinks, and the real destination only comes from
+`entities.urls[].expanded_url` — which #70 adds to `tweet.fields`, so it
+arrives inside the request already being paid for. Making a link clickable
+*in place* would mean splitting the body into interleaved text and link
+elements, and gpui lays each child out as its own block, so the paragraph
+would stop wrapping as one piece. Each line is labelled with X's own
+`display_url` (`example.com/a/b…`), so what is shown matches what the text
+says even though what opens is the expanded destination. An entity with no
+`expanded_url` (a media attachment's own `t.co`, for instance) is dropped
+rather than shown as a link back to the shortlink.
+
+**How it opens.** `open(1)` is invoked directly through
+`std::process::Command` — never through a shell, so nothing in a URL that
+came from a post can be read as syntax — and only `http://` and `https://`
+URLs are handed to it. That last part is not decoration: `open` will act on
+a local path, on another app's registered scheme, and above all on a
+leading `-`, which it would read as one of its own flags. A URL that fails
+that check, or a browser that fails to launch, shows a banner rather than a
+click that silently does nothing.
+
 ## Liking and unliking (#68)
 
 Most posts show a "Like" / "Liked" toggle. Clicking "Like" sends
