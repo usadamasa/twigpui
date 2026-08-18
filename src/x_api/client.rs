@@ -392,20 +392,27 @@ impl XClient {
         Ok((response.into_items(), next_token))
     }
 
-    /// `GET /2/tweets?ids=` (#12) for a single id — used one level at a time
-    /// by the parent-chain walk in `cache::fetch_thread`, since each level's
-    /// id is only known once the previous one resolves. Returns whatever
-    /// [`TimelineResponse::into_items`] produces for the (at most one) post
-    /// the API hands back: empty when the id is missing from `data`
-    /// entirely (deleted, protected, or otherwise absent), which the caller
-    /// treats as the walk stopping cleanly rather than an error.
+    /// `GET /2/tweets?ids=` (#12). `ids` is whatever the caller already
+    /// joined with commas — X's own query parameter accepts a
+    /// comma-separated list natively, so there is nothing here to loop
+    /// over. Two callers rely on that: `cache::fetch_thread`'s parent-chain
+    /// walk passes exactly one id at a time (each level's id is only known
+    /// once the previous one resolves), while `main::fetch_post` (#42)
+    /// joins every id from `--fetch-post` into a single call, so looking up
+    /// five posts still costs exactly one request. Returns whatever
+    /// [`TimelineResponse::into_items`] produces for whichever of the
+    /// requested posts the API hands back: fewer entries than ids requested
+    /// (down to zero) when some are missing from `data` entirely (deleted,
+    /// protected, or otherwise absent) — the parent-chain walk treats that
+    /// as stopping cleanly rather than an error, and `--fetch-post` reports
+    /// the shortfall on stderr rather than failing outright.
     pub(crate) fn tweets_by_id(
         &self,
         paths: &Paths,
-        id: &str,
+        ids: &str,
         now: i64,
     ) -> Result<Vec<TimelineItem>> {
-        let url = tweets_by_id_url(id);
+        let url = tweets_by_id_url(ids);
         let body = self.get(paths, Endpoint::TweetById, &url, now)?;
 
         let response: TimelineResponse =
@@ -585,18 +592,24 @@ fn timeline_url(user_id: &str, max_results: u32, since_id: Option<&str>) -> Stri
 }
 
 /// `GET /2/tweets?ids=` (#12), with the same expansions as the timeline
-/// endpoints so a fetched parent's own author (and, if it is itself a
-/// reply, its own parent's id) comes back in the same response — one id at
-/// a time, since the parent-chain walk only learns the next id after this
-/// one resolves.
+/// endpoints so a fetched post's own author (and, if it is itself a reply,
+/// its own parent's id) comes back in the same response. `ids` is inserted
+/// verbatim — a single id for the parent-chain walk (which only learns the
+/// next id after this one resolves, so it never has more than one in hand
+/// at a time), or a comma-separated list for `--fetch-post` (#42), since
+/// X's own query parameter already accepts either without this crate doing
+/// any joining or looping of its own.
 ///
 /// Unlike the timeline builders above, this one does not ask for
 /// `public_metrics` (#67) or `entities` (#70): a walked parent renders as a
-/// [`crate::thread::ThreadItem`], which shows neither counts nor links.
-fn tweets_by_id_url(id: &str) -> String {
+/// [`crate::thread::ThreadItem`], which shows neither counts nor links —
+/// and `--fetch-post`'s JSON output is [`TimelineItem`] as-is, which came
+/// from the very same response shape, so there is no second URL builder to
+/// give those fields to it instead.
+fn tweets_by_id_url(ids: &str) -> String {
     format!(
         "{API_BASE}/tweets\
-         ?ids={id}\
+         ?ids={ids}\
          &tweet.fields=created_at,referenced_tweets\
          &expansions=author_id,referenced_tweets.id,referenced_tweets.id.author_id\
          &user.fields=name,profile_image_url,username"
@@ -728,6 +741,19 @@ mod tests {
         assert_eq!(
             tweets_by_id_url("1700000000000000001"),
             "https://api.x.com/2/tweets?ids=1700000000000000001&tweet.fields=created_at,referenced_tweets&expansions=author_id,referenced_tweets.id,referenced_tweets.id.author_id&user.fields=name,profile_image_url,username"
+        );
+    }
+
+    #[test]
+    fn builds_the_tweets_by_id_url_with_a_comma_joined_id_list() {
+        // #42: `--fetch-post` joins every requested id with commas before
+        // calling `tweets_by_id`, relying on `ids` landing in the query
+        // string verbatim rather than this builder looping over it — X's
+        // own `ids=` parameter already accepts a comma-separated list, so
+        // three ids still cost exactly one request.
+        assert_eq!(
+            tweets_by_id_url("1,2,3"),
+            "https://api.x.com/2/tweets?ids=1,2,3&tweet.fields=created_at,referenced_tweets&expansions=author_id,referenced_tweets.id,referenced_tweets.id.author_id&user.fields=name,profile_image_url,username"
         );
     }
 
