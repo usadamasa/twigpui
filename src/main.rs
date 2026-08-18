@@ -70,7 +70,13 @@ fn main() {
         };
 
         let opened = cx.open_window(options, |window, cx| {
-            cx.new(|cx| ui::TimelineView::new(config, paths, window, cx))
+            let timeline = cx.new(|cx| ui::TimelineView::new(config, paths, window, cx));
+            // #38: gpui-component's widgets reach back up to the window's
+            // root expecting to find its `Root` there — its text input asks
+            // for it on the very first render, and `Root::read` panics
+            // outright if the root view is anything else. Making the
+            // timeline the root directly aborted the app at startup.
+            cx.new(|cx| gpui_component::Root::new(timeline, window, cx))
         });
         if let Err(error) = opened {
             eprintln!("could not open the window: {error:#}");
@@ -153,19 +159,25 @@ fn applescript_quote(text: &str) -> String {
 /// `since_id` keeps the response small — see the eprintln! below for which
 /// happened.
 fn fetch_only(config: &config::Config, paths: &paths::Paths) -> i32 {
-    let credential = match oauth::resolve_credential(config, paths, oauth::unix_now()) {
-        Ok(Some(credential)) => credential,
-        Ok(None) => {
-            eprintln!(
-                "no credential is available. Run twigpui without --fetch-only and use \
-                 \"Sign in with X\", or set X_BEARER_TOKEN."
-            );
-            return 1;
-        }
+    let resolution = match oauth::resolve_credential(config, paths, oauth::unix_now()) {
+        Ok(resolution) => resolution,
         Err(error) => {
             eprintln!("could not resolve a credential: {error:#}");
             return 1;
         }
+    };
+    // #54: a stored session that couldn't be refreshed is worth saying out
+    // loud here too — headless runs have no header banner to show it in
+    // instead.
+    if let Some(demotion) = &resolution.demotion {
+        eprintln!("{}", oauth::describe_demotion(demotion, paths));
+    }
+    let Some(credential) = resolution.credential else {
+        eprintln!(
+            "no credential is available. Run twigpui without --fetch-only and use \
+             \"Sign in with X\", or set X_BEARER_TOKEN."
+        );
+        return 1;
     };
 
     if !credential.is_oauth() {

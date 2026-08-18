@@ -78,14 +78,18 @@ enum PrimaryAction {
 /// [`cache::MeEntry`] so the header and `home_user_id` can be populated even
 /// on a pure cache hit, without a second round trip through `/me`.
 enum StartOutcome {
-    NotAuthenticated,
+    NotAuthenticated {
+        session_notice: Option<String>,
+    },
     SingleUser {
         credential: oauth::Credential,
         cached: Option<Vec<TimelineItem>>,
+        session_notice: Option<String>,
     },
     Home {
         credential: oauth::Credential,
         cached: Option<(cache::MeEntry, Vec<TimelineItem>)>,
+        session_notice: Option<String>,
     },
 }
 
@@ -189,6 +193,18 @@ pub(crate) struct TimelineView {
     /// session whose scope wasn't recorded. Feeds [`offers_reauthorize`]
     /// and [`Self::submit_post`]'s own scope check.
     oauth_scope: Option<String>,
+    /// A human-readable explanation of why a stored OAuth session couldn't
+    /// be used as-is at the most recent credential resolution (#54) — `None`
+    /// when nothing degraded (a fresh or successfully refreshed session, no
+    /// stored session at all, or no OAuth involved to begin with). Rendered
+    /// as a persistent banner regardless of `state` — see
+    /// [`session_notice_banner`] — since the defect this field exists to fix
+    /// is precisely that the timeline otherwise renders as if nothing
+    /// happened. Set once, in [`Self::start`] (mirroring how the credential
+    /// itself is only resolved at startup — see that method's doc); cleared
+    /// the moment a fresh sign-in or re-authorize succeeds, in
+    /// [`Self::sign_in`].
+    session_notice: Option<SharedString>,
     /// Request-count totals across every tracked endpoint (#18), shown in
     /// the header — see [`Self::refresh_usage`]. Zero until the first
     /// refresh completes, which is a truthful "nothing observed yet" rather
@@ -267,6 +283,7 @@ impl TimelineView {
             _compose_input_subscription: compose_input_subscription,
             submit_task: None,
             oauth_scope: None,
+            session_notice: None,
             usage_totals: usage::Totals::default(),
             usage_refresh: None,
             reposted_ids: HashSet::new(),
@@ -296,9 +313,18 @@ impl TimelineView {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    let credential = oauth::resolve_credential(&config, &paths, oauth::unix_now())?;
-                    let Some(credential) = credential else {
-                        return anyhow::Ok(StartOutcome::NotAuthenticated);
+                    let resolution = oauth::resolve_credential(&config, &paths, oauth::unix_now())?;
+                    // #54: rendered as a persistent banner regardless of what
+                    // `credential` below turns out to be — a demoted session
+                    // and "never signed in" can resolve to the exact same
+                    // credential, but only one of them is worth telling the
+                    // user about.
+                    let session_notice = resolution
+                        .demotion
+                        .as_ref()
+                        .map(|demotion| oauth::describe_demotion(demotion, &paths));
+                    let Some(credential) = resolution.credential else {
+                        return anyhow::Ok(StartOutcome::NotAuthenticated { session_notice });
                     };
                     // #11: decided once, right where the credential itself
                     // resolves — everything downstream (which cache file,
@@ -308,11 +334,19 @@ impl TimelineView {
                         TimelineSource::SingleUser => {
                             let cached =
                                 cache::startup(&paths, &config.target_username, oauth::unix_now())?;
-                            anyhow::Ok(StartOutcome::SingleUser { credential, cached })
+                            anyhow::Ok(StartOutcome::SingleUser {
+                                credential,
+                                cached,
+                                session_notice,
+                            })
                         }
                         TimelineSource::Home => {
                             let cached = cache::startup_home(&paths, oauth::unix_now())?;
-                            anyhow::Ok(StartOutcome::Home { credential, cached })
+                            anyhow::Ok(StartOutcome::Home {
+                                credential,
+                                cached,
+                                session_notice,
+                            })
                         }
                     }
                 })
@@ -322,11 +356,17 @@ impl TimelineView {
                 this.refresh_usage(cx);
                 this.refresh_reposted_ids(cx);
                 match result {
-                    Ok(StartOutcome::NotAuthenticated) => {
+                    Ok(StartOutcome::NotAuthenticated { session_notice }) => {
+                        this.session_notice = session_notice.map(SharedString::from);
                         this.state = TimelineState::NotAuthenticated;
                         cx.notify();
                     }
-                    Ok(StartOutcome::SingleUser { credential, cached }) => {
+                    Ok(StartOutcome::SingleUser {
+                        credential,
+                        cached,
+                        session_notice,
+                    }) => {
+                        this.session_notice = session_notice.map(SharedString::from);
                         this.signed_in_with_oauth = credential.is_oauth();
                         this.oauth_scope = credential.scope().map(str::to_string);
                         this.source = Some(TimelineSource::SingleUser);
@@ -339,7 +379,12 @@ impl TimelineView {
                             None => this.reload(cx),
                         }
                     }
-                    Ok(StartOutcome::Home { credential, cached }) => {
+                    Ok(StartOutcome::Home {
+                        credential,
+                        cached,
+                        session_notice,
+                    }) => {
+                        this.session_notice = session_notice.map(SharedString::from);
                         this.signed_in_with_oauth = credential.is_oauth();
                         this.oauth_scope = credential.scope().map(str::to_string);
                         this.source = Some(TimelineSource::Home);
@@ -764,6 +809,10 @@ impl TimelineView {
                     // `offers_reauthorize` stop offering the button right
                     // after a successful re-authorization.
                     this.oauth_scope.clone_from(&tokens.scope);
+                    // #54: a fresh sign-in fixes whatever the banner was
+                    // reporting — an expired session can't stay expired past
+                    // a brand-new one.
+                    this.session_notice = None;
                     // #11: a stored OAuth session always maps to the home
                     // timeline — see `TimelineSource::for_credential`.
                     this.source = Some(TimelineSource::Home);
@@ -1327,6 +1376,13 @@ impl Render for TimelineView {
             .text_color(rgb(theme.text))
             .text_sm()
             .child(self.header(cx))
+            // #54: shown regardless of `state` — the whole defect this
+            // fixes is a timeline that renders as if nothing happened, so
+            // this banner has to survive independently of whatever `body`
+            // below is currently showing.
+            .when_some(self.session_notice.clone(), |column, message| {
+                column.child(session_notice_banner(message, theme))
+            })
             // #14: posting requires OAuth regardless of scope — a missing
             // `tweet.write` scope is caught inside `submit_post` itself
             // (with the header's "Re-authorize" button as the fix), rather
@@ -1369,6 +1425,23 @@ fn notice(message: impl Into<SharedString>, color: u32) -> impl IntoElement {
         .py_3()
         .text_color(rgb(color))
         .child(message.into())
+}
+
+/// The persistent "your session expired" banner (#54): a distinct row
+/// between the header and everything else, rather than folded into
+/// [`TimelineView::body`]'s `state`-keyed match — the whole point is that it
+/// has to keep showing even while `body` renders a perfectly normal loaded
+/// timeline (on the bearer-token fallback), which is exactly the state #54
+/// was filed from.
+fn session_notice_banner(message: SharedString, theme: Theme) -> impl IntoElement {
+    div()
+        .px_4()
+        .py_2()
+        .bg(rgb(theme.bg_header))
+        .border_b_1()
+        .border_color(rgb(theme.border))
+        .text_color(rgb(theme.danger))
+        .child(message)
 }
 
 /// `@name`, or nothing at all when the author was missing from the expansion —
