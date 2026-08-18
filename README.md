@@ -379,17 +379,15 @@ and Enter inserts a newline rather than submitting — only the "Post" button
 does that.
 
 **Character counting.** X's 280-character limit is enforced client-side
-before anything is sent, using an approximation of X's own "weighted
-length" — not the exact `twitter-text` algorithm. Any `http://`/`https://`
-token counts as a flat 23 regardless of its real length (matching X's
-own link-shortening), and characters in the common CJK/hangul/fullwidth
-Unicode blocks count double; everything else counts as one character per
-codepoint. This does not reproduce every range `twitter-text` weights
-doubly (a few rarer supplementary-plane CJK extensions and symbol blocks
-are left out), but it never *undercounts* relative to a plain character
-count, so the one thing this exists to prevent — spending a request on a
-post X will reject outright — still holds; the gap can only make it stop a
-draft earlier than X's own counter would, never later.
+before anything is sent, using X's own "weighted length" rule (per the
+open-source `twitter-text` library): any `http://`/`https://` token counts
+as a flat 23 regardless of its real length (matching X's own
+link-shortening), and every codepoint counts as 1 if it falls in a short
+list of "low weight" ranges (plain ASCII, Latin-1, the rest of Latin
+Extended/Greek/Cyrillic, and a few punctuation ranges) or 2 otherwise —
+CJK ideographs, hangul, hiragana/katakana (fullwidth and halfwidth alike),
+fullwidth forms, emoji, and everything else not on the low-weight list
+(#61).
 
 **Double submission.** The submit button is only clickable at all while
 there's something postable and nothing already in flight; a click sets the
