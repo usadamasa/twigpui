@@ -346,6 +346,19 @@ pub(crate) struct TimelineView {
     /// reload) cancels whatever was still downloading, which the next call
     /// re-collects from the new timeline anyway.
     avatar_fetch: Option<Task<()>>,
+    /// The post whose delete confirmation is currently showing (#72), if
+    /// any. One at a time: a second "Delete" click elsewhere moves the
+    /// prompt rather than opening two. `None` means no row is asking.
+    ///
+    /// A two-step click rather than a modal because deleting is
+    /// irreversible and this app has no dialog machinery — what matters is
+    /// that no single click can destroy a post, which this guarantees.
+    pending_delete: Option<String>,
+    /// Holds an in-flight delete alive (#72).
+    delete_task: Option<Task<()>>,
+    /// Why the last delete failed (#72), shown on the row that asked.
+    /// Keyed by post id so a failure stays attached to its own row.
+    delete_failures: HashMap<String, String>,
     open_task: Option<Task<()>>,
     /// Why the last open attempt failed (#70), shown in the header until
     /// the next attempt clears it. `None` is the ordinary case — a
@@ -416,6 +429,9 @@ impl TimelineView {
             like_tasks: HashMap::new(),
             avatar_paths: HashMap::new(),
             avatar_fetch: None,
+            pending_delete: None,
+            delete_task: None,
+            delete_failures: HashMap::new(),
             open_task: None,
             open_failure: None,
         };
@@ -1132,6 +1148,129 @@ impl TimelineView {
         }
     }
 
+    /// Ask for confirmation before deleting `post_id` (#72) — the first
+    /// click of the two-step. Replaces any other row's pending prompt, so
+    /// only one post is ever a click away from being deleted.
+    fn ask_to_delete(&mut self, post_id: String, cx: &mut Context<'_, Self>) {
+        self.delete_failures.remove(&post_id);
+        self.pending_delete = Some(post_id);
+        cx.notify();
+    }
+
+    /// Dismiss the delete prompt without deleting anything (#72).
+    fn cancel_delete(&mut self, cx: &mut Context<'_, Self>) {
+        self.pending_delete = None;
+        cx.notify();
+    }
+
+    /// Delete `post_id` for real (#72) — the second click.
+    ///
+    /// On success the post is dropped from the rendered timeline *and* from
+    /// the cache file, and the cache is read back to confirm: a row that
+    /// vanishes now and returns on the next start is exactly the
+    /// looks-like-it-worked failure #54 was about, and the issue calls it
+    /// out by name.
+    ///
+    /// A failed delete leaves the row in place with the API's own message
+    /// attached, which is the honest outcome — the post still exists.
+    fn confirm_delete(&mut self, post_id: String, cx: &mut Context<'_, Self>) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        let Some(user_id) = self.home_user_id.clone() else {
+            return;
+        };
+        let home = matches!(self.source, Some(TimelineSource::Home));
+
+        self.pending_delete = None;
+        cx.notify();
+
+        let paths = self.paths.clone();
+        let request_id = post_id.clone();
+
+        self.delete_task = Some(cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    client.delete_post(&paths, &request_id, oauth::unix_now())?;
+                    // Only once X has confirmed the deletion: forgetting it
+                    // locally first would hide a post that still exists.
+                    cache::forget_post(&paths, home, &user_id, &request_id, oauth::unix_now())
+                })
+                .await;
+
+            let _ = this.update(cx, |this, cx| {
+                this.refresh_usage(cx);
+                match result {
+                    Ok(remaining) => {
+                        this.delete_failures.remove(&post_id);
+                        this.state = TimelineState::Loaded(remaining);
+                    }
+                    Err(error) => {
+                        this.delete_failures
+                            .insert(post_id.clone(), format!("{error:#}"));
+                    }
+                }
+                cx.notify();
+            });
+        }));
+    }
+
+    /// The delete affordance for one post (#72): "Delete", or the
+    /// confirmation pair once it has been clicked, plus whatever the last
+    /// attempt failed with.
+    fn delete_row(&self, item: &TimelineItem, cx: &mut Context<'_, Self>) -> AnyElement {
+        let theme = self.theme;
+        let asking = self.pending_delete.as_deref() == Some(item.id.as_str());
+
+        let controls = if asking {
+            let confirm_id = item.id.clone();
+            div()
+                .flex()
+                .gap_3()
+                .child(
+                    div()
+                        .id(SharedString::from(format!("delete-confirm-{}", item.id)))
+                        .text_color(rgb(theme.danger))
+                        .child("Delete permanently")
+                        .on_click(cx.listener(move |this, _event, _window, cx| {
+                            this.confirm_delete(confirm_id.clone(), cx);
+                        })),
+                )
+                .child(
+                    div()
+                        .id(SharedString::from(format!("delete-cancel-{}", item.id)))
+                        .text_color(rgb(theme.text_muted))
+                        .child("Cancel")
+                        .on_click(cx.listener(|this, _event, _window, cx| {
+                            this.cancel_delete(cx);
+                        })),
+                )
+        } else {
+            let ask_id = item.id.clone();
+            div().child(
+                div()
+                    .id(SharedString::from(format!("delete-{}", item.id)))
+                    .text_color(rgb(theme.text_muted))
+                    .child("Delete")
+                    .on_click(cx.listener(move |this, _event, _window, cx| {
+                        this.ask_to_delete(ask_id.clone(), cx);
+                    })),
+            )
+        };
+
+        match self.delete_failures.get(&item.id) {
+            Some(message) => div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(div().text_color(rgb(theme.danger)).child(message.clone()))
+                .child(controls)
+                .into_any_element(),
+            None => controls.into_any_element(),
+        }
+    }
+
     /// Hand `url` to the system browser (#70).
     ///
     /// Runs on the background executor rather than in the click handler:
@@ -1803,6 +1942,16 @@ impl TimelineView {
             .when(offers_reply(self.signed_in_with_oauth, item), |column| {
                 column.child(reply_row(item, theme, cx))
             })
+            // #72: delete — own posts only, and never in one click.
+            .when(
+                offers_delete(
+                    self.signed_in_with_oauth,
+                    self.home_user_id.as_deref(),
+                    self.home_username.as_deref(),
+                    item,
+                ),
+                |column| column.child(self.delete_row(item, cx)),
+            )
             // #68: like/unlike — see `offers_like`'s doc for which posts
             // get one. Unlike repost, this is offered on one's own posts.
             .when(
@@ -2591,6 +2740,31 @@ fn reply_row(item: &TimelineItem, theme: Theme, cx: &mut Context<'_, TimelineVie
         .into_any_element()
 }
 
+/// Whether post `item` should offer a delete affordance (#72).
+///
+/// Own posts only — X rejects deleting anyone else's, and [`is_own_post`]
+/// already answers that question for #15. Requires a resolved
+/// `home_user_id` for the same reason the other write actions do: without
+/// `/me` the app does not yet know whose posts these are.
+///
+/// **Withheld on a repost row**, unlike every other action since #52. A
+/// repost row displays someone's original post; `is_own_post` compares
+/// against that original's author, so a repost of your own post would
+/// otherwise offer to delete the original from a row the user is reading
+/// as "my repost". Removing a repost is [`offers_repost`]'s toggle, and
+/// conflating the two on an irreversible action is not a risk worth taking.
+fn offers_delete(
+    signed_in_with_oauth: bool,
+    home_user_id: Option<&str>,
+    home_username: Option<&str>,
+    item: &TimelineItem,
+) -> bool {
+    signed_in_with_oauth
+        && home_user_id.is_some()
+        && item.reposted_by.is_none()
+        && is_own_post(home_username, &item.author_username)
+}
+
 /// Whether post `item` should offer a "Reply" action (#71).
 ///
 /// Requires the composer to be reachable at all — `signed_in_with_oauth`,
@@ -2998,12 +3172,12 @@ mod tests {
         RepliedTo, Theme, ThreadFetchState, TimelineItem, TimelineSource, TimelineState,
         ToggleState, action_post_id, at_the_post_cap, avatar_initial, byline,
         compose_error_message, cooldown_label, cooldown_tick, format_timestamp, header_title,
-        is_own_post, like_action_label, metrics_label, offers_like, offers_load_older,
-        offers_quote, offers_reauthorize, offers_reply, offers_repost, offers_sign_in,
-        post_permalink, profile_url, rate_limit, reload_cooldown, reload_failure_outcome,
-        reload_gate, reload_start_state, reply_banner_label, reply_target_label,
-        repost_action_label, repost_banner_label, thread_action_label, usage, usage_color,
-        usage_label,
+        is_own_post, like_action_label, metrics_label, offers_delete, offers_like,
+        offers_load_older, offers_quote, offers_reauthorize, offers_reply, offers_repost,
+        offers_sign_in, post_permalink, profile_url, rate_limit, reload_cooldown,
+        reload_failure_outcome, reload_gate, reload_start_state, reply_banner_label,
+        reply_target_label, repost_action_label, repost_banner_label, thread_action_label, usage,
+        usage_color, usage_label,
     };
 
     fn item_with(id: &str, author_username: &str, reposted_by: Option<&str>) -> TimelineItem {
@@ -3230,6 +3404,72 @@ mod tests {
         let mut item = item_with(row_id, original_author, Some("bob"));
         item.original_post_id = Some(original_id.to_string());
         item
+    }
+
+    // --- #72: delete ---
+
+    #[test]
+    fn offers_delete_on_ones_own_post() {
+        assert!(offers_delete(
+            true,
+            Some("me-id"),
+            Some("bob"),
+            &item_with("1", "bob", None)
+        ));
+    }
+
+    #[test]
+    fn does_not_offer_delete_on_someone_elses_post() {
+        // X rejects it, and this is irreversible — no reason to offer a
+        // click that can only fail.
+        assert!(!offers_delete(
+            true,
+            Some("me-id"),
+            Some("bob"),
+            &item_with("1", "alice", None)
+        ));
+    }
+
+    #[test]
+    fn does_not_offer_delete_on_a_repost_row_even_of_ones_own_post() {
+        // Unlike every other action since #52, this one stays withheld: the
+        // row reads as "my repost", but the delete would destroy the
+        // original. Removing a repost is the repost toggle's job.
+        let mut item = item_with("activity-id", "bob", Some("bob"));
+        item.original_post_id = Some("original-id".to_string());
+        assert!(!offers_delete(true, Some("me-id"), Some("bob"), &item));
+    }
+
+    #[test]
+    fn does_not_offer_delete_before_the_signed_in_id_resolves() {
+        assert!(!offers_delete(
+            true,
+            None,
+            Some("bob"),
+            &item_with("1", "bob", None)
+        ));
+    }
+
+    #[test]
+    fn does_not_offer_delete_before_the_signed_in_handle_resolves() {
+        // `is_own_post` treats an unresolved handle as "not mine", which is
+        // the safe direction for an irreversible action.
+        assert!(!offers_delete(
+            true,
+            Some("me-id"),
+            None,
+            &item_with("1", "bob", None)
+        ));
+    }
+
+    #[test]
+    fn does_not_offer_delete_without_an_oauth_session() {
+        assert!(!offers_delete(
+            false,
+            Some("me-id"),
+            Some("bob"),
+            &item_with("1", "bob", None)
+        ));
     }
 
     // --- #71: reply ---

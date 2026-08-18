@@ -429,6 +429,34 @@ client-side either.
 **Quoting a repost row quotes the original** (#52) — which is also the text
 and author the quote card would show, since that is what the row renders.
 
+## Deleting your own posts (#72)
+
+Your own posts show a "Delete" action; nobody else's does, since X rejects
+deleting someone else's and there is no point spending a request that can
+only fail.
+
+**Deleting takes two clicks, never one.** "Delete" replaces itself with
+"Delete permanently" / "Cancel". The action is irreversible, so no single
+click can destroy a post. Only one row can be asking at a time — clicking
+"Delete" elsewhere moves the prompt rather than opening a second one.
+
+**It leaves the cache too.** A post deleted from X but left in
+`timeline-<id>.json` disappears from the window and comes back on the next
+start: the app looking like it worked when it didn't. So a successful
+delete rewrites the cache file and then **reads it back**, rendering what is
+actually on disk rather than what was just written. The local cache is only
+touched after X has confirmed the deletion — forgetting it first would hide
+a post that still exists.
+
+**A repost row gets no Delete**, unlike every other action since #52. Such
+a row displays someone's original post, so on a repost of your *own* post
+the delete would destroy the original from a row that reads as "my repost".
+Removing a repost is the repost toggle's job (#15), and conflating the two
+on an irreversible action is not worth the risk.
+
+`DELETE /2/tweets/:id`, `tweet.write` scope, one request, counted as spend
+like every other write.
+
 ## Replying (#71)
 
 Every post shows a "Reply" action. Clicking it sets the composer's target
@@ -612,7 +640,8 @@ explicit action — there is no polling or auto-refresh, and since #9,
 local cache below whenever one exists, with no request in the loop.
 
 Reposting spends one request; un-reposting spends one more. Liking and
-unliking (#68) cost the same, one request each.
+unliking (#68) cost the same, one request each, and so does deleting a post
+(#72).
 
 When credits run out the API answers `429` with a `UsageCapExceeded` problem
 body; the app surfaces that text directly in the window.

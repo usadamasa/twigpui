@@ -235,6 +235,10 @@ pub(crate) enum Endpoint {
     /// `DELETE /2/users/:id/likes/:tweet_id` (#68) — unliking. See
     /// `CreateLike`'s doc.
     DeleteLike,
+    /// `DELETE /2/tweets/:id` (#72) — deleting one's own post. Its own
+    /// bucket for the reason every write endpoint has one: X limits each
+    /// separately, and #18 has to count this as spend like any other.
+    DeletePost,
 }
 
 impl Endpoint {
@@ -247,7 +251,7 @@ impl Endpoint {
     /// failure #18 exists to prevent. `CreatePost` was missing here until
     /// #50; the test below now fails to compile rather than silently pass if
     /// a new variant is left out again.
-    pub(crate) const ALL: [Self; 10] = [
+    pub(crate) const ALL: [Self; 11] = [
         Self::UserLookup,
         Self::Timeline,
         Self::Me,
@@ -258,6 +262,7 @@ impl Endpoint {
         Self::DeleteRepost,
         Self::CreateLike,
         Self::DeleteLike,
+        Self::DeletePost,
     ];
 
     /// `pub(crate)` rather than private (unlike before #18): `usage.rs`
@@ -275,6 +280,7 @@ impl Endpoint {
             Self::DeleteRepost => "delete_repost",
             Self::CreateLike => "create_like",
             Self::DeleteLike => "delete_like",
+            Self::DeletePost => "delete_post",
         }
     }
 }
@@ -773,6 +779,7 @@ mod tests {
             Endpoint::DeleteRepost,
             Endpoint::CreateLike,
             Endpoint::DeleteLike,
+            Endpoint::DeletePost,
         ];
         for endpoint in every {
             match endpoint {
@@ -785,7 +792,8 @@ mod tests {
                 | Endpoint::CreateRepost
                 | Endpoint::DeleteRepost
                 | Endpoint::CreateLike
-                | Endpoint::DeleteLike => {}
+                | Endpoint::DeleteLike
+                | Endpoint::DeletePost => {}
             }
             assert!(
                 Endpoint::ALL.contains(&endpoint),
