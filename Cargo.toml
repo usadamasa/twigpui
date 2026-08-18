@@ -41,3 +41,16 @@ serde_json = "1.0.151"
 sha2 = "0.11.0"
 toml = "1.1.4"
 ureq = { version = "3.4.0", features = ["json"] }
+
+# Only the startup smoke test (#59) needs this. `test-support` brings in
+# `TestAppContext`, whose window implementation draws to nothing
+# (`TestWindow::draw` is a no-op in gpui's `platform/test/window.rs`), so a
+# test can open a window and render a frame without a GPU or the window
+# server. That path is what `cargo test` never covered before, and it is
+# where #55 hid: a panic reachable only once something actually renders.
+[dev-dependencies]
+gpui = { version = "0.2.2", default-features = false, features = [
+    "font-kit",
+    "macos-blade",
+    "test-support",
+] }
