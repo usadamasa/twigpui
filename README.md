@@ -77,6 +77,38 @@ credentials without opening a window:
 cargo run -- --fetch-only
 ```
 
+**Fetching one specific post: `--fetch-post` (#42).** Sometimes what's
+wanted isn't the timeline at all, but a single post referenced from
+elsewhere — e.g. so a Claude Code session can read a post's text, since
+`x.com` itself returns 402 to `WebFetch` and a human would otherwise have to
+paste the text in by hand. `--fetch-post` takes a post id, a full status URL
+(`https://x.com/<user>/status/<id>` or the `twitter.com` alias), or a
+comma-separated list of either, and prints the fetched post(s) as JSON to
+stdout — no window, no human-readable mode, since the point is a tool
+reading the output, the same reasoning `--usage` already applies to its own
+output:
+
+```sh
+cargo run -- --fetch-post 1700000000000000001
+cargo run -- --fetch-post https://x.com/jack/status/20
+cargo run -- --fetch-post 20,30,40
+```
+
+Every id goes into a single `GET /2/tweets?ids=` request — X's own query
+parameter already accepts a comma-separated list, so fetching several posts
+at once still costs exactly **one** request, reported on stderr along with
+how many of the requested ids actually came back (a missing one is usually
+deleted or protected). Each printed post carries the same repost/quote/reply
+context (`reposted_by`/`quoted`/`replied_to`) the timeline itself joins in
+(#12, #13), at no extra request cost.
+
+`--fetch-post` never touches the timeline cache (#9) — nothing is read from
+it, nothing is written to it. That cache exists to avoid re-fetching the
+same account's timeline on every reload, a repeated-access pattern an
+arbitrary post id doesn't share: it's typically looked up once, from
+wherever it was linked, so the simplest defensible choice is to always spend
+the one request and never persist the result.
+
 ## Requirements
 
 The `macos-blade` feature is enabled so the build does not need `xcrun metal`,
@@ -585,6 +617,10 @@ local cache below whenever one exists, with no request in the loop.
 
 Reposting spends one request; un-reposting spends one more. Liking and
 unliking (#68) cost the same, one request each.
+
+`--fetch-post` (#42) spends exactly one request per run, however many post
+ids are given — they all ride in a single `GET /2/tweets?ids=` request's
+comma-separated `ids=` parameter, never one request per id.
 
 When credits run out the API answers `429` with a `UsageCapExceeded` problem
 body; the app surfaces that text directly in the window.
