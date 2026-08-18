@@ -17,7 +17,7 @@ use crate::repost::{self, RepostState, RepostStatus};
 use crate::theme::{self, Theme};
 use crate::thread::{self, ThreadChain};
 use crate::usage;
-use crate::x_api::{QuotedPost, RepliedTo, TimelineItem, XClient};
+use crate::x_api::{PostMetrics, QuotedPost, RepliedTo, TimelineItem, XClient};
 
 /// What's known about one reply's "Show thread" walk (#12), keyed by the
 /// reply's own post id in [`TimelineView::threads`]. Absent from that map
@@ -1444,6 +1444,14 @@ impl TimelineView {
                     ),
             )
             .child(div().child(item.text.clone()))
+            // #67: reply/repost/like counts, muted and only when there is
+            // something to show. They ride along in the timeline response,
+            // so this costs no extra request — but they are a snapshot from
+            // when the row was fetched (see `x_api::model::PostMetrics`).
+            .when_some(
+                item.metrics.as_ref().and_then(metrics_label),
+                |column, label| column.child(div().text_color(rgb(theme.text_muted)).child(label)),
+            )
             // #13: a quote (including a repost of a quote) embeds its source
             // as a bordered card under the text.
             .when_some(item.quoted.as_ref(), |column, quoted| {
@@ -2288,6 +2296,60 @@ fn cooldown_tick(notice: Option<&ReloadNotice>, now: i64) -> CooldownTick {
     }
 }
 
+/// The engagement line shown under a post's body (#67), or `None` when the
+/// post has no engagement at all — three zeros on every fresh post would be
+/// noise, and #67 asks for counts that stay out of the way.
+///
+/// Zero counts are dropped individually for the same reason, so a post with
+/// only likes reads "3 likes" rather than "0 replies · 0 reposts · 3 likes".
+fn metrics_label(metrics: &PostMetrics) -> Option<String> {
+    let parts: Vec<String> = [
+        (metrics.replies, "reply", "replies"),
+        (metrics.reposts, "repost", "reposts"),
+        (metrics.likes, "like", "likes"),
+    ]
+    .into_iter()
+    .filter(|(count, _, _)| *count > 0)
+    .map(|(count, singular, plural)| {
+        let noun = if count == 1 { singular } else { plural };
+        format!("{} {noun}", compact_count(count))
+    })
+    .collect();
+
+    if parts.is_empty() {
+        return None;
+    }
+    Some(parts.join(" · "))
+}
+
+/// Abbreviate a count the way X's own UI does — `12345` becomes `12.3K` —
+/// so a popular post cannot push the timestamp and byline around by being
+/// seven digits wide. A trailing `.0` is dropped (`1000` is `1K`, not
+/// `1.0K`); below 1000 the number is shown as-is.
+fn compact_count(count: u64) -> String {
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "an abbreviated count is approximate by construction"
+    )]
+    fn scaled(count: u64, unit: u64, suffix: char) -> String {
+        let value = count as f64 / unit as f64;
+        // One decimal, truncated rather than rounded, so the label never
+        // claims more engagement than the post actually has.
+        let tenths = (value * 10.0).floor() / 10.0;
+        if (tenths.fract()).abs() < f64::EPSILON {
+            format!("{}{suffix}", tenths.trunc())
+        } else {
+            format!("{tenths:.1}{suffix}")
+        }
+    }
+
+    match count {
+        0..1_000 => count.to_string(),
+        1_000..1_000_000 => scaled(count, 1_000, 'K'),
+        _ => scaled(count, 1_000_000, 'M'),
+    }
+}
+
 /// Turn `2026-08-16T09:00:00.000Z` into `2026-08-16 09:00`.
 ///
 /// The API always returns UTC in RFC 3339, so slicing beats pulling in a date
@@ -2305,13 +2367,14 @@ fn format_timestamp(created_at: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        ComposeStatus, Cooldown, CooldownTick, ReloadNotice, ReloadTrigger, RepliedTo, RepostState,
-        Theme, ThreadFetchState, TimelineItem, TimelineSource, TimelineState, at_the_post_cap,
-        byline, compose_error_message, cooldown_label, cooldown_tick, format_timestamp,
-        header_title, is_own_post, offers_load_older, offers_quote, offers_reauthorize,
-        offers_repost, offers_sign_in, rate_limit, reload_cooldown, reload_failure_outcome,
-        reload_gate, reload_start_state, reply_banner_label, repost_action_label,
-        repost_banner_label, thread_action_label, usage, usage_color, usage_label,
+        ComposeStatus, Cooldown, CooldownTick, PostMetrics, ReloadNotice, ReloadTrigger, RepliedTo,
+        RepostState, Theme, ThreadFetchState, TimelineItem, TimelineSource, TimelineState,
+        at_the_post_cap, byline, compose_error_message, cooldown_label, cooldown_tick,
+        format_timestamp, header_title, is_own_post, metrics_label, offers_load_older,
+        offers_quote, offers_reauthorize, offers_repost, offers_sign_in, rate_limit,
+        reload_cooldown, reload_failure_outcome, reload_gate, reload_start_state,
+        reply_banner_label, repost_action_label, repost_banner_label, thread_action_label, usage,
+        usage_color, usage_label,
     };
 
     fn item_with(id: &str, author_username: &str, reposted_by: Option<&str>) -> TimelineItem {
@@ -2324,7 +2387,69 @@ mod tests {
             reposted_by: reposted_by.map(str::to_string),
             quoted: None,
             replied_to: None,
+            metrics: None,
         }
+    }
+
+    #[test]
+    fn metrics_label_lists_replies_reposts_and_likes() {
+        assert_eq!(
+            metrics_label(&PostMetrics {
+                replies: 12,
+                reposts: 34,
+                likes: 56,
+            })
+            .as_deref(),
+            Some("12 replies · 34 reposts · 56 likes")
+        );
+    }
+
+    #[test]
+    fn metrics_label_omits_the_counts_that_are_zero() {
+        // #67: a row that only got likes should say so, not carry two zeros
+        // along for the ride.
+        assert_eq!(
+            metrics_label(&PostMetrics {
+                replies: 0,
+                reposts: 0,
+                likes: 3,
+            })
+            .as_deref(),
+            Some("3 likes")
+        );
+    }
+
+    #[test]
+    fn metrics_label_is_singular_for_one() {
+        assert_eq!(
+            metrics_label(&PostMetrics {
+                replies: 1,
+                reposts: 1,
+                likes: 1,
+            })
+            .as_deref(),
+            Some("1 reply · 1 repost · 1 like")
+        );
+    }
+
+    #[test]
+    fn metrics_label_is_absent_when_nothing_has_happened_yet() {
+        // A post with no engagement gets no line at all — three zeros are
+        // noise on every fresh post in the timeline.
+        assert_eq!(metrics_label(&PostMetrics::default()), None);
+    }
+
+    #[test]
+    fn metrics_label_abbreviates_large_counts() {
+        assert_eq!(
+            metrics_label(&PostMetrics {
+                replies: 1000,
+                reposts: 12_345,
+                likes: 2_400_000,
+            })
+            .as_deref(),
+            Some("1K replies · 12.3K reposts · 2.4M likes")
+        );
     }
 
     #[test]
@@ -2491,6 +2616,7 @@ mod tests {
                 reposted_by: None,
                 quoted: None,
                 replied_to: None,
+                metrics: None,
             })
             .collect();
         let state = TimelineState::Loaded(full);
@@ -3071,6 +3197,34 @@ mod tests {
         .unwrap();
 
         cx.run_until_parked();
+
+        // Give the body a post to draw. An empty timeline renders none of
+        // `post_row`, so without this the walk below never reaches the
+        // banners, the quote card, the action buttons or #67's metrics line
+        // -- exactly the kind of blind spot #59 was written to close. It has
+        // to happen *after* the startup task settles: that task ends by
+        // assigning `state` itself (`NotAuthenticated`, with no credential
+        // configured here) and would otherwise wipe this.
+        cx.update(|cx| {
+            timeline.update(cx, |view, cx| {
+                view.state = TimelineState::Loaded(vec![TimelineItem {
+                    id: "1700000000000000001".to_string(),
+                    text: "a rendered post".to_string(),
+                    created_at: Some("2026-08-16T09:00:00.000Z".to_string()),
+                    author_name: "Developers".to_string(),
+                    author_username: "XDevelopers".to_string(),
+                    reposted_by: None,
+                    quoted: None,
+                    replied_to: None,
+                    metrics: Some(PostMetrics {
+                        replies: 12,
+                        reposts: 34,
+                        likes: 5600,
+                    }),
+                }]);
+                cx.notify();
+            });
+        });
 
         // Opening a window is not enough: nothing has rendered yet, and the
         // panic #55 is about only fires once the element tree is walked.
