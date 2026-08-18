@@ -428,20 +428,13 @@ reverts to an ordinary post; submitting from there sends no
 doesn't reject quoting your own post, so twigpui doesn't check for it
 client-side either.
 
-**Which posts don't get one.** A post that is itself already a repost in
-your timeline doesn't offer "Quote", for the same reason it doesn't offer
-"Repost" (see "Which posts don't get a button" under "Reposting" below):
-its own post id is the retweet activity's, not the original content's, and
-`quote_tweet_id` needs the original. twigpui doesn't currently resolve that
-original id for a displayed repost row (#52 tracks fixing that for both
-buttons together), so it withholds the action there rather than risk
-quoting the wrong post. Quoting the original post directly, wherever else
-it appears in the timeline, is unaffected.
+**Quoting a repost row quotes the original** (#52) — which is also the text
+and author the quote card would show, since that is what the row renders.
 
 ## Reposting and un-reposting (#15)
 
-Most posts show a "Repost" / "Reposted" toggle — see "Which posts don't get
-one" below for the two exceptions. Clicking "Repost" sends
+Every post but your own shows a "Repost" / "Reposted" toggle — see "Which
+posts don't get a button" below. Clicking "Repost" sends
 `POST /2/users/:id/retweets`; clicking "Reposted" (to undo it) sends
 `DELETE /2/users/:id/retweets/:source_tweet_id`. The button flips
 immediately on click — optimistic update, no waiting on the network to see
@@ -479,14 +472,17 @@ click and shows the message, offering a retry.
 
 **Which posts don't get a button.** Your own posts don't — the API rejects
 reposting yourself, and twigpui checks this client-side first rather than
-spending a guaranteed-failing request. A post that is itself already a
-repost in your timeline doesn't either: it renders with the *original*
-post's text and author (see "Reposts and quotes are expanded" above), but
-its own post id is still the retweet activity's, not the original content's
-— and the repost endpoints act on the original. twigpui doesn't currently
-resolve that original id for a displayed repost row, so it withholds the
-button there rather than risk sending the wrong id. Reposting the original
-post directly, wherever else it appears in the timeline, is unaffected.
+spending a guaranteed-failing request. For a repost row that check looks at
+the *original* author, since that is whose post would actually be reposted.
+
+**Repost rows are operable (#52).** A row that is itself a repost renders
+with the original post's text and author, but its own post id is the
+retweet activity's, not the original content's — and every write endpoint
+acts on the original. `TimelineItem` now carries that original id,
+populated from the same `referenced_tweets` reference the expansion already
+used, so Repost, Quote and Like all work on a repost row and send the right
+id. Before this they were withheld there, which mattered: a home timeline
+is mostly reposts.
 
 ## Author avatars (#64)
 
@@ -576,10 +572,6 @@ the `like.write` scope, which X grants separately from `tweet.write`: a
 session authorized before #68 can post and repost but not like, and the
 header's "Re-authorize" button (#14) is what fixes it. Re-running the
 sign-in flow requests every scope at once.
-
-A post that is itself a repost in your timeline gets no Like button, for
-exactly the reason it gets no Repost button — its own post id is the
-retweet activity's, not the original content's (#52).
 
 ## API cost
 
