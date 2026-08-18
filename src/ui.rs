@@ -23,7 +23,7 @@ use crate::thread::{self, ThreadChain};
 use crate::toggle::{ToggleState, ToggleStatus};
 use crate::usage;
 use crate::x_api::{
-    PostLink, PostMetrics, QuotedPost, RepliedTo, TimelineItem, XClient, action_post_id,
+    Draft, PostLink, PostMetrics, QuotedPost, RepliedTo, TimelineItem, XClient, action_post_id,
 };
 
 /// What's known about one reply's "Show thread" walk (#12), keyed by the
@@ -1369,6 +1369,41 @@ impl TimelineView {
             )
     }
 
+    /// The reply target shown inside the composer, if `compose.reply()` has
+    /// one (#71).
+    ///
+    /// Uses the same [`quote_card`] rendering as a quote target, with an
+    /// explicit "Replying to" heading above it — the card alone cannot say
+    /// which of the two a draft is, and the difference is not visible after
+    /// the fact: a reply lands under a conversation, a quote does not.
+    fn composer_reply_card(
+        &self,
+        target: &compose::ReplyTarget,
+        cx: &mut Context<'_, Self>,
+    ) -> impl IntoElement {
+        let theme = self.theme;
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(
+                div()
+                    .text_color(rgb(theme.text_muted))
+                    .child(reply_target_label(&target.replying_to.author_username)),
+            )
+            .child(quote_card(&target.replying_to, theme))
+            .child(
+                div()
+                    .id("compose-remove-reply")
+                    .text_color(rgb(theme.accent))
+                    .child("Remove reply")
+                    .on_click(cx.listener(|this, _event, _window, cx| {
+                        this.compose.clear_reply();
+                        cx.notify();
+                    })),
+            )
+    }
+
     /// The post composer (#14): a real text input (#38), character counter,
     /// and submit button. Shown whenever the session is signed in with
     /// OAuth — see [`Render::render`]'s doc on why a missing `tweet.write`
@@ -1403,6 +1438,11 @@ impl TimelineView {
             // `composer_quote_card`'s doc.
             .when_some(self.compose.quote(), |column, target| {
                 column.child(self.composer_quote_card(target, cx))
+            })
+            // #71: the reply target, when "Reply" set one. Never both — see
+            // `ComposeState::set_reply`.
+            .when_some(self.compose.reply(), |column, target| {
+                column.child(self.composer_reply_card(target, cx))
             })
             .when_some(
                 compose_error_message(self.compose.status()),
@@ -1503,12 +1543,23 @@ impl TimelineView {
         // out before the closure below moves `self.compose` implicitly via
         // `apply_result`'s mutation, same as `text` above.
         let quote_tweet_id = self.compose.quote().map(|target| target.post_id.clone());
+        // #71: the post this reply answers, if "Reply" set one. Mutually
+        // exclusive with the quote above — see `ComposeState::set_reply`.
+        let reply_to_post_id = self.compose.reply().map(|target| target.post_id.clone());
 
         self.submit_task = Some(cx.spawn_in(window, async move |this, cx| {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    client.create_post(&paths, &text, quote_tweet_id.as_deref(), oauth::unix_now())
+                    client.create_post(
+                        &paths,
+                        Draft {
+                            text: &text,
+                            quote_tweet_id: quote_tweet_id.as_deref(),
+                            reply_to_post_id: reply_to_post_id.as_deref(),
+                        },
+                        oauth::unix_now(),
+                    )
                 })
                 .await;
 
@@ -1746,6 +1797,11 @@ impl TimelineView {
             // `offers_repost` withholds its own button).
             .when(offers_quote(self.signed_in_with_oauth, item), |column| {
                 column.child(quote_row(item, theme, cx))
+            })
+            // #71: "Reply" — sets the composer's target; nothing is sent
+            // until the draft is submitted.
+            .when(offers_reply(self.signed_in_with_oauth, item), |column| {
+                column.child(reply_row(item, theme, cx))
             })
             // #68: like/unlike — see `offers_like`'s doc for which posts
             // get one. Unlike repost, this is offered on one's own posts.
@@ -2505,6 +2561,57 @@ fn link_row(links: &[PostLink], theme: Theme, cx: &mut Context<'_, TimelineView>
     row.into_any_element()
 }
 
+/// The "Reply" action for one post (#71), rendered whenever
+/// [`offers_reply`] allows it.
+///
+/// Sets the composer's reply target and nothing else — no request goes out
+/// until the draft is submitted, mirroring how [`quote_row`] works. The id
+/// it carries is `action_post_id`'s (#52): replying from a repost row must
+/// answer the *original* post, or the reply lands under a different
+/// conversation entirely.
+fn reply_row(item: &TimelineItem, theme: Theme, cx: &mut Context<'_, TimelineView>) -> AnyElement {
+    let post_id = action_post_id(item).to_string();
+    let replying_to = QuotedPost {
+        author_name: item.author_name.clone(),
+        author_username: item.author_username.clone(),
+        text: item.text.clone(),
+    };
+
+    div()
+        .id(SharedString::from(format!("reply-{}", item.id)))
+        .text_color(rgb(theme.text_muted))
+        .child("Reply")
+        .on_click(cx.listener(move |this, _event, _window, cx| {
+            this.compose.set_reply(compose::ReplyTarget {
+                post_id: post_id.clone(),
+                replying_to: replying_to.clone(),
+            });
+            cx.notify();
+        }))
+        .into_any_element()
+}
+
+/// Whether post `item` should offer a "Reply" action (#71).
+///
+/// Requires the composer to be reachable at all — `signed_in_with_oauth`,
+/// the same gate [`offers_quote`] uses, since a reply has nowhere to go
+/// without one. Nothing else: X accepts a reply to your own post, and a
+/// repost row is fine now that #52 resolves it to the original.
+fn offers_reply(signed_in_with_oauth: bool, _item: &TimelineItem) -> bool {
+    signed_in_with_oauth
+}
+
+/// The composer's heading above a reply target (#71) — "Replying to
+/// @someone", or the handle-less form when the author never expanded,
+/// mirroring [`reply_banner_label`]'s own treatment of the same gap.
+fn reply_target_label(author_username: &str) -> String {
+    if author_username.is_empty() {
+        "Replying to a post".to_string()
+    } else {
+        format!("Replying to @{author_username}")
+    }
+}
+
 /// Whether post `item` should offer a "Quote" action (#16).
 ///
 /// Requires the composer to even be reachable — `signed_in_with_oauth`,
@@ -2892,10 +2999,11 @@ mod tests {
         ToggleState, action_post_id, at_the_post_cap, avatar_initial, byline,
         compose_error_message, cooldown_label, cooldown_tick, format_timestamp, header_title,
         is_own_post, like_action_label, metrics_label, offers_like, offers_load_older,
-        offers_quote, offers_reauthorize, offers_repost, offers_sign_in, post_permalink,
-        profile_url, rate_limit, reload_cooldown, reload_failure_outcome, reload_gate,
-        reload_start_state, reply_banner_label, repost_action_label, repost_banner_label,
-        thread_action_label, usage, usage_color, usage_label,
+        offers_quote, offers_reauthorize, offers_reply, offers_repost, offers_sign_in,
+        post_permalink, profile_url, rate_limit, reload_cooldown, reload_failure_outcome,
+        reload_gate, reload_start_state, reply_banner_label, reply_target_label,
+        repost_action_label, repost_banner_label, thread_action_label, usage, usage_color,
+        usage_label,
     };
 
     fn item_with(id: &str, author_username: &str, reposted_by: Option<&str>) -> TimelineItem {
@@ -3124,6 +3232,42 @@ mod tests {
         item
     }
 
+    // --- #71: reply ---
+
+    #[test]
+    fn offers_reply_once_signed_in_with_oauth() {
+        assert!(offers_reply(true, &item_with("1", "alice", None)));
+    }
+
+    #[test]
+    fn does_not_offer_reply_without_oauth() {
+        // The composer itself isn't reachable without OAuth — nowhere for a
+        // reply to go.
+        assert!(!offers_reply(false, &item_with("1", "alice", None)));
+    }
+
+    #[test]
+    fn offers_reply_on_ones_own_post() {
+        // X accepts replying to yourself, and self-threading is a normal
+        // way to write.
+        assert!(offers_reply(true, &item_with("1", "me", None)));
+    }
+
+    #[test]
+    fn reply_target_label_names_the_author() {
+        assert_eq!(
+            reply_target_label("XDevelopers"),
+            "Replying to @XDevelopers"
+        );
+    }
+
+    #[test]
+    fn reply_target_label_without_a_handle() {
+        // Same gap `reply_banner_label` already handles: an author who
+        // never expanded.
+        assert_eq!(reply_target_label(""), "Replying to a post");
+    }
+
     // --- #52: a repost row acts on the original ---
 
     #[test]
@@ -3165,6 +3309,16 @@ mod tests {
         // reposter's handle is irrelevant to what the API would reject.
         let item = repost_row_item("activity-id", "original-id", "bob");
         assert!(!offers_repost(true, Some("2244994945"), Some("bob"), &item));
+    }
+
+    #[test]
+    fn replying_from_a_repost_row_answers_the_original_post() {
+        // The trap #71 calls out: `in_reply_to_tweet_id` pointing at the
+        // retweet activity would hang the reply off a different
+        // conversation, and nothing about that failure is visible.
+        let item = repost_row_item("activity-id", "original-id", "alice");
+        assert_eq!(action_post_id(&item), "original-id");
+        assert!(offers_reply(true, &item));
     }
 
     #[test]
