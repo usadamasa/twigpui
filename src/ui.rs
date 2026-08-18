@@ -3005,4 +3005,80 @@ mod tests {
         deleting.start_toggle();
         assert_eq!(repost_action_label(&deleting), "Removing repost…");
     }
+
+    /// The startup path #55 fell straight through (#59).
+    ///
+    /// Everything below `cargo run` built and unit-tested clean, but nobody
+    /// had opened the window, so a panic that only fires once something
+    /// renders reached `main` untouched. gpui's test platform draws to
+    /// nothing (`TestWindow::draw` is a no-op), so this needs neither a GPU
+    /// nor the window server -- yet it still walks the same element tree the
+    /// real window would, which is exactly where `gpui_component`'s widgets
+    /// reach back up for the window root.
+    #[gpui::test]
+    fn the_window_root_renders_without_panicking(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext as _;
+
+        let home = std::env::temp_dir().join("twigpui-smoke");
+        let home = home.display().to_string();
+        let paths =
+            crate::paths::Paths::from_vars(move |key| (key == "HOME").then(|| home.clone()))
+                .unwrap();
+        let config = crate::config::Config {
+            bearer_token: None,
+            oauth_client_id: None,
+            target_username: "XDevelopers".to_string(),
+            max_results: 20,
+            min_fetch_interval_seconds: 60,
+            theme: crate::theme::ThemeMode::Light,
+            request_price: None,
+            daily_request_budget: None,
+        };
+
+        cx.update(gpui_component::init);
+
+        // Held so the composer's input can be focused below: `add_window`
+        // hands back a handle to the *root* view, which is deliberately the
+        // `Root` wrapper here, not the timeline inside it.
+        let timeline_slot = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let window = {
+            let slot = timeline_slot.clone();
+            cx.add_window(move |window, cx| {
+                let timeline = cx.new(|cx| {
+                    let mut view = super::TimelineView::new(config, paths, window, cx);
+                    // #55 hid behind this flag: the composer -- the one widget
+                    // that reaches back up for the window root -- is only
+                    // rendered for an OAuth session, so every run on a bearer
+                    // token missed it.
+                    view.signed_in_with_oauth = true;
+                    view
+                });
+                *slot.borrow_mut() = Some(timeline.clone());
+                // The line whose absence aborted the app at startup (#55).
+                gpui_component::Root::new(timeline, window, cx)
+            })
+        };
+        let timeline = timeline_slot.borrow().clone().unwrap();
+
+        // The composer only reaches for the window root once its input is
+        // focused, which is what the app does as soon as the user clicks it.
+        cx.update_window(window.into(), |_, window, cx| {
+            timeline.update(cx, |view, cx| {
+                view.compose_input
+                    .update(cx, |input, cx| input.focus(window, cx));
+            });
+        })
+        .unwrap();
+
+        cx.run_until_parked();
+
+        // Opening a window is not enough: nothing has rendered yet, and the
+        // panic #55 is about only fires once the element tree is walked.
+        for _ in 0..2 {
+            cx.update_window(window.into(), |_, window, cx| {
+                let _ = window.draw(cx);
+            })
+            .unwrap();
+        }
+    }
 }
