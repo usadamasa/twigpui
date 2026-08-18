@@ -25,28 +25,30 @@ pub(crate) const MAX_WEIGHTED_LENGTH: usize = 280;
 /// this length before counting it.
 const URL_WEIGHT: usize = 23;
 
-/// X's "weighted length" (per the open-source `twitter-text` library),
-/// approximated rather than reproduced exactly — see #14's design notes on
-/// why exact fidelity isn't the goal here. Two adjustments from a plain
-/// `chars().count()`:
+/// X's "weighted length" (per the open-source `twitter-text` library). Two
+/// adjustments from a plain `chars().count()`:
 ///
 /// - A whitespace-delimited token starting with `http://` or `https://`
 ///   counts as [`URL_WEIGHT`] regardless of its actual length.
-/// - A codepoint in one of the well-known "double-width" Unicode blocks —
-///   CJK ideographs, hiragana, katakana, hangul, and CJK/fullwidth
-///   punctuation and forms, see [`is_double_width`] — counts as 2;
-///   everything else (including whitespace) counts as 1.
+/// - A codepoint outside `twitter-text`'s "weight 1" ranges — see
+///   [`is_low_weight`] — counts as 2; everything inside them (plain ASCII,
+///   Latin-1, the rest of the Latin/Greek/Cyrillic block, and a few
+///   punctuation ranges) counts as 1.
 ///
-/// This does **not** reproduce `twitter-text`'s complete range table: it
-/// omits rarer supplementary-plane CJK extensions and a handful of symbol
-/// blocks, and it doesn't special-case `@mentions`/`#hashtags` the way X's
-/// own counter might for unrelated reasons. What matters for #14's actual
-/// goal — never spend a request on a post X will reject outright — is never
-/// *undercounting*: this implementation only ever adds weight relative to a
-/// plain character count (an unmodeled block still counts as at least 1,
-/// and a URL shorter than 23 characters gets rounded *up*, never down), so
-/// the gaps above can only make it stop the user *earlier* than X's real
-/// counter would, never later.
+/// #61: earlier versions of this function had the rule backwards — it
+/// listed the *double-width* blocks (CJK ideographs, hiragana/katakana,
+/// hangul, fullwidth forms, …) and treated everything unlisted as weight 1.
+/// That list was necessarily incomplete — it stopped at U+FF60 and missed
+/// halfwidth kana and halfwidth punctuation at U+FF61–U+FF9F, among other
+/// gaps — and every such gap was an *undercount*: a character
+/// `twitter-text` weighs 2 fell through to the unlisted default of 1, so
+/// this counter could tell a user a draft still fit when X would reject
+/// it. `twitter-text` itself defines the rule the other way around: a
+/// short, fixed list of ranges weighs 1, and *everything else* weighs 2.
+/// Mirroring that shape here — rather than the inverse — means any
+/// codepoint this function has never specifically heard of already gets
+/// the safe (2) weight by default, so there is no longer a gap left to
+/// undercount through.
 pub(crate) fn weighted_length(text: &str) -> usize {
     let whitespace_weight = text.chars().filter(|c| c.is_whitespace()).count();
     let word_weight: usize = text
@@ -71,27 +73,25 @@ fn is_url(word: &str) -> bool {
 }
 
 fn char_weight(c: char) -> usize {
-    if is_double_width(c) { 2 } else { 1 }
+    if is_low_weight(c) { 1 } else { 2 }
 }
 
-/// Whether `c` falls in one of the commonly-cited `twitter-text`
-/// double-width ranges: Hangul Jamo, CJK radicals/symbols/punctuation,
-/// hiragana/katakana/CJK compatibility, CJK Unified Ideographs (plus
-/// Extension A), Hangul syllables, CJK compatibility ideographs, and
-/// fullwidth forms/signs. Deliberately not exhaustive — see
-/// [`weighted_length`]'s doc for what's left out and why that's an
-/// acceptable gap here.
-fn is_double_width(c: char) -> bool {
+/// Whether `c` falls in one of `twitter-text`'s "weight 1" ranges (#61):
+/// `0x0000..=0x10FF` (ASCII, Latin-1 Supplement, and the rest of the Latin
+/// Extended / Greek / Cyrillic block, among others), `0x2000..=0x200D`
+/// (general punctuation spaces and dashes), `0x2010..=0x201F` (general
+/// punctuation hyphens and quotation marks), and `0x2032..=0x2037` (prime
+/// marks). Everything *not* in one of these four ranges — CJK ideographs,
+/// hangul, hiragana/katakana (fullwidth and halfwidth alike), fullwidth
+/// forms, emoji, and so on — is weight 2 via [`char_weight`]'s default. See
+/// [`weighted_length`]'s doc for why listing what's weight *1* (rather than
+/// what's weight 2) is what keeps this from ever undercounting again.
+fn is_low_weight(c: char) -> bool {
     matches!(u32::from(c),
-        0x1100..=0x115F
-        | 0x2E80..=0x303E
-        | 0x3041..=0x33FF
-        | 0x3400..=0x4DBF
-        | 0x4E00..=0x9FFF
-        | 0xAC00..=0xD7A3
-        | 0xF900..=0xFAFF
-        | 0xFF00..=0xFF60
-        | 0xFFE0..=0xFFE6
+        0x0000..=0x10FF
+        | 0x2000..=0x200D
+        | 0x2010..=0x201F
+        | 0x2032..=0x2037
     )
 }
 
@@ -310,20 +310,59 @@ mod tests {
     fn counts_koujaa_with_a_trailing_fullwidth_period_as_ten() {
         // Regression check for a screen report that showed "こうじゃ。" as
         // 9/280: five characters — こ (U+3053), う (U+3046), じ (U+3058),
-        // ゃ (U+3083), all inside `is_double_width`'s hiragana range, and
-        // 。 (U+3002) inside its CJK punctuation range — so the correct
-        // weighted length is 5 * 2 = 10. If this assertion ever fails,
-        // `weighted_length`/`is_double_width` has a bug, not the display.
+        // ゃ (U+3083), and 。 (U+3002) — all outside `is_low_weight`'s
+        // ranges (which top out at U+10FF for non-punctuation codepoints),
+        // so each defaults to weight 2 and the correct weighted length is
+        // 5 * 2 = 10. If this assertion ever fails, `weighted_length`/
+        // `is_low_weight` has a bug, not the display.
         assert_eq!(weighted_length("こうじゃ。"), 10);
     }
 
     #[test]
     fn a_fullwidth_period_counts_double_while_a_halfwidth_period_counts_single() {
-        // U+3002 (fullwidth "。") falls inside `is_double_width`'s CJK
-        // punctuation range; U+002E (halfwidth ".") is plain ASCII and must
-        // not be — the two look similar but are not interchangeable here.
+        // U+3002 (fullwidth "。") is outside `is_low_weight`'s ranges, so
+        // it defaults to weight 2; U+002E (halfwidth ".") is plain ASCII,
+        // inside `0x0000..=0x10FF`, so it stays weight 1 — the two look
+        // similar but are not interchangeable here.
         assert_eq!(weighted_length("。"), 2);
         assert_eq!(weighted_length("."), 1);
+    }
+
+    #[test]
+    fn counts_koujaa_with_a_trailing_halfwidth_period_as_ten() {
+        // #61 — the actual bug report: "こうじゃ｡" with a *halfwidth*
+        // trailing period (U+FF61), not the fullwidth U+3002 the older
+        // regression test above uses. The old range table stopped at
+        // U+FF60, so U+FF61 fell through to the unlisted default of 1 and
+        // the composer showed 9/280 while X counts 10. All five codepoints
+        // here — こ (U+3053), う (U+3046), じ (U+3058), ゃ (U+3083), ｡
+        // (U+FF61) — must weigh 2, for a total of 5 * 2 = 10.
+        assert_eq!(weighted_length("こうじゃ\u{FF61}"), 10);
+    }
+
+    #[test]
+    fn counts_halfwidth_katakana_double() {
+        // #61 completion criterion — halfwidth katakana (U+FF61–U+FF9F) is
+        // exactly the range the old table's `0xFF00..=0xFF60` upper bound
+        // dropped off the edge of.
+        assert_eq!(weighted_length("ｱ"), 2);
+    }
+
+    #[test]
+    fn counts_an_emoji_double() {
+        // #61 completion criterion — 😀 (U+1F600) is well outside every
+        // weight-1 range, so it must default to weight 2 rather than rely
+        // on ever being named in a double-width list.
+        assert_eq!(weighted_length("😀"), 2);
+    }
+
+    #[test]
+    fn counts_latin_diacritics_and_cyrillic_single() {
+        // #61 completion criterion — é (U+00E9, Latin-1 Supplement) and И
+        // (U+0418, Cyrillic) both fall inside 0x0000..=0x10FF and must stay
+        // weight 1, same as plain ASCII.
+        assert_eq!(weighted_length("é"), 1);
+        assert_eq!(weighted_length("И"), 1);
     }
 
     // --- validate ---
