@@ -141,6 +141,14 @@ impl Paths {
         self.cache_dir.join("avatars")
     }
 
+    /// Directory holding downloaded post media (#65), under `cache_dir` —
+    /// separate from [`Self::avatar_dir`] so "delete the cached photos" and
+    /// "delete the cached avatars" stay independent, and so one growing
+    /// large doesn't obscure the other.
+    pub(crate) fn media_dir(&self) -> PathBuf {
+        self.cache_dir.join("media")
+    }
+
     /// Path to the local record of post ids the signed-in user has liked
     /// from this app, under `state_dir` (#68). Separate from
     /// [`Self::reposted_posts_file`] rather than one combined file: the two
@@ -404,6 +412,16 @@ mod tests {
             paths.usage_file(),
             PathBuf::from("/home/alice/.local/state/twigpui/usage.json")
         );
+    }
+
+    #[test]
+    fn media_and_avatar_caches_are_separate_directories() {
+        let paths = Paths::from_vars(vars(&[("HOME", "/home/alice")])).unwrap();
+        assert_eq!(
+            paths.media_dir(),
+            PathBuf::from("/home/alice/.cache/twigpui/media")
+        );
+        assert_ne!(paths.media_dir(), paths.avatar_dir());
     }
 
     #[test]

@@ -3,5 +3,5 @@ pub(crate) mod model;
 
 pub(crate) use client::XClient;
 pub(crate) use model::{
-    Draft, PostLink, PostMetrics, QuotedPost, RepliedTo, TimelineItem, action_post_id,
+    Draft, PostLink, PostMedia, PostMetrics, QuotedPost, RepliedTo, TimelineItem, action_post_id,
 };

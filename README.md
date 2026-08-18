@@ -346,7 +346,7 @@ created (mode `0700`) on startup:
 | Variable | Default | Holds |
 | --- | --- | --- |
 | `XDG_CONFIG_HOME` | `~/.config/twigpui/` | `config.toml` |
-| `XDG_CACHE_HOME` | `~/.cache/twigpui/` | Response cache: `user_ids.json`, `timeline-<user_id>.json` (#9), `me.json`, `home-timeline-<user_id>.json` (#11), `thread-<reply_id>.json` (#12), `avatars/` (#64) |
+| `XDG_CACHE_HOME` | `~/.cache/twigpui/` | Response cache: `user_ids.json`, `timeline-<user_id>.json` (#9), `me.json`, `home-timeline-<user_id>.json` (#11), `thread-<reply_id>.json` (#12), `avatars/` (#64), `media/` (#65) |
 | `XDG_STATE_HOME` | `~/.local/state/twigpui/` | `oauth_tokens.json` (mode `0600`), `rate_limit.json` (#10), `usage.json` (#18), `reposted_posts.json` (#15), `liked_posts.json` (#68) |
 
 An `XDG_*` variable is only honored if it is set to a non-blank absolute
@@ -569,6 +569,30 @@ populated from the same `referenced_tweets` reference the expansion already
 used, so Repost, Quote and Like all work on a repost row and send the right
 id. Before this they were withheld there, which mattered: a home timeline
 is mostly reposts.
+
+## Attached images (#65)
+
+A post's attached images render as thumbnails under its text. Videos and
+animated GIFs show their still with a "Video" / "GIF" badge — neither plays
+here; that is deliberately out of scope. Clicking a thumbnail opens the full
+image in the browser (#70), since this app has no lightbox.
+
+`attachments.media_keys` and the `media.fields` join ride along in the
+timeline request already being made, so **no extra request and no extra
+cost** — only a larger response. The images themselves come from
+`pbs.twimg.com` and share the download-once cache layer with avatars (see
+below), under `$XDG_CACHE_HOME/twigpui/media/`.
+
+**Thumbnail cells are a fixed height**, not sized from each image's own
+`width`/`height`. A row whose height depends on which images have finished
+downloading reflows under the reader as they land, which is worse than
+showing frames waiting to be filled. One image renders across a single
+column, two or more in two columns — three across would each be too narrow
+to read, and X's own maximum of four is two rows of two.
+
+**Alt text is shown, not hidden behind a hover.** This app has no
+screen-reader path of its own, so alt text a sighted reader can actually see
+is more use than alt text nobody ever reaches.
 
 ## Author avatars (#64)
 

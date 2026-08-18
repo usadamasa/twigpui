@@ -45,6 +45,50 @@ pub(crate) struct Post {
     /// to reach the real destination without following a redirect.
     #[serde(default)]
     pub entities: Option<Entities>,
+    /// The media attached to this post (#65) — keys only; the media
+    /// objects themselves arrive in `includes.media`, joined by
+    /// [`post_media`] the same way an author is joined from
+    /// `includes.users`.
+    #[serde(default)]
+    pub attachments: Option<Attachments>,
+}
+
+/// A post's `attachments` object (#65). Only `media_keys` is read; polls
+/// also live here and are not supported.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub(crate) struct Attachments {
+    #[serde(default)]
+    pub media_keys: Vec<String>,
+}
+
+/// One entry in `includes.media` (#65), as returned for the `media.fields`
+/// the timeline requests ask for.
+///
+/// Every field but `media_key` is optional on the wire, and deliberately
+/// modelled that way: X omits `url` for a video or animated GIF (only
+/// `preview_image_url` is given), omits `alt_text` unless the author wrote
+/// one, and has been known to omit dimensions. A missing field must degrade
+/// the rendering, never fail the parse — the same rule the rest of this
+/// module follows.
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct Media {
+    /// X spells this `media_key`; renamed on the wire because a field
+    /// called `media_key` on a struct called `Media` says the same word
+    /// twice — clippy's `struct_field_names` objects, and it is right.
+    #[serde(rename = "media_key")]
+    pub key: String,
+    #[serde(default, rename = "type")]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub preview_image_url: Option<String>,
+    #[serde(default)]
+    pub width: Option<u32>,
+    #[serde(default)]
+    pub height: Option<u32>,
+    #[serde(default)]
+    pub alt_text: Option<String>,
 }
 
 /// The subset of X's `entities` object twigpui reads (#70) — just the URLs.
@@ -134,6 +178,10 @@ pub(crate) struct Includes {
     /// here, keyed by id, rather than in `data` itself.
     #[serde(default)]
     pub tweets: Vec<Post>,
+    /// Attached media (#65), keyed by `media_key` — the same
+    /// side-table-plus-keys shape `users` and `tweets` already use.
+    #[serde(default)]
+    pub media: Vec<Media>,
 }
 
 /// The `errors` array X returns alongside partial results, and also the
@@ -334,6 +382,39 @@ pub(crate) struct TimelineItem {
     /// quietly discard every user's cache and re-fetch it at their expense.
     #[serde(default)]
     pub original_post_id: Option<String>,
+    /// The media attached to whichever post the body holds (#65) — the
+    /// original's for a repost, matching its text. Empty for a post with
+    /// no attachments, and `#[serde(default)]` so cache files written
+    /// before #65 deserialize cleanly.
+    #[serde(default)]
+    pub media: Vec<PostMedia>,
+}
+
+/// One attached image, video thumbnail or GIF thumbnail, flattened for
+/// rendering (#65).
+///
+/// `url` is whatever is actually displayable: the image itself for a photo,
+/// the `preview_image_url` still for a video or animated GIF — neither of
+/// which this app plays (that is deliberately out of scope; the row shows
+/// the thumbnail and a badge saying what it is). An entry with nothing
+/// displayable at all is dropped by [`post_media`] rather than rendered as
+/// a hole.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct PostMedia {
+    pub url: String,
+    /// X's own `type` string, kept verbatim (`photo`, `video`,
+    /// `animated_gif`, or something newer). Not parsed into an enum: the
+    /// only decision it drives is which badge to show, and an unrecognized
+    /// value should show no badge rather than fail to parse a whole
+    /// timeline.
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub width: Option<u32>,
+    #[serde(default)]
+    pub height: Option<u32>,
+    #[serde(default)]
+    pub alt_text: Option<String>,
 }
 
 /// The id of the post a write endpoint should act on for `item` (#52): the
@@ -422,9 +503,17 @@ impl TimelineResponse {
             .map(|post| (post.id.as_str(), post))
             .collect();
 
+        // #65: the media side table, keyed the same way as the two above.
+        let media: HashMap<&str, &Media> = self
+            .includes
+            .media
+            .iter()
+            .map(|item| (item.key.as_str(), item))
+            .collect();
+
         self.data
             .iter()
-            .map(|post| build_item(post, &users, &referenced))
+            .map(|post| build_item(post, &users, &referenced, &media))
             .collect()
     }
 }
@@ -451,6 +540,7 @@ fn build_item(
     post: &Post,
     users: &HashMap<&str, &User>,
     referenced: &HashMap<&str, &Post>,
+    media: &HashMap<&str, &Media>,
 ) -> TimelineItem {
     let (author_name, author_username, author_avatar_url) = author_fields(post, users);
     let mut item = TimelineItem {
@@ -466,6 +556,7 @@ fn build_item(
         links: post_links(post),
         author_avatar_url,
         original_post_id: None,
+        media: post_media(post, media),
     };
 
     if let Some(retweet_ref) = post
@@ -497,6 +588,8 @@ fn build_item(
             item.metrics = original.public_metrics;
             // #70: the links belong to the body, which is the original's.
             item.links = post_links(original);
+            // #65: and so does the attached media.
+            item.media = post_media(original, media);
         } else {
             // Original is gone from `includes` — keep the outer post's own
             // (possibly truncated `RT @user: …`) text already set above
@@ -510,6 +603,7 @@ fn build_item(
             // outer repost's own counts are not the original's (#67).
             item.metrics = None;
             item.links.clear();
+            item.media.clear();
         }
     } else {
         if post
@@ -581,6 +675,38 @@ fn post_links(post: &Post) -> Vec<PostLink> {
         });
     }
     seen
+}
+
+/// The attached media for `post` (#65), joined from `includes.media` by
+/// the keys the post carries.
+///
+/// A key with no matching entry is skipped — X can omit media the caller
+/// is not allowed to see — and so is an entry with nothing displayable:
+/// `url` for a photo, `preview_image_url` for a video or animated GIF
+/// (neither of which this app plays). Order follows the post's own
+/// `media_keys`, which is the order the author attached them in.
+fn post_media(post: &Post, media: &HashMap<&str, &Media>) -> Vec<PostMedia> {
+    let Some(attachments) = post.attachments.as_ref() else {
+        return Vec::new();
+    };
+    attachments
+        .media_keys
+        .iter()
+        .filter_map(|key| media.get(key.as_str()).copied())
+        .filter_map(|item| {
+            let url = item
+                .url
+                .clone()
+                .or_else(|| item.preview_image_url.clone())?;
+            Some(PostMedia {
+                url,
+                kind: item.kind.clone(),
+                width: item.width,
+                height: item.height,
+                alt_text: item.alt_text.clone(),
+            })
+        })
+        .collect()
 }
 
 /// The post `post` quotes, if it has a `quoted` reference and that post is
@@ -1502,6 +1628,140 @@ mod tests {
             response.into_items()[0].author_avatar_url.as_deref(),
             Some("https://pbs.twimg.com/original_normal.jpg")
         );
+    }
+
+    const MEDIA_JSON: &str = r#"{
+      "data": [
+        {
+          "id": "1",
+          "text": "with photos",
+          "author_id": "2244994945",
+          "attachments": { "media_keys": ["k-photo", "k-video", "k-missing"] }
+        },
+        { "id": "2", "text": "no attachments", "author_id": "2244994945" }
+      ],
+      "includes": {
+        "users": [
+          { "id": "2244994945", "name": "Developers", "username": "XDevelopers" }
+        ],
+        "media": [
+          {
+            "media_key": "k-photo",
+            "type": "photo",
+            "url": "https://pbs.twimg.com/media/photo.jpg",
+            "width": 1200,
+            "height": 675,
+            "alt_text": "a chart"
+          },
+          {
+            "media_key": "k-video",
+            "type": "video",
+            "preview_image_url": "https://pbs.twimg.com/media/still.jpg",
+            "width": 1280,
+            "height": 720
+          }
+        ]
+      }
+    }"#;
+
+    #[test]
+    fn joins_attached_media_by_key_in_the_posts_own_order() {
+        // #65: the same side-table join `users` and `tweets` already use.
+        let response: TimelineResponse = serde_json::from_str(MEDIA_JSON).unwrap();
+        let items = response.into_items();
+
+        assert_eq!(items[0].media.len(), 2, "the unmatched key must be skipped");
+        assert_eq!(
+            items[0].media[0].url,
+            "https://pbs.twimg.com/media/photo.jpg"
+        );
+        assert_eq!(items[0].media[0].alt_text.as_deref(), Some("a chart"));
+        assert_eq!(items[0].media[0].kind.as_deref(), Some("photo"));
+    }
+
+    #[test]
+    fn a_video_falls_back_to_its_preview_still() {
+        // This app doesn't play video; the still plus a badge is the whole
+        // rendering, so `preview_image_url` is what has to come through.
+        let response: TimelineResponse = serde_json::from_str(MEDIA_JSON).unwrap();
+        let items = response.into_items();
+
+        assert_eq!(
+            items[0].media[1].url,
+            "https://pbs.twimg.com/media/still.jpg"
+        );
+        assert_eq!(items[0].media[1].kind.as_deref(), Some("video"));
+    }
+
+    #[test]
+    fn media_with_nothing_displayable_is_dropped() {
+        // Neither `url` nor `preview_image_url`: there is nothing to draw,
+        // and a hole in the grid is worse than one fewer thumbnail.
+        let json = r#"{
+          "data": [{ "id": "1", "text": "t", "attachments": { "media_keys": ["k"] } }],
+          "includes": { "media": [{ "media_key": "k", "type": "photo" }] }
+        }"#;
+        let response: TimelineResponse = serde_json::from_str(json).unwrap();
+        assert!(response.into_items()[0].media.is_empty());
+    }
+
+    #[test]
+    fn a_post_without_attachments_has_no_media() {
+        let response: TimelineResponse = serde_json::from_str(MEDIA_JSON).unwrap();
+        assert!(response.into_items()[1].media.is_empty());
+    }
+
+    #[test]
+    fn a_repost_carries_the_originals_media() {
+        // The body is the original's text, so the images under it have to
+        // be the original's too.
+        let json = r#"{
+          "data": [
+            {
+              "id": "10",
+              "text": "RT @XDevelopers: look",
+              "author_id": "1000000000",
+              "referenced_tweets": [{ "type": "retweeted", "id": "11" }]
+            }
+          ],
+          "includes": {
+            "users": [
+              { "id": "1000000000", "name": "R", "username": "reposter" },
+              { "id": "2244994945", "name": "D", "username": "XDevelopers" }
+            ],
+            "tweets": [
+              {
+                "id": "11",
+                "text": "look",
+                "author_id": "2244994945",
+                "attachments": { "media_keys": ["k"] }
+              }
+            ],
+            "media": [
+              {
+                "media_key": "k",
+                "type": "photo",
+                "url": "https://pbs.twimg.com/media/original.jpg"
+              }
+            ]
+          }
+        }"#;
+        let response: TimelineResponse = serde_json::from_str(json).unwrap();
+        let items = response.into_items();
+        assert_eq!(items[0].media.len(), 1);
+        assert_eq!(
+            items[0].media[0].url,
+            "https://pbs.twimg.com/media/original.jpg"
+        );
+    }
+
+    #[test]
+    fn a_cache_file_written_before_media_existed_still_loads() {
+        let item: TimelineItem = serde_json::from_str(
+            r#"{"id":"1","text":"cached","created_at":null,"author_name":"a","author_username":"b"}"#,
+        )
+        .unwrap();
+        assert!(item.media.is_empty());
     }
 
     #[test]

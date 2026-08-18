@@ -13,6 +13,7 @@ use crate::browser;
 use crate::cache;
 use crate::compose::{self, ComposeState, ComposeStatus};
 use crate::config::Config;
+use crate::image_cache;
 use crate::like;
 use crate::oauth::{self, TimelineSource};
 use crate::paths::Paths;
@@ -23,7 +24,8 @@ use crate::thread::{self, ThreadChain};
 use crate::toggle::{ToggleState, ToggleStatus};
 use crate::usage;
 use crate::x_api::{
-    Draft, PostLink, PostMetrics, QuotedPost, RepliedTo, TimelineItem, XClient, action_post_id,
+    Draft, PostLink, PostMedia, PostMetrics, QuotedPost, RepliedTo, TimelineItem, XClient,
+    action_post_id,
 };
 
 /// What's known about one reply's "Show thread" walk (#12), keyed by the
@@ -341,11 +343,18 @@ pub(crate) struct TimelineView {
     /// `avatar::preferred_url`'s guess. Absent means "not downloaded yet",
     /// which renders the placeholder.
     avatar_paths: HashMap<String, PathBuf>,
+    /// Downloaded post media (#65), keyed by the media URL — the same
+    /// shape as `avatar_paths`, kept as its own map because the two live
+    /// in different cache directories and come from different fields.
+    media_paths: HashMap<String, PathBuf>,
     /// Holds the in-flight avatar downloads alive (#64). One task walks the
     /// whole visible timeline rather than one per row; reassigning it (a
     /// reload) cancels whatever was still downloading, which the next call
     /// re-collects from the new timeline anyway.
     avatar_fetch: Option<Task<()>>,
+    /// Holds the in-flight media downloads alive (#65) — see
+    /// `avatar_fetch`, which this mirrors.
+    media_fetch: Option<Task<()>>,
     /// The post whose delete confirmation is currently showing (#72), if
     /// any. One at a time: a second "Delete" click elsewhere moves the
     /// prompt rather than opening two. `None` means no row is asking.
@@ -428,7 +437,9 @@ impl TimelineView {
             like_overrides: HashMap::new(),
             like_tasks: HashMap::new(),
             avatar_paths: HashMap::new(),
+            media_paths: HashMap::new(),
             avatar_fetch: None,
+            media_fetch: None,
             pending_delete: None,
             delete_task: None,
             delete_failures: HashMap::new(),
@@ -500,7 +511,7 @@ impl TimelineView {
                 this.refresh_usage(cx);
                 this.refresh_reposted_ids(cx);
                 this.refresh_liked_ids(cx);
-                this.refresh_avatars(cx);
+                this.refresh_images(cx);
                 match result {
                     Ok(StartOutcome::NotAuthenticated { session_notice }) => {
                         this.session_notice = session_notice.map(SharedString::from);
@@ -656,7 +667,7 @@ impl TimelineView {
                         this.refresh_usage(cx);
                         this.refresh_reposted_ids(cx);
                         this.refresh_liked_ids(cx);
-                        this.refresh_avatars(cx);
+                        this.refresh_images(cx);
                         this.reloading = false;
                         match result {
                             Ok(reloaded) => {
@@ -692,7 +703,7 @@ impl TimelineView {
                         this.refresh_usage(cx);
                         this.refresh_reposted_ids(cx);
                         this.refresh_liked_ids(cx);
-                        this.refresh_avatars(cx);
+                        this.refresh_images(cx);
                         this.reloading = false;
                         match result {
                             Ok(reloaded) => {
@@ -852,7 +863,7 @@ impl TimelineView {
                 this.refresh_usage(cx);
                 this.refresh_reposted_ids(cx);
                 this.refresh_liked_ids(cx);
-                this.refresh_avatars(cx);
+                this.refresh_images(cx);
                 this.reloading = false;
                 match result {
                     Ok((items, next_token)) => {
@@ -1128,6 +1139,140 @@ impl TimelineView {
                 }
             }
         }));
+    }
+
+    /// Fetch whatever images the visible timeline is missing (#64, #65) —
+    /// author avatars and attached media both.
+    ///
+    /// One entry point rather than two calls at every site that changes the
+    /// timeline: the two are wanted at exactly the same moments, and a
+    /// caller that remembered one but not the other would leave half the
+    /// row waiting for the next reload.
+    fn refresh_images(&mut self, cx: &mut Context<'_, Self>) {
+        self.refresh_avatars(cx);
+        self.refresh_media(cx);
+    }
+
+    /// Download whatever attached images the visible timeline needs and
+    /// doesn't have yet (#65) — [`Self::refresh_avatars`]'s twin, with the
+    /// same contract: one task for the whole timeline, one URL at a time on
+    /// the background executor, each thumbnail appearing as it lands, and a
+    /// failure left absent so the frame stays and the next reload retries.
+    ///
+    /// Attached media is larger than an avatar but arrives the same way
+    /// (`pbs.twimg.com`, no API quota, no credits) and is bounded by the
+    /// shared image cache's own size limit.
+    fn refresh_media(&mut self, cx: &mut Context<'_, Self>) {
+        let TimelineState::Loaded(items) = &self.state else {
+            return;
+        };
+        let mut wanted: Vec<String> = Vec::new();
+        for url in items
+            .iter()
+            .flat_map(|item| item.media.iter())
+            .map(|media| media.url.as_str())
+        {
+            if !self.media_paths.contains_key(url) && !wanted.iter().any(|seen| seen == url) {
+                wanted.push(url.to_string());
+            }
+        }
+        if wanted.is_empty() {
+            return;
+        }
+
+        let dir = self.paths.media_dir();
+        self.media_fetch = Some(cx.spawn(async move |this, cx| {
+            for url in wanted {
+                let dir = dir.clone();
+                let fetch_url = url.clone();
+                let result = cx
+                    .background_executor()
+                    .spawn(async move { image_cache::ensure_cached(&dir, &fetch_url) })
+                    .await;
+
+                if let Ok(path) = result {
+                    let _ = this.update(cx, |this, cx| {
+                        this.media_paths.insert(url.clone(), path);
+                        cx.notify();
+                    });
+                }
+            }
+        }));
+    }
+
+    /// The attached-media grid under one post's body (#65).
+    ///
+    /// At most [`MAX_RENDERED_MEDIA`] thumbnails, in [`media_columns`]
+    /// columns. Each cell is a fixed height so a row's height cannot depend
+    /// on which images have finished downloading — a timeline that reflows
+    /// under the reader as images land is worse than one showing frames
+    /// waiting to be filled.
+    fn media_grid(&self, item: &TimelineItem, cx: &mut Context<'_, Self>) -> AnyElement {
+        let theme = self.theme;
+        let shown: Vec<&PostMedia> = item.media.iter().take(MAX_RENDERED_MEDIA).collect();
+        let columns = media_columns(shown.len());
+
+        let mut grid = div().flex().flex_col().gap_1();
+        for chunk in shown.chunks(columns) {
+            let mut row = div().flex().gap_1();
+            for media in chunk {
+                row = row.child(self.media_cell(media, theme, cx));
+            }
+            grid = grid.child(row);
+        }
+        grid.into_any_element()
+    }
+
+    /// One thumbnail: the downloaded image once it has arrived, else a
+    /// frame of the same size (#65). Clicking it opens the full image in
+    /// the browser (#70) — this app has no lightbox, and a thumbnail with
+    /// no way to see it properly is half a feature. A video or animated GIF
+    /// shows its still with a badge saying which it is; neither plays here.
+    fn media_cell(
+        &self,
+        media: &PostMedia,
+        theme: Theme,
+        cx: &mut Context<'_, TimelineView>,
+    ) -> AnyElement {
+        let url = media.url.clone();
+
+        let inner = match self.media_paths.get(&media.url) {
+            Some(path) => img(path.clone())
+                .h(MEDIA_CELL_HEIGHT)
+                .rounded_md()
+                .into_any_element(),
+            None => div()
+                .h(MEDIA_CELL_HEIGHT)
+                .w(MEDIA_CELL_HEIGHT)
+                .rounded_md()
+                .bg(rgb(theme.border))
+                .into_any_element(),
+        };
+
+        let mut cell = div()
+            .id(SharedString::from(format!("media-{}", media.url)))
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(inner)
+            .on_click(cx.listener(move |this, _event, _window, cx| {
+                this.open_in_browser(url.clone(), cx);
+            }));
+
+        if let Some(badge) = media_badge(media.kind.as_deref()) {
+            cell = cell.child(div().text_color(rgb(theme.text_muted)).child(badge));
+        }
+        if let Some(alt) = media.alt_text.as_ref() {
+            // Shown rather than hidden behind a hover: this app has no
+            // screen-reader path of its own, and alt text a sighted reader
+            // can see is more use than alt text nobody ever reaches.
+            cell = cell.child(
+                div()
+                    .text_color(rgb(theme.text_muted))
+                    .child(format!("Alt: {alt}")),
+            );
+        }
+        cell.into_any_element()
     }
 
     /// One post's author avatar (#64): the downloaded image once it is on
@@ -1909,6 +2054,10 @@ impl TimelineView {
             // they sit under the text rather than inside it.
             .when(!item.links.is_empty(), |column| {
                 column.child(link_row(&item.links, theme, cx))
+            })
+            // #65: attached images, as thumbnails under the body.
+            .when(!item.media.is_empty(), |column| {
+                column.child(self.media_grid(item, cx))
             })
             // #13: a quote (including a repost of a quote) embeds its source
             // as a bordered card under the text.
@@ -3027,6 +3176,37 @@ fn cooldown_tick(notice: Option<&ReloadNotice>, now: i64) -> CooldownTick {
     }
 }
 
+/// How many attached images one row will render (#65). X allows up to four
+/// per post, which is also as many as fit before a timeline row stops being
+/// a timeline row.
+const MAX_RENDERED_MEDIA: usize = 4;
+
+/// How tall one thumbnail is (#65). Fixed rather than derived from the
+/// media's own `width`/`height`: a row's height must not depend on which
+/// images have finished downloading, or the timeline reflows under the
+/// reader as they land.
+const MEDIA_CELL_HEIGHT: gpui::Pixels = px(160.0);
+
+/// How many columns to lay `count` thumbnails out in (#65): one across for
+/// a single image, two for anything more. Three across would each be too
+/// narrow to read at this height, and X's own maximum of four is two rows
+/// of two. Never returns 0 — `chunks` would panic.
+fn media_columns(count: usize) -> usize {
+    if count <= 1 { 1 } else { 2 }
+}
+
+/// The badge shown under a non-photo thumbnail (#65), or `None` for a plain
+/// photo — and for any `type` this app doesn't recognize, which is the
+/// forward-compatible direction: a media type X invents later should render
+/// as a bare still rather than as a label nobody can interpret.
+fn media_badge(kind: Option<&str>) -> Option<&'static str> {
+    match kind {
+        Some("video") => Some("Video"),
+        Some("animated_gif") => Some("GIF"),
+        _ => None,
+    }
+}
+
 /// How big an author avatar renders (#64). One constant because the
 /// placeholder has to match the image exactly — a row that reflows when the
 /// download lands is worse than no avatar at all.
@@ -3168,13 +3348,13 @@ fn format_timestamp(created_at: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        ComposeStatus, Cooldown, CooldownTick, PostLink, PostMetrics, ReloadNotice, ReloadTrigger,
-        RepliedTo, Theme, ThreadFetchState, TimelineItem, TimelineSource, TimelineState,
-        ToggleState, action_post_id, at_the_post_cap, avatar_initial, byline,
+        ComposeStatus, Cooldown, CooldownTick, PostLink, PostMedia, PostMetrics, ReloadNotice,
+        ReloadTrigger, RepliedTo, Theme, ThreadFetchState, TimelineItem, TimelineSource,
+        TimelineState, ToggleState, action_post_id, at_the_post_cap, avatar_initial, byline,
         compose_error_message, cooldown_label, cooldown_tick, format_timestamp, header_title,
-        is_own_post, like_action_label, metrics_label, offers_delete, offers_like,
-        offers_load_older, offers_quote, offers_reauthorize, offers_reply, offers_repost,
-        offers_sign_in, post_permalink, profile_url, rate_limit, reload_cooldown,
+        is_own_post, like_action_label, media_badge, media_columns, metrics_label, offers_delete,
+        offers_like, offers_load_older, offers_quote, offers_reauthorize, offers_reply,
+        offers_repost, offers_sign_in, post_permalink, profile_url, rate_limit, reload_cooldown,
         reload_failure_outcome, reload_gate, reload_start_state, reply_banner_label,
         reply_target_label, repost_action_label, repost_banner_label, thread_action_label, usage,
         usage_color, usage_label,
@@ -3194,6 +3374,7 @@ mod tests {
             links: Vec::new(),
             author_avatar_url: None,
             original_post_id: None,
+            media: Vec::new(),
         }
     }
 
@@ -3404,6 +3585,49 @@ mod tests {
         let mut item = item_with(row_id, original_author, Some("bob"));
         item.original_post_id = Some(original_id.to_string());
         item
+    }
+
+    // --- #65: attached media ---
+
+    #[test]
+    fn one_image_is_laid_out_in_a_single_column() {
+        assert_eq!(media_columns(1), 1);
+    }
+
+    #[test]
+    fn two_or_more_images_are_laid_out_in_two_columns() {
+        // Three across would each be too narrow to read at the fixed cell
+        // height, and X's own maximum of four is two rows of two.
+        assert_eq!(media_columns(2), 2);
+        assert_eq!(media_columns(3), 2);
+        assert_eq!(media_columns(4), 2);
+    }
+
+    #[test]
+    fn the_column_count_is_never_zero() {
+        // `media_grid` passes this straight to `chunks`, which panics on 0.
+        assert_eq!(media_columns(0), 1);
+    }
+
+    #[test]
+    fn a_photo_gets_no_badge() {
+        assert_eq!(media_badge(Some("photo")), None);
+    }
+
+    #[test]
+    fn video_and_gif_say_which_they_are() {
+        // Neither plays here, so the badge is the only thing distinguishing
+        // a still from a photo.
+        assert_eq!(media_badge(Some("video")), Some("Video"));
+        assert_eq!(media_badge(Some("animated_gif")), Some("GIF"));
+    }
+
+    #[test]
+    fn an_unrecognized_media_type_gets_no_badge() {
+        // Forward compatibility: something X invents later should render as
+        // a bare still, not as a label nobody can interpret.
+        assert_eq!(media_badge(Some("hologram")), None);
+        assert_eq!(media_badge(None), None);
     }
 
     // --- #72: delete ---
@@ -3741,6 +3965,7 @@ mod tests {
                 links: Vec::new(),
                 author_avatar_url: None,
                 original_post_id: None,
+                media: Vec::new(),
             })
             .collect();
         let state = TimelineState::Loaded(full);
@@ -4340,6 +4565,13 @@ mod tests {
                         "https://pbs.twimg.com/profile_images/1/a_normal.jpg".to_string(),
                     ),
                     original_post_id: None,
+                    media: vec![PostMedia {
+                        url: "https://pbs.twimg.com/media/one.jpg".to_string(),
+                        kind: Some("photo".to_string()),
+                        width: Some(1200),
+                        height: Some(675),
+                        alt_text: Some("a rendered image".to_string()),
+                    }],
                 }]);
                 cx.notify();
             });

@@ -603,6 +603,7 @@ mod tests {
             links: Vec::new(),
             author_avatar_url: None,
             original_post_id: None,
+            media: Vec::new(),
         }
     }
 
