@@ -4,8 +4,7 @@ use anyhow::{Context as _, Result, bail};
 use ureq::Agent;
 
 use super::model::{
-    ApiProblem, PostTweetRequest, TimelineItem, TimelineResponse, TweetIdRequest, User,
-    UserLookupResponse,
+    ApiProblem, Draft, TimelineItem, TimelineResponse, TweetIdRequest, User, UserLookupResponse,
 };
 use crate::paths::Paths;
 use crate::rate_limit::{self, Endpoint, RateLimitState};
@@ -76,13 +75,10 @@ impl XClient {
         paths: &Paths,
         endpoint: Endpoint,
         url: &str,
-        text: &str,
-        quote_tweet_id: Option<&str>,
+        draft: Draft<'_>,
         now: i64,
     ) -> Result<String> {
-        Self::send_with_retry(paths, endpoint, now, || {
-            self.send_post_once(url, text, quote_tweet_id)
-        })
+        Self::send_with_retry(paths, endpoint, now, || self.send_post_once(url, draft))
     }
 
     /// Perform one DELETE (#15's un-repost), sharing every rate-limit/retry
@@ -206,21 +202,13 @@ impl XClient {
     /// by #16), mirroring [`Self::send_once`]'s shape so
     /// [`Self::send_with_retry`] can treat the two identically. `send_json`
     /// (the `ureq` `json` feature, already a dependency) both serializes
-    /// [`PostTweetRequest`] and sets `Content-Type: application/json`.
-    fn send_post_once(
-        &self,
-        url: &str,
-        text: &str,
-        quote_tweet_id: Option<&str>,
-    ) -> Result<(u16, String, RateLimitState)> {
+    /// [`super::model::PostTweetRequest`] and sets `Content-Type: application/json`.
+    fn send_post_once(&self, url: &str, draft: Draft<'_>) -> Result<(u16, String, RateLimitState)> {
         let mut response = self
             .agent
             .post(url)
             .header("Authorization", format!("Bearer {}", self.bearer_token))
-            .send_json(PostTweetRequest {
-                text,
-                quote_tweet_id,
-            })
+            .send_json(draft.to_request())
             .with_context(|| format!("request to {url} failed"))?;
 
         let header = |name: &str| -> Option<String> {
@@ -280,7 +268,7 @@ impl XClient {
     /// `tweet_id` — `POST /2/users/:id/retweets` (#15) and
     /// `POST /2/users/:id/likes` (#68) — mirroring [`Self::send_post_once`]'s
     /// shape but serializing [`TweetIdRequest`] instead of
-    /// [`PostTweetRequest`]. Kept separate from `send_post_once` rather than
+    /// [`super::model::PostTweetRequest`]. Kept separate from `send_post_once` rather than
     /// parameterizing it over the body type: the duplication here is a
     /// handful of lines, not the retry/rate-limit logic that actually needs
     /// sharing (that lives in [`Self::send_with_retry`], used identically by
@@ -436,15 +424,9 @@ impl XClient {
     /// afterward (subject to #10's own interval, like any other reload)
     /// rather than this call handing back the created post's own fields,
     /// which nothing here currently needs.
-    pub(crate) fn create_post(
-        &self,
-        paths: &Paths,
-        text: &str,
-        quote_tweet_id: Option<&str>,
-        now: i64,
-    ) -> Result<()> {
+    pub(crate) fn create_post(&self, paths: &Paths, draft: Draft<'_>, now: i64) -> Result<()> {
         let url = create_post_url();
-        self.post(paths, Endpoint::CreatePost, &url, text, quote_tweet_id, now)?;
+        self.post(paths, Endpoint::CreatePost, &url, draft, now)?;
         Ok(())
     }
 

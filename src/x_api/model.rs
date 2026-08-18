@@ -189,6 +189,47 @@ pub(crate) struct PostTweetRequest<'a> {
     pub text: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub quote_tweet_id: Option<&'a str>,
+    /// #71: what makes this post a reply. Nested rather than flat because
+    /// that is the shape X specifies, and `skip_serializing_if` keeps it
+    /// entirely absent for an ordinary post — the same treatment
+    /// `quote_tweet_id` gets, for the same reason.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reply: Option<ReplyRequest<'a>>,
+}
+
+/// The `reply` object inside [`PostTweetRequest`] (#71).
+#[derive(Debug, Serialize)]
+pub(crate) struct ReplyRequest<'a> {
+    pub in_reply_to_tweet_id: &'a str,
+}
+
+/// What `POST /2/tweets` is being asked to publish (#71): the text plus
+/// whichever optional target the composer had.
+///
+/// A struct rather than three positional `Option` parameters threaded
+/// through `XClient::create_post` → `post` → `send_post_once`: at three
+/// arguments the call sites stop being readable, and two of them are
+/// `Option<&str>` that would silently swap without a type error — a
+/// mix-up that turns a quote into a reply under someone else's
+/// conversation.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Draft<'a> {
+    pub text: &'a str,
+    pub quote_tweet_id: Option<&'a str>,
+    pub reply_to_post_id: Option<&'a str>,
+}
+
+impl<'a> Draft<'a> {
+    /// The request body for this draft.
+    pub(crate) fn to_request(self) -> PostTweetRequest<'a> {
+        PostTweetRequest {
+            text: self.text,
+            quote_tweet_id: self.quote_tweet_id,
+            reply: self.reply_to_post_id.map(|id| ReplyRequest {
+                in_reply_to_tweet_id: id,
+            }),
+        }
+    }
 }
 
 /// The request body shared by `POST /2/users/:id/retweets` (#15) and
@@ -1081,13 +1122,32 @@ mod tests {
         // rather than sending it as `null` — X may reject a stray null
         // outright, so this checks the exact serialized shape, not just
         // that `quote_tweet_id` deserializes back to `None`.
-        let request = PostTweetRequest {
+        let request = Draft {
             text: "hello",
             quote_tweet_id: None,
-        };
+            reply_to_post_id: None,
+        }
+        .to_request();
         assert_eq!(
             serde_json::to_string(&request).unwrap(),
             r#"{"text":"hello"}"#
+        );
+    }
+
+    #[test]
+    fn serializes_the_post_tweet_request_body_with_a_reply() {
+        // #71: a reply is the same endpoint with a nested `reply` object —
+        // and the id inside it is what decides which conversation this
+        // lands under, so the exact shape is worth pinning.
+        let request = Draft {
+            text: "hello",
+            quote_tweet_id: None,
+            reply_to_post_id: Some("1700000000000000001"),
+        }
+        .to_request();
+        assert_eq!(
+            serde_json::to_string(&request).unwrap(),
+            r#"{"text":"hello","reply":{"in_reply_to_tweet_id":"1700000000000000001"}}"#
         );
     }
 
@@ -1096,10 +1156,12 @@ mod tests {
         // #16: `POST /2/tweets` gains `quote_tweet_id` rather than a
         // separate quote endpoint — this is the whole body a quote post
         // sends.
-        let request = PostTweetRequest {
+        let request = Draft {
             text: "hello",
             quote_tweet_id: Some("1700000000000000001"),
-        };
+            reply_to_post_id: None,
+        }
+        .to_request();
         assert_eq!(
             serde_json::to_string(&request).unwrap(),
             r#"{"text":"hello","quote_tweet_id":"1700000000000000001"}"#

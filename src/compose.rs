@@ -162,14 +162,34 @@ pub(crate) struct QuoteTarget {
     pub(crate) quoted: QuotedPost,
 }
 
-/// The composer's full state (#14, #16): draft text, an optional quote
-/// target, plus [`ComposeStatus`], bundled so "never lose the draft",
-/// "never lose the quote target", and "never submit twice" can each be
-/// expressed — and tested — as one value's transitions.
+/// The post a draft replies to (#71): its id (what `in_reply_to_tweet_id`
+/// sends X) and the already-known author/text, reusing [`QuotedPost`] the
+/// same way [`QuoteTarget`] does — it is #13's "a post embedded as a card"
+/// shape, and a reply target is rendered as exactly that, with a different
+/// heading.
+///
+/// `post_id` must be the id of the post actually being replied to, which
+/// for a repost row is the *original's* id, not the retweet activity's —
+/// `x_api::action_post_id` is what resolves that (#52). Getting it wrong
+/// does not fail loudly: the reply lands under a different conversation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ReplyTarget {
+    pub(crate) post_id: String,
+    pub(crate) replying_to: QuotedPost,
+}
+
+/// The composer's full state (#14, #16, #71): draft text, an optional
+/// target (a quote or a reply), plus [`ComposeStatus`], bundled so "never
+/// lose the draft", "never lose the target", and "never submit twice" can
+/// each be expressed — and tested — as one value's transitions.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ComposeState {
     text: String,
     quote: Option<QuoteTarget>,
+    /// #71. Mutually exclusive with `quote` — see [`Self::set_reply`] for
+    /// why this crate refuses to build a post that is both at once, even
+    /// though X's API would accept one.
+    reply: Option<ReplyTarget>,
     status: ComposeStatus,
 }
 
@@ -178,6 +198,7 @@ impl ComposeState {
         Self {
             text: String::new(),
             quote: None,
+            reply: None,
             status: ComposeStatus::Idle,
         }
     }
@@ -204,6 +225,34 @@ impl ComposeState {
     /// draft only ever quotes one post at a time.
     pub(crate) fn set_quote(&mut self, target: QuoteTarget) {
         self.quote = Some(target);
+        // #71: one target at a time — see `set_reply`'s doc.
+        self.reply = None;
+    }
+
+    /// The post currently being replied to, if any (#71).
+    pub(crate) fn reply(&self) -> Option<&ReplyTarget> {
+        self.reply.as_ref()
+    }
+
+    /// Set (or replace) the reply target (#71), clearing any quote target.
+    ///
+    /// X's API would accept a post that is both a reply and a quote, but
+    /// this composer deliberately refuses to build one: the two read almost
+    /// identically in a small composer, and sending the wrong one is not a
+    /// visible mistake — a reply lands under a conversation, a quote does
+    /// not. One target at a time makes "what will this post be" answerable
+    /// from a single line of UI. Clicking "Reply" while a quote is set is
+    /// therefore a switch, not an addition, and the draft text survives it
+    /// either way.
+    pub(crate) fn set_reply(&mut self, target: ReplyTarget) {
+        self.reply = Some(target);
+        self.quote = None;
+    }
+
+    /// Clear the reply target without touching the draft text (#71) — the
+    /// same mis-click recovery [`Self::clear_quote`] provides.
+    pub(crate) fn clear_reply(&mut self) {
+        self.reply = None;
     }
 
     /// Clear the quote target without touching the draft text (#16) — the
@@ -254,6 +303,10 @@ impl ComposeState {
             Ok(()) => {
                 self.text.clear();
                 self.quote = None;
+                // #71: the reply target goes with the draft it belonged to,
+                // for the same reason the quote target does — the next
+                // draft starts from nothing.
+                self.reply = None;
                 self.status = ComposeStatus::Idle;
             }
             Err(message) => self.refuse(message),
@@ -271,7 +324,7 @@ impl Default for ComposeState {
 mod tests {
     use super::{
         ComposeState, ComposeStatus, ComposeValidationError, MAX_WEIGHTED_LENGTH, QuoteTarget,
-        validate, weighted_length,
+        ReplyTarget, validate, weighted_length,
     };
     use crate::x_api::QuotedPost;
 
@@ -388,6 +441,110 @@ mod tests {
     #[test]
     fn still_counts_an_ordinary_space_single() {
         assert_eq!(weighted_length("a b"), 3);
+    }
+
+    // --- #71: reply target ---
+
+    fn a_post() -> QuotedPost {
+        QuotedPost {
+            author_name: "Developers".to_string(),
+            author_username: "XDevelopers".to_string(),
+            text: "the post being answered".to_string(),
+        }
+    }
+
+    fn a_reply_target(post_id: &str) -> ReplyTarget {
+        ReplyTarget {
+            post_id: post_id.to_string(),
+            replying_to: a_post(),
+        }
+    }
+
+    fn a_quote_target(post_id: &str) -> QuoteTarget {
+        QuoteTarget {
+            post_id: post_id.to_string(),
+            quoted: a_post(),
+        }
+    }
+
+    #[test]
+    fn a_fresh_composer_is_replying_to_nothing() {
+        assert_eq!(ComposeState::new().reply(), None);
+    }
+
+    #[test]
+    fn set_reply_records_the_target() {
+        let mut state = ComposeState::new();
+        state.set_reply(a_reply_target("1700000000000000001"));
+        assert_eq!(
+            state.reply().map(|target| target.post_id.as_str()),
+            Some("1700000000000000001")
+        );
+    }
+
+    #[test]
+    fn setting_a_reply_clears_a_quote_and_the_other_way_round() {
+        // Deliberate: X would accept a post that is both, but the two read
+        // almost identically in a small composer and sending the wrong one
+        // is not a visible mistake.
+        let mut state = ComposeState::new();
+        state.set_quote(a_quote_target("quoted"));
+        state.set_reply(a_reply_target("replied"));
+        assert_eq!(state.quote(), None);
+        assert!(state.reply().is_some());
+
+        state.set_quote(a_quote_target("quoted"));
+        assert_eq!(state.reply(), None);
+        assert!(state.quote().is_some());
+    }
+
+    #[test]
+    fn switching_between_a_reply_and_a_quote_keeps_the_draft() {
+        let mut state = ComposeState::new();
+        state.set_text("already typed".to_string());
+        state.set_reply(a_reply_target("1"));
+        state.set_quote(a_quote_target("2"));
+        assert_eq!(state.text(), "already typed");
+    }
+
+    #[test]
+    fn clearing_a_reply_keeps_the_draft() {
+        // The mis-click recovery: removing the wrong target must not force
+        // discarding what was already typed.
+        let mut state = ComposeState::new();
+        state.set_text("already typed".to_string());
+        state.set_reply(a_reply_target("1"));
+        state.clear_reply();
+        assert_eq!(state.reply(), None);
+        assert_eq!(state.text(), "already typed");
+    }
+
+    #[test]
+    fn a_successful_submit_clears_the_reply_target_with_the_draft() {
+        let mut state = ComposeState::new();
+        state.set_text("a reply".to_string());
+        state.set_reply(a_reply_target("1"));
+        state.start_submitting();
+        state.apply_result(Ok(()));
+        assert_eq!(state.reply(), None);
+        assert_eq!(state.text(), "");
+    }
+
+    #[test]
+    fn a_failed_submit_keeps_the_reply_target_and_the_draft() {
+        // A retry has to send the same reply to the same post; losing the
+        // target on failure would silently turn the retry into a top-level
+        // post.
+        let mut state = ComposeState::new();
+        state.set_text("a reply".to_string());
+        state.set_reply(a_reply_target("1"));
+        state.start_submitting();
+        state.apply_result(Err("network error".to_string()));
+        assert_eq!(
+            state.reply().map(|target| target.post_id.as_str()),
+            Some("1")
+        );
+        assert_eq!(state.text(), "a reply");
     }
 
     // --- validate ---

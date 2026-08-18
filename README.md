@@ -429,6 +429,34 @@ client-side either.
 **Quoting a repost row quotes the original** (#52) — which is also the text
 and author the quote card would show, since that is what the row renders.
 
+## Replying (#71)
+
+Every post shows a "Reply" action. Clicking it sets the composer's target
+and nothing else — no request goes out until the draft is submitted, the
+same way "Quote" works. The composer then shows "Replying to @someone"
+above a card of the post being answered, with "Remove reply" to clear it
+without losing what was already typed. Submitting sends the same
+`POST /2/tweets` as an ordinary post, with a nested
+`reply.in_reply_to_tweet_id`; the scope (`tweet.write`) and the cost (one
+request) are identical.
+
+**A draft is a reply or a quote, never both.** X's API would accept one that
+is both, but this composer refuses to build it: the two look almost
+identical in a small composer, and sending the wrong one is not a visible
+mistake — a reply lands under a conversation, a quote does not. Clicking
+"Reply" while a quote is set is therefore a switch, not an addition, and the
+draft text survives either way.
+
+**Replying from a repost row answers the original post** (#52) — the id sent
+as `in_reply_to_tweet_id` is the original's, not the retweet activity's.
+Getting that wrong would hang the reply off a different conversation
+entirely, with nothing about the failure visible afterwards.
+
+**Nothing is re-fetched afterwards beyond the usual reload.** "Show thread"
+(#12) walks a post's *ancestors*, and a new reply is a descendant, so no
+cached chain becomes stale by posting one. The reply itself shows up in the
+timeline reload that every successful post already triggers.
+
 ## Reposting and un-reposting (#15)
 
 Every post but your own shows a "Repost" / "Reposted" toggle — see "Which
