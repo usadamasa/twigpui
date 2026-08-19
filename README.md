@@ -625,6 +625,38 @@ to the original rather than leaving the row without a face.
 Losing the avatar cache costs one re-download per author and nothing else —
 it is cache, not state.
 
+## Keyboard shortcuts (#58)
+
+| Key | Action |
+| --- | --- |
+| `⌘R` | Reload |
+| `⌘↩` | Post the draft |
+| `⌘N` | Focus the composer |
+| `esc` | Leave the composer (the draft is kept) |
+
+The same list is shown on screen, under the header — four bindings fit on
+one line, and a help screen nobody opens documents nothing.
+
+**Every binding carries a modifier, deliberately.** The hazard #58 is really
+about is a bare `j`/`k`/`n` firing while you are typing a post; nothing
+bound today can. Bare keys become worth having once posts can be selected,
+and that needs a second key context the composer's focus removes — see
+`ui::KEY_CONTEXT`.
+
+**`⌘↩` posts; plain `↩` does not.** Enter has to keep inserting a newline,
+and a post is not undoable.
+
+**`esc` moves focus only.** The draft is left exactly as typed: losing it to
+a stray key is unrecoverable, and never losing a draft is the composer's
+main promise (#14).
+
+**"Load older" has no shortcut.** Each press pages backwards for one paid
+request, and a key that spends money on a mis-hit is not a convenience.
+`⌘R` does spend requests, but it is the reload gesture every app shares and
+not one anyone hits by accident — and it goes through the same throttle
+(#10) and cooldown reporting (#57) as the button, so a held-down `⌘R`
+cannot outrun the interval that exists to stop this app spending in a loop.
+
 ## Opening things in a browser (#70)
 
 Every post row carries three ways out of the app, and none of them costs an
