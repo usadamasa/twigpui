@@ -2,6 +2,7 @@ use anyhow::{Context as _, Result, bail};
 use serde::Deserialize;
 use std::path::Path;
 
+use crate::log;
 use crate::paths::Paths;
 use crate::theme::ThemeMode;
 
@@ -32,6 +33,10 @@ pub(crate) struct Config {
     /// appearance). Defaults to `light`; an unrecognized value falls back to
     /// the default rather than failing startup — see [`Config::resolve`].
     pub theme: ThemeMode,
+    /// How much detail reaches the log file (#49). Defaults to
+    /// [`log::Level::Info`]; an unrecognized value falls back to it rather
+    /// than failing startup, exactly like `theme`.
+    pub log_level: log::Level,
     /// Price per API request (#18), in whatever unit the operator has in
     /// mind — this crate never assumes a currency. `None` by default: the
     /// per-request price depends on the account's plan and there is no way
@@ -79,6 +84,12 @@ struct FileSettings {
     /// failing the whole file load.
     #[serde(default)]
     theme: Option<String>,
+    /// Raw `log_level` value (#49), parsed the same way and for the same
+    /// reason as `theme`. This is the setting that matters for a `.app`
+    /// launched from Finder, where no environment variable set in a shell
+    /// is visible (#40).
+    #[serde(default)]
+    log_level: Option<String>,
     /// Non-secret (see [`Config::request_price`]'s doc), so this key is
     /// allowed in `config.toml` like `oauth_client_id` above.
     #[serde(default)]
@@ -240,6 +251,8 @@ impl Config {
             })
             .unwrap_or_default();
 
+        let log_level = resolve_log_level(&var, file.log_level);
+
         let request_price = resolve_request_price(&var, file.request_price)?;
         let daily_request_budget = resolve_daily_request_budget(&var, file.daily_request_budget)?;
 
@@ -250,6 +263,7 @@ impl Config {
             max_results,
             min_fetch_interval_seconds,
             theme,
+            log_level,
             request_price,
             daily_request_budget,
         })
@@ -267,6 +281,40 @@ impl Config {
 /// default. Still validated when present, from either source: a negative
 /// or non-finite price would silently corrupt every estimated amount
 /// downstream.
+/// Resolve the log level (#49): `TWIGPUI_LOG` wins over `config.toml`'s
+/// `log_level`, and an unrecognized value warns and falls back to the
+/// default rather than blocking startup — the same shape as `theme` (#19),
+/// for the same reason: neither is worth refusing to run over.
+///
+/// The warning goes to stderr rather than the log, because this runs
+/// *before* `log::init` — the level it produces is what `init` is waiting
+/// for. In a `.app` launched from Finder nobody sees it, which is also the
+/// case where a bad value is least likely to be a surprise: environment
+/// variables set in a shell are not visible there, so it came from
+/// `config.toml`, which the user just edited.
+fn resolve_log_level(
+    var: &impl Fn(&str) -> Option<String>,
+    file_value: Option<String>,
+) -> log::Level {
+    var("TWIGPUI_LOG")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            file_value
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        })
+        .and_then(|raw| {
+            log::Level::parse(&raw).or_else(|| {
+                eprintln!(
+                    "warning: unrecognized log_level {raw:?} (expected error, warn, info, or debug); using info instead"
+                );
+                None
+            })
+        })
+        .unwrap_or_default()
+}
+
 fn resolve_request_price(
     var: &impl Fn(&str) -> Option<String>,
     file_value: Option<f64>,
@@ -353,6 +401,66 @@ mod tests {
 
     // A blank token must still count as "not configured" rather than being
     // used verbatim — but with an oauth_client_id present, that no longer
+    // --- #49: log level ---
+
+    #[test]
+    fn the_log_level_defaults_to_info() {
+        let config = Config::resolve(
+            vars(&[("X_BEARER_TOKEN", "token")]),
+            FileSettings::default(),
+        )
+        .unwrap();
+        assert_eq!(config.log_level, crate::log::Level::Info);
+    }
+
+    #[test]
+    fn the_log_level_comes_from_the_environment_when_set() {
+        let config = Config::resolve(
+            vars(&[("X_BEARER_TOKEN", "token"), ("TWIGPUI_LOG", "debug")]),
+            FileSettings::default(),
+        )
+        .unwrap();
+        assert_eq!(config.log_level, crate::log::Level::Debug);
+    }
+
+    #[test]
+    fn the_environments_log_level_wins_over_the_files() {
+        let config = Config::resolve(
+            vars(&[("X_BEARER_TOKEN", "token"), ("TWIGPUI_LOG", "error")]),
+            FileSettings {
+                log_level: Some("debug".to_string()),
+                ..FileSettings::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(config.log_level, crate::log::Level::Error);
+    }
+
+    #[test]
+    fn the_files_log_level_is_used_when_the_environment_is_silent() {
+        // The case that actually matters: a `.app` launched from Finder
+        // sees no environment variable set in a shell (#40).
+        let config = Config::resolve(
+            vars(&[("X_BEARER_TOKEN", "token")]),
+            FileSettings {
+                log_level: Some("warn".to_string()),
+                ..FileSettings::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(config.log_level, crate::log::Level::Warn);
+    }
+
+    #[test]
+    fn an_unrecognized_log_level_falls_back_rather_than_failing_startup() {
+        let config = Config::resolve(
+            vars(&[("X_BEARER_TOKEN", "token"), ("TWIGPUI_LOG", "loud")]),
+            FileSettings::default(),
+        )
+        .unwrap();
+        assert_eq!(config.log_level, crate::log::Level::Info);
+    }
+
     // means resolution fails, only that `bearer_token` ends up `None`.
     #[test]
     fn treats_a_blank_token_as_unset_rather_than_a_literal_value() {
