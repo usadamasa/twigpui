@@ -46,7 +46,11 @@ const MAX_BYTES: u64 = 8 * 1024 * 1024;
 /// falls back to `.img` rather than being trusted as a path component.
 pub(crate) fn cache_key(url: &str) -> String {
     let digest = Sha256::digest(url.as_bytes());
-    let mut key = String::with_capacity(digest.len() * 2 + 5);
+    // Capacity hint only: two hex characters per byte, plus a dot and a
+    // short extension. Saturating because it is an optimization, not a
+    // bound — an overflow here would be a wrong allocation size, not a
+    // wrong key (#47).
+    let mut key = String::with_capacity(digest.len().saturating_mul(2).saturating_add(5));
     for byte in digest {
         // Infallible: writing to a String never fails.
         let _ = write!(key, "{byte:02x}");

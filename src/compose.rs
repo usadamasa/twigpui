@@ -72,7 +72,10 @@ pub(crate) fn weighted_length(text: &str) -> usize {
             }
         })
         .sum();
-    whitespace_weight + word_weight
+    // `saturating_add` (#47): a draft long enough to overflow `usize`
+    // cannot exist, but saying so explicitly beats a debug-only panic as
+    // the thing standing between this counter and a wrong answer.
+    whitespace_weight.saturating_add(word_weight)
 }
 
 /// Whether `word` looks like a URL X would shorten to a fixed-length t.co

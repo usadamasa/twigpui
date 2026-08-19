@@ -106,7 +106,10 @@ impl TokenSet {
     /// Whether this token should be refreshed before use: already expired,
     /// or inside the skew window.
     pub(crate) fn needs_refresh(&self, now: i64) -> bool {
-        now + REFRESH_SKEW_SECONDS >= self.expires_at
+        // `saturating_add` (#47): `now` comes from the clock, so a
+        // machine with an absurd date set must make this say "refresh",
+        // not overflow.
+        now.saturating_add(REFRESH_SKEW_SECONDS) >= self.expires_at
     }
 }
 

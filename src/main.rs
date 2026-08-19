@@ -300,7 +300,10 @@ fn fetch_post_arg<'a>(args: &'a [String], flag: &str) -> FetchPostArg<'a> {
     let Some(index) = args.iter().position(|arg| arg == flag) else {
         return FetchPostArg::Absent;
     };
-    match args.get(index + 1) {
+    // `saturating_add` (#47): argv cannot be `usize::MAX` long, but the
+    // saturating form makes that a lookup that finds nothing rather than
+    // an overflow.
+    match args.get(index.saturating_add(1)) {
         Some(value) => FetchPostArg::Value(value.as_str()),
         None => FetchPostArg::MissingValue,
     }
