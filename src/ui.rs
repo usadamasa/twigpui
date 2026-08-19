@@ -2219,7 +2219,7 @@ impl TimelineView {
 
 /// The "Load older" row appended after the list (#11), styled like
 /// [`notice`] but clickable — appending posts *behind* what's already shown
-/// via `cache::append_older`, never merged ahead like a normal reload.
+/// via `cache::splice`, never merged ahead like a normal reload.
 fn load_older_row(theme: Theme, cx: &mut Context<'_, TimelineView>) -> impl IntoElement {
     div()
         .id("load-older")
@@ -3058,7 +3058,7 @@ fn header_title(home_username: Option<&str>) -> String {
 /// only while the timeline is in a state where clicking it makes sense.
 ///
 /// Withheld at the post cap, which is the part that matters for money.
-/// `cache::append_older` truncates back down to `MAX_CACHED_POSTS`, so at the
+/// `cache::splice` truncates back down to `MAX_CACHED_POSTS`, so at the
 /// cap a click would spend a real API request and then discard every post it
 /// bought — a paid no-op, in a project whose entire cache exists to avoid
 /// exactly that. [`at_the_post_cap`] renders an explanation in its place so
@@ -3916,7 +3916,7 @@ mod tests {
 
     #[test]
     fn does_not_offer_load_older_at_the_post_cap() {
-        // `cache::append_older` truncates back to the cap, so a click here
+        // `cache::splice` truncates back to the cap, so a click here
         // would spend a real API request and discard everything it bought.
         let full: Vec<_> = (0..crate::cache::MAX_CACHED_POSTS)
             .map(|n| TimelineItem {

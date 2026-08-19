@@ -31,7 +31,7 @@ const USER_ID_TTL_SECONDS: i64 = 30 * 24 * 60 * 60;
 /// `~/.cache` is not purged automatically by macOS the way `~/Library/Caches`
 /// is, so without this an actively reloaded user's cache would grow forever.
 ///
-/// `ui.rs` reads this too: at the cap, [`append_older`] would throw away
+/// `ui.rs` reads this too: at the cap, [`splice`] would throw away
 /// everything a "Load older" request bought, so the button has to be
 /// withheld rather than left to spend credits for nothing.
 pub(crate) const MAX_CACHED_POSTS: usize = 500;
@@ -234,45 +234,57 @@ pub(crate) fn since_id(cached: &[TimelineItem]) -> Option<&str> {
     cached.first().map(|item| item.id.as_str())
 }
 
-/// Merge freshly fetched posts (newest-first) ahead of what's cached (also
-/// newest-first): drop any id already present in `cached` — the API can
-/// return a post already on file — then cap the combined, still
-/// newest-first list to [`MAX_CACHED_POSTS`].
-pub(crate) fn merge_timeline(
-    fresh: Vec<TimelineItem>,
-    cached: Vec<TimelineItem>,
-) -> Vec<TimelineItem> {
-    let cached_ids: HashSet<&str> = cached.iter().map(|item| item.id.as_str()).collect();
-    let mut merged: Vec<TimelineItem> = fresh
-        .into_iter()
-        .filter(|item| !cached_ids.contains(item.id.as_str()))
-        .collect();
-    merged.extend(cached);
-    merged.truncate(MAX_CACHED_POSTS);
-    merged
+/// Which side of what's already cached an incoming batch belongs on (#92).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Side {
+    /// A newer batch, from a `since_id` reload — it goes in front.
+    Ahead,
+    /// An older batch, from following `meta.next_token` (#11's "Load
+    /// older") — it goes behind. Putting one in front instead would
+    /// silently invert the newest-first invariant every other reader of
+    /// the cache relies on.
+    Behind,
 }
 
-/// Append freshly fetched *older* posts (also newest-first, from following
-/// `meta.next_token` — #11's "Load older") after what's cached: the opposite
-/// side from [`merge_timeline`], which puts a newer batch *ahead* of cached.
-/// Putting an older batch there instead would silently invert the
-/// newest-first invariant every other reader of the cache relies on. Drops
-/// any id already present in `cached` — the API can return a post already on
-/// file at the page boundary — then caps the combined, still newest-first
-/// list to [`MAX_CACHED_POSTS`], same as [`merge_timeline`].
-pub(crate) fn append_older(
+/// Splice `incoming` into `cached` on the given side, both newest-first,
+/// and cap the result to [`MAX_CACHED_POSTS`].
+///
+/// Ids already in `cached` are dropped from `incoming` — the API returns a
+/// post already on file both on an incremental reload and at a page
+/// boundary. **The cached copy is the one kept**, in either direction. That
+/// was true of both functions this replaces (#92: they were the same
+/// operation with the concatenation reversed), and it is worth stating
+/// rather than leaving as an accident: a post's `metrics` (#67) are a
+/// snapshot from when it was fetched, so "keep what is on file" is what
+/// makes a reload leave existing rows' counts alone instead of shuffling
+/// them.
+pub(crate) fn splice(
     cached: Vec<TimelineItem>,
-    older: Vec<TimelineItem>,
+    incoming: Vec<TimelineItem>,
+    side: Side,
 ) -> Vec<TimelineItem> {
     let cached_ids: HashSet<&str> = cached.iter().map(|item| item.id.as_str()).collect();
-    let filtered_older: Vec<TimelineItem> = older
+    let fresh: Vec<TimelineItem> = incoming
         .into_iter()
         .filter(|item| !cached_ids.contains(item.id.as_str()))
         .collect();
-    let mut merged = cached;
-    merged.extend(filtered_older);
-    merged.truncate(MAX_CACHED_POSTS);
-    merged
+
+    // Both arms move rather than clone: whichever list goes first becomes
+    // the buffer the other is appended to.
+    let mut spliced = match side {
+        Side::Ahead => {
+            let mut ahead = fresh;
+            ahead.extend(cached);
+            ahead
+        }
+        Side::Behind => {
+            let mut behind = cached;
+            behind.extend(fresh);
+            behind
+        }
+    };
+    spliced.truncate(MAX_CACHED_POSTS);
+    spliced
 }
 
 /// Every item except `post_id` (#72), in the same order.
@@ -346,7 +358,7 @@ pub(crate) struct Reloaded {
 ///
 /// Not unit-tested directly — it makes real HTTP requests through `client`.
 /// Everything it composes ([`cached_user_id`], [`save_user_id`],
-/// [`load_timeline`], [`since_id`], [`merge_timeline`], [`save_timeline`])
+/// [`load_timeline`], [`since_id`], [`splice`], [`save_timeline`])
 /// is tested standalone, the same way `oauth::resolve_credential`'s
 /// network-calling refresh branch isn't directly tested either.
 pub(crate) fn reload(
@@ -367,7 +379,7 @@ pub(crate) fn reload(
     let cached = load_timeline(paths, &user_id)?.unwrap_or_default();
     let since = since_id(&cached);
     let fresh = client.timeline(paths, &user_id, max_results, since, now)?;
-    let items = merge_timeline(fresh, cached);
+    let items = splice(cached, fresh, Side::Ahead);
     save_timeline(paths, &user_id, &items, now)?;
     Ok(Reloaded {
         items,
@@ -422,7 +434,7 @@ pub(crate) fn reload_home(
     let cached = load_home_timeline(paths, &me.id)?.unwrap_or_default();
     let since = since_id(&cached);
     let (fresh, next_token) = client.home_timeline(paths, &me.id, max_results, since, None, now)?;
-    let items = merge_timeline(fresh, cached);
+    let items = splice(cached, fresh, Side::Ahead);
     save_home_timeline(paths, &me.id, &items, now)?;
     Ok(ReloadedHome {
         items,
@@ -432,8 +444,8 @@ pub(crate) fn reload_home(
 }
 
 /// Spend one request to fetch the page *behind* `pagination_token` (#11's
-/// "Load older"): append it after what's cached — via [`append_older`],
-/// never [`merge_timeline`] — persist the combined result, and return it
+/// "Load older"): append it after what's cached — [`Side::Behind`], never
+/// [`Side::Ahead`] — persist the combined result, and return it
 /// alongside the next `meta.next_token` (`None` once there's nothing further
 /// back). `user_id` is the caller's responsibility to supply — `ui.rs` keeps
 /// it around from the last [`reload_home`] or [`startup_home`], since this
@@ -458,7 +470,7 @@ pub(crate) fn load_older_home(
         Some(pagination_token),
         now,
     )?;
-    let items = append_older(cached, older);
+    let items = splice(cached, older, Side::Behind);
     save_home_timeline(paths, user_id, &items, now)?;
     Ok((items, next_token))
 }
@@ -715,39 +727,39 @@ mod tests {
         assert_eq!(since_id(&cached), Some("300"));
     }
 
-    // --- merge_timeline ---
+    // --- splice ahead (#92, formerly merge_timeline) ---
 
     #[test]
-    fn merge_places_fresh_posts_ahead_of_cached_posts() {
+    fn splice_ahead_places_fresh_posts_before_cached_posts() {
         let fresh = vec![item("3"), item("2")];
         let cached = vec![item("1")];
-        let merged = merge_timeline(fresh, cached);
+        let merged = splice(cached, fresh, Side::Ahead);
         assert_eq!(ids(&merged), vec!["3", "2", "1"]);
     }
 
     #[test]
-    fn merge_drops_a_fresh_post_whose_id_is_already_cached() {
+    fn splice_ahead_drops_a_fresh_post_whose_id_is_already_cached() {
         // The API can hand back a post that's already on file; the cached
         // copy stays put rather than being duplicated.
         let fresh = vec![item("3"), item("2")];
         let cached = vec![item("2"), item("1")];
-        let merged = merge_timeline(fresh, cached);
+        let merged = splice(cached, fresh, Side::Ahead);
         assert_eq!(ids(&merged), vec!["3", "2", "1"]);
     }
 
     #[test]
-    fn merge_keeps_the_result_ordered_newest_first() {
+    fn splice_ahead_keeps_the_result_ordered_newest_first() {
         let fresh = vec![item("6"), item("5"), item("4")];
         let cached = vec![item("3"), item("2"), item("1")];
-        let merged = merge_timeline(fresh, cached);
+        let merged = splice(cached, fresh, Side::Ahead);
         assert_eq!(ids(&merged), vec!["6", "5", "4", "3", "2", "1"]);
     }
 
     #[test]
-    fn merge_truncates_to_the_500_post_cap() {
+    fn splice_ahead_truncates_to_the_500_post_cap() {
         let fresh = vec![item("502"), item("501")];
         let cached: Vec<_> = (1..=500).rev().map(|n| item(&n.to_string())).collect();
-        let merged = merge_timeline(fresh, cached);
+        let merged = splice(cached, fresh, Side::Ahead);
         assert_eq!(merged.len(), 500);
         assert_eq!(merged.first().unwrap().id, "502");
         // The two oldest cached posts ("2" and "1") were pushed out by the cap.
@@ -756,39 +768,64 @@ mod tests {
         assert_eq!(merged.last().unwrap().id, "3");
     }
 
-    // --- append_older ---
+    #[test]
+    fn splice_keeps_the_cached_copy_of_a_duplicate_in_both_directions() {
+        // #92: the two functions this replaced both kept what was already
+        // on file, and that is load-bearing rather than incidental — a
+        // post's metrics (#67) are a snapshot from when it was fetched, so
+        // keeping the cached copy is what stops a reload shuffling the
+        // counts on rows the user is already looking at.
+        let mut cached_copy = item("1");
+        cached_copy.text = "on file".to_string();
+        let mut incoming_copy = item("1");
+        incoming_copy.text = "just fetched".to_string();
+
+        let ahead = splice(
+            vec![cached_copy.clone()],
+            vec![incoming_copy.clone()],
+            Side::Ahead,
+        );
+        assert_eq!(ahead.len(), 1);
+        assert_eq!(ahead[0].text, "on file");
+
+        let behind = splice(vec![cached_copy], vec![incoming_copy], Side::Behind);
+        assert_eq!(behind.len(), 1);
+        assert_eq!(behind[0].text, "on file");
+    }
+
+    // --- splice behind (#92, formerly append_older) ---
 
     #[test]
-    fn append_older_places_older_posts_behind_cached_posts() {
+    fn splice_behind_places_older_posts_after_cached_posts() {
         let cached = vec![item("3"), item("2")];
         let older = vec![item("1")];
-        let merged = append_older(cached, older);
+        let merged = splice(cached, older, Side::Behind);
         assert_eq!(ids(&merged), vec!["3", "2", "1"]);
     }
 
     #[test]
-    fn append_older_drops_an_older_post_whose_id_is_already_cached() {
+    fn splice_behind_drops_an_older_post_whose_id_is_already_cached() {
         // The page boundary can overlap: the API can hand back a post
         // that's already on file, and it must not be duplicated.
         let cached = vec![item("3"), item("2")];
         let older = vec![item("2"), item("1")];
-        let merged = append_older(cached, older);
+        let merged = splice(cached, older, Side::Behind);
         assert_eq!(ids(&merged), vec!["3", "2", "1"]);
     }
 
     #[test]
-    fn append_older_keeps_the_result_ordered_newest_first() {
+    fn splice_behind_keeps_the_result_ordered_newest_first() {
         let cached = vec![item("6"), item("5"), item("4")];
         let older = vec![item("3"), item("2"), item("1")];
-        let merged = append_older(cached, older);
+        let merged = splice(cached, older, Side::Behind);
         assert_eq!(ids(&merged), vec!["6", "5", "4", "3", "2", "1"]);
     }
 
     #[test]
-    fn append_older_truncates_to_the_500_post_cap() {
+    fn splice_behind_truncates_to_the_500_post_cap() {
         let cached: Vec<_> = (3..=502).rev().map(|n| item(&n.to_string())).collect();
         let older = vec![item("2"), item("1")];
-        let merged = append_older(cached, older);
+        let merged = splice(cached, older, Side::Behind);
         assert_eq!(merged.len(), 500);
         assert_eq!(merged.first().unwrap().id, "502");
         // The two oldest fetched posts ("2" and "1") are pushed out by the cap.
