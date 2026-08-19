@@ -104,6 +104,10 @@ fn main() {
         // before any of its widgets (the composer's text input) can be
         // constructed.
         gpui_component::init(cx);
+        // #58: twigpui's own key bindings, registered alongside
+        // gpui-component's for the same reason — once, before the window
+        // that dispatches to them exists.
+        ui::init(cx);
 
         let bounds = Bounds::centered(None, size(px(560.0), px(820.0)), cx);
         let options = WindowOptions {
