@@ -92,8 +92,18 @@ cargo test
   ビルドしているので、この指定を外さない。同時に x11 / wayland も落ちるため Linux 向けには
   ビルドできない (CI が macOS ランナーのみなのはこのため)。
 - **厳格な lint**: `Cargo.toml` の `[lints.rust]` / `[lints.clippy]` で `unsafe_code` を
-  forbid し、`pedantic` / `unwrap_used` / `expect_used` を有効にしている。バイナリクレート
-  なので公開項目は `pub(crate)` で書く。
+  forbid し、それ以外は **すべて `deny`** にしている (#47)。`warn` にすると手元で通って
+  CI だけが落ちるので、レベルを下げない。バイナリクレートなので公開項目は `pub(crate)`
+  で書く。
+  - パニックを生む添字・スライスは `indexing_slicing` / `string_slice` で禁止している。
+    リモート入力 (API レスポンス、投稿本文、OAuth のリダイレクト) を扱う箇所では
+    `&s[..n]` ではなく `s.get(..n)` を使う。#47 でこの 3 箇所から実際にパニックが出た。
+  - テストの中だけは `main.rs` の `#![cfg_attr(test, allow(...))]` 1 行で
+    `unwrap_used` / `expect_used` / `indexing_slicing` / `string_slice` / `panic` を
+    許可している。テストの添字とパニックは表明であって事故ではない。
+    **許可を増やすときはこの 1 行に足す。個別の `#[allow]` を撒かない。**
+  - lint を足すときは、まず有効にして件数を測り、採否の理由を `Cargo.toml` の
+    コメントに残す。`#[allow]` を撒くことになる lint は採用しない。
 - **課金に直結する API**: X API はプリペイド残高からの従量課金。リロード 1 回で
   ID 解決 (単一ユーザーモードは screen name 検索、ホームタイムラインモードは `/users/me`) +
   タイムライン取得の 2 リクエストを消費する (#11)。「Load older」のクリックごとにさらに

@@ -37,10 +37,23 @@ pub(crate) fn is_openable(url: &str) -> bool {
 
 /// The part of `url` after `http://` or `https://`, or `None` when it
 /// carries neither scheme.
+/// Compared and split on **bytes**, not on `str` ranges. `url[..8]` is a
+/// byte range that panics unless 8 happens to be a character boundary, and
+/// `"https:/\u{3042}"` is exactly the input where it isn't — remote input
+/// reaching a panic (#47, found by `clippy::string_slice`). Comparing the
+/// prefix bytes first also makes the following `get` infallible in
+/// practice: once the first `scheme.len()` bytes are known to be ASCII,
+/// that index is a boundary.
 fn strip_scheme(url: &str) -> Option<&str> {
     for scheme in ["https://", "http://"] {
-        if url.len() >= scheme.len() && url[..scheme.len()].eq_ignore_ascii_case(scheme) {
-            return Some(&url[scheme.len()..]);
+        // `continue`, not `?`: a URL shorter than the scheme being tried
+        // must fall through to the next one, not end the whole search —
+        // otherwise the result would depend on the order of this list.
+        let Some(prefix) = url.as_bytes().get(..scheme.len()) else {
+            continue;
+        };
+        if prefix.eq_ignore_ascii_case(scheme.as_bytes()) {
+            return url.get(scheme.len()..);
         }
     }
     None
@@ -114,6 +127,24 @@ mod tests {
     fn refuses_an_unregistered_or_app_specific_scheme() {
         assert!(!is_openable("javascript:alert(1)"));
         assert!(!is_openable("x-apple-something://do-a-thing"));
+    }
+
+    #[test]
+    fn a_multi_byte_character_inside_the_scheme_does_not_panic() {
+        // Found by `clippy::string_slice` (#47), not by a bug report:
+        // `url[..8]` is a byte range, and "https:/あ" is 10 bytes with a
+        // character boundary at 7 and 10 — so slicing at 8 used to panic.
+        // Post text is remote input, so this was reachable.
+        assert!(!is_openable("https:/\u{3042}"));
+        assert!(!is_openable("http:/\u{3042}"));
+    }
+
+    #[test]
+    fn a_url_shorter_than_the_longest_scheme_still_matches_its_own() {
+        // "http://a" is 8 bytes and "https://" is 8 too, so the scheme
+        // search must fall through rather than stopping at the first
+        // scheme it cannot even fit.
+        assert!(is_openable("http://a"));
     }
 
     #[test]
