@@ -70,3 +70,13 @@ jobs:
 
       - name: Run clippy
         run: cargo clippy --locked --all-targets -- -D warnings
+
+      # #48: structural metrics, reported into the run summary rather than
+      # gated on. The existing code is already over any threshold worth
+      # setting, and a check that fails from day one gets disabled instead
+      # of fixed — so this establishes the baseline first, which is what
+      # #48 asks for. It rides in the lint job rather than a new one
+      # because it reuses that job's already-warm clippy cache; a separate
+      # runner would rebuild the crate from scratch (#46).
+      - name: Report code metrics
+        run: bash scripts/code-metrics.sh >> "$GITHUB_STEP_SUMMARY"

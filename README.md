@@ -760,6 +760,23 @@ that) for a line with a level, a timestamp and a size cap. The headless
 directly: they only ever run from a terminal, and a one-shot command has no
 business leaving a file behind.
 
+## Code metrics (#48)
+
+```sh
+bash scripts/code-metrics.sh
+```
+
+Prints file sizes (split into implementation and test lines), the fifteen
+longest functions, and any `clippy::cognitive_complexity` hits. CI runs it
+in the Lint job and writes the output to the run summary.
+
+**It reports; it does not gate.** The existing code is already past any
+threshold worth setting, and a check that fails from day one gets disabled
+rather than fixed — so the baseline comes first. It is built from bash, awk
+and clippy alone rather than a metrics tool, because every such tool needs
+an install step on every CI run and build time is a live concern (#46).
+When one earns that time, this script is what it replaces.
+
 ## API cost
 
 The X API bills per request against prepaid credits. A cold reload spends two
