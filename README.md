@@ -1,8 +1,14 @@
-# twigpui
+<p align="center">
+  <img src="assets/AppIcon.png" alt="twigpui" width="180" height="180">
+</p>
 
-A development-only X (Twitter) timeline viewer, built with Rust and
-[gpui](https://crates.io/crates/gpui). macOS only — no other platform is
-considered.
+<h1 align="center">twigpui</h1>
+
+<p align="center">
+  A development-only X (Twitter) timeline viewer, built with Rust and
+  <a href="https://crates.io/crates/gpui">gpui</a>.<br>
+  macOS only — no other platform is considered.
+</p>
 
 ## Status
 
@@ -138,13 +144,15 @@ to make it distributable. Move the result wherever you like, e.g.:
 mv dist/twigpui.app /Applications/
 ```
 
-**Icon.** The script looks for `assets/AppIcon.icns` (used as-is) or
-`assets/AppIcon.png` (a 1024×1024 source it turns into a full `.icns` via
-`sips`/`iconutil`). Neither exists in this repository — producing real
-artwork wasn't practical without a design tool — so a bundle built as-is has
-no `CFBundleIconFile` and macOS shows it with the generic app icon rather
-than a dangling reference to a file that isn't there. Drop either file into
-`assets/` and rebuild to get a custom one.
+**Icon.** `assets/AppIcon.png` is the source (#85, the crab holding a bird
+at the top of this file). The script resizes it into the ten sizes
+`iconutil` wants and writes the `.icns` into the bundle — `sips` and
+`iconutil` both ship with macOS, so there is nothing to install.
+
+`assets/AppIcon.icns` takes precedence if you drop one in, and is used
+as-is. With neither file present the bundle simply carries no
+`CFBundleIconFile` and macOS shows the generic app icon — the script never
+writes a dangling reference to a file it did not copy in.
 
 ### Configuration for a bundled launch — read this before double-clicking
 
