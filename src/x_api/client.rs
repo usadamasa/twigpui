@@ -135,7 +135,7 @@ impl XClient {
                     rate_limit::save(paths, endpoint, state)?;
 
                     if is_retryable_status(status) && attempt < rate_limit::MAX_RETRIES {
-                        attempt += 1;
+                        attempt = attempt.saturating_add(1);
                         std::thread::sleep(rate_limit::backoff_delay(
                             attempt,
                             rate_limit::random_jitter_fraction(),
@@ -148,7 +148,7 @@ impl XClient {
                 }
                 Err(error) => {
                     if attempt < rate_limit::MAX_RETRIES {
-                        attempt += 1;
+                        attempt = attempt.saturating_add(1);
                         std::thread::sleep(rate_limit::backoff_delay(
                             attempt,
                             rate_limit::random_jitter_fraction(),

@@ -2658,7 +2658,9 @@ fn usage_color(status: usage::BudgetStatus, theme: Theme) -> u32 {
 /// actually rate limiting this app, and reporting the self-imposed interval
 /// as a rate limit would misdescribe what happened.
 fn cooldown_label(cooldown: Cooldown, reset_at: i64, now: i64) -> String {
-    let remaining = (reset_at - now).max(0);
+    // `saturating_sub` (#47): `reset_at` comes from an API header and
+    // `now` from the clock, so neither is this code's to trust.
+    let remaining = reset_at.saturating_sub(now).max(0);
     match cooldown {
         Cooldown::LocalInterval => format!("Waiting out the fetch interval — {remaining}s"),
         Cooldown::ApiRateLimit => format!("Rate limited by X — retry in {remaining}s"),

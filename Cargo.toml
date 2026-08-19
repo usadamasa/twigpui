@@ -30,9 +30,6 @@ variant_size_differences = "deny"
 #   `let _ = this.update(cx, …)` — gpui's own way of saying "the entity may
 #   already be gone". Adopting it would mean 26 `#[allow]`s, which is the
 #   issue's own stated reason not to adopt a lint.
-# - `clippy::arithmetic_side_effects` (17 hits in `src/`): worth doing, but
-#   each hit is a real decision about saturating vs checked arithmetic, not
-#   a mechanical rewrite. Its own change.
 [lints.clippy]
 pedantic = { level = "deny", priority = -1 }
 unwrap_used = "deny"
@@ -52,6 +49,12 @@ verbose_file_reads = "deny"
 same_name_method = "deny"
 missing_assert_message = "deny"
 redundant_type_annotations = "deny"
+# The second half of #47's lint work: every arithmetic operation in `src/`
+# now states what it does on overflow (saturate, wrap where the range
+# already proves it cannot, or check and fall back). Timestamps come from
+# the clock and from API headers, and byte offsets from a redirect URL —
+# none of it this code's to trust.
+arithmetic_side_effects = "deny"
 
 [dependencies]
 anyhow = "1.0.104"

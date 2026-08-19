@@ -85,10 +85,14 @@ fn parse_query(raw: &str) -> HashMap<String, String> {
 }
 
 fn hex_digit(byte: u8) -> Option<u8> {
+    // Each arm's subtraction is bounded by the pattern that selected it,
+    // so `wrapping_sub` and `wrapping_add` cannot actually wrap here — but
+    // stating it beats relying on a debug-only overflow check to notice if
+    // a range is ever edited (#47).
     match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
+        b'0'..=b'9' => Some(byte.wrapping_sub(b'0')),
+        b'a'..=b'f' => Some(byte.wrapping_sub(b'a').wrapping_add(10)),
+        b'A'..=b'F' => Some(byte.wrapping_sub(b'A').wrapping_add(10)),
         _ => None,
     }
 }
@@ -110,16 +114,19 @@ fn percent_decode(value: &str) -> String {
     while let Some(&byte) = bytes.get(i) {
         if byte == b'%'
             && let (Some(Some(hi)), Some(Some(lo))) = (
-                bytes.get(i + 1).copied().map(hex_digit),
-                bytes.get(i + 2).copied().map(hex_digit),
+                bytes.get(i.saturating_add(1)).copied().map(hex_digit),
+                bytes.get(i.saturating_add(2)).copied().map(hex_digit),
             )
         {
-            out.push(hi * 16 + lo);
-            i += 3;
+            // Both nibbles are 0..=15 by `hex_digit`'s construction, so
+            // this fits a `u8` — `wrapping_*` says so without a
+            // debug-only check being the thing that would catch a change.
+            out.push(hi.wrapping_mul(16).wrapping_add(lo));
+            i = i.saturating_add(3);
             continue;
         }
         out.push(byte);
-        i += 1;
+        i = i.saturating_add(1);
     }
     String::from_utf8_lossy(&out).into_owned()
 }
@@ -224,7 +231,13 @@ pub(crate) async fn await_authorization_code(
         .set_nonblocking(true)
         .context("could not set the loopback listener to non-blocking")?;
 
-    let deadline = executor.now() + CALLBACK_TIMEOUT;
+    // `checked_add`, falling back to `now` (#47): a clock far enough
+    // ahead to overflow an `Instant` should make the wait expire
+    // immediately rather than panic in the middle of a sign-in.
+    let deadline = executor
+        .now()
+        .checked_add(CALLBACK_TIMEOUT)
+        .unwrap_or_else(|| executor.now());
     loop {
         match listener.accept() {
             Ok((stream, _addr)) => {
