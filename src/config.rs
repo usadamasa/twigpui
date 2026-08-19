@@ -10,16 +10,14 @@ use crate::theme::ThemeMode;
 /// > built-in default precedence.
 #[derive(Debug, Clone)]
 pub(crate) struct Config {
-    /// App-only Bearer token, used verbatim in the `Authorization` header.
-    ///
-    /// `Option` since #7: an OAuth session is an equally valid credential,
-    /// so this is no longer the only way to authenticate. [`Config::resolve`]
-    /// only fails when *neither* this nor [`Config::oauth_client_id`] is set.
-    pub bearer_token: Option<String>,
     /// OAuth 2.0 client id for the PKCE sign-in flow (#7). Non-secret — a
-    /// public OAuth client has no client secret — so unlike `bearer_token`
-    /// this may live in `config.toml`.
-    pub oauth_client_id: Option<String>,
+    /// public OAuth client has no client secret — so this may live in
+    /// `config.toml`.
+    ///
+    /// Required since #33 dropped the app-only bearer token: it is the only
+    /// way to authenticate now, so a missing one is a startup failure
+    /// rather than one of two alternatives.
+    pub oauth_client_id: String,
     /// Screen name whose posts are shown, without a leading `@`.
     pub target_username: String,
     /// Posts requested per fetch. The X API accepts 5..=100.
@@ -76,7 +74,7 @@ struct FileSettings {
     #[serde(default)]
     min_fetch_interval_seconds: Option<u32>,
     /// Non-secret (see [`Config::oauth_client_id`]), so — unlike
-    /// `bearer_token` below — this key is allowed in `config.toml`.
+    /// this key is allowed in `config.toml`.
     #[serde(default)]
     oauth_client_id: Option<String>,
     /// Raw `theme` value (#19), parsed by [`Config::resolve`] rather than
@@ -97,10 +95,13 @@ struct FileSettings {
     /// Non-secret, same reasoning as `request_price`.
     #[serde(default)]
     daily_request_budget: Option<u32>,
-    /// Present only so [`Config::resolve`] can detect and reject a bearer
-    /// token accidentally checked into `config.toml`. Kept as an untyped
-    /// `toml::Value` so any shape (string, table, array, ...) under this key
-    /// still triggers the check instead of failing with a deserialize error.
+    /// Present only so [`Config::resolve`] can reject a file that still
+    /// carries one. It was a credential that must never sit in a
+    /// dotfiles-repo file; since #33 it is not a credential at all, and
+    /// silently ignoring it would leave someone believing they are
+    /// configured when they are not. Kept as an untyped `toml::Value` so
+    /// any shape under this key still triggers the check instead of failing
+    /// with a deserialize error.
     #[serde(default)]
     bearer_token: Option<toml::Value>,
 }
@@ -143,19 +144,18 @@ impl Config {
     /// Split out from [`Config::from_env`] so the rules below can be tested
     /// without `set_var`, which is `unsafe` and races the other test threads.
     fn resolve(var: impl Fn(&str) -> Option<String>, file: FileSettings) -> Result<Self> {
-        // config.toml is a hand-edited file that people put in dotfiles repos, so a
-        // bearer token must never be readable from it. Reject the key outright
-        // rather than silently accepting it — credentials get their own store in #7.
+        // #33 removed the app-only bearer token. Someone upgrading still has
+        // the key in their file, and ignoring it would leave them believing
+        // they are configured when nothing reads it — so say what happened
+        // and what to do instead.
         if file.bearer_token.is_some() {
             bail!(
-                "bearer_token must not be set in config.toml. Use the X_BEARER_TOKEN \
-                 environment variable (or .env) instead."
+                "bearer_token is no longer supported (#33): app-only access could not read \
+                 the home timeline or write anything, so twigpui now signs in with X. \
+                 Remove the key from config.toml and set oauth_client_id (or \
+                 X_OAUTH_CLIENT_ID) instead."
             );
         }
-
-        let bearer_token = var("X_BEARER_TOKEN")
-            .map(|t| t.trim().to_string())
-            .filter(|t| !t.is_empty());
 
         let oauth_client_id = var("X_OAUTH_CLIENT_ID")
             .map(|c| c.trim().to_string())
@@ -166,16 +166,14 @@ impl Config {
                     .filter(|c| !c.is_empty())
             });
 
-        // Since #7, an OAuth session is an equally valid credential to the
-        // bearer token, so only the *combination* of both being absent is a
-        // hard failure — either one alone is enough to run.
-        if bearer_token.is_none() && oauth_client_id.is_none() {
+        // The only credential there is since #33, so a missing one is a
+        // startup failure rather than one of two alternatives.
+        let Some(oauth_client_id) = oauth_client_id else {
             bail!(
-                "no credential is configured. Set X_BEARER_TOKEN for app-only access, \
-                 or X_OAUTH_CLIENT_ID (or oauth_client_id in config.toml) to sign in \
-                 with X via OAuth."
+                "no oauth_client_id is configured. Set X_OAUTH_CLIENT_ID, or add \
+                 oauth_client_id = \"…\" to config.toml, then click \"Sign in with X\"."
             );
-        }
+        };
 
         let target_username = var("X_TARGET_USERNAME")
             .filter(|u| !u.trim().is_empty())
@@ -257,7 +255,6 @@ impl Config {
         let daily_request_budget = resolve_daily_request_budget(&var, file.daily_request_budget)?;
 
         Ok(Self {
-            bearer_token,
             oauth_client_id,
             target_username,
             max_results,
@@ -368,14 +365,14 @@ mod tests {
     }
 
     #[test]
-    fn fills_in_the_defaults_when_only_the_token_is_set() {
+    fn fills_in_the_defaults_when_only_the_client_id_is_set() {
         let config = Config::resolve(
-            vars(&[("X_BEARER_TOKEN", "token")]),
+            vars(&[("X_OAUTH_CLIENT_ID", "client-123")]),
             FileSettings::default(),
         )
         .unwrap();
 
-        assert_eq!(config.bearer_token.as_deref(), Some("token"));
+        assert_eq!(config.oauth_client_id, "client-123");
         assert_eq!(config.target_username, DEFAULT_USERNAME);
         assert_eq!(config.max_results, DEFAULT_MAX_RESULTS);
         assert_eq!(
@@ -385,18 +382,18 @@ mod tests {
         assert_eq!(config.theme, ThemeMode::default());
     }
 
-    // Since #7, a bearer token is one of *two* valid credentials (the other
-    // being an OAuth client id), so "no token" alone is no longer an error —
-    // only "neither credential" is. This test used to be
-    // `rejects_a_missing_token`; it now asserts the new failure condition
-    // instead of the old one.
+    // #33 made the client id the only credential, so this is a hard
+    // failure again — as it was before #7 introduced the second one.
     #[test]
-    fn rejects_when_no_credential_is_configured() {
+    fn rejects_when_no_client_id_is_configured() {
         let error = Config::resolve(vars(&[]), FileSettings::default())
             .unwrap_err()
             .to_string();
-        assert!(error.contains("X_BEARER_TOKEN"), "{error}");
         assert!(error.contains("X_OAUTH_CLIENT_ID"), "{error}");
+        assert!(
+            !error.contains("X_BEARER_TOKEN"),
+            "the message must not point at a credential that no longer exists: {error}"
+        );
     }
 
     // A blank token must still count as "not configured" rather than being
@@ -406,7 +403,7 @@ mod tests {
     #[test]
     fn the_log_level_defaults_to_info() {
         let config = Config::resolve(
-            vars(&[("X_BEARER_TOKEN", "token")]),
+            vars(&[("X_OAUTH_CLIENT_ID", "client-123")]),
             FileSettings::default(),
         )
         .unwrap();
@@ -416,7 +413,10 @@ mod tests {
     #[test]
     fn the_log_level_comes_from_the_environment_when_set() {
         let config = Config::resolve(
-            vars(&[("X_BEARER_TOKEN", "token"), ("TWIGPUI_LOG", "debug")]),
+            vars(&[
+                ("X_OAUTH_CLIENT_ID", "client-123"),
+                ("TWIGPUI_LOG", "debug"),
+            ]),
             FileSettings::default(),
         )
         .unwrap();
@@ -426,7 +426,10 @@ mod tests {
     #[test]
     fn the_environments_log_level_wins_over_the_files() {
         let config = Config::resolve(
-            vars(&[("X_BEARER_TOKEN", "token"), ("TWIGPUI_LOG", "error")]),
+            vars(&[
+                ("X_OAUTH_CLIENT_ID", "client-123"),
+                ("TWIGPUI_LOG", "error"),
+            ]),
             FileSettings {
                 log_level: Some("debug".to_string()),
                 ..FileSettings::default()
@@ -441,7 +444,7 @@ mod tests {
         // The case that actually matters: a `.app` launched from Finder
         // sees no environment variable set in a shell (#40).
         let config = Config::resolve(
-            vars(&[("X_BEARER_TOKEN", "token")]),
+            vars(&[("X_OAUTH_CLIENT_ID", "client-123")]),
             FileSettings {
                 log_level: Some("warn".to_string()),
                 ..FileSettings::default()
@@ -454,62 +457,34 @@ mod tests {
     #[test]
     fn an_unrecognized_log_level_falls_back_rather_than_failing_startup() {
         let config = Config::resolve(
-            vars(&[("X_BEARER_TOKEN", "token"), ("TWIGPUI_LOG", "loud")]),
+            vars(&[("X_OAUTH_CLIENT_ID", "client-123"), ("TWIGPUI_LOG", "loud")]),
             FileSettings::default(),
         )
         .unwrap();
         assert_eq!(config.log_level, crate::log::Level::Info);
     }
 
-    // means resolution fails, only that `bearer_token` ends up `None`.
     #[test]
-    fn treats_a_blank_token_as_unset_rather_than_a_literal_value() {
-        let config = Config::resolve(
-            vars(&[
-                ("X_BEARER_TOKEN", "   "),
-                ("X_OAUTH_CLIENT_ID", "client-123"),
-            ]),
+    fn treats_a_blank_client_id_as_unset_rather_than_a_literal_value() {
+        let error = Config::resolve(
+            vars(&[("X_OAUTH_CLIENT_ID", "   ")]),
             FileSettings::default(),
         )
-        .unwrap();
-        assert_eq!(config.bearer_token, None);
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("X_OAUTH_CLIENT_ID"), "{error}");
     }
 
     #[test]
-    fn trims_the_token() {
-        // A token pasted into .env often carries a trailing newline, and it goes
-        // into the Authorization header verbatim.
+    fn trims_the_client_id() {
+        // A value pasted into .env often carries a trailing newline, and it
+        // goes into the authorize URL verbatim.
         let config = Config::resolve(
-            vars(&[("X_BEARER_TOKEN", "  token\n")]),
+            vars(&[("X_OAUTH_CLIENT_ID", "  client-123\n")]),
             FileSettings::default(),
         )
         .unwrap();
-        assert_eq!(config.bearer_token.as_deref(), Some("token"));
-    }
-
-    #[test]
-    fn resolve_succeeds_with_only_an_oauth_client_id() {
-        let config = Config::resolve(
-            vars(&[("X_OAUTH_CLIENT_ID", "client-123")]),
-            FileSettings::default(),
-        )
-        .unwrap();
-        assert_eq!(config.bearer_token, None);
-        assert_eq!(config.oauth_client_id.as_deref(), Some("client-123"));
-    }
-
-    #[test]
-    fn resolve_succeeds_with_both_credentials_configured() {
-        let config = Config::resolve(
-            vars(&[
-                ("X_BEARER_TOKEN", "token"),
-                ("X_OAUTH_CLIENT_ID", "client-123"),
-            ]),
-            FileSettings::default(),
-        )
-        .unwrap();
-        assert_eq!(config.bearer_token.as_deref(), Some("token"));
-        assert_eq!(config.oauth_client_id.as_deref(), Some("client-123"));
+        assert_eq!(config.oauth_client_id, "client-123");
     }
 
     #[test]
@@ -519,7 +494,7 @@ mod tests {
             FileSettings::default(),
         )
         .unwrap();
-        assert_eq!(config.oauth_client_id.as_deref(), Some("client-123"));
+        assert_eq!(config.oauth_client_id, "client-123");
     }
 
     #[test]
@@ -529,7 +504,7 @@ mod tests {
             ..FileSettings::default()
         };
         let config = Config::resolve(vars(&[]), file).unwrap();
-        assert_eq!(config.oauth_client_id.as_deref(), Some("file-client"));
+        assert_eq!(config.oauth_client_id, "file-client");
     }
 
     #[test]
@@ -539,14 +514,14 @@ mod tests {
             ..FileSettings::default()
         };
         let config = Config::resolve(vars(&[("X_OAUTH_CLIENT_ID", "env-client")]), file).unwrap();
-        assert_eq!(config.oauth_client_id.as_deref(), Some("env-client"));
+        assert_eq!(config.oauth_client_id, "env-client");
     }
 
     #[test]
     fn strips_a_leading_at_from_the_username() {
         let config = Config::resolve(
             vars(&[
-                ("X_BEARER_TOKEN", "token"),
+                ("X_OAUTH_CLIENT_ID", "client-123"),
                 ("X_TARGET_USERNAME", " @XDevelopers "),
             ]),
             FileSettings::default(),
@@ -558,7 +533,10 @@ mod tests {
     #[test]
     fn falls_back_to_the_default_username_when_blank() {
         let config = Config::resolve(
-            vars(&[("X_BEARER_TOKEN", "token"), ("X_TARGET_USERNAME", "  ")]),
+            vars(&[
+                ("X_OAUTH_CLIENT_ID", "client-123"),
+                ("X_TARGET_USERNAME", "  "),
+            ]),
             FileSettings::default(),
         )
         .unwrap();
@@ -568,7 +546,10 @@ mod tests {
     #[test]
     fn parses_max_results() {
         let config = Config::resolve(
-            vars(&[("X_BEARER_TOKEN", "token"), ("X_MAX_RESULTS", " 42 ")]),
+            vars(&[
+                ("X_OAUTH_CLIENT_ID", "client-123"),
+                ("X_MAX_RESULTS", " 42 "),
+            ]),
             FileSettings::default(),
         )
         .unwrap();
@@ -578,7 +559,10 @@ mod tests {
     #[test]
     fn rejects_a_non_numeric_max_results() {
         let error = Config::resolve(
-            vars(&[("X_BEARER_TOKEN", "token"), ("X_MAX_RESULTS", "lots")]),
+            vars(&[
+                ("X_OAUTH_CLIENT_ID", "client-123"),
+                ("X_MAX_RESULTS", "lots"),
+            ]),
             FileSettings::default(),
         )
         .unwrap_err()
@@ -590,7 +574,7 @@ mod tests {
     fn accepts_both_ends_of_the_api_range() {
         for raw in ["5", "100"] {
             let config = Config::resolve(
-                vars(&[("X_BEARER_TOKEN", "token"), ("X_MAX_RESULTS", raw)]),
+                vars(&[("X_OAUTH_CLIENT_ID", "client-123"), ("X_MAX_RESULTS", raw)]),
                 FileSettings::default(),
             )
             .unwrap();
@@ -602,7 +586,7 @@ mod tests {
     fn rejects_max_results_outside_the_api_range() {
         for raw in ["4", "101"] {
             let error = Config::resolve(
-                vars(&[("X_BEARER_TOKEN", "token"), ("X_MAX_RESULTS", raw)]),
+                vars(&[("X_OAUTH_CLIENT_ID", "client-123"), ("X_MAX_RESULTS", raw)]),
                 FileSettings::default(),
             )
             .unwrap_err()
@@ -619,7 +603,7 @@ mod tests {
             target_username: Some("FileUser".to_string()),
             ..FileSettings::default()
         };
-        let config = Config::resolve(vars(&[("X_BEARER_TOKEN", "token")]), file).unwrap();
+        let config = Config::resolve(vars(&[("X_OAUTH_CLIENT_ID", "client-123")]), file).unwrap();
         assert_eq!(config.target_username, "FileUser");
     }
 
@@ -631,7 +615,7 @@ mod tests {
         };
         let config = Config::resolve(
             vars(&[
-                ("X_BEARER_TOKEN", "token"),
+                ("X_OAUTH_CLIENT_ID", "client-123"),
                 ("X_TARGET_USERNAME", "EnvUser"),
             ]),
             file,
@@ -646,7 +630,7 @@ mod tests {
             max_results: Some(42),
             ..FileSettings::default()
         };
-        let config = Config::resolve(vars(&[("X_BEARER_TOKEN", "token")]), file).unwrap();
+        let config = Config::resolve(vars(&[("X_OAUTH_CLIENT_ID", "client-123")]), file).unwrap();
         assert_eq!(config.max_results, 42);
     }
 
@@ -657,7 +641,7 @@ mod tests {
             ..FileSettings::default()
         };
         let config = Config::resolve(
-            vars(&[("X_BEARER_TOKEN", "token"), ("X_MAX_RESULTS", "7")]),
+            vars(&[("X_OAUTH_CLIENT_ID", "client-123"), ("X_MAX_RESULTS", "7")]),
             file,
         )
         .unwrap();
@@ -670,7 +654,7 @@ mod tests {
             max_results: Some(4),
             ..FileSettings::default()
         };
-        let error = Config::resolve(vars(&[("X_BEARER_TOKEN", "token")]), file)
+        let error = Config::resolve(vars(&[("X_OAUTH_CLIENT_ID", "client-123")]), file)
             .unwrap_err()
             .to_string();
         assert!(error.contains("between 5 and 100"), "{error}");
@@ -678,15 +662,20 @@ mod tests {
     }
 
     #[test]
-    fn resolve_rejects_a_bearer_token_in_the_file() {
+    fn resolve_rejects_a_bearer_token_left_in_the_file() {
+        // #33: someone upgrading still has the key. Ignoring it would leave
+        // them believing they are configured when nothing reads it, so this
+        // is a hard failure that names the replacement — and, as before,
+        // never echoes the value itself into the message.
         let file = FileSettings {
             bearer_token: Some(toml::Value::String("leaked".to_string())),
             ..FileSettings::default()
         };
-        let error = Config::resolve(vars(&[("X_BEARER_TOKEN", "token")]), file)
+        let error = Config::resolve(vars(&[("X_OAUTH_CLIENT_ID", "client-123")]), file)
             .unwrap_err()
             .to_string();
-        assert!(error.contains("X_BEARER_TOKEN"), "{error}");
+        assert!(error.contains("no longer supported"), "{error}");
+        assert!(error.contains("oauth_client_id"), "{error}");
         assert!(!error.contains("leaked"), "{error}");
     }
 
@@ -698,7 +687,7 @@ mod tests {
             min_fetch_interval_seconds: Some(120),
             ..FileSettings::default()
         };
-        let config = Config::resolve(vars(&[("X_BEARER_TOKEN", "token")]), file).unwrap();
+        let config = Config::resolve(vars(&[("X_OAUTH_CLIENT_ID", "client-123")]), file).unwrap();
         assert_eq!(config.min_fetch_interval_seconds, 120);
     }
 
@@ -710,7 +699,7 @@ mod tests {
         };
         let config = Config::resolve(
             vars(&[
-                ("X_BEARER_TOKEN", "token"),
+                ("X_OAUTH_CLIENT_ID", "client-123"),
                 ("X_MIN_FETCH_INTERVAL_SECONDS", "30"),
             ]),
             file,
@@ -723,7 +712,7 @@ mod tests {
     fn resolve_rejects_a_min_fetch_interval_of_zero() {
         let error = Config::resolve(
             vars(&[
-                ("X_BEARER_TOKEN", "token"),
+                ("X_OAUTH_CLIENT_ID", "client-123"),
                 ("X_MIN_FETCH_INTERVAL_SECONDS", "0"),
             ]),
             FileSettings::default(),
@@ -737,7 +726,7 @@ mod tests {
     fn resolve_rejects_a_non_numeric_min_fetch_interval() {
         let error = Config::resolve(
             vars(&[
-                ("X_BEARER_TOKEN", "token"),
+                ("X_OAUTH_CLIENT_ID", "client-123"),
                 ("X_MIN_FETCH_INTERVAL_SECONDS", "soon"),
             ]),
             FileSettings::default(),
@@ -757,7 +746,7 @@ mod tests {
             ("system", ThemeMode::System),
         ] {
             let config = Config::resolve(
-                vars(&[("X_BEARER_TOKEN", "token"), ("X_THEME", raw)]),
+                vars(&[("X_OAUTH_CLIENT_ID", "client-123"), ("X_THEME", raw)]),
                 FileSettings::default(),
             )
             .unwrap();
@@ -768,7 +757,7 @@ mod tests {
     #[test]
     fn resolve_theme_is_case_insensitive_and_trims_whitespace() {
         let config = Config::resolve(
-            vars(&[("X_BEARER_TOKEN", "token"), ("X_THEME", "  DARK\n")]),
+            vars(&[("X_OAUTH_CLIENT_ID", "client-123"), ("X_THEME", "  DARK\n")]),
             FileSettings::default(),
         )
         .unwrap();
@@ -781,7 +770,7 @@ mod tests {
             theme: Some("dark".to_string()),
             ..FileSettings::default()
         };
-        let config = Config::resolve(vars(&[("X_BEARER_TOKEN", "token")]), file).unwrap();
+        let config = Config::resolve(vars(&[("X_OAUTH_CLIENT_ID", "client-123")]), file).unwrap();
         assert_eq!(config.theme, ThemeMode::Dark);
     }
 
@@ -792,7 +781,7 @@ mod tests {
             ..FileSettings::default()
         };
         let config = Config::resolve(
-            vars(&[("X_BEARER_TOKEN", "token"), ("X_THEME", "light")]),
+            vars(&[("X_OAUTH_CLIENT_ID", "client-123"), ("X_THEME", "light")]),
             file,
         )
         .unwrap();
@@ -802,7 +791,7 @@ mod tests {
     #[test]
     fn resolve_falls_back_to_the_default_theme_when_unset() {
         let config = Config::resolve(
-            vars(&[("X_BEARER_TOKEN", "token")]),
+            vars(&[("X_OAUTH_CLIENT_ID", "client-123")]),
             FileSettings::default(),
         )
         .unwrap();
@@ -815,7 +804,10 @@ mod tests {
     #[test]
     fn resolve_falls_back_to_the_default_theme_on_an_unrecognized_env_value() {
         let config = Config::resolve(
-            vars(&[("X_BEARER_TOKEN", "token"), ("X_THEME", "solarized")]),
+            vars(&[
+                ("X_OAUTH_CLIENT_ID", "client-123"),
+                ("X_THEME", "solarized"),
+            ]),
             FileSettings::default(),
         )
         .unwrap();
@@ -828,14 +820,14 @@ mod tests {
             theme: Some("solarized".to_string()),
             ..FileSettings::default()
         };
-        let config = Config::resolve(vars(&[("X_BEARER_TOKEN", "token")]), file).unwrap();
+        let config = Config::resolve(vars(&[("X_OAUTH_CLIENT_ID", "client-123")]), file).unwrap();
         assert_eq!(config.theme, ThemeMode::default());
     }
 
     #[test]
     fn resolve_falls_back_to_the_default_theme_when_blank() {
         let config = Config::resolve(
-            vars(&[("X_BEARER_TOKEN", "token"), ("X_THEME", "   ")]),
+            vars(&[("X_OAUTH_CLIENT_ID", "client-123"), ("X_THEME", "   ")]),
             FileSettings::default(),
         )
         .unwrap();
@@ -847,7 +839,7 @@ mod tests {
     #[test]
     fn request_price_and_daily_budget_are_unset_by_default() {
         let config = Config::resolve(
-            vars(&[("X_BEARER_TOKEN", "token")]),
+            vars(&[("X_OAUTH_CLIENT_ID", "client-123")]),
             FileSettings::default(),
         )
         .unwrap();
@@ -858,7 +850,10 @@ mod tests {
     #[test]
     fn parses_the_request_price_from_env() {
         let config = Config::resolve(
-            vars(&[("X_BEARER_TOKEN", "token"), ("X_REQUEST_PRICE", "0.015")]),
+            vars(&[
+                ("X_OAUTH_CLIENT_ID", "client-123"),
+                ("X_REQUEST_PRICE", "0.015"),
+            ]),
             FileSettings::default(),
         )
         .unwrap();
@@ -868,7 +863,10 @@ mod tests {
     #[test]
     fn rejects_a_non_numeric_request_price() {
         let error = Config::resolve(
-            vars(&[("X_BEARER_TOKEN", "token"), ("X_REQUEST_PRICE", "free")]),
+            vars(&[
+                ("X_OAUTH_CLIENT_ID", "client-123"),
+                ("X_REQUEST_PRICE", "free"),
+            ]),
             FileSettings::default(),
         )
         .unwrap_err()
@@ -879,7 +877,10 @@ mod tests {
     #[test]
     fn rejects_a_negative_request_price() {
         let error = Config::resolve(
-            vars(&[("X_BEARER_TOKEN", "token"), ("X_REQUEST_PRICE", "-0.01")]),
+            vars(&[
+                ("X_OAUTH_CLIENT_ID", "client-123"),
+                ("X_REQUEST_PRICE", "-0.01"),
+            ]),
             FileSettings::default(),
         )
         .unwrap_err()
@@ -893,7 +894,7 @@ mod tests {
             request_price: Some(0.02),
             ..FileSettings::default()
         };
-        let config = Config::resolve(vars(&[("X_BEARER_TOKEN", "token")]), file).unwrap();
+        let config = Config::resolve(vars(&[("X_OAUTH_CLIENT_ID", "client-123")]), file).unwrap();
         assert_eq!(config.request_price, Some(0.02));
     }
 
@@ -904,7 +905,10 @@ mod tests {
             ..FileSettings::default()
         };
         let config = Config::resolve(
-            vars(&[("X_BEARER_TOKEN", "token"), ("X_REQUEST_PRICE", "0.05")]),
+            vars(&[
+                ("X_OAUTH_CLIENT_ID", "client-123"),
+                ("X_REQUEST_PRICE", "0.05"),
+            ]),
             file,
         )
         .unwrap();
@@ -917,7 +921,7 @@ mod tests {
             request_price: Some(-1.0),
             ..FileSettings::default()
         };
-        let error = Config::resolve(vars(&[("X_BEARER_TOKEN", "token")]), file)
+        let error = Config::resolve(vars(&[("X_OAUTH_CLIENT_ID", "client-123")]), file)
             .unwrap_err()
             .to_string();
         assert!(error.contains("request_price"), "{error}");
@@ -927,7 +931,7 @@ mod tests {
     fn parses_the_daily_request_budget_from_env() {
         let config = Config::resolve(
             vars(&[
-                ("X_BEARER_TOKEN", "token"),
+                ("X_OAUTH_CLIENT_ID", "client-123"),
                 ("X_DAILY_REQUEST_BUDGET", "500"),
             ]),
             FileSettings::default(),
@@ -940,7 +944,7 @@ mod tests {
     fn rejects_a_non_numeric_daily_request_budget() {
         let error = Config::resolve(
             vars(&[
-                ("X_BEARER_TOKEN", "token"),
+                ("X_OAUTH_CLIENT_ID", "client-123"),
                 ("X_DAILY_REQUEST_BUDGET", "lots"),
             ]),
             FileSettings::default(),
@@ -956,7 +960,7 @@ mod tests {
             daily_request_budget: Some(200),
             ..FileSettings::default()
         };
-        let config = Config::resolve(vars(&[("X_BEARER_TOKEN", "token")]), file).unwrap();
+        let config = Config::resolve(vars(&[("X_OAUTH_CLIENT_ID", "client-123")]), file).unwrap();
         assert_eq!(config.daily_request_budget, Some(200));
     }
 
@@ -968,7 +972,7 @@ mod tests {
         };
         let config = Config::resolve(
             vars(&[
-                ("X_BEARER_TOKEN", "token"),
+                ("X_OAUTH_CLIENT_ID", "client-123"),
                 ("X_DAILY_REQUEST_BUDGET", "50"),
             ]),
             file,

@@ -6,20 +6,20 @@ considered.
 
 ## Status
 
-The app shows one of two timelines, depending on which credential is active
-(#11):
+The app shows your own home timeline —
+`GET /2/users/:id/timelines/reverse_chronological` for the id
+`GET /2/users/me` resolves — in a scrollable list with a reload button. A
+"Load older" button pages further back via `meta.next_token`.
 
-- **Signed in with OAuth** (see "Signing in with X" below): your own home
-  timeline, `GET /2/users/:id/timelines/reverse_chronological` for the id
-  `GET /2/users/me` resolves. A "Load older" button pages further back via
-  `meta.next_token`.
-- **App-only Bearer token only**: `X_TARGET_USERNAME`'s recent posts via
-  `GET /2/users/:id/tweets` — the original milestone-1 view, kept as the
-  fallback since the home timeline endpoint rejects an app-only token with
-  401 (see "Why the fallback exists" below).
+**Signing in with X is now the only way to authenticate** (#33). The
+app-only bearer token was removed: it could not read the home timeline and
+could not post, repost, quote, like or delete, which is most of what this
+app does. See "Migrating from the bearer token" below if you were using one.
 
-Either way, results render in a scrollable list with a reload button, and the
-header names which mode is showing.
+`--fetch-only` still fetches `X_TARGET_USERNAME`'s posts via
+`GET /2/users/:id/tweets`; that endpoint works fine with an OAuth token, and
+dropping the app-only *credential* is not the same as dropping the
+single-user *view*.
 
 **Reposts and quotes are expanded (#13).** The API's raw response truncates a
 repost to `RT @user: …`; both timeline requests now also ask for
@@ -164,18 +164,11 @@ effect on a bundled launch. Two things follow:
   environment setup. Once signed in, the session persists to
   `$XDG_STATE_HOME/twigpui/oauth_tokens.json` and needs no environment
   variable on the next bundled launch either.
-- **`X_BEARER_TOKEN` cannot go in `config.toml`.** It's a secret, and
-  `config.toml` is a plain file people check into dotfiles repos — putting a
-  bearer token there is rejected with an explicit error rather than silently
-  accepted. If you only have a bearer token and no OAuth client id, a
-  bundled launch genuinely has no dotfiles-safe place left to read it from.
-  The workaround is `launchctl setenv X_BEARER_TOKEN '…'`, which injects it
-  into every GUI app's environment for the rest of the login session (not
-  just twigpui's, and not persisted across logout or reboot) — or keep
-  running the plain binary from a terminal, where `.env` and the shell
-  environment still apply. The clean fix is signing in with OAuth instead,
-  which needs nothing but the client id above; #33 tracks retiring the
-  bearer token entirely, which this issue does not implement.
+- **A `bearer_token` left in `config.toml` is rejected outright** (#33).
+  The key is no longer read, and silently ignoring it would leave you
+  believing you are configured when nothing reads it — so startup fails with
+  a message naming `oauth_client_id` as the replacement. The value itself is
+  never echoed into that message.
 - **A missing or invalid configuration now names where to look.**
   Previously, a configuration error before the window opened only printed
   to stderr — which a bundled launch has no terminal to show, so the
@@ -205,23 +198,14 @@ effect on a bundled launch. Two things follow:
   was not. A human double-clicking the built `.app` is the only way to
   confirm the window opens.
 
-## Why the single-user fallback exists
-
-`GET /2/users/:id/timelines/reverse_chronological` (the home timeline) only
-accepts OAuth 2.0 Authorization Code (user context) — an app-only Bearer
-token gets a 401. Signing in with OAuth (below) is what unlocks it. Without a
-signed-in session, twigpui falls back to showing `X_TARGET_USERNAME`'s posts
-instead of showing nothing.
-
 ## Setup
 
-At least one of the two credentials below is required — either alone is
-enough to run, and having both is fine too.
+An OAuth client id is required. There is no other credential (#33).
 
 **Recommended: put `oauth_client_id` in `config.toml`.** It's the only
 non-secret credential twigpui has (a public OAuth client has no client
-secret), so unlike the Bearer token it's fine to check into a dotfiles repo —
-and unlike an exported environment variable, it's picked up no matter how
+secret), so it is fine to check into a dotfiles repo — and unlike an
+exported environment variable, it's picked up no matter how
 twigpui is started. An exported `X_OAUTH_CLIENT_ID` is invisible to a
 different terminal, a fresh shell that never sourced your profile, and a
 `.app` launched from Finder/Spotlight/Dock (#40) — none of which inherit your
@@ -242,24 +226,34 @@ cargo run
 `$XDG_CONFIG_HOME/twigpui/config.toml` if that's set. See "`config.toml`"
 below for the full path resolution and every other key the file accepts.)
 
-**`X_BEARER_TOKEN` cannot go in `config.toml`.** It's a secret, and
-`config.toml` is a plain file people check into dotfiles repos, so a
-`bearer_token` entry there is rejected outright rather than silently
-accepted. Export it instead:
-
-```sh
-export X_BEARER_TOKEN='…'
-cargo run
-```
-
-or keep a local `.env`, which `dotenvy` loads into the same variables (this
-also works for `X_OAUTH_CLIENT_ID`, if you'd rather not use `config.toml`):
+Or keep a local `.env`, which `dotenvy` loads into the environment, if
+you'd rather not use `config.toml`:
 
 ```sh
 cp .env.example .env
-$EDITOR .env          # fill in X_BEARER_TOKEN, or X_OAUTH_CLIENT_ID
+$EDITOR .env          # fill in X_OAUTH_CLIENT_ID
 cargo run
 ```
+
+### Migrating from the bearer token (#33)
+
+`X_BEARER_TOKEN` is gone. If that is what you had configured:
+
+1. Set `X_OAUTH_CLIENT_ID`, or add `oauth_client_id = "…"` to
+   `config.toml` — the client id of a public OAuth client from the X
+   Developer Portal. It is not a secret.
+2. Remove any `bearer_token` key from `config.toml`. Startup fails while it
+   is still there, on purpose: ignoring it would leave you believing you are
+   configured when nothing reads it.
+3. Run twigpui and click **Sign in with X** once. The session persists to
+   `$XDG_STATE_HOME/twigpui/oauth_tokens.json`, and every later launch —
+   including `--fetch-only` and `--fetch-post`, which never open a browser —
+   reuses it.
+
+App-only access could not read the home timeline (401) and could not post,
+repost, quote, like or delete. Keeping it meant a second credential path
+through config resolution, the timeline source, and every affordance in the
+header, in exchange for a strictly less capable app.
 
 An environment variable always overrides the same key in `config.toml` (see
 "`config.toml`" below) — handy for a one-off override, but not a substitute
@@ -269,9 +263,8 @@ each time.
 
 | Variable | Required | Default | Meaning |
 | --- | --- | --- | --- |
-| `X_BEARER_TOKEN` | see below | — | App-only Bearer token, used verbatim (keep any `%2F` / `%3D` as-is) |
-| `X_OAUTH_CLIENT_ID` | see below | — | OAuth 2.0 client id for "Sign in with X" — non-secret, may also live in `config.toml` |
-| `X_TARGET_USERNAME` | no | `XDevelopers` | Screen name to display, without a leading `@` |
+| `X_OAUTH_CLIENT_ID` | **yes** | — | OAuth 2.0 client id for "Sign in with X" — non-secret, may also live in `config.toml` as `oauth_client_id` |
+| `X_TARGET_USERNAME` | no | `XDevelopers` | Screen name `--fetch-only` fetches, without a leading `@` |
 | `X_MAX_RESULTS` | no | `20` | Posts per fetch, 5–100 |
 | `X_MIN_FETCH_INTERVAL_SECONDS` | no | `60` | Floor on how often a fetch may run, in seconds (#10) |
 | `X_THEME` | no | `light` | Color theme: `light`, `dark`, or `system` (follows the OS appearance) — also `theme` in `config.toml` (#19) |
@@ -282,11 +275,11 @@ each time.
 
 ## Signing in with X (OAuth 2.0 Authorization Code + PKCE)
 
-Some endpoints — the home timeline, posting, and anything else that acts as
-*you* rather than reading public data — require a user-context OAuth 2.0
-session instead of the app-only Bearer token. twigpui gets one with the
-Authorization Code + PKCE flow (RFC 6749 + RFC 7636), run entirely from the
-window via a "Sign in with X" button.
+Everything this app does — the home timeline, posting, replying, liking,
+deleting — acts as *you* rather than reading public data, so all of it needs
+a user-context OAuth 2.0 session. twigpui gets one with the Authorization
+Code + PKCE flow (RFC 6749 + RFC 7636), run entirely from the window via a
+"Sign in with X" button.
 
 **Developer Portal prerequisite.** Register a **public client** (no client
 secret) in the X Developer Portal, and add this exact redirect URI:
@@ -301,8 +294,8 @@ registration verbatim.
 
 **Client id.** Copy the client id the Portal shows you into `X_OAUTH_CLIENT_ID`
 (env or `.env`) or `oauth_client_id` in `config.toml`. It's non-secret — a
-public client has no secret to protect — so unlike the bearer token it's
-fine to check into a dotfiles repo.
+public client has no secret to protect — so it is fine to check into a
+dotfiles repo.
 
 **Scopes.** twigpui requests `tweet.read users.read tweet.write like.write
 offline.access`: enough to read posts, resolve user context, post (#14),
@@ -355,8 +348,7 @@ path; a relative or blank value falls back to the default, per spec.
 ### `config.toml`
 
 `$XDG_CONFIG_HOME/twigpui/config.toml` is an optional, hand-edited settings
-file with the same keys as the environment variables above, minus the bearer
-token:
+file with the same keys as the environment variables above:
 
 ```toml
 target_username = "XDevelopers"
@@ -370,12 +362,12 @@ daily_request_budget = 500
 
 A missing file is fine — it just means there are no file-level settings.
 Precedence is **environment variable > `config.toml` > built-in default**,
-so an env var always wins over the file. There is no `bearer_token` key:
-`config.toml` is a plain file people check into dotfiles repos, so that
-credential stays environment-only by design (`X_BEARER_TOKEN` or `.env`) —
-a `bearer_token` entry in the file is rejected with an error rather than
-silently read. `oauth_client_id` is the exception: it's a public client id,
-not a secret, so it's fine to check in.
+so an env var always wins over the file. `oauth_client_id` is safe to check
+in — it is a public client id, not a secret.
+
+A `bearer_token` key is **rejected** rather than ignored (#33): the
+credential it named no longer exists, and a file that still carries it would
+otherwise look configured while nothing read it.
 
 ### Theme (#19)
 
