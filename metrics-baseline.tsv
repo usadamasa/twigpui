@@ -1,0 +1,46 @@
+# Per-file ceilings on implementation lines (#48). Checked by
+# `scripts/code-metrics.sh --check`, which CI runs.
+#
+# These are NOT targets. Every value is today's measurement rounded up to
+# the next 50, which gives an ordinary change room to breathe while making
+# sustained growth impossible to add without noticing: the moment a file
+# crosses its ceiling, CI fails and the only way through is to edit this
+# file in the same pull request — where a reviewer sees it.
+#
+# Raising a ceiling is a legitimate thing to do. Doing it silently is not,
+# which is the whole mechanism.
+#
+# Lower a ceiling whenever a file shrinks below it. `src/ui.rs` is the one
+# that matters: 3,341 implementation lines, more than twice what #48
+# recorded, holding rendering, state transitions, async task management and
+# `EntityInputHandler` in one place.
+#
+# A new file must be added here before it can be committed — an unlisted
+# file is a failure, not a pass, so this cannot be sidestepped by adding
+# code somewhere new.
+#
+# Format: <path><TAB><max implementation lines>
+src/avatar.rs	100
+src/browser.rs	100
+src/cache.rs	600
+src/compose.rs	350
+src/config.rs	400
+src/image_cache.rs	150
+src/like.rs	150
+src/log.rs	350
+src/main.rs	550
+src/oauth/callback.rs	350
+src/oauth/mod.rs	300
+src/oauth/pkce.rs	150
+src/oauth/tokens.rs	200
+src/paths.rs	300
+src/rate_limit.rs	350
+src/repost.rs	150
+src/theme.rs	250
+src/thread.rs	100
+src/toggle.rs	200
+src/ui.rs	3350
+src/usage.rs	350
+src/x_api/client.rs	750
+src/x_api/mod.rs	50
+src/x_api/model.rs	750

@@ -770,12 +770,25 @@ Prints file sizes (split into implementation and test lines), the fifteen
 longest functions, and any `clippy::cognitive_complexity` hits. CI runs it
 in the Lint job and writes the output to the run summary.
 
-**It reports; it does not gate.** The existing code is already past any
-threshold worth setting, and a check that fails from day one gets disabled
-rather than fixed — so the baseline comes first. It is built from bash, awk
-and clippy alone rather than a metrics tool, because every such tool needs
-an install step on every CI run and build time is a live concern (#46).
-When one earns that time, this script is what it replaces.
+**One metric gates: file size.** `scripts/code-metrics.sh --check` compares
+each file's implementation lines against `metrics-baseline.tsv` and fails if
+one is over its ceiling — or missing from the baseline entirely, so new code
+cannot dodge the check by living in a new file. CI runs it.
+
+The ceilings are today's numbers rounded up to the next 50, not targets.
+Growth stays possible; it just cannot be silent, because crossing a ceiling
+means editing `metrics-baseline.tsv` in the same pull request, where a
+reviewer sees it. Lower a ceiling whenever a file shrinks below it.
+
+The other two metrics report only. Function length is already enforced by
+`clippy::too_many_lines` (denied via `pedantic`, #47) and cognitive
+complexity has no hits at clippy's default threshold — gating either would
+add a second check for something already checked, or for nothing.
+
+Built from bash, awk and clippy alone rather than a metrics tool, because
+every such tool needs an install step on every CI run and build time is a
+live concern (#46). When one earns that time, this script is what it
+replaces.
 
 ## API cost
 

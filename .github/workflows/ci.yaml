@@ -80,3 +80,13 @@ jobs:
       # runner would rebuild the crate from scratch (#46).
       - name: Report code metrics
         run: bash scripts/code-metrics.sh >> "$GITHUB_STEP_SUMMARY"
+
+      # #48's gate, and the only metric that is one. Function length is
+      # already enforced by `clippy::too_many_lines` (denied via `pedantic`,
+      # #47) and cognitive complexity has no hits to gate on; file size has
+      # a real problem and no existing check. It ratchets against
+      # `metrics-baseline.tsv` rather than an absolute limit, so growth is
+      # possible but never silent — crossing a ceiling fails here, and the
+      # only way through is to raise it in the same pull request.
+      - name: Check file sizes against the baseline
+        run: bash scripts/code-metrics.sh --check

@@ -11,14 +11,79 @@
 # every push slower. When one of those tools earns its install time, this
 # script is the thing it replaces.
 #
-# Reports only. It never exits non-zero on a metric, because the existing
-# code is already over any threshold worth setting and a check that fails
-# from day one gets disabled rather than fixed. Thresholds come after the
-# numbers, which is #48's own instruction.
+# Two modes:
+#
+# - no argument: print the report. Never fails on a metric.
+# - `--check`: compare implementation line counts against
+#   `metrics-baseline.tsv` and exit non-zero if any file is over its
+#   ceiling, or is missing from the baseline entirely. Prints nothing else.
+#
+# The split is deliberate. Function length is already enforced by
+# `clippy::too_many_lines` (denied via `pedantic`, #47) and cognitive
+# complexity has no hits to gate on, so file size is the one metric with
+# both a real problem and no existing check — and it is gated by a ratchet
+# against today's numbers rather than an ideal nobody can reach from here.
+# See `metrics-baseline.tsv` for why that is the shape.
 set -euo pipefail
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$repo_root"
+
+baseline_file="metrics-baseline.tsv"
+
+# Implementation lines in $1 — everything before the `#[cfg(test)]` line,
+# or the whole file when there is none. This crate keeps its tests in the
+# same file, and a file that is 60% tests is not the same problem as one
+# that is 60% rendering code.
+implementation_lines() {
+  local file="$1" total match
+  total=$(wc -l <"$file" | tr -d ' ')
+
+  # grep exits 1 for "no match" and 2 for a real failure. Only the first is
+  # an ordinary outcome here — a file with no test module — so the two are
+  # told apart rather than both swallowed with `|| true`, which would hide
+  # an unreadable file as "no tests".
+  if match=$(grep -n -m1 '^#\[cfg(test)\]' "$file"); then
+    printf '%s\n' "$(( ${match%%:*} - 1 ))"
+  else
+    local status=$?
+    if [ "$status" -ne 1 ]; then
+      printf 'error: could not read %s (grep exit %s)\n' "$file" "$status" >&2
+      exit 1
+    fi
+    printf '%s\n' "$total"
+  fi
+}
+
+if [ "${1:-}" = "--check" ]; then
+  failed=0
+  while IFS= read -r file; do
+    impl=$(implementation_lines "$file")
+
+    # awk on the tab-separated field rather than grep on the line: an exact
+    # field match cannot let `src/like.rs` be satisfied by `src/liked.rs`,
+    # and BSD grep (which is what macOS ships) has no `-P` for `\t`. awk
+    # exits non-zero when the path is absent, which is the signal here.
+    if ! ceiling=$(awk -F'\t' -v want="$file" \
+      '$1 == want { print $2; found = 1 } END { exit !found }' "$baseline_file"); then
+      printf '%s is not in %s (%s implementation lines). Add it.\n' \
+        "$file" "$baseline_file" "$impl" >&2
+      failed=1
+      continue
+    fi
+
+    if [ "$impl" -gt "$ceiling" ]; then
+      printf '%s: %s implementation lines, over its ceiling of %s. Split it, or raise the ceiling in %s and say why in the pull request.\n' \
+        "$file" "$impl" "$ceiling" "$baseline_file" >&2
+      failed=1
+    fi
+  done < <(find src -name '*.rs' | sort)
+
+  if [ "$failed" -ne 0 ]; then
+    exit 1
+  fi
+  exit 0
+fi
 
 # --- file sizes -------------------------------------------------------------
 #
@@ -33,25 +98,8 @@ printf '| --- | ---: | ---: | ---: |\n'
 
 while IFS= read -r file; do
   total=$(wc -l <"$file" | tr -d ' ')
-
-  # grep exits 1 for "no match" and 2 for a real failure. Only the first is
-  # an ordinary outcome here — a file with no test module — so the two are
-  # told apart rather than both swallowed with `|| true`, which would hide
-  # an unreadable file as "no tests".
-  if match=$(grep -n -m1 '^#\[cfg(test)\]' "$file"); then
-    test_start=${match%%:*}
-    impl_lines=$((test_start - 1))
-    test_lines=$((total - impl_lines))
-  else
-    status=$?
-    if [ "$status" -ne 1 ]; then
-      printf 'error: could not read %s (grep exit %s)\n' "$file" "$status" >&2
-      exit 1
-    fi
-    impl_lines="$total"
-    test_lines=0
-  fi
-
+  impl_lines=$(implementation_lines "$file")
+  test_lines=$((total - impl_lines))
   printf '| %s | %s | %s | %s |\n' "$file" "$total" "$impl_lines" "$test_lines"
 done < <(find src -name '*.rs' | sort)
 
