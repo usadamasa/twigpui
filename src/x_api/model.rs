@@ -129,7 +129,7 @@ pub(crate) struct UrlEntity {
 ///
 /// These are a **snapshot taken when the post was fetched**, and nothing
 /// refreshes them: an incremental reload sends `since_id`, so a post already
-/// on file is never returned again (see `cache::merge_timeline`). A row's
+/// on file is never returned again (see `cache::splice`). A row's
 /// counts therefore show what was true when it first arrived. Rendering them
 /// with a per-row "as of" timestamp was considered and dropped — the row is
 /// already dense, and the drift matters less than the counts being visible
