@@ -37,7 +37,7 @@ macOS 専用、開発用途のみ。他プラットフォームは考慮しな�
 ### 開発体験の改善は優先度キューに並べず、随時やる
 
 ビルド時間 (#46)、Linter の厳格化 (#47)、コードスメルの自動検知 (#48)、
-ログ出力 (#49)、Bearer トークンの廃止 (#33) のような開発体験・保守性の課題は、
+ログ出力 (#49) のような開発体験・保守性の課題は、
 優先度ラベルの順番を待たせない。機能追加の作業中に手が届いたらその場で拾う。
 
 後回しにすると効き目が落ちる性質のものだから。Linter が緩いままコードが増えれば
@@ -123,21 +123,21 @@ cargo test
 - **`.env` は編集不可**: パーミッション設定により Claude セッションからは `.env` を
   読み書きできない。認証情報が要るときは環境変数を export してもらう。
 
-## ホームタイムライン表示と単一ユーザーへのフォールバック (#11)
+## ホームタイムライン表示 (#11) と単一ユーザー取得 (#33 以降)
 
+ウィンドウは常にホームタイムラインを表示する。
 `GET /2/users/:id/timelines/reverse_chronological` は OAuth 2.0 Authorization Code
-(ユーザーコンテキスト) しか受け付けず、アプリ専用 Bearer トークンでは 401 になる。
-そのため表示モードは解決した credential の種類でそのまま決まる:
+(ユーザーコンテキスト) しか受け付けないが、**#33 でアプリ専用 Bearer トークンを
+廃止したので、資格情報は 1 種類しかない**。表示先を資格情報の種類で分岐させていた
+`TimelineSource::for_credential` は削除済みで、分岐そのものが無くなった。
 
-- OAuth セッションでサインイン済み: `GET /2/users/me` で自分の id を取得し (#9 と同じ
-  仕組みでキャッシュ)、`GET /2/users/:id/timelines/reverse_chronological` でホーム
-  タイムラインを表示する。「Load older」ボタンで `meta.next_token` を辿って過去方向に
-  追加取得できる。
-- Bearer トークンのみ: 従来どおり `GET /2/users/:id/tweets` で `X_TARGET_USERNAME` の
-  投稿を表示する (マイルストーン 1 からの挙動を維持したフォールバック)。
+- 表示: `GET /2/users/me` で自分の id を取得し (#9 と同じ仕組みでキャッシュ)、
+  `GET /2/users/:id/timelines/reverse_chronological` を引く。「Load older」ボタンで
+  `meta.next_token` を辿って過去方向に追加取得できる。
+- `--fetch-only`: `GET /2/users/:id/tweets` で `X_TARGET_USERNAME` の投稿を引く。
+  **資格情報としての Bearer を落とすことと、単一ユーザー取得を落とすことは別**で、
+  このエンドポイントは OAuth トークンでも普通に叩ける (#24 のパネルでも使う)。
 
-どちらのモードかは `oauth::TimelineSource::for_credential` が credential の種類だけから
-決める純粋関数で、`cache.rs` や `ui.rs` に `is_oauth()` 分岐を散らさずに一箇所で決定する。
 ホームタイムラインと単一ユーザーのキャッシュは同じ user id でも内容が異なるため、
 `Paths::home_timeline_file` / `Paths::timeline_file` として別ファイルに分けている。
 レートリミットも `/users/me` とホームタイムラインをそれぞれ独立した `Endpoint` として

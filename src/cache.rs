@@ -222,21 +222,6 @@ pub(crate) fn startup_home(
     Ok(Some((me, items)))
 }
 
-/// Render straight from cache with no API request at all: `Some` only when
-/// both the user id and a timeline are already cached (and the user id is
-/// still within its TTL) — anything less and there's nothing trustworthy to
-/// show, so the caller falls back to a full [`reload`].
-pub(crate) fn startup(
-    paths: &Paths,
-    username: &str,
-    now: i64,
-) -> Result<Option<Vec<TimelineItem>>> {
-    let Some(user_id) = cached_user_id(paths, username, now)? else {
-        return Ok(None);
-    };
-    load_timeline(paths, &user_id)
-}
-
 /// The id of the newest cached post, to pass as `since_id` on the next
 /// fetch — the first element, since every cache file is stored newest-first.
 ///
@@ -1153,63 +1138,6 @@ mod tests {
         std::fs::write(paths.thread_file("1800000000000000003"), b"not json at all").unwrap();
 
         assert_eq!(load_thread(&paths, "1800000000000000003").unwrap(), None);
-
-        std::fs::remove_dir_all(&root).unwrap();
-    }
-
-    // --- startup ---
-
-    #[test]
-    fn startup_renders_from_cache_when_both_the_user_id_and_timeline_are_cached() {
-        let root = temp_root("startup-hit");
-        let paths = test_paths(&root);
-        paths.ensure_dirs().unwrap();
-
-        save_user_id(&paths, "XDevelopers", "2244994945", 0).unwrap();
-        let items = vec![item("2"), item("1")];
-        save_timeline(&paths, "2244994945", &items, 0).unwrap();
-
-        let rendered = startup(&paths, "XDevelopers", 0).unwrap();
-        assert_eq!(rendered, Some(items));
-
-        std::fs::remove_dir_all(&root).unwrap();
-    }
-
-    #[test]
-    fn startup_is_none_when_the_user_id_is_not_cached() {
-        let root = temp_root("startup-no-user-id");
-        let paths = test_paths(&root);
-        paths.ensure_dirs().unwrap();
-
-        assert_eq!(startup(&paths, "XDevelopers", 0).unwrap(), None);
-
-        std::fs::remove_dir_all(&root).unwrap();
-    }
-
-    #[test]
-    fn startup_is_none_when_the_user_id_is_cached_but_the_timeline_is_not() {
-        let root = temp_root("startup-no-timeline");
-        let paths = test_paths(&root);
-        paths.ensure_dirs().unwrap();
-
-        save_user_id(&paths, "XDevelopers", "2244994945", 0).unwrap();
-
-        assert_eq!(startup(&paths, "XDevelopers", 0).unwrap(), None);
-
-        std::fs::remove_dir_all(&root).unwrap();
-    }
-
-    #[test]
-    fn startup_is_none_when_the_cached_user_id_has_gone_stale() {
-        let root = temp_root("startup-stale-user-id");
-        let paths = test_paths(&root);
-        paths.ensure_dirs().unwrap();
-
-        save_user_id(&paths, "XDevelopers", "2244994945", 0).unwrap();
-        save_timeline(&paths, "2244994945", &[item("1")], 0).unwrap();
-
-        let rendered = startup(&paths, "XDevelopers", USER_ID_TTL_SECONDS).unwrap();
-        assert_eq!(rendered, None);
 
         std::fs::remove_dir_all(&root).unwrap();
     }

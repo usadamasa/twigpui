@@ -168,7 +168,7 @@ fn report_startup_error(message: &str) {
     let full_message = format!(
         "twigpui could not start: {message} Configuration lives in \
          {config_hint} (non-secret settings, e.g. oauth_client_id) or the \
-         X_BEARER_TOKEN / X_OAUTH_CLIENT_ID environment variables — see the \
+         X_OAUTH_CLIENT_ID environment variable — see the \
          README's Setup section."
     );
     eprintln!("configuration error: {full_message}");
@@ -227,24 +227,19 @@ fn fetch_only(config: &config::Config, paths: &paths::Paths) -> i32 {
     // loud here too — headless runs have no header banner to show it in
     // instead.
     if let Some(demotion) = &resolution.demotion {
-        eprintln!("{}", oauth::describe_demotion(demotion, paths));
+        eprintln!("{}", oauth::describe_demotion(demotion));
     }
     let Some(credential) = resolution.credential else {
+        // #33: signing in is the only way to get a credential now, and it
+        // needs a browser — which a headless run has no business opening.
         eprintln!(
-            "no credential is available. Run twigpui without --fetch-only and use \
-             \"Sign in with X\", or set X_BEARER_TOKEN."
+            "no signed-in session is available. Run twigpui without --fetch-only and click \
+             \"Sign in with X\" once; this flag reuses the session that leaves behind."
         );
         return 1;
     };
 
-    if !credential.is_oauth() {
-        // Worth saying out loud: several endpoints this project is heading
-        // for (#11, #14–#17) reject an app-only token outright, so a
-        // headless run succeeding here does not mean the user context works.
-        eprintln!("credential: app-only bearer token (not a signed-in OAuth session)");
-    }
-
-    let client = x_api::XClient::new(credential.token().to_string());
+    let client = x_api::XClient::new(credential.token);
     match cache::reload(
         paths,
         &client,
@@ -434,17 +429,18 @@ fn fetch_post(config: &config::Config, paths: &paths::Paths, arg: &str) -> i32 {
     // loud here too — headless runs have no header banner to show it in
     // instead.
     if let Some(demotion) = &resolution.demotion {
-        eprintln!("{}", oauth::describe_demotion(demotion, paths));
+        eprintln!("{}", oauth::describe_demotion(demotion));
     }
     let Some(credential) = resolution.credential else {
+        // See `fetch_only`'s equivalent: signing in needs a browser (#33).
         eprintln!(
-            "no credential is available. Run twigpui without --fetch-post and use \
-             \"Sign in with X\", or set X_BEARER_TOKEN."
+            "no signed-in session is available. Run twigpui without --fetch-post and click \
+             \"Sign in with X\" once; this flag reuses the session that leaves behind."
         );
         return 1;
     };
 
-    let client = x_api::XClient::new(credential.token().to_string());
+    let client = x_api::XClient::new(credential.token);
     let joined_ids = ids.join(",");
     match client.tweets_by_id(paths, &joined_ids, oauth::unix_now()) {
         Ok(items) => {

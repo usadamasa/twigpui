@@ -16,7 +16,7 @@ use crate::config::Config;
 use crate::image_cache;
 use crate::like;
 use crate::log;
-use crate::oauth::{self, TimelineSource};
+use crate::oauth;
 use crate::paths::Paths;
 use crate::rate_limit;
 use crate::repost;
@@ -189,18 +189,14 @@ enum ReloadTrigger {
 
 /// What [`TimelineView::start`]'s background half found, carried back across
 /// the executor boundary to the `update` closure that applies it to `self`.
-/// A local enum rather than a tuple because the two credential-bearing modes
-/// carry differently shaped cached data (#11): `SingleUser` only ever needed
-/// a bare `Option<Vec<TimelineItem>>`, but `Home` also needs the resolved
-/// [`cache::MeEntry`] so the header and `home_user_id` can be populated even
-/// on a pure cache hit, without a second round trip through `/me`.
+///
+/// A local enum rather than a tuple because `Home` carries the resolved
+/// [`cache::MeEntry`] alongside the posts, so the header and `home_user_id`
+/// are populated even on a pure cache hit without a second round trip
+/// through `/me`. It had a third variant until #33 — `SingleUser`, the
+/// shape an app-only bearer token resolved to.
 enum StartOutcome {
     NotAuthenticated {
-        session_notice: Option<String>,
-    },
-    SingleUser {
-        credential: oauth::Credential,
-        cached: Option<Vec<TimelineItem>>,
         session_notice: Option<String>,
     },
     Home {
@@ -248,20 +244,12 @@ pub(crate) struct TimelineView {
     /// reachable instead of only appearing when there is no credential at
     /// all.
     signed_in_with_oauth: bool,
-    /// Which timeline this view shows (#11) — decided once, alongside
-    /// `client`, from the resolved credential via
-    /// [`oauth::TimelineSource::for_credential`]. `None` until a credential
-    /// is resolved, mirroring `client`.
-    source: Option<TimelineSource>,
-    /// The signed-in user's own id, resolved via `GET /2/users/me`. Needed to
-    /// call the home-timeline endpoint and to page further back with
-    /// [`Self::load_older`]. Populated whenever `source` is
-    /// `TimelineSource::Home`; stays `None` for `SingleUser`, which has no
-    /// use for it.
+    /// The signed-in user's own id, resolved via `GET /2/users/me`. Needed
+    /// to call the home-timeline endpoint and to page further back with
+    /// [`Self::load_older`]. `None` until `/me` has resolved once.
     home_user_id: Option<String>,
     /// The signed-in user's own screen name (also from `/me`), shown in the
-    /// header instead of `config.target_username` while `source` is
-    /// `TimelineSource::Home` — see [`header_title`].
+    /// header — see [`header_title`].
     home_username: Option<String>,
     /// `meta.next_token` from the most recent home-timeline response, if
     /// any (#11). Drives whether the "Load older" button appears — see
@@ -470,7 +458,6 @@ impl TimelineView {
             last_reload_at: None,
             reloading: false,
             signed_in_with_oauth: false,
-            source: None,
             home_user_id: None,
             home_username: None,
             next_page_token: None,
@@ -532,36 +519,22 @@ impl TimelineView {
                     // and "never signed in" can resolve to the exact same
                     // credential, but only one of them is worth telling the
                     // user about.
-                    let session_notice = resolution
-                        .demotion
-                        .as_ref()
-                        .map(|demotion| oauth::describe_demotion(demotion, &paths));
+                    let session_notice = resolution.demotion.as_ref().map(oauth::describe_demotion);
                     let Some(credential) = resolution.credential else {
                         return anyhow::Ok(StartOutcome::NotAuthenticated { session_notice });
                     };
-                    // #11: decided once, right where the credential itself
-                    // resolves — everything downstream (which cache file,
-                    // which endpoint, which header text) branches on this
-                    // rather than re-deriving it.
-                    match TimelineSource::for_credential(&credential) {
-                        TimelineSource::SingleUser => {
-                            let cached =
-                                cache::startup(&paths, &config.target_username, oauth::unix_now())?;
-                            anyhow::Ok(StartOutcome::SingleUser {
-                                credential,
-                                cached,
-                                session_notice,
-                            })
-                        }
-                        TimelineSource::Home => {
-                            let cached = cache::startup_home(&paths, oauth::unix_now())?;
-                            anyhow::Ok(StartOutcome::Home {
-                                credential,
-                                cached,
-                                session_notice,
-                            })
-                        }
-                    }
+                    // #33: the window always shows the home timeline now.
+                    // Which timeline to show used to follow from the kind of
+                    // credential — the app-only bearer token got a 401 from
+                    // the home endpoint — and with that credential gone
+                    // there is nothing left to branch on. `SingleUser`
+                    // survives for `--fetch-only` and #24's panels.
+                    let cached = cache::startup_home(&paths, oauth::unix_now())?;
+                    anyhow::Ok(StartOutcome::Home {
+                        credential,
+                        cached,
+                        session_notice,
+                    })
                 })
                 .await;
 
@@ -576,38 +549,15 @@ impl TimelineView {
                         this.state = TimelineState::NotAuthenticated;
                         cx.notify();
                     }
-                    Ok(StartOutcome::SingleUser {
-                        credential,
-                        cached,
-                        session_notice,
-                    }) => {
-                        this.session_notice = session_notice.map(SharedString::from);
-                        this.signed_in_with_oauth = credential.is_oauth();
-                        this.oauth_scope = credential.scope().map(str::to_string);
-                        this.source = Some(TimelineSource::SingleUser);
-                        this.client = Some(XClient::new(credential.token().to_string()));
-                        match cached {
-                            Some(items) => {
-                                this.state = TimelineState::Loaded(items);
-                                cx.notify();
-                            }
-                            // A cache miss at startup, not a user action —
-                            // subject to #10's interval like any other
-                            // unsolicited fetch (though `last_reload_at` is
-                            // still `None` here, so it never actually waits).
-                            None => this.reload(ReloadTrigger::Polling, cx),
-                        }
-                    }
                     Ok(StartOutcome::Home {
                         credential,
                         cached,
                         session_notice,
                     }) => {
                         this.session_notice = session_notice.map(SharedString::from);
-                        this.signed_in_with_oauth = credential.is_oauth();
-                        this.oauth_scope = credential.scope().map(str::to_string);
-                        this.source = Some(TimelineSource::Home);
-                        this.client = Some(XClient::new(credential.token().to_string()));
+                        this.signed_in_with_oauth = true;
+                        this.oauth_scope.clone_from(&credential.scope);
+                        this.client = Some(XClient::new(credential.token));
                         match cached {
                             Some((me, items)) => {
                                 this.home_user_id = Some(me.id);
@@ -660,13 +610,6 @@ impl TimelineView {
             cx.notify();
             return;
         };
-        // `source` is always set alongside `client` (see `start` and
-        // `sign_in`), so this is defensive rather than a real branch.
-        let Some(source) = self.source else {
-            self.state = TimelineState::NotAuthenticated;
-            cx.notify();
-            return;
-        };
 
         let now = oauth::unix_now();
         if let Some(reset_at) = reload_gate(
@@ -703,83 +646,38 @@ impl TimelineView {
         let paths = self.paths.clone();
         let max_results = self.config.max_results;
 
-        match source {
-            TimelineSource::SingleUser => {
-                let username = self.config.target_username.clone();
-                self.fetch = Some(cx.spawn(async move |this, cx| {
-                    // The client blocks, so it must not run on the foreground thread.
-                    let result = cx
-                        .background_executor()
-                        .spawn(async move {
-                            cache::reload(
-                                &paths,
-                                &client,
-                                &username,
-                                max_results,
-                                oauth::unix_now(),
-                            )
-                        })
-                        .await;
+        // #33: the window always shows the home timeline — see
+        // `TimelineSource`'s removal. The single-user endpoint and its cache
+        // stay for `--fetch-only`.
+        self.fetch = Some(cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    cache::reload_home(&paths, &client, max_results, oauth::unix_now())
+                })
+                .await;
 
-                    let _ = this.update(cx, |this, cx| {
-                        this.refresh_usage(cx);
-                        this.refresh_reposted_ids(cx);
-                        this.refresh_liked_ids(cx);
-                        this.refresh_images(cx);
-                        this.reloading = false;
-                        match result {
-                            Ok(reloaded) => {
-                                // Single-user mode has no pagination cursor —
-                                // #11 keeps its "Load older" button reserved
-                                // for the home timeline.
-                                this.next_page_token = None;
-                                this.state = TimelineState::Loaded(reloaded.items);
-                                this.reload_notice = None;
-                                // #57 item 3: a success means there is
-                                // nothing left to count down — stop
-                                // immediately rather than let the ticker
-                                // notice on its next tick, up to a second
-                                // later.
-                                this.cooldown_ticker = None;
-                            }
-                            Err(error) => this.apply_reload_failure(&error, cx),
-                        }
-                        cx.notify();
-                    });
-                }));
-            }
-            TimelineSource::Home => {
-                self.fetch = Some(cx.spawn(async move |this, cx| {
-                    let result = cx
-                        .background_executor()
-                        .spawn(async move {
-                            cache::reload_home(&paths, &client, max_results, oauth::unix_now())
-                        })
-                        .await;
-
-                    let _ = this.update(cx, |this, cx| {
-                        this.refresh_usage(cx);
-                        this.refresh_reposted_ids(cx);
-                        this.refresh_liked_ids(cx);
-                        this.refresh_images(cx);
-                        this.reloading = false;
-                        match result {
-                            Ok(reloaded) => {
-                                this.home_user_id = Some(reloaded.me.id);
-                                this.home_username = Some(reloaded.me.username);
-                                this.next_page_token = reloaded.next_token;
-                                this.state = TimelineState::Loaded(reloaded.items);
-                                this.reload_notice = None;
-                                // Same reasoning as the single-user branch above.
-                                this.cooldown_ticker = None;
-                            }
-                            Err(error) => this.apply_reload_failure(&error, cx),
-                        }
-                        cx.notify();
-                    });
-                }));
-            }
-        }
+            let _ = this.update(cx, |this, cx| {
+                this.refresh_usage(cx);
+                this.refresh_reposted_ids(cx);
+                this.refresh_liked_ids(cx);
+                this.refresh_images(cx);
+                this.reloading = false;
+                match result {
+                    Ok(reloaded) => {
+                        this.home_user_id = Some(reloaded.me.id);
+                        this.home_username = Some(reloaded.me.username);
+                        this.next_page_token = reloaded.next_token;
+                        this.state = TimelineState::Loaded(reloaded.items);
+                        this.reload_notice = None;
+                        // Same reasoning as the single-user branch above.
+                        this.cooldown_ticker = None;
+                    }
+                    Err(error) => this.apply_reload_failure(&error, cx),
+                }
+                cx.notify();
+            });
+        }));
 
         cx.notify();
     }
@@ -1398,7 +1296,9 @@ impl TimelineView {
         let Some(user_id) = self.home_user_id.clone() else {
             return;
         };
-        let home = matches!(self.source, Some(TimelineSource::Home));
+        // #33: the window only ever shows the home timeline, so that is
+        // the cache file a delete has to be removed from.
+        let home = true;
 
         self.pending_delete = None;
         cx.notify();
@@ -1623,13 +1523,9 @@ impl TimelineView {
     /// loopback callback, exchange the code, persist the tokens, then fall
     /// straight into [`Self::reload`].
     fn sign_in(&mut self, cx: &mut Context<'_, Self>) {
-        let Some(client_id) = self.config.oauth_client_id.clone() else {
-            self.state = TimelineState::Failed(
-                "X_OAUTH_CLIENT_ID (or oauth_client_id in config.toml) is not set.".into(),
-            );
-            cx.notify();
-            return;
-        };
+        // #33: `Config::resolve` refuses to start without one, so there is
+        // nothing to check here any more.
+        let client_id = self.config.oauth_client_id.clone();
 
         self.state = TimelineState::SigningIn;
         let paths = self.paths.clone();
@@ -1659,7 +1555,6 @@ impl TimelineView {
                     this.session_notice = None;
                     // #11: a stored OAuth session always maps to the home
                     // timeline — see `TimelineSource::for_credential`.
-                    this.source = Some(TimelineSource::Home);
                     this.client = Some(XClient::new(tokens.access_token));
                     // #57: confirms what the user just did — must not wait
                     // out #10's interval, which exists to suppress polling,
@@ -2026,11 +1921,11 @@ impl TimelineView {
                     .flex()
                     .flex_col()
                     .gap_1()
-                    .child(div().font_weight(FontWeight::BOLD).child(header_title(
-                        self.source,
-                        self.home_username.as_deref(),
-                        &self.config.target_username,
-                    )))
+                    .child(
+                        div()
+                            .font_weight(FontWeight::BOLD)
+                            .child(header_title(self.home_username.as_deref())),
+                    )
                     .child(
                         div()
                             .text_color(rgb(usage_color(usage_status, theme)))
@@ -2042,19 +1937,6 @@ impl TimelineView {
                     .flex()
                     .items_center()
                     .gap_2()
-                    // #31: running on the app-only bearer token is a working
-                    // state, so the primary button says "Reload" — but the
-                    // offer to upgrade to a user context has to stay
-                    // reachable, or the OAuth flow can never be started at
-                    // all while a bearer token is configured.
-                    .when(
-                        offers_sign_in(
-                            self.config.oauth_client_id.as_deref(),
-                            self.signed_in_with_oauth,
-                            &self.state,
-                        ),
-                        |row| row.child(sign_in_pill("sign-in", "Sign in with X", theme, cx)),
-                    )
                     // #14: an already-signed-in session from before #14
                     // holds no `tweet.write` scope — #31's exact lesson
                     // repeats here (an already-active session hides its own
@@ -2695,35 +2577,21 @@ fn compose_error_message(status: &ComposeStatus) -> Option<SharedString> {
     }
 }
 
-/// Whether the header should offer a separate "Sign in with X" button (#31).
-///
-/// True only when signing in is both possible and would change something: a
-/// client id is configured, the current credential is not already an OAuth
-/// session, and the primary button is not itself already the sign-in
-/// affordance (which it is whenever there is no credential at all, or one is
-/// mid-flight) — two identical buttons side by side would be worse than one.
-fn offers_sign_in(
-    oauth_client_id: Option<&str>,
-    signed_in_with_oauth: bool,
-    state: &TimelineState,
-) -> bool {
-    if oauth_client_id.is_none_or(str::is_empty) || signed_in_with_oauth {
-        return false;
-    }
-    !matches!(
-        state,
-        TimelineState::NotAuthenticated | TimelineState::SigningIn
-    )
-}
+// #31's separate "Sign in with X" button is gone with #33. It existed for
+// exactly one situation: running on an app-only bearer token, which was a
+// working state whose primary button therefore said "Reload", leaving the
+// OAuth flow otherwise unreachable. Without that credential the only
+// unsigned state is `NotAuthenticated`, where the *primary* button already
+// says "Sign in with X" — and two identical buttons side by side is what
+// #31 was avoiding in the first place.
 
-/// Whether the header should offer to re-authorize (#14): the session is
-/// already an OAuth one — `offers_sign_in` already covers "not OAuth at
-/// all" — but its recorded scope doesn't include what posting needs.
-/// Mirrors `offers_sign_in`'s shape rather than folding into it: the two
-/// affordances are mutually exclusive by construction (this requires
-/// `signed_in_with_oauth`, `offers_sign_in` requires its opposite) and read
-/// differently ("Sign in" vs "Re-authorize") — #31's actual lesson was
-/// "don't hide the affordance", not "there must be only one button".
+/// Whether the header should offer to re-authorize (#14): the session
+/// exists, but its recorded scope doesn't include what writing needs.
+///
+/// Distinct from the primary "Sign in with X" button by construction — this
+/// requires a session, that one appears only when there isn't one — and
+/// they read differently ("Sign in" vs "Re-authorize"). #31's actual lesson
+/// was "don't hide the affordance", not "there must be only one button".
 ///
 /// Checks every write scope the app can need, not just #14's: #68 added
 /// `like.write`, which X grants separately, so a session authorized before
@@ -3171,21 +3039,17 @@ fn reload_failure_outcome(
 /// never left guessing whether they're looking at their own home timeline or
 /// one account's posts.
 ///
-/// `source` is `None` only before a credential has resolved, in which case
-/// there is nothing to distinguish yet and this falls back to
-/// `target_username` (the eventual `SingleUser` display), matching what the
-/// header showed before #11. `home_username` is `None` only for the brief
-/// window in `Home` mode before `/me` has resolved even once (never true
-/// once anything is cached or has loaded).
-fn header_title(
-    source: Option<TimelineSource>,
-    home_username: Option<&str>,
-    target_username: &str,
-) -> String {
-    match (source, home_username) {
-        (Some(TimelineSource::Home), Some(username)) => format!("@{username} — Home timeline"),
-        (Some(TimelineSource::Home), None) => "Home timeline".to_string(),
-        (Some(TimelineSource::SingleUser) | None, _) => format!("@{target_username}"),
+/// `home_username` is `None` only for the brief window before `/me` has
+/// resolved even once (never true once anything is cached or has loaded),
+/// which is the one case where the title cannot name the account.
+///
+/// It took a `TimelineSource` until #33, when the window stopped being able
+/// to show anything but the home timeline — the single-user view existed
+/// because an app-only bearer token could not read the home one.
+fn header_title(home_username: Option<&str>) -> String {
+    match home_username {
+        Some(username) => format!("@{username} — Home timeline"),
+        None => "Home timeline".to_string(),
     }
 }
 
@@ -3479,12 +3343,12 @@ fn format_timestamp(created_at: Option<&str>) -> String {
 mod tests {
     use super::{
         ComposeStatus, Cooldown, CooldownTick, PostLink, PostMedia, PostMetrics, ReloadNotice,
-        ReloadTrigger, RepliedTo, Theme, ThreadFetchState, TimelineItem, TimelineSource,
-        TimelineState, ToggleState, action_post_id, at_the_post_cap, avatar_initial, byline,
+        ReloadTrigger, RepliedTo, Theme, ThreadFetchState, TimelineItem, TimelineState,
+        ToggleState, action_post_id, at_the_post_cap, avatar_initial, byline,
         compose_error_message, cooldown_label, cooldown_tick, format_timestamp, header_title,
         is_own_post, like_action_label, media_badge, media_columns, metrics_label, offers_delete,
         offers_like, offers_load_older, offers_quote, offers_reauthorize, offers_reply,
-        offers_repost, offers_sign_in, post_permalink, profile_url, rate_limit, reload_cooldown,
+        offers_repost, post_permalink, profile_url, rate_limit, reload_cooldown,
         reload_failure_outcome, reload_gate, reload_start_state, reply_banner_label,
         reply_target_label, repost_action_label, repost_banner_label, shortcuts,
         thread_action_label, usage, usage_color, usage_label,
@@ -3968,58 +3832,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn offers_sign_in_while_running_on_the_app_only_bearer_token() {
-        // #31: the whole point — a bearer token makes the app work, so the
-        // primary button says "Reload" and nothing else would ever surface
-        // the OAuth flow.
-        assert!(offers_sign_in(
-            Some("client-id"),
-            false,
-            &TimelineState::Loaded(Vec::new())
-        ));
-    }
-
-    #[test]
-    fn does_not_offer_sign_in_once_signed_in_with_oauth() {
-        assert!(!offers_sign_in(
-            Some("client-id"),
-            true,
-            &TimelineState::Loaded(Vec::new())
-        ));
-    }
-
-    #[test]
-    fn does_not_offer_sign_in_without_a_client_id() {
-        // Nothing to sign in with — the button would only ever error.
-        assert!(!offers_sign_in(
-            None,
-            false,
-            &TimelineState::Loaded(Vec::new())
-        ));
-        assert!(!offers_sign_in(
-            Some(""),
-            false,
-            &TimelineState::Loaded(Vec::new())
-        ));
-    }
-
-    #[test]
-    fn does_not_duplicate_the_primary_sign_in_button() {
-        // In these two states the primary button already *is* "Sign in with
-        // X" / "Signing in…", so a second one beside it is noise.
-        assert!(!offers_sign_in(
-            Some("client-id"),
-            false,
-            &TimelineState::NotAuthenticated
-        ));
-        assert!(!offers_sign_in(
-            Some("client-id"),
-            false,
-            &TimelineState::SigningIn
-        ));
-    }
-
     // --- offers_reauthorize (#14) ---
 
     #[test]
@@ -4078,34 +3890,15 @@ mod tests {
     }
 
     #[test]
-    fn header_title_shows_the_target_username_for_single_user_mode() {
-        assert_eq!(
-            header_title(Some(TimelineSource::SingleUser), None, "XDevelopers"),
-            "@XDevelopers"
-        );
+    fn header_title_names_the_signed_in_account() {
+        assert_eq!(header_title(Some("alice")), "@alice — Home timeline");
     }
 
     #[test]
-    fn header_title_shows_the_target_username_before_a_credential_has_resolved() {
-        // Matches what the header showed before #11 — nothing to
-        // distinguish yet, since there's no credential at all.
-        assert_eq!(header_title(None, None, "XDevelopers"), "@XDevelopers");
-    }
-
-    #[test]
-    fn header_title_shows_the_signed_in_users_own_name_for_home_mode() {
-        assert_eq!(
-            header_title(Some(TimelineSource::Home), Some("alice"), "XDevelopers"),
-            "@alice — Home timeline"
-        );
-    }
-
-    #[test]
-    fn header_title_falls_back_while_home_mode_has_not_learned_the_username_yet() {
-        assert_eq!(
-            header_title(Some(TimelineSource::Home), None, "XDevelopers"),
-            "Home timeline"
-        );
+    fn header_title_falls_back_before_me_has_resolved() {
+        // The only case left since #33: the window always shows the home
+        // timeline, so the only unknown is whose it is.
+        assert_eq!(header_title(None), "Home timeline");
     }
 
     #[test]
@@ -4656,8 +4449,7 @@ mod tests {
             crate::paths::Paths::from_vars(move |key| (key == "HOME").then(|| home.clone()))
                 .unwrap();
         let config = crate::config::Config {
-            bearer_token: None,
-            oauth_client_id: None,
+            oauth_client_id: "client-123".to_string(),
             target_username: "XDevelopers".to_string(),
             max_results: 20,
             min_fetch_interval_seconds: 60,

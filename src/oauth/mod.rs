@@ -118,76 +118,21 @@ fn request_token(form: &[(&str, &str)]) -> Result<TokenResponse> {
     serde_json::from_str(&body).context("could not parse the token response")
 }
 
-/// Which credential [`resolve_credential`] found. Both carry a token that
-/// goes into the same `Authorization: Bearer` header, so the token alone
-/// cannot tell them apart — and callers need to, because an app-only bearer
-/// token cannot read the home timeline or write anything (#11, #14–#17).
-/// `ui.rs` uses this to keep offering "Sign in with X" while running on a
-/// bearer token (#31).
+/// A user-context access token from a stored (or just-refreshed) OAuth
+/// session, plus the scope X granted it (#14).
+///
+/// A struct rather than the enum this was until #33: the app-only bearer
+/// token was the only other variant, and every question callers asked of it
+/// ("is this OAuth?", "what scope?") existed to work around the fact that
+/// it might not be. There is only one kind of credential now.
+///
+/// `scope: None` means unrecorded/unknown — a pre-#14 token, or one whose
+/// token-endpoint response carried no `scope` at all — which
+/// `tokens::has_scope` treats as insufficient for anything scope-gated.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Credential {
-    /// A user-context access token from a stored (or just-refreshed) OAuth
-    /// session, plus the scope X granted it (#14). `scope: None` means
-    /// unrecorded/unknown — a pre-#14 token, or one whose token-endpoint
-    /// response carried no `scope` at all — which `tokens::has_scope`
-    /// treats as insufficient for anything scope-gated.
-    OAuth {
-        token: String,
-        scope: Option<String>,
-    },
-    /// The app-only bearer token from configuration.
-    Bearer(String),
-}
-
-impl Credential {
-    pub(crate) fn token(&self) -> &str {
-        match self {
-            Self::OAuth { token, .. } | Self::Bearer(token) => token,
-        }
-    }
-
-    /// Whether this is a user-context credential. `false` means the app is
-    /// running app-only and signing in would strictly widen what it can do.
-    pub(crate) fn is_oauth(&self) -> bool {
-        matches!(self, Self::OAuth { .. })
-    }
-
-    /// The granted scope for an OAuth session — `None` for a bearer
-    /// credential (meaningless there) or an OAuth session whose scope
-    /// wasn't recorded. `ui.rs` feeds this to `tokens::has_scope` to decide
-    /// whether to offer re-authorization (#14).
-    pub(crate) fn scope(&self) -> Option<&str> {
-        match self {
-            Self::OAuth { scope, .. } => scope.as_deref(),
-            Self::Bearer(_) => None,
-        }
-    }
-}
-
-/// Which timeline `ui.rs` shows (#11), decided once — alongside the
-/// credential itself — rather than scattered as `if credential.is_oauth()`
-/// checks through `cache.rs` and `ui.rs`. A pure function of the credential
-/// kind: an OAuth session can read the home timeline
-/// (`GET /2/users/:id/timelines/reverse_chronological`); an app-only bearer
-/// token gets a 401 there, so it keeps the milestone-1 single-user view
-/// (`GET /2/users/:id/tweets` for `Config::target_username`) instead.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum TimelineSource {
-    /// The signed-in user's own home timeline.
-    Home,
-    /// `Config::target_username`'s posts — the pre-#11 behavior, kept as the
-    /// fallback for an app-only bearer token.
-    SingleUser,
-}
-
-impl TimelineSource {
-    pub(crate) fn for_credential(credential: &Credential) -> Self {
-        if credential.is_oauth() {
-            Self::Home
-        } else {
-            Self::SingleUser
-        }
-    }
+pub(crate) struct Credential {
+    pub(crate) token: String,
+    pub(crate) scope: Option<String>,
 }
 
 /// Why a stored OAuth session could not be used as-is, and
@@ -202,10 +147,6 @@ impl TimelineSource {
 /// — see [`Resolution::demotion`] — since nothing degraded in that case.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SessionDemotion {
-    /// The stored session needed a refresh, but no `oauth_client_id` is
-    /// configured to refresh it with — the exact shape #54 was filed from: a
-    /// shell (or a bundled `.app` launch, #40) that never saw the client id.
-    NoClientId,
     /// The stored session needed a refresh, but carries no refresh token to
     /// refresh with — a session that predates `offline.access`, or one X
     /// simply never issued a refresh token for.
@@ -222,9 +163,8 @@ pub(crate) enum SessionDemotion {
 /// since #54 — whether a stored OAuth session had to be demoted along the
 /// way, and why. A stored-but-unrefreshable session is a materially
 /// different state from "no credential was ever configured": both can
-/// resolve to the same [`Credential::Bearer`] (or no credential at all), but
-/// only one of them means the user was signed in a moment ago and now
-/// silently isn't.
+/// resolve to no credential at all, but only one of them means the user was
+/// signed in a moment ago and now silently isn't.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Resolution {
     pub(crate) credential: Option<Credential>,
@@ -232,21 +172,27 @@ pub(crate) struct Resolution {
 }
 
 /// Find a usable credential without opening a browser: a fresh stored OAuth
-/// session, a stale one refreshed in place, or the app-only bearer token —
-/// in that order. `credential: None` means neither is currently usable and
-/// the caller (`--fetch-only`, or `ui.rs` at startup) should ask the user to
-/// sign in.
+/// session, or a stale one refreshed in place. `credential: None` means
+/// there is no usable session and the caller (`--fetch-only`, or `ui.rs` at
+/// startup) should ask the user to sign in.
+///
+/// Before #33 this had a third outcome — falling back to the app-only
+/// bearer token — which is what `demotion` existed to explain: the timeline
+/// still rendered, so silently losing the ability to post looked identical
+/// to everything being fine. `demotion` survives the bearer token because
+/// the same explanation is still owed, only now the visible consequence is
+/// "signed out" rather than "quietly less capable".
 pub(crate) fn resolve_credential(config: &Config, paths: &Paths, now: i64) -> Result<Resolution> {
     let Some(stored) = tokens::load(paths)? else {
         return Ok(Resolution {
-            credential: config.bearer_token.clone().map(Credential::Bearer),
+            credential: None,
             demotion: None,
         });
     };
 
     if !stored.needs_refresh(now) {
         return Ok(Resolution {
-            credential: Some(Credential::OAuth {
+            credential: Some(Credential {
                 token: stored.access_token,
                 scope: stored.scope,
             }),
@@ -254,15 +200,10 @@ pub(crate) fn resolve_credential(config: &Config, paths: &Paths, now: i64) -> Re
         });
     }
 
-    let Some(client_id) = &config.oauth_client_id else {
-        return Ok(Resolution {
-            credential: config.bearer_token.clone().map(Credential::Bearer),
-            demotion: Some(SessionDemotion::NoClientId),
-        });
-    };
+    let client_id = &config.oauth_client_id;
     let Some(refresh) = &stored.refresh_token else {
         return Ok(Resolution {
-            credential: config.bearer_token.clone().map(Credential::Bearer),
+            credential: None,
             demotion: Some(SessionDemotion::NoRefreshToken),
         });
     };
@@ -278,7 +219,7 @@ pub(crate) fn resolve_credential(config: &Config, paths: &Paths, now: i64) -> Re
             refreshed.scope = carried_scope(refreshed.scope, stored.scope.as_deref());
             tokens::save(paths, &refreshed)?;
             Ok(Resolution {
-                credential: Some(Credential::OAuth {
+                credential: Some(Credential {
                     token: refreshed.access_token,
                     scope: refreshed.scope,
                 }),
@@ -294,7 +235,7 @@ pub(crate) fn resolve_credential(config: &Config, paths: &Paths, now: i64) -> Re
             // this module's doc and the issue's "do not break the bearer
             // fallback" requirement).
             Ok(Resolution {
-                credential: config.bearer_token.clone().map(Credential::Bearer),
+                credential: None,
                 demotion: Some(SessionDemotion::Rejected(format!("{error:#}"))),
             })
         }
@@ -302,23 +243,14 @@ pub(crate) fn resolve_credential(config: &Config, paths: &Paths, now: i64) -> Re
 }
 
 /// Explain why a stored OAuth session couldn't be used as-is (#54), for
-/// `ui.rs`'s on-screen banner and `--fetch-only`'s stderr alike. Always names
-/// the concrete `config.toml` path for the one case where there is a setting
-/// to change — mirrors `main.rs::report_startup_error`'s rule (#40): point at
-/// the file itself, not just "configuration error". For the other two cases
-/// there is no file to point at — the fix is clicking "Sign in with X" again
-/// — so the message says that instead; `ui.rs`'s `offers_sign_in` already
-/// keeps that button reachable whenever a client id is configured, which is
-/// true in both of those cases (only [`SessionDemotion::NoClientId`] itself
-/// has none to offer).
-pub(crate) fn describe_demotion(demotion: &SessionDemotion, paths: &Paths) -> String {
+/// `ui.rs`'s on-screen banner and `--fetch-only`'s stderr alike.
+///
+/// Both remaining cases are fixed the same way — sign in again — so both
+/// messages say so. `NoClientId` was a third case until #33 made a client
+/// id mandatory at startup: an app that cannot start without one cannot
+/// later discover it is missing.
+pub(crate) fn describe_demotion(demotion: &SessionDemotion) -> String {
     match demotion {
-        SessionDemotion::NoClientId => format!(
-            "Your X sign-in session expired and could not be renewed: no oauth_client_id is \
-             configured. Add oauth_client_id = \"…\" to {} (or set X_OAUTH_CLIENT_ID), then \
-             restart twigpui.",
-            paths.settings_file().display()
-        ),
         SessionDemotion::NoRefreshToken => "Your X sign-in session expired and carries no \
              refresh token, so it can't be renewed automatically. Click \"Sign in with X\" to \
              start a new session."
@@ -343,10 +275,9 @@ fn carried_scope(refreshed_scope: Option<String>, previous_scope: Option<&str>) 
 mod tests {
     use super::*;
 
-    fn test_config(bearer_token: Option<&str>, oauth_client_id: Option<&str>) -> Config {
+    fn test_config(oauth_client_id: &str) -> Config {
         Config {
-            bearer_token: bearer_token.map(str::to_string),
-            oauth_client_id: oauth_client_id.map(str::to_string),
+            oauth_client_id: oauth_client_id.to_string(),
             target_username: "someone".to_string(),
             max_results: 20,
             min_fetch_interval_seconds: 60,
@@ -369,31 +300,6 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&root);
         root
-    }
-
-    #[test]
-    fn timeline_source_is_home_for_an_oauth_credential() {
-        assert_eq!(
-            TimelineSource::for_credential(&Credential::OAuth {
-                token: "token".into(),
-                scope: None
-            }),
-            TimelineSource::Home
-        );
-    }
-
-    #[test]
-    fn credential_scope_is_none_for_a_bearer_token() {
-        assert_eq!(Credential::Bearer("token".into()).scope(), None);
-    }
-
-    #[test]
-    fn credential_scope_reflects_the_oauth_sessions_recorded_scope() {
-        let credential = Credential::OAuth {
-            token: "token".into(),
-            scope: Some("tweet.read tweet.write".into()),
-        };
-        assert_eq!(credential.scope(), Some("tweet.read tweet.write"));
     }
 
     // --- carried_scope ---
@@ -423,104 +329,12 @@ mod tests {
     }
 
     #[test]
-    fn timeline_source_is_single_user_for_a_bearer_credential() {
-        assert_eq!(
-            TimelineSource::for_credential(&Credential::Bearer("token".into())),
-            TimelineSource::SingleUser
-        );
-    }
-
-    #[test]
-    fn resolve_credential_prefers_a_fresh_stored_session_over_the_bearer_token() {
-        let root = temp_root("fresh");
-        let paths = test_paths(&root);
-        paths.ensure_dirs().unwrap();
-        tokens::save(
-            &paths,
-            &TokenSet {
-                access_token: "oauth-token".into(),
-                refresh_token: None,
-                expires_at: 1_000_000,
-                scope: Some("tweet.read tweet.write".into()),
-            },
-        )
-        .unwrap();
-
-        let config = test_config(Some("bearer-token"), None);
-        let resolution = resolve_credential(&config, &paths, 0).unwrap();
-        assert_eq!(
-            resolution.credential,
-            Some(Credential::OAuth {
-                token: "oauth-token".into(),
-                scope: Some("tweet.read tweet.write".into()),
-            })
-        );
-        assert_eq!(resolution.demotion, None);
-
-        std::fs::remove_dir_all(&root).unwrap();
-    }
-
-    #[test]
-    fn resolve_credential_falls_back_to_the_bearer_token_when_the_stored_session_is_stale_and_unrefreshable()
-     {
-        let root = temp_root("stale");
-        let paths = test_paths(&root);
-        paths.ensure_dirs().unwrap();
-        tokens::save(
-            &paths,
-            &TokenSet {
-                access_token: "oauth-token".into(),
-                refresh_token: None,
-                expires_at: 0,
-                scope: None,
-            },
-        )
-        .unwrap();
-
-        // No client id and no refresh token on the stored session, so a
-        // refresh isn't possible — this must fall through to the bearer
-        // token rather than erroring, and report why (#54): absence of a
-        // client id is checked first, matching the issue's own diagnosis
-        // that this is the primary reported trigger.
-        let config = test_config(Some("bearer-token"), None);
-        let resolution = resolve_credential(&config, &paths, 1_000_000).unwrap();
-        assert_eq!(
-            resolution.credential,
-            Some(Credential::Bearer("bearer-token".into()))
-        );
-        assert_eq!(resolution.demotion, Some(SessionDemotion::NoClientId));
-
-        std::fs::remove_dir_all(&root).unwrap();
-    }
-
-    #[test]
-    fn resolve_credential_uses_the_bearer_token_when_there_is_no_stored_session() {
-        let root = temp_root("none");
-        let paths = test_paths(&root);
-        paths.ensure_dirs().unwrap();
-
-        let config = test_config(Some("bearer-token"), None);
-        let resolution = resolve_credential(&config, &paths, 0).unwrap();
-        // #31: the caller must be able to tell this apart from an OAuth
-        // session, so it can keep offering to sign in. No stored session at
-        // all means nothing degraded, so there is no demotion reason either.
-        assert_eq!(
-            resolution.credential,
-            Some(Credential::Bearer("bearer-token".into()))
-        );
-        assert!(!resolution.credential.unwrap().is_oauth());
-        assert_eq!(resolution.demotion, None);
-
-        std::fs::remove_dir_all(&root).unwrap();
-    }
-
-    #[test]
-    fn resolve_credential_is_none_when_nothing_is_configured() {
+    fn resolve_credential_is_none_when_there_is_no_stored_session() {
         let root = temp_root("nothing");
         let paths = test_paths(&root);
         paths.ensure_dirs().unwrap();
 
-        let config = test_config(None, None);
+        let config = test_config("client-id");
         let resolution = resolve_credential(&config, &paths, 0).unwrap();
         assert!(resolution.credential.is_none());
         assert_eq!(resolution.demotion, None);
@@ -529,38 +343,6 @@ mod tests {
     }
 
     // --- SessionDemotion (#54) ---
-
-    #[test]
-    fn resolve_credential_demotes_with_no_client_id_reason_when_a_stale_session_has_a_refresh_token_but_no_client_id()
-     {
-        // The exact shape #54 was filed from: a stored session that needs
-        // refreshing, a refresh token present on it, but no oauth_client_id
-        // configured in this run — a shell that never exported it, or a
-        // bundled launch (#40).
-        let root = temp_root("no-client-id");
-        let paths = test_paths(&root);
-        paths.ensure_dirs().unwrap();
-        tokens::save(
-            &paths,
-            &TokenSet {
-                access_token: "oauth-token".into(),
-                refresh_token: Some("refresh-token".into()),
-                expires_at: 0,
-                scope: Some("tweet.read tweet.write".into()),
-            },
-        )
-        .unwrap();
-
-        let config = test_config(Some("bearer-token"), None);
-        let resolution = resolve_credential(&config, &paths, 1_000_000).unwrap();
-        assert_eq!(
-            resolution.credential,
-            Some(Credential::Bearer("bearer-token".into()))
-        );
-        assert_eq!(resolution.demotion, Some(SessionDemotion::NoClientId));
-
-        std::fs::remove_dir_all(&root).unwrap();
-    }
 
     #[test]
     fn resolve_credential_demotes_with_no_refresh_token_reason_when_the_stored_session_carries_none()
@@ -579,27 +361,22 @@ mod tests {
         )
         .unwrap();
 
-        // A client id *is* configured this time — the only thing missing is
-        // a refresh token on the stored session itself.
-        let config = test_config(Some("bearer-token"), Some("client-id"));
+        let config = test_config("client-id");
         let resolution = resolve_credential(&config, &paths, 1_000_000).unwrap();
-        assert_eq!(
-            resolution.credential,
-            Some(Credential::Bearer("bearer-token".into()))
-        );
+        // #33: there is no fallback credential left, so a session that
+        // cannot be renewed leaves the app signed out — and says why.
+        assert_eq!(resolution.credential, None);
         assert_eq!(resolution.demotion, Some(SessionDemotion::NoRefreshToken));
 
         std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
-    fn resolve_credential_demotes_to_no_credential_when_neither_a_bearer_token_nor_a_refreshable_session_exists()
-     {
-        // A demotion reason must surface even when there is nothing to fall
-        // back to at all — `credential: None` and `demotion: Some(_)` are
-        // independent facts, and `ui.rs` needs both: the first decides
-        // whether the app can read anything, the second decides whether the
-        // "session expired" banner shows.
+    fn resolve_credential_reports_why_even_though_there_is_nothing_to_fall_back_to() {
+        // `credential: None` and `demotion: Some(_)` are independent facts,
+        // and `ui.rs` needs both: the first decides whether the app can read
+        // anything, the second decides whether the "session expired" banner
+        // shows.
         let root = temp_root("no-fallback");
         let paths = test_paths(&root);
         paths.ensure_dirs().unwrap();
@@ -614,7 +391,7 @@ mod tests {
         )
         .unwrap();
 
-        let config = test_config(None, Some("client-id"));
+        let config = test_config("client-id");
         let resolution = resolve_credential(&config, &paths, 1_000_000).unwrap();
         assert_eq!(resolution.credential, None);
         assert_eq!(resolution.demotion, Some(SessionDemotion::NoRefreshToken));
@@ -625,37 +402,17 @@ mod tests {
     // --- describe_demotion (#54) ---
 
     #[test]
-    fn describe_demotion_names_the_config_toml_path_for_a_missing_client_id() {
-        let root = temp_root("describe-no-client-id");
-        let paths = test_paths(&root);
-
-        let message = describe_demotion(&SessionDemotion::NoClientId, &paths);
-        assert!(
-            message.contains(&paths.settings_file().display().to_string()),
-            "{message}"
-        );
-        assert!(message.contains("oauth_client_id"), "{message}");
-    }
-
-    #[test]
     fn describe_demotion_for_no_refresh_token_points_at_signing_in_again() {
-        let root = temp_root("describe-no-refresh-token");
-        let paths = test_paths(&root);
-
-        let message = describe_demotion(&SessionDemotion::NoRefreshToken, &paths);
+        let message = describe_demotion(&SessionDemotion::NoRefreshToken);
         assert!(message.contains("Sign in with X"), "{message}");
     }
 
     #[test]
     fn describe_demotion_for_a_rejected_refresh_carries_the_detail_and_points_at_signing_in_again()
     {
-        let root = temp_root("describe-rejected");
-        let paths = test_paths(&root);
-
-        let message = describe_demotion(
-            &SessionDemotion::Rejected("invalid_grant: token expired".to_string()),
-            &paths,
-        );
+        let message = describe_demotion(&SessionDemotion::Rejected(
+            "invalid_grant: token expired".to_string(),
+        ));
         assert!(
             message.contains("invalid_grant: token expired"),
             "{message}"
