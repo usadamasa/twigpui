@@ -31,6 +31,7 @@ mod compose;
 mod config;
 mod image_cache;
 mod like;
+mod log;
 mod oauth;
 mod paths;
 mod rate_limit;
@@ -98,6 +99,12 @@ fn main() {
         std::process::exit(usage_only(&config, &paths));
     }
 
+    // #49: from here on, anything worth knowing goes to the log file as
+    // well as stderr — which is the only record at all for a `.app`
+    // launched from Finder, where stderr goes nowhere (#40, #45).
+    log::init(&paths, config.log_level);
+    log::info("starting twigpui");
+
     Application::new().run(move |cx| {
         // #38: registers gpui-component's global keybindings, theme, and
         // other per-App state (see its own `init`'s doc) — required once,
@@ -129,7 +136,7 @@ fn main() {
             cx.new(|cx| gpui_component::Root::new(timeline, window, cx))
         });
         if let Err(error) = opened {
-            eprintln!("could not open the window: {error:#}");
+            log::error(&format!("could not open the window: {error:#}"));
             cx.quit();
             return;
         }

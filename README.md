@@ -347,7 +347,7 @@ created (mode `0700`) on startup:
 | --- | --- | --- |
 | `XDG_CONFIG_HOME` | `~/.config/twigpui/` | `config.toml` |
 | `XDG_CACHE_HOME` | `~/.cache/twigpui/` | Response cache: `user_ids.json`, `timeline-<user_id>.json` (#9), `me.json`, `home-timeline-<user_id>.json` (#11), `thread-<reply_id>.json` (#12), `avatars/` (#64), `media/` (#65) |
-| `XDG_STATE_HOME` | `~/.local/state/twigpui/` | `oauth_tokens.json` (mode `0600`), `rate_limit.json` (#10), `usage.json` (#18), `reposted_posts.json` (#15), `liked_posts.json` (#68) |
+| `XDG_STATE_HOME` | `~/.local/state/twigpui/` | `oauth_tokens.json` (mode `0600`), `rate_limit.json` (#10), `usage.json` (#18), `reposted_posts.json` (#15), `liked_posts.json` (#68), `logs/` (#49) |
 
 An `XDG_*` variable is only honored if it is set to a non-blank absolute
 path; a relative or blank value falls back to the default, per spec.
@@ -714,6 +714,51 @@ the `like.write` scope, which X grants separately from `tweet.write`: a
 session authorized before #68 can post and repost but not like, and the
 header's "Re-authorize" button (#14) is what fixes it. Re-running the
 sign-in flow requests every scope at once.
+
+## Logs (#49)
+
+`$XDG_STATE_HOME/twigpui/logs/twigpui.log`, with one rotated predecessor at
+`twigpui.log.1`. `state`, not `cache`: a log deleted on the next boot
+answers no questions about what happened yesterday.
+
+```sh
+tail -f ~/.local/state/twigpui/logs/twigpui.log
+```
+
+**This exists because a `.app` has no stderr.** Launched from Finder or
+Spotlight, everything the app has to say goes nowhere (#40, #45). The
+startup alert covers exactly one case — "it did not start" — and nothing at
+all for a session that starts fine and then misbehaves. Run from a terminal,
+messages still go to stderr *as well*, so `cargo run` behaves as it always
+did.
+
+**Tokens never reach the file.** Every message is redacted before it is
+written: `Bearer <token>`, and any `access_token` / `refresh_token` /
+`client_secret` / `token` / `code` / `state` value in a query string or JSON
+body, all become `[redacted]`. The redactor is deliberately blunt —
+over-redacting costs a confusing log line, missing costs a credential on
+disk, and that failure is silent and permanent. Tests are the guarantee, not
+the care of whoever writes the next call site. The file is also created
+`0600`, matching the token store (#7).
+
+**It cannot grow without bound.** At 1 MiB the current log is moved to
+`.log.1` and a fresh one starts; exactly one previous generation is kept.
+`~/.local/state` is not swept by macOS, so an uncapped log is a slow leak —
+the same reasoning as #9's cache cap.
+
+**Level** comes from `TWIGPUI_LOG` (`error`, `warn`, `info`, `debug`), or
+from `log_level` in `config.toml` when that is unset, defaulting to `info`.
+The `config.toml` setting is the one that matters for a bundled `.app`,
+which never sees an environment variable set in a shell. An unrecognized
+value warns and falls back rather than blocking startup, exactly like
+`theme`.
+
+**No logging framework.** `tracing` plus a subscriber and an appender is a
+large tree to compile on every build (#46 is an open issue about exactly
+that) for a line with a level, a timestamp and a size cap. The headless
+`--fetch-only` / `--fetch-post` / `--usage` paths keep writing to stderr
+directly: they only ever run from a terminal, and a one-shot command has no
+business leaving a file behind.
 
 ## API cost
 

@@ -149,6 +149,20 @@ impl Paths {
         self.cache_dir.join("media")
     }
 
+    /// Directory holding diagnostic logs (#49), under `state_dir`. The XDG
+    /// spec names logs as a state-directory use explicitly, and unlike the
+    /// cache these are meant to survive — a log deleted on the next boot
+    /// answers no questions about what happened yesterday.
+    pub(crate) fn log_dir(&self) -> PathBuf {
+        self.state_dir.join("logs")
+    }
+
+    /// The current log file (#49). Its rotated predecessor is this path
+    /// with `.1` appended — see `log::rotate_if_needed`.
+    pub(crate) fn log_file(&self) -> PathBuf {
+        self.log_dir().join("twigpui.log")
+    }
+
     /// Path to the local record of post ids the signed-in user has liked
     /// from this app, under `state_dir` (#68). Separate from
     /// [`Self::reposted_posts_file`] rather than one combined file: the two
@@ -422,6 +436,16 @@ mod tests {
             PathBuf::from("/home/alice/.cache/twigpui/media")
         );
         assert_ne!(paths.media_dir(), paths.avatar_dir());
+    }
+
+    #[test]
+    fn the_log_file_is_under_the_state_dir() {
+        let paths = Paths::from_vars(vars(&[("HOME", "/home/alice")])).unwrap();
+        assert_eq!(
+            paths.log_file(),
+            PathBuf::from("/home/alice/.local/state/twigpui/logs/twigpui.log")
+        );
+        assert_eq!(paths.log_file().parent().unwrap(), paths.log_dir());
     }
 
     #[test]

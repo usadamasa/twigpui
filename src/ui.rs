@@ -15,6 +15,7 @@ use crate::compose::{self, ComposeState, ComposeStatus};
 use crate::config::Config;
 use crate::image_cache;
 use crate::like;
+use crate::log;
 use crate::oauth::{self, TimelineSource};
 use crate::paths::Paths;
 use crate::rate_limit;
@@ -791,6 +792,11 @@ impl TimelineView {
     /// (and, since #57's item 3, ticker) handling below rather than three
     /// copies that could drift.
     fn apply_reload_failure(&mut self, error: &anyhow::Error, cx: &mut Context<'_, Self>) {
+        // #49: a `.app` launched from Finder has no stderr, so without this
+        // a failed reload leaves nothing behind but a banner the user
+        // dismissed. `log::redact` runs on the way out — an API error can
+        // quote the request that produced it.
+        log::error(&format!("reload failed: {error:#}"));
         let (state, notice) = reload_failure_outcome(
             std::mem::replace(&mut self.state, TimelineState::Loading),
             error,
@@ -1188,11 +1194,18 @@ impl TimelineView {
                     .spawn(async move { avatar::ensure_cached(&paths, &fetch_url) })
                     .await;
 
-                if let Ok(path) = result {
-                    let _ = this.update(cx, |this, cx| {
-                        this.avatar_paths.insert(url.clone(), path);
-                        cx.notify();
-                    });
+                match result {
+                    Ok(path) => {
+                        let _ = this.update(cx, |this, cx| {
+                            this.avatar_paths.insert(url.clone(), path);
+                            cx.notify();
+                        });
+                    }
+                    // #49: the row keeps its placeholder either way, but a
+                    // silently missing avatar is exactly the kind of thing
+                    // that is impossible to investigate afterwards without
+                    // a line in the log.
+                    Err(error) => log::warn(&format!("avatar fetch failed: {error:#}")),
                 }
             }
         }));
@@ -1247,11 +1260,14 @@ impl TimelineView {
                     .spawn(async move { image_cache::ensure_cached(&dir, &fetch_url) })
                     .await;
 
-                if let Ok(path) = result {
-                    let _ = this.update(cx, |this, cx| {
-                        this.media_paths.insert(url.clone(), path);
-                        cx.notify();
-                    });
+                match result {
+                    Ok(path) => {
+                        let _ = this.update(cx, |this, cx| {
+                            this.media_paths.insert(url.clone(), path);
+                            cx.notify();
+                        });
+                    }
+                    Err(error) => log::warn(&format!("media fetch failed: {error:#}")),
                 }
             }
         }));
@@ -1631,6 +1647,7 @@ impl TimelineView {
 
             let _ = this.update(cx, |this, cx| match result {
                 Ok(tokens) => {
+                    log::info("signed in with OAuth");
                     this.signed_in_with_oauth = true;
                     // #14: the freshly granted scope — this is what makes
                     // `offers_reauthorize` stop offering the button right
@@ -1650,6 +1667,7 @@ impl TimelineView {
                     this.reload(ReloadTrigger::UserAction, cx);
                 }
                 Err(error) => {
+                    log::error(&format!("sign-in failed: {error:#}"));
                     this.state = TimelineState::Failed(format!("{error:#}").into());
                     cx.notify();
                 }
@@ -4644,6 +4662,7 @@ mod tests {
             max_results: 20,
             min_fetch_interval_seconds: 60,
             theme: crate::theme::ThemeMode::Light,
+            log_level: crate::log::Level::default(),
             request_price: None,
             daily_request_budget: None,
         };

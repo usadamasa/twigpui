@@ -351,6 +351,7 @@ mod tests {
             max_results: 20,
             min_fetch_interval_seconds: 60,
             theme: crate::theme::ThemeMode::default(),
+            log_level: crate::log::Level::default(),
             request_price: None,
             daily_request_budget: None,
         }
