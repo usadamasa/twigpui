@@ -8,9 +8,20 @@
       "Bash(cargo:*)"
     ]
   },
+  "extraKnownMarketplaces": {
+    "rust-skills": {
+      "source": {
+        "source": "github",
+        "repo": "actionbook/rust-skills"
+      }
+    }
+  },
   "sandbox": {
     "excludedCommands": [
       "cargo *"
     ]
+  },
+  "enabledPlugins": {
+    "rust-skills@rust-skills": true
   }
 }
