@@ -34,8 +34,9 @@ gpui::actions!(
 );
 
 /// The key context the timeline's root element carries (#58) — every
-/// binding below is scoped to it rather than registered globally, so a
-/// future single-key binding cannot fire while another view has focus.
+/// binding below except [`QUIT`] (#99) is scoped to it rather than
+/// registered globally, so a future single-key binding cannot fire while
+/// another view has focus.
 pub(crate) const KEY_CONTEXT: &str = "Timeline";
 
 /// One binding, defined once (#99).
@@ -225,12 +226,23 @@ mod tests {
     #[test]
     fn no_shortcut_is_a_bare_letter() {
         // The issue's central hazard: a bare `j`/`k`/`n` firing while the
-        // user is typing a post. Nothing bound today can, because every
-        // binding carries a modifier — and this fails if one ever doesn't.
-        for (key, label) in shortcuts() {
+        // user is typing a post. This has to walk `ALL_SHORTCUTS`, not
+        // `shortcuts()`: the latter is filtered to what the header
+        // advertises, so a binding registered with `in_header: false` —
+        // `QUIT` (#99) today, maybe another one tomorrow — would go
+        // unchecked. It also has to compare `keystroke`, not `glyphs`:
+        // `keystroke` is what `init` actually hands to `KeyBinding::new`,
+        // so that is what determines whether gpui fires the binding while
+        // someone is typing.
+        //
+        // `"escape"` is allowed with no modifier: it is a named special
+        // key, not a letter that ordinary typing would produce.
+        for shortcut in ALL_SHORTCUTS {
+            let keystroke = shortcut.keystroke;
             assert!(
-                key.starts_with('⌘') || key == "esc",
-                "{label} is bound to {key}, which would fire while typing"
+                keystroke.starts_with("cmd-") || keystroke == "escape",
+                "{} is bound to {keystroke}, which would fire while typing",
+                shortcut.label
             );
         }
     }
