@@ -1204,6 +1204,7 @@ impl TimelineView {
         match cached {
             Some(path) => img(path.clone())
                 .size(AVATAR_SIZE)
+                .flex_shrink_0()
                 .rounded_full()
                 .into_any_element(),
             None => avatar_placeholder(&item.author_name, theme),
@@ -3161,6 +3162,12 @@ fn media_badge(kind: Option<&str>) -> Option<&'static str> {
 /// How big an author avatar renders (#64). One constant because the
 /// placeholder has to match the image exactly — a row that reflows when the
 /// download lands is worse than no avatar at all.
+///
+/// Matching sizes alone isn't enough (#103): `post_row` sits the avatar next
+/// to a `flex_1` body, and flex's default `flex-shrink: 1` squishes a plain
+/// `.size(AVATAR_SIZE)` element once the body's content pushes past the
+/// available width. Both the `img` and the placeholder `div` need
+/// `flex_shrink_0` alongside this size, not just the size itself.
 const AVATAR_SIZE: gpui::Pixels = px(44.0);
 
 /// What stands in for an avatar that hasn't downloaded, failed, or never
@@ -3176,6 +3183,7 @@ fn avatar_placeholder(author_name: &str, theme: Theme) -> AnyElement {
 
     div()
         .size(AVATAR_SIZE)
+        .flex_shrink_0()
         .rounded_full()
         .bg(rgb(theme.border))
         .flex()
