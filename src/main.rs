@@ -2,9 +2,10 @@
 //! built with gpui.
 //!
 //! This binary crate is the whole application: `ui` renders the window,
-//! `x_api` talks to X, `cache`/`usage`/`rate_limit` keep the per-request
-//! billing under control, and this module is the entry point plus the
-//! headless `--fetch-only` / `--fetch-post` / `--usage` paths.
+//! `menu` holds the key bindings and the menu bar, `x_api` talks to X,
+//! `cache`/`usage`/`rate_limit` keep the per-request billing under control,
+//! and this module is the entry point plus the headless `--fetch-only` /
+//! `--fetch-post` / `--usage` paths.
 
 // `unwrap` in a test is a legible assertion, not a lurking panic — the strict
 // lints in Cargo.toml are aimed at the code that actually ships. #47 extends
@@ -32,6 +33,7 @@ mod config;
 mod image_cache;
 mod like;
 mod log;
+mod menu;
 mod oauth;
 mod paths;
 mod rate_limit;
@@ -114,7 +116,16 @@ fn main() {
         // #58: twigpui's own key bindings, registered alongside
         // gpui-component's for the same reason — once, before the window
         // that dispatches to them exists.
-        ui::init(cx);
+        menu::init(cx);
+        // #99: the menu bar, and the one action behind it that the window
+        // cannot own. A menu item dispatches into the focused window, so
+        // Reload/New Post/Submit Post reach the timeline's own handlers —
+        // but quitting has to work with no window focused at all, which is
+        // what `App::on_action` registers and a handler on the window's
+        // root would not. Both run before the window opens: an app whose
+        // window fails to open (below) still has a menu bar.
+        cx.on_action(|_: &menu::Quit, cx| cx.quit());
+        cx.set_menus(menu::menus());
 
         let bounds = Bounds::centered(None, size(px(560.0), px(820.0)), cx);
         let options = WindowOptions {

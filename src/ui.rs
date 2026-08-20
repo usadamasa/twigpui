@@ -16,6 +16,9 @@ use crate::config::Config;
 use crate::image_cache;
 use crate::like;
 use crate::log;
+use crate::menu::{
+    BlurComposer, FocusComposer, KEY_CONTEXT, Reload, ShowAbout, SubmitPost, shortcuts,
+};
 use crate::oauth;
 use crate::paths::Paths;
 use crate::rate_limit;
@@ -28,63 +31,6 @@ use crate::x_api::{
     Draft, PostLink, PostMedia, PostMetrics, QuotedPost, RepliedTo, TimelineItem, XClient,
     action_post_id,
 };
-
-gpui::actions!(
-    twigpui,
-    [
-        /// Reload the timeline (#58). Spends API requests, so it is bound
-        /// to `cmd-r` — the reload gesture every app shares, and not a key
-        /// anyone hits by accident.
-        Reload,
-        /// Submit the composer's draft (#58), bound to `cmd-enter`. Plain
-        /// `enter` is deliberately *not* bound: it has to keep inserting a
-        /// newline, and a post is not undoable.
-        SubmitPost,
-        /// Move focus into the composer (#58).
-        FocusComposer,
-        /// Move focus out of the composer (#58), leaving the draft alone.
-        BlurComposer,
-    ]
-);
-
-/// The key context the timeline's root element carries (#58) — every
-/// binding below is scoped to it rather than registered globally, so a
-/// future single-key binding cannot fire while another view has focus.
-const KEY_CONTEXT: &str = "Timeline";
-
-/// Register #58's key bindings. Called once at startup, next to
-/// `gpui_component::init` (which registers its own).
-///
-/// **Every binding here uses a modifier.** The issue's central hazard is a
-/// bare `j`/`k`/`n` firing while the user is typing a post; nothing bound
-/// here can, because nothing here is a bare letter. When post selection
-/// arrives and bare keys become worth having, they will need a second key
-/// context that the composer's focus removes — this constant is where that
-/// starts.
-pub(crate) fn init(cx: &mut gpui::App) {
-    cx.bind_keys([
-        gpui::KeyBinding::new("cmd-r", Reload, Some(KEY_CONTEXT)),
-        gpui::KeyBinding::new("cmd-enter", SubmitPost, Some(KEY_CONTEXT)),
-        gpui::KeyBinding::new("cmd-n", FocusComposer, Some(KEY_CONTEXT)),
-        gpui::KeyBinding::new("escape", BlurComposer, Some(KEY_CONTEXT)),
-    ]);
-}
-
-/// The shortcut list shown in the header (#58) and mirrored in the README —
-/// one source for both, so a binding cannot be added without the list that
-/// tells the user it exists.
-///
-/// Deliberately short. Anything spending an API request beyond `cmd-r` is
-/// absent: "Load older" pages backwards one paid request per press, and a
-/// key that spends money on a mis-hit is not a convenience.
-pub(crate) fn shortcuts() -> [(&'static str, &'static str); 4] {
-    [
-        ("⌘R", "Reload"),
-        ("⌘↩", "Post"),
-        ("⌘N", "Focus the composer"),
-        ("esc", "Leave the composer"),
-    ]
-}
 
 /// What's known about one reply's "Show thread" walk (#12), keyed by the
 /// reply's own post id in [`TimelineView::threads`]. Absent from that map
@@ -2258,6 +2204,24 @@ impl Render for TimelineView {
                 // never losing a draft as the composer's main promise.
                 window.blur();
             }))
+            .on_action(cx.listener(|_this, _: &ShowAbout, window, cx| {
+                // The receiver is dropped rather than awaited: there is one
+                // button, so which one was pressed carries no information.
+                // `Quit` is the action that has to reach the `App` — this
+                // one only has to reach a window, so it stays here with the
+                // rest of them.
+                drop(window.prompt(
+                    gpui::PromptLevel::Info,
+                    "twigpui",
+                    Some(&format!(
+                        "Version {}\n\nA development-only X timeline viewer \
+                         for macOS, built with gpui.",
+                        env!("CARGO_PKG_VERSION")
+                    )),
+                    &["OK"],
+                    cx,
+                ));
+            }))
             .flex()
             .flex_col()
             .size_full()
@@ -3350,8 +3314,8 @@ mod tests {
         offers_like, offers_load_older, offers_quote, offers_reauthorize, offers_reply,
         offers_repost, post_permalink, profile_url, rate_limit, reload_cooldown,
         reload_failure_outcome, reload_gate, reload_start_state, reply_banner_label,
-        reply_target_label, repost_action_label, repost_banner_label, shortcuts,
-        thread_action_label, usage, usage_color, usage_label,
+        reply_target_label, repost_action_label, repost_banner_label, thread_action_label, usage,
+        usage_color, usage_label,
     };
 
     fn item_with(id: &str, author_username: &str, reposted_by: Option<&str>) -> TimelineItem {
@@ -3579,50 +3543,6 @@ mod tests {
         let mut item = item_with(row_id, original_author, Some("bob"));
         item.original_post_id = Some(original_id.to_string());
         item
-    }
-
-    // --- #58: keyboard shortcuts ---
-
-    #[test]
-    fn no_shortcut_is_a_bare_letter() {
-        // The issue's central hazard: a bare `j`/`k`/`n` firing while the
-        // user is typing a post. Nothing bound today can, because every
-        // binding carries a modifier — and this fails if one ever doesn't.
-        for (key, label) in shortcuts() {
-            assert!(
-                key.starts_with('⌘') || key == "esc",
-                "{label} is bound to {key}, which would fire while typing"
-            );
-        }
-    }
-
-    #[test]
-    fn every_shortcut_is_labelled() {
-        for (key, label) in shortcuts() {
-            assert!(!key.is_empty(), "a shortcut with no key");
-            assert!(!label.is_empty(), "{key} has no label");
-        }
-    }
-
-    #[test]
-    fn no_key_is_bound_twice() {
-        let mut keys: Vec<&str> = shortcuts().iter().map(|(key, _)| *key).collect();
-        keys.sort_unstable();
-        let before = keys.len();
-        keys.dedup();
-        assert_eq!(keys.len(), before, "two actions share a key");
-    }
-
-    #[test]
-    fn load_older_has_no_shortcut() {
-        // Each press pages backwards for one paid request. A key that
-        // spends money on a mis-hit is not a convenience (#58).
-        assert!(
-            !shortcuts()
-                .iter()
-                .any(|(_, label)| label.to_lowercase().contains("older")),
-            "\"Load older\" must not be bound"
-        );
     }
 
     // --- #65: attached media ---
@@ -4463,7 +4383,7 @@ mod tests {
         // #58: `KeyBinding::new` panics on a keystroke it cannot parse, so
         // running this here turns a typo in a binding into a failing test
         // rather than a crash on the user's first launch.
-        cx.update(super::init);
+        cx.update(crate::menu::init);
 
         // Held so the composer's input can be focused below: `add_window`
         // hands back a handle to the *root* view, which is deliberately the

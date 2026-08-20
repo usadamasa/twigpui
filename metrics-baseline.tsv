@@ -11,7 +11,7 @@
 # which is the whole mechanism.
 #
 # Lower a ceiling whenever a file shrinks below it. `src/ui.rs` is the one
-# that matters: 3,341 implementation lines, more than twice what #48
+# that matters: 3,305 implementation lines, more than twice what #48
 # recorded, holding rendering, state transitions, async task management and
 # `EntityInputHandler` in one place.
 #
@@ -29,6 +29,7 @@ src/image_cache.rs	150
 src/like.rs	150
 src/log.rs	350
 src/main.rs	550
+src/menu.rs	250
 src/oauth/callback.rs	350
 src/oauth/mod.rs	300
 src/oauth/pkce.rs	150

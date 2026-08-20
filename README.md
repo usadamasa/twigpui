@@ -238,15 +238,23 @@ typo'd theme is cosmetic, not worth blocking the app over — it falls back to
 | `⌘↩` | Post the draft |
 | `⌘N` | Focus the composer |
 | `esc` | Leave the composer (the draft is kept) |
+| `⌘Q` | Quit |
 
-The same list is shown on screen, under the header — four bindings fit on
-one line, and a help screen nobody opens documents nothing.
+The first four are shown on screen, under the header — four bindings fit on
+one line, and a help screen nobody opens documents nothing. `⌘Q` is left off
+that strip: the strip is for what this app does that another one would not.
 
 **Every binding carries a modifier, deliberately.** The hazard #58 is really
 about is a bare `j`/`k`/`n` firing while you are typing a post; nothing
 bound today can. Bare keys become worth having once posts can be selected,
 and that needs a second key context the composer's focus removes — see
-`ui::KEY_CONTEXT`.
+`menu::KEY_CONTEXT`.
+
+**`⌘Q` is the one binding with no key context.** The others answer a
+question about the timeline and belong to the view that answers it.
+Quitting is not the window's business, and scoping it would mean `⌘Q` doing
+nothing whenever focus sat anywhere else — so it is registered globally and
+handled on the `App` rather than on the window's root (#99).
 
 **`⌘↩` posts; plain `↩` does not.** Enter has to keep inserting a newline,
 and a post is not undoable.
@@ -261,4 +269,22 @@ request, and a key that spends money on a mis-hit is not a convenience.
 not one anyone hits by accident — and it goes through the same throttle
 (#10) and cooldown reporting (#57) as the button, so a held-down `⌘R`
 cannot outrun the interval that exists to stop this app spending in a loop.
+
+
+## Menu bar
+
+| Menu | Items |
+| --- | --- |
+| twigpui | About twigpui, Quit twigpui |
+| File | New Post, Submit Post |
+| View | Reload |
+
+Every item dispatches the same action its keystroke does, and macOS draws
+the key equivalent beside it from the keymap — so a keystroke is written in
+exactly one place in the source (`menu::Shortcut`), and the menu bar, the
+on-screen strip and the key bindings cannot drift apart (#99).
+
+The wordings differ between the two lists on purpose: a menu item is read
+on its own ("New Post"), while the strip is read as a row of hints under a
+heading ("⌘N Focus the composer").
 
