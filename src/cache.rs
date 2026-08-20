@@ -10,6 +10,7 @@
 //! `XClient`), so unlike the rest of this module it is not unit tested — see
 //! its own doc comment.
 
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
@@ -326,8 +327,76 @@ fn merge_item(mut cached: TimelineItem, incoming: &TimelineItem) -> TimelineItem
     cached
 }
 
-/// Splice `incoming` into `cached` on the given side, both newest-first,
-/// and cap the result to [`MAX_CACHED_POSTS`].
+/// Sort `items` into `created_at` descending order (newest first), stable,
+/// with rows that have no `created_at` pushed to the end (#102).
+///
+/// `created_at` is not parsed into a date type here, on purpose. Every
+/// timeline endpoint requests it via `tweet.fields=created_at`
+/// (`x_api::client`, the three `.../tweet.fields=created_at...` query
+/// strings), and the API always renders it as a fixed-width, UTC-only RFC
+/// 3339 timestamp: `YYYY-MM-DDTHH:MM:SS.mmmZ`. Fixed width and a single
+/// timezone are exactly what [`since_id`]'s doc comment warns post *ids*
+/// lack — ids grow in digit count over time, so a lexicographic compare of
+/// two ids breaks at each digit-count boundary (`"9" > "10"` as strings,
+/// even though id `10` was issued later). `created_at` has no such
+/// boundary: year, month, day, hour, minute, second, and millisecond are
+/// each zero-padded to a fixed width, so a byte-wise string comparison of
+/// two `created_at` values agrees with their chronological order. That is
+/// the whole justification for comparing the raw strings below instead of
+/// pulling in a date-parsing crate — it is correct here in a way it would
+/// not be for `id`.
+///
+/// The sort is stable ([`slice::sort_by`], not `sort_unstable_by`) rather
+/// than merely convenient: two posts sharing the same `created_at` down to
+/// the millisecond are not impossible, and when that happens this keeps
+/// them in whatever relative order the caller already had — which, for a
+/// freshly fetched page, is the API's own response order.
+///
+/// Rows without a `created_at` sort after every row that has one, rather
+/// than joining the string comparison — `None` means "unknown", not
+/// "oldest". In practice this is rare: `created_at` is populated on every
+/// timeline response, and `None` only shows up on rows written to the
+/// cache before the field existed (#97) or if a response ever came back
+/// malformed. Sinking those rows to the end rather than raising them to the
+/// front is the lower-harm default: a post landing a few slots deep in a
+/// mixed-vintage cache is far less visible than an unrelated post jumping
+/// to the very top of a newest-first feed.
+///
+/// This does interact with [`since_id`], which reports `cached.first()` as
+/// the newest post to resume from. If a brand-new row with `created_at:
+/// None` is ever spliced in, sinking it to the end here means `since_id`
+/// reports an *older* post as the newest cached one, so the next reload
+/// asks the API for posts since that older id — a range that already
+/// includes this row. That re-fetch is harmless **only because `splice`
+/// merges the incoming batch by id (#97) instead of blindly concatenating
+/// it**: the row comes back from the API, is recognized as already cached,
+/// and is folded into place via [`merge_item`] rather than appended a
+/// second time. The cost is one wasted request, not a duplicate row. This
+/// sort function does not provide that safety net itself — it is entirely
+/// a property of `splice`'s id-based merge — so if that merge step is ever
+/// weakened or removed, a `None`-`created_at` row sinking below `since_id`
+/// stops being a free re-fetch and starts being a silent duplicate.
+fn sort_by_created_at_desc(items: &mut [TimelineItem]) {
+    items.sort_by(|a, b| match (&a.created_at, &b.created_at) {
+        (Some(a_created_at), Some(b_created_at)) => b_created_at.cmp(a_created_at),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => Ordering::Equal,
+    });
+}
+
+/// Splice `incoming` into `cached` on the given side, re-sort the result by
+/// `created_at` descending (#102, via [`sort_by_created_at_desc`]), and cap
+/// it to [`MAX_CACHED_POSTS`].
+///
+/// The concatenation order below (fresh-then-cached for [`Side::Ahead`],
+/// cached-then-fresh for [`Side::Behind`]) is no longer what makes the
+/// result newest-first by itself — that used to rest entirely on the API
+/// returning each side's posts already in time order (#92's original
+/// design). This function now asserts that ordering explicitly with a sort
+/// pass rather than assuming it, so newest-first holds regardless of
+/// fetch order: a `since_id` reload, a `Load older` page, and a future
+/// insert-on-post path (#14) all converge to the same order.
 ///
 /// Ids already in `cached` are dropped from `incoming` — the API returns a
 /// post already on file both on an incremental reload and at a page
@@ -381,6 +450,13 @@ pub(crate) fn splice(
             behind
         }
     };
+    // Re-sort by created_at before capping (#102): sorting first and
+    // truncating second is the only order that keeps the newest rows. Cap
+    // then sort would let a stale, already-in-place ordering decide which
+    // rows survive the cut, dropping a genuinely fresh row that merely
+    // arrived past the tail of `spliced` while an older row upstream of it
+    // survives.
+    sort_by_created_at_desc(&mut spliced);
     spliced.truncate(MAX_CACHED_POSTS);
     spliced
 }
@@ -706,6 +782,28 @@ mod tests {
         items.iter().map(|item| item.id.as_str()).collect()
     }
 
+    /// [`item`] with `created_at` set to a real-shaped, fixed-width
+    /// timestamp string, for the #102 ordering tests below.
+    fn item_at(id: &str, created_at: &str) -> TimelineItem {
+        let mut built = item(id);
+        built.created_at = Some(created_at.to_string());
+        built
+    }
+
+    /// A fixed-width `created_at` string that increases with `n`, in the
+    /// same `YYYY-MM-DDTHH:MM:SS.mmmZ` shape the API actually sends. Used
+    /// instead of hand-writing distinct timestamp literals per test so the
+    /// ordering under test (`n` larger => string compares greater) is
+    /// obviously correct by construction.
+    fn ts(n: u32) -> String {
+        format!(
+            "2026-01-01T{:02}:{:02}:{:02}.000Z",
+            n / 3600,
+            (n / 60) % 60,
+            n % 60
+        )
+    }
+
     fn test_paths(root: &Path) -> Paths {
         let home = root.display().to_string();
         Paths::from_vars(move |key| (key == "HOME").then(|| home.clone())).unwrap()
@@ -999,6 +1097,90 @@ mod tests {
         assert!(!ids(&merged).contains(&"1"));
         assert!(!ids(&merged).contains(&"2"));
         assert_eq!(merged.last().unwrap().id, "3");
+    }
+
+    // --- splice orders the result by created_at, not by fetch order (#102) ---
+
+    #[test]
+    fn splice_ahead_orders_by_created_at_even_when_the_fresh_batch_is_older() {
+        // A `since_id` reload's own posts are expected to be newer than
+        // what's cached, but this must not be an assumption baked into the
+        // result — if it ever isn't (clock skew, a backfilled post), the
+        // splice still has to land in created_at order rather than fresh-
+        // batch-always-first.
+        let cached = vec![item_at("2", &ts(20))];
+        let fresh = vec![item_at("3", &ts(10))];
+        let merged = splice(cached, fresh, Side::Ahead);
+        assert_eq!(ids(&merged), vec!["2", "3"]);
+    }
+
+    #[test]
+    fn splice_behind_orders_by_created_at_even_when_the_older_batch_is_newer() {
+        // Mirrors the Ahead case above for a "Load older" page.
+        let cached = vec![item_at("5", &ts(10))];
+        let older = vec![item_at("4", &ts(20))];
+        let merged = splice(cached, older, Side::Behind);
+        assert_eq!(ids(&merged), vec!["4", "5"]);
+    }
+
+    #[test]
+    fn splice_sort_is_stable_for_equal_created_at() {
+        // Same created_at down to the string: the relative order the API
+        // returned them in (here, the pre-sort concatenation order) must
+        // survive, which is exactly what a stable sort guarantees and
+        // `sort_unstable_by` would not.
+        let cached = vec![item_at("1", &ts(10))];
+        let fresh = vec![item_at("3", &ts(10)), item_at("2", &ts(10))];
+        let merged = splice(cached, fresh, Side::Ahead);
+        assert_eq!(ids(&merged), vec!["3", "2", "1"]);
+    }
+
+    #[test]
+    fn splice_sinks_a_missing_created_at_row_to_the_end() {
+        // A row with no created_at (#97's old cache rows, or a malformed
+        // response) must not sort ahead of a row that has one, even when
+        // fetch order would otherwise place it first.
+        let cached = vec![item_at("2", &ts(10))];
+        let fresh = vec![item("3")]; // created_at: None
+        let merged = splice(cached, fresh, Side::Ahead);
+        assert_eq!(ids(&merged), vec!["2", "3"]);
+    }
+
+    #[test]
+    fn splice_preserves_relative_order_among_multiple_missing_created_at_rows() {
+        // Two None rows must not swap relative to each other just because
+        // sorting moved them both past a row that does have a created_at.
+        let fresh = vec![item("9")]; // created_at: None
+        let cached = vec![item_at("5", &ts(10)), item("8")]; // second: None
+        // Pre-sort concatenation (Side::Ahead) is ["9", "5", "8"]: a None
+        // row ahead of a Some row, and another None row behind it.
+        let merged = splice(cached, fresh, Side::Ahead);
+        assert_eq!(ids(&merged), vec!["5", "9", "8"]);
+    }
+
+    #[test]
+    fn splice_sorts_before_capping_so_the_500_cap_drops_the_oldest_rows() {
+        // Regression guard for ordering the truncate after the sort: build
+        // a batch where the naive "concatenate, then cut at 500" order
+        // would keep the wrong rows. `fresh` sits at the front of the
+        // Side::Ahead concatenation (positions 0-1) but is, by created_at,
+        // older than every cached row. If truncate ran before the sort (or
+        // the sort didn't run at all), the cap would keep these two and
+        // drop the two oldest *cached* rows instead — even though those
+        // cached rows are chronologically newer than `fresh`.
+        let cached: Vec<_> = (1000..1500)
+            .rev()
+            .map(|n| item_at(&n.to_string(), &ts(n)))
+            .collect();
+        let fresh = vec![item_at("502", &ts(2)), item_at("501", &ts(1))];
+        let merged = splice(cached, fresh, Side::Ahead);
+        assert_eq!(merged.len(), 500);
+        assert_eq!(merged.first().unwrap().id, "1499");
+        assert_eq!(merged.last().unwrap().id, "1000");
+        // The chronologically-oldest rows (the fresh ones) are the ones
+        // the cap drops, not the two oldest cached rows.
+        assert!(!ids(&merged).contains(&"502"));
+        assert!(!ids(&merged).contains(&"501"));
     }
 
     // --- cached_me / save_me ---
