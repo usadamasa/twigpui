@@ -67,9 +67,30 @@ struct UserIdCacheFile {
     users: HashMap<String, UserIdEntry>,
 }
 
+/// The current shape of [`TimelineCacheFile`]/[`TimelineItem`] (#97).
+///
+/// **Bump this whenever a field is added to [`TimelineItem`].** A cached row
+/// written before the field existed deserializes with that field simply
+/// absent (`#[serde(default)]`), and neither `reload` nor `load_older_home`
+/// ever re-fetches an id already on file — a `since_id`/`pagination_token`
+/// walk only ever asks the API for posts *outside* the cached range. So a
+/// pre-existing row's new field stays empty forever unless something forces
+/// a full re-fetch. Bumping this constant is that force: [`load_timeline`]/
+/// [`load_home_timeline`] treat a version mismatch as a clean cache miss
+/// (deliberately *not* `#[serde(default)]` on the field below — an old file
+/// must fail to parse as the current shape, not silently coerce into it),
+/// the same "corrupt file → `Ok(None)`" path [`load_json`] already uses, so
+/// every row gets re-fetched with the new field populated on the next
+/// reload. See also `splice`'s merge rule, which fixes the same problem
+/// for rows that recur across a `since_id`/page boundary without requiring
+/// a version bump at all.
+const TIMELINE_SCHEMA_VERSION: u32 = 1;
+
 /// The whole contents of one [`Paths::timeline_file`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct TimelineCacheFile {
+    /// Deliberately *not* `#[serde(default)]` — see [`TIMELINE_SCHEMA_VERSION`].
+    schema_version: u32,
     fetched_at: i64,
     items: Vec<TimelineItem>,
 }
@@ -157,7 +178,9 @@ pub(crate) fn save_me(paths: &Paths, id: &str, username: &str, now: i64) -> Resu
 /// only an explicit reload spends credits" decision.
 pub(crate) fn load_timeline(paths: &Paths, user_id: &str) -> Result<Option<Vec<TimelineItem>>> {
     let file: Option<TimelineCacheFile> = load_json(&paths.timeline_file(user_id))?;
-    Ok(file.map(|file| file.items))
+    Ok(file
+        .filter(|file| file.schema_version == TIMELINE_SCHEMA_VERSION)
+        .map(|file| file.items))
 }
 
 /// Persist `items` (already merged and capped by the caller) as `user_id`'s
@@ -169,6 +192,7 @@ pub(crate) fn save_timeline(
     now: i64,
 ) -> Result<()> {
     let file = TimelineCacheFile {
+        schema_version: TIMELINE_SCHEMA_VERSION,
         fetched_at: now,
         items: items.to_vec(),
     };
@@ -185,7 +209,9 @@ pub(crate) fn load_home_timeline(
     user_id: &str,
 ) -> Result<Option<Vec<TimelineItem>>> {
     let file: Option<TimelineCacheFile> = load_json(&paths.home_timeline_file(user_id))?;
-    Ok(file.map(|file| file.items))
+    Ok(file
+        .filter(|file| file.schema_version == TIMELINE_SCHEMA_VERSION)
+        .map(|file| file.items))
 }
 
 /// Persist `items` as `user_id`'s home-timeline cache. Mirrors
@@ -197,6 +223,7 @@ pub(crate) fn save_home_timeline(
     now: i64,
 ) -> Result<()> {
     let file = TimelineCacheFile {
+        schema_version: TIMELINE_SCHEMA_VERSION,
         fetched_at: now,
         items: items.to_vec(),
     };
@@ -246,24 +273,95 @@ pub(crate) enum Side {
     Behind,
 }
 
+/// Fill whichever of `cached`'s optional/collection fields are empty with
+/// `incoming`'s value for that same field, leaving every field `cached`
+/// already has untouched (#97).
+///
+/// One rule, applied identically to every mergeable field rather than one
+/// branch per field: **cached `Some`/non-empty wins; incoming fills only
+/// what cached is missing.** That is exactly what a row saved before a
+/// field existed needs (`author_avatar_url`/`media`/`links` before
+/// #64/#65/#70), and it is also exactly what #67's `metrics` snapshot
+/// needs — a cached `Some` metrics is never displaced by a fresher one, so
+/// there is no metrics-specific branch here. Any field added to
+/// [`TimelineItem`] in the future defaults to this same "fill only when
+/// missing" behavior once it is added below, which is the safe side to
+/// default to.
+///
+/// `id`/`text`/`author_name`/`author_username` are not `Option`, since the
+/// parser always fills them from the API response, so `cached`'s value for
+/// those (and every other field not listed below) is kept as-is.
+fn merge_item(mut cached: TimelineItem, incoming: &TimelineItem) -> TimelineItem {
+    if cached.created_at.is_none() {
+        cached.created_at.clone_from(&incoming.created_at);
+    }
+    if cached.reposted_by.is_none() {
+        cached.reposted_by.clone_from(&incoming.reposted_by);
+    }
+    if cached.quoted.is_none() {
+        cached.quoted.clone_from(&incoming.quoted);
+    }
+    if cached.replied_to.is_none() {
+        cached.replied_to.clone_from(&incoming.replied_to);
+    }
+    if cached.metrics.is_none() {
+        cached.metrics = incoming.metrics;
+    }
+    if cached.links.is_empty() {
+        cached.links.clone_from(&incoming.links);
+    }
+    if cached.author_avatar_url.is_none() {
+        cached
+            .author_avatar_url
+            .clone_from(&incoming.author_avatar_url);
+    }
+    if cached.original_post_id.is_none() {
+        cached
+            .original_post_id
+            .clone_from(&incoming.original_post_id);
+    }
+    if cached.media.is_empty() {
+        cached.media.clone_from(&incoming.media);
+    }
+    cached
+}
+
 /// Splice `incoming` into `cached` on the given side, both newest-first,
 /// and cap the result to [`MAX_CACHED_POSTS`].
 ///
 /// Ids already in `cached` are dropped from `incoming` — the API returns a
 /// post already on file both on an incremental reload and at a page
-/// boundary. **The cached copy is the one kept**, in either direction. That
-/// was true of both functions this replaces (#92: they were the same
-/// operation with the concatenation reversed), and it is worth stating
-/// rather than leaving as an accident: a post's `metrics` (#67) are a
-/// snapshot from when it was fetched, so "keep what is on file" is what
+/// boundary. **The cached copy is the one kept**, in either direction, but
+/// not verbatim: it is first passed through [`merge_item`], which fills in
+/// whatever fields it is missing from the incoming copy (#97) — otherwise a
+/// row cached before a field like `author_avatar_url` existed would keep
+/// recurring at a page boundary or `since_id` overlap without ever picking
+/// the field up, since neither `reload` nor `load_older_home` re-fetches an
+/// id already on file by any other path. This was true of both functions
+/// this replaces before the merge existed (#92: they were the same
+/// operation with the concatenation reversed, keeping the cached copy
+/// as-is) — a post's `metrics` (#67) are a snapshot from when it was
+/// fetched, so "keep what is on file" for a field already present is what
 /// makes a reload leave existing rows' counts alone instead of shuffling
-/// them.
+/// them; [`merge_item`]'s rule preserves that while also fixing #97.
 pub(crate) fn splice(
     cached: Vec<TimelineItem>,
     incoming: Vec<TimelineItem>,
     side: Side,
 ) -> Vec<TimelineItem> {
-    let cached_ids: HashSet<&str> = cached.iter().map(|item| item.id.as_str()).collect();
+    let incoming_by_id: HashMap<&str, &TimelineItem> = incoming
+        .iter()
+        .map(|item| (item.id.as_str(), item))
+        .collect();
+    let merged: Vec<TimelineItem> = cached
+        .into_iter()
+        .map(|item| match incoming_by_id.get(item.id.as_str()) {
+            Some(fresh) => merge_item(item, fresh),
+            None => item,
+        })
+        .collect();
+
+    let cached_ids: HashSet<&str> = merged.iter().map(|item| item.id.as_str()).collect();
     let fresh: Vec<TimelineItem> = incoming
         .into_iter()
         .filter(|item| !cached_ids.contains(item.id.as_str()))
@@ -274,11 +372,11 @@ pub(crate) fn splice(
     let mut spliced = match side {
         Side::Ahead => {
             let mut ahead = fresh;
-            ahead.extend(cached);
+            ahead.extend(merged);
             ahead
         }
         Side::Behind => {
-            let mut behind = cached;
+            let mut behind = merged;
             behind.extend(fresh);
             behind
         }
@@ -793,6 +891,75 @@ mod tests {
         assert_eq!(behind[0].text, "on file");
     }
 
+    // --- splice merges a recurring id's missing fields (#97) ---
+
+    #[test]
+    fn splice_fills_a_missing_optional_field_from_the_incoming_copy() {
+        let mut cached_copy = item("1");
+        cached_copy.author_avatar_url = None;
+        let mut incoming_copy = item("1");
+        incoming_copy.author_avatar_url = Some("https://example.com/avatar.png".to_string());
+
+        let merged = splice(vec![cached_copy], vec![incoming_copy], Side::Ahead);
+        assert_eq!(
+            merged[0].author_avatar_url.as_deref(),
+            Some("https://example.com/avatar.png")
+        );
+    }
+
+    #[test]
+    fn splice_keeps_the_cached_metrics_snapshot_instead_of_the_incoming_one() {
+        // #67: metrics are a snapshot from when the post was first fetched.
+        // The merge rule ("cached Some wins") must not special-case this —
+        // it falls out of the same rule that fills a missing
+        // author_avatar_url, and this test is what proves it does.
+        let mut cached_copy = item("1");
+        cached_copy.metrics = Some(crate::x_api::PostMetrics {
+            likes: 1,
+            reposts: 2,
+            replies: 3,
+        });
+        let mut incoming_copy = item("1");
+        incoming_copy.metrics = Some(crate::x_api::PostMetrics {
+            likes: 100,
+            reposts: 200,
+            replies: 300,
+        });
+
+        let merged = splice(vec![cached_copy], vec![incoming_copy], Side::Ahead);
+        assert_eq!(merged[0].metrics.as_ref().unwrap().likes, 1);
+    }
+
+    #[test]
+    fn splice_fills_metrics_when_the_cached_copy_has_none() {
+        let cached_copy = item("1");
+        assert_eq!(cached_copy.metrics, None);
+        let mut incoming_copy = item("1");
+        incoming_copy.metrics = Some(crate::x_api::PostMetrics {
+            likes: 5,
+            reposts: 6,
+            replies: 7,
+        });
+
+        let merged = splice(vec![cached_copy], vec![incoming_copy], Side::Ahead);
+        assert_eq!(merged[0].metrics.as_ref().unwrap().likes, 5);
+    }
+
+    #[test]
+    fn splice_fills_an_empty_links_vec_from_the_incoming_copy() {
+        let cached_copy = item("1");
+        assert!(cached_copy.links.is_empty());
+        let mut incoming_copy = item("1");
+        incoming_copy.links = vec![crate::x_api::PostLink {
+            url: "https://example.com".to_string(),
+            label: "example.com".to_string(),
+        }];
+
+        let merged = splice(vec![cached_copy], vec![incoming_copy], Side::Ahead);
+        assert_eq!(merged[0].links.len(), 1);
+        assert_eq!(merged[0].links[0].label, "example.com");
+    }
+
     // --- splice behind (#92, formerly append_older) ---
 
     #[test]
@@ -1036,6 +1203,62 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
     }
 
+    #[test]
+    fn a_timeline_cache_file_with_an_old_schema_version_is_a_clean_miss() {
+        // #97: a cache file written by an older twigpui — same overall
+        // shape, but `schema_version` one behind current — must not be
+        // trusted, since its `TimelineItem` rows may be missing fields
+        // added since. It parses fine but is rejected by the version check.
+        let root = temp_root("timeline-old-schema-version");
+        let paths = test_paths(&root);
+        paths.ensure_dirs().unwrap();
+        let stale = TimelineCacheFile {
+            schema_version: TIMELINE_SCHEMA_VERSION - 1,
+            fetched_at: 0,
+            items: vec![item("1")],
+        };
+        save_json(&paths.timeline_file("2244994945"), &stale).unwrap();
+
+        assert_eq!(load_timeline(&paths, "2244994945").unwrap(), None);
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_timeline_cache_file_without_a_schema_version_field_is_a_clean_miss() {
+        // The pre-#97 file shape: no `schema_version` key at all. Since the
+        // field is deliberately not `#[serde(default)]`, this fails to
+        // deserialize as `TimelineCacheFile` and load_json's parse-failure
+        // path returns `Ok(None)` — the same outcome as an explicit version
+        // mismatch, just via a different route.
+        let root = temp_root("timeline-no-schema-version-field");
+        let paths = test_paths(&root);
+        paths.ensure_dirs().unwrap();
+        std::fs::write(
+            paths.timeline_file("2244994945"),
+            br#"{"fetched_at": 0, "items": []}"#,
+        )
+        .unwrap();
+
+        assert_eq!(load_timeline(&paths, "2244994945").unwrap(), None);
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_timeline_cache_file_with_the_current_schema_version_reads_back() {
+        let root = temp_root("timeline-current-schema-version");
+        let paths = test_paths(&root);
+        paths.ensure_dirs().unwrap();
+
+        let items = vec![item("1")];
+        save_timeline(&paths, "2244994945", &items, 0).unwrap();
+
+        assert_eq!(load_timeline(&paths, "2244994945").unwrap(), Some(items));
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
     // --- load_home_timeline / save_home_timeline ---
 
     #[test]
@@ -1059,6 +1282,42 @@ mod tests {
         save_home_timeline(&paths, "2244994945", &items, 1_000).unwrap();
         let loaded = load_home_timeline(&paths, "2244994945").unwrap();
         assert_eq!(loaded, Some(items));
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_home_timeline_cache_file_with_an_old_schema_version_is_a_clean_miss() {
+        // #97, mirroring the single-user-timeline test above: the home
+        // timeline is a separate file, so the version check must apply
+        // there too, not just to `timeline_file`.
+        let root = temp_root("home-timeline-old-schema-version");
+        let paths = test_paths(&root);
+        paths.ensure_dirs().unwrap();
+        let stale = TimelineCacheFile {
+            schema_version: TIMELINE_SCHEMA_VERSION - 1,
+            fetched_at: 0,
+            items: vec![item("1")],
+        };
+        save_json(&paths.home_timeline_file("2244994945"), &stale).unwrap();
+
+        assert_eq!(load_home_timeline(&paths, "2244994945").unwrap(), None);
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_home_timeline_cache_file_without_a_schema_version_field_is_a_clean_miss() {
+        let root = temp_root("home-timeline-no-schema-version-field");
+        let paths = test_paths(&root);
+        paths.ensure_dirs().unwrap();
+        std::fs::write(
+            paths.home_timeline_file("2244994945"),
+            br#"{"fetched_at": 0, "items": []}"#,
+        )
+        .unwrap();
+
+        assert_eq!(load_home_timeline(&paths, "2244994945").unwrap(), None);
 
         std::fs::remove_dir_all(&root).unwrap();
     }
