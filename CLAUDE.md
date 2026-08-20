@@ -91,6 +91,10 @@ cargo test
   Tools には含まれない。`Cargo.toml` は `default-features = false` + `macos-blade` で
   ビルドしているので、この指定を外さない。同時に x11 / wayland も落ちるため Linux 向けには
   ビルドできない (CI が macOS ランナーのみなのはこのため)。
+- **`cargo` は sandbox の外で動かす**: `.claude/settings.json` の
+  `sandbox.excludedCommands` に `cargo *` を置いている。この指定を外すと `cargo fetch` が
+  crate の展開途中で止まり、`cargo run` はウィンドウを開けない。sandbox 由来の失敗を
+  切り分けるときは `sandbox-troubleshooting` スキルに従う。
 - **厳格な lint**: `Cargo.toml` の `[lints.rust]` / `[lints.clippy]` で `unsafe_code` を
   forbid し、それ以外は **すべて `deny`** にしている (#47)。`warn` にすると手元で通って
   CI だけが落ちるので、レベルを下げない。バイナリクレートなので公開項目は `pub(crate)`
