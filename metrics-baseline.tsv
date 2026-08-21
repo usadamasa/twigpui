@@ -26,7 +26,8 @@
 # Format: <path><TAB><max implementation lines>
 src/avatar.rs	100
 src/browser.rs	100
-src/cache.rs	800
+src/cache/mod.rs	600
+src/cache/timeline.rs	250
 src/compose.rs	350
 src/config.rs	400
 src/image_cache.rs	150
