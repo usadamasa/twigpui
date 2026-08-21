@@ -458,6 +458,13 @@ pub(crate) struct QuotedPost {
     pub author_name: String,
     pub author_username: String,
     pub text: String,
+    /// The quoted post's own attached media (#123), joined the same way a
+    /// repost's is — the quote card had text only until then, so an image
+    /// that *was* the point of the quote did not appear at all.
+    /// `#[serde(default)]` for the same cache-compatibility reason as
+    /// every other field added after #9.
+    #[serde(default)]
+    pub media: Vec<PostMedia>,
 }
 
 impl TimelineResponse {
@@ -581,7 +588,7 @@ fn build_item(
             // A repost of a quote — or of a reply — carries context that
             // belongs to the original post now shown as the body, not to
             // the (already-consumed) retweet reference on the outer post.
-            item.quoted = quote_of(original, users, referenced);
+            item.quoted = quote_of(original, users, referenced, media);
             item.replied_to = reply_target(original, users, referenced);
             // #67: the body is the original's, so the counts under it have
             // to be the original's too — the outer repost carries its own.
@@ -611,7 +618,7 @@ fn build_item(
             .iter()
             .any(|r| r.kind == ReferenceKind::Quoted)
         {
-            item.quoted = quote_of(post, users, referenced);
+            item.quoted = quote_of(post, users, referenced, media);
         }
         // #12: a reply (with or without an attached quote) shows who it's
         // replying to, at zero extra request cost — the parent is already
@@ -717,6 +724,7 @@ fn quote_of(
     post: &Post,
     users: &HashMap<&str, &User>,
     referenced: &HashMap<&str, &Post>,
+    media: &HashMap<&str, &Media>,
 ) -> Option<QuotedPost> {
     let quote_ref = post
         .referenced_tweets
@@ -728,6 +736,7 @@ fn quote_of(
         author_name,
         author_username,
         text: quoted_post.text.clone(),
+        media: post_media(quoted_post, media),
     })
 }
 
@@ -943,6 +952,85 @@ mod tests {
         ]
       }
     }"#;
+
+    /// A quote whose *quoted* post carries the media (#123). Same shape
+    /// `referenced_tweets.id.attachments.media_keys` produces for a repost
+    /// (#104) — the expansion covers both, since both reach their content
+    /// through `referenced_tweets`.
+    const QUOTE_WITH_MEDIA_JSON: &str = r#"{
+      "data": [
+        {
+          "id": "1800000000000000003",
+          "text": "look at this one",
+          "created_at": "2026-08-16T11:00:00.000Z",
+          "author_id": "3000000000000000001",
+          "referenced_tweets": [
+            { "type": "quoted", "id": "1700000000000000003" }
+          ]
+        }
+      ],
+      "includes": {
+        "users": [
+          { "id": "3000000000000000001", "name": "Reposter One", "username": "reposter1" },
+          { "id": "2244994945", "name": "Developers", "username": "XDevelopers" }
+        ],
+        "tweets": [
+          {
+            "id": "1700000000000000003",
+            "text": "the quoted post",
+            "created_at": "2026-08-16T09:00:00.000Z",
+            "author_id": "2244994945",
+            "attachments": { "media_keys": ["k-quoted"] }
+          }
+        ],
+        "media": [
+          {
+            "media_key": "k-quoted",
+            "type": "photo",
+            "url": "https://pbs.twimg.com/media/quoted.jpg",
+            "alt_text": "the quoted post's photo"
+          }
+        ]
+      }
+    }"#;
+
+    #[test]
+    fn a_quoted_post_carries_its_own_media() {
+        // #123: the card showed text only, so an image that *was* the point
+        // of the quote did not appear at all.
+        let response: TimelineResponse = serde_json::from_str(QUOTE_WITH_MEDIA_JSON).unwrap();
+        let items = response.into_items();
+
+        let quoted = items[0].quoted.as_ref().expect("the quote card's post");
+        assert_eq!(quoted.text, "the quoted post");
+        assert_eq!(quoted.media.len(), 1);
+        assert_eq!(
+            quoted.media[0].url,
+            "https://pbs.twimg.com/media/quoted.jpg"
+        );
+        assert_eq!(
+            quoted.media[0].alt_text.as_deref(),
+            Some("the quoted post's photo")
+        );
+    }
+
+    #[test]
+    fn the_quoting_post_does_not_borrow_the_quoted_posts_media() {
+        // The outer post has no attachments of its own here. Its own grid
+        // must stay empty rather than mirroring the card's.
+        let response: TimelineResponse = serde_json::from_str(QUOTE_WITH_MEDIA_JSON).unwrap();
+        let items = response.into_items();
+
+        assert!(items[0].media.is_empty());
+    }
+
+    #[test]
+    fn a_quote_without_media_leaves_the_card_empty() {
+        let response: TimelineResponse = serde_json::from_str(QUOTE_JSON).unwrap();
+        let items = response.into_items();
+
+        assert!(items[0].quoted.as_ref().expect("a quote").media.is_empty());
+    }
 
     #[test]
     fn a_quote_attaches_the_quoted_post_without_replacing_the_body() {
