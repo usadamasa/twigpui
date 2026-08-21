@@ -9,6 +9,30 @@
 //! [`reload`] is the one function that also touches the network (via
 //! `XClient`), so unlike the rest of this module it is not unit tested — see
 //! its own doc comment.
+//!
+//! ## Cached rows can outlive the code that wrote them
+//!
+//! A `since_id`/`pagination_token` walk only ever asks the API for posts
+//! *outside* the cached range, so a row already on file is never
+//! re-fetched. Change what a field holds — add one to `TimelineItem`, or
+//! widen `expansions` the way #104 did for a repost's media — and every
+//! row already cached keeps the old, emptier value indefinitely.
+//!
+//! Two things address that, and neither is automatic:
+//!
+//! - [`splice`] fills a cached row's missing fields from the incoming copy
+//!   when the same id turns up again, which covers a page boundary or a
+//!   `since_id` overlap but not the rows in between.
+//! - **Deleting the cache files by hand covers the rest.** They live under
+//!   `Paths::cache_dir`; removing them costs nothing but the one reload
+//!   that was going to happen anyway, since an empty cache makes
+//!   `since_id` return `None`.
+//!
+//! #97 automated the second half with a schema version stamped on write
+//! and checked on read. It was removed again: for a single-user
+//! development tool the constant was one more thing to remember to bump,
+//! with the same failure mode as forgetting to delete the files, and it
+//! discarded 500 rows of scrollback each time it fired.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -75,45 +99,9 @@ struct UserIdCacheFile {
     users: HashMap<String, UserIdEntry>,
 }
 
-/// The current shape of [`TimelineCacheFile`]/[`TimelineItem`] (#97).
-///
-/// **Bump this whenever a cached row can come out wrong in a way that only
-/// re-fetching it fixes** — not only when a field is *added* to
-/// [`TimelineItem`], but also when an existing field starts getting filled
-/// in differently for rows already on disk. #104 is the latter case: adding
-/// `referenced_tweets.id.attachments.media_keys` to the client's
-/// `expansions` (`x_api::client::home_timeline_url`/`timeline_url`) didn't
-/// touch `TimelineItem`'s shape at all, but it changed what `media` holds
-/// for a repost row — empty before, populated after, for the exact same
-/// field that already existed. A cached repost row written under the old
-/// expansions has `media: []` baked in, and nothing about its *shape*
-/// disqualifies it from deserializing cleanly, so without a version bump it
-/// would sit there wrong forever: a `since_id`/`pagination_token` walk only
-/// ever asks the API for posts *outside* the cached range, so an id already
-/// on file is never re-fetched by `reload` or `load_older_home`.
-///
-/// The field-addition case works the same way for the same reason: a row
-/// written before the field existed deserializes with it simply absent
-/// (`#[serde(default)]`), and a pre-existing row's new field stays empty
-/// forever unless something forces a full re-fetch.
-///
-/// Bumping this constant is that force in both cases: [`load_timeline`]/
-/// [`load_home_timeline`] treat a version mismatch as a clean cache miss
-/// (deliberately *not* `#[serde(default)]` on the field below — an old file
-/// must fail to parse as the current shape, not silently coerce into it),
-/// the same "corrupt file → `Ok(None)`" path [`load_json`] already uses, so
-/// every row gets re-fetched — with the new field populated, or the
-/// existing one finally filled in correctly — on the next reload. See also
-/// `splice`'s merge rule, which fixes the same problem for rows that recur
-/// across a `since_id`/page boundary without requiring a version bump at
-/// all.
-const TIMELINE_SCHEMA_VERSION: u32 = 2;
-
 /// The whole contents of one [`Paths::timeline_file`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct TimelineCacheFile {
-    /// Deliberately *not* `#[serde(default)]` — see [`TIMELINE_SCHEMA_VERSION`].
-    schema_version: u32,
     fetched_at: i64,
     items: Vec<TimelineItem>,
 }
@@ -204,17 +192,9 @@ pub(crate) fn load_timeline(paths: &Paths, user_id: &str) -> Result<Option<Vec<T
 }
 
 /// Read one timeline cache file, whichever of the two it is (#92).
-///
-/// The version check sits here because it is what goes wrong when written
-/// twice: #97 added it to both copies, and a check present on one file but
-/// not the other is a cache that heals half of itself. The two *files*
-/// stay separate — a repost can sit in both — but the rule for reading one
-/// does not.
 fn load_timeline_file(path: &Path) -> Result<Option<Vec<TimelineItem>>> {
     let file: Option<TimelineCacheFile> = load_json(path)?;
-    Ok(file
-        .filter(|file| file.schema_version == TIMELINE_SCHEMA_VERSION)
-        .map(|file| file.items))
+    Ok(file.map(|file| file.items))
 }
 
 /// Persist `items` (already merged and capped by the caller) as `user_id`'s
@@ -229,10 +209,9 @@ pub(crate) fn save_timeline(
 }
 
 /// Write one timeline cache file (#92) — [`load_timeline_file`]'s
-/// counterpart, stamping the version that function checks.
+/// counterpart.
 fn save_timeline_file(path: &Path, items: &[TimelineItem], now: i64) -> Result<()> {
     let file = TimelineCacheFile {
-        schema_version: TIMELINE_SCHEMA_VERSION,
         fetched_at: now,
         items: items.to_vec(),
     };
@@ -1193,49 +1172,34 @@ mod tests {
     }
 
     #[test]
-    fn a_timeline_cache_file_with_an_old_schema_version_is_a_clean_miss() {
-        // #97: a cache file written by an older twigpui — same overall
-        // shape, but `schema_version` one behind current — must not be
-        // trusted, since its `TimelineItem` rows may be missing fields
-        // added since. It parses fine but is rejected by the version check.
-        let root = temp_root("timeline-old-schema-version");
-        let paths = test_paths(&root);
-        paths.ensure_dirs().unwrap();
-        let stale = TimelineCacheFile {
-            schema_version: TIMELINE_SCHEMA_VERSION - 1,
-            fetched_at: 0,
-            items: vec![item("1")],
-        };
-        save_json(&paths.timeline_file("2244994945"), &stale).unwrap();
-
-        assert_eq!(load_timeline(&paths, "2244994945").unwrap(), None);
-
-        std::fs::remove_dir_all(&root).unwrap();
-    }
-
-    #[test]
-    fn a_timeline_cache_file_without_a_schema_version_field_is_a_clean_miss() {
-        // The pre-#97 file shape: no `schema_version` key at all. Since the
-        // field is deliberately not `#[serde(default)]`, this fails to
-        // deserialize as `TimelineCacheFile` and load_json's parse-failure
-        // path returns `Ok(None)` — the same outcome as an explicit version
-        // mismatch, just via a different route.
-        let root = temp_root("timeline-no-schema-version-field");
+    fn a_cache_file_carrying_a_schema_version_key_still_reads_back() {
+        // Every cache file on disk right now was written while
+        // `schema_version` existed (#97, dropped again since). Serde
+        // ignores unknown fields, so those files still load — but that is
+        // a property of the derive rather than an intention anyone wrote
+        // down, and if it stopped holding the whole cache would go quiet
+        // rather than loudly: `load_json` turns a parse failure into
+        // `Ok(None)`, which reads exactly like an empty cache.
+        let root = temp_root("timeline-legacy-schema-version-key");
         let paths = test_paths(&root);
         paths.ensure_dirs().unwrap();
         std::fs::write(
             paths.timeline_file("2244994945"),
-            br#"{"fetched_at": 0, "items": []}"#,
+            br#"{"schema_version": 2, "fetched_at": 0, "items": []}"#,
         )
         .unwrap();
 
-        assert_eq!(load_timeline(&paths, "2244994945").unwrap(), None);
+        assert_eq!(
+            load_timeline(&paths, "2244994945").unwrap(),
+            Some(Vec::new()),
+            "a file with the old key must load, not read as an empty cache"
+        );
 
         std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
-    fn a_timeline_cache_file_with_the_current_schema_version_reads_back() {
+    fn a_timeline_cache_file_written_by_this_version_reads_back() {
         let root = temp_root("timeline-current-schema-version");
         let paths = test_paths(&root);
         paths.ensure_dirs().unwrap();
@@ -1271,42 +1235,6 @@ mod tests {
         save_home_timeline(&paths, "2244994945", &items, 1_000).unwrap();
         let loaded = load_home_timeline(&paths, "2244994945").unwrap();
         assert_eq!(loaded, Some(items));
-
-        std::fs::remove_dir_all(&root).unwrap();
-    }
-
-    #[test]
-    fn a_home_timeline_cache_file_with_an_old_schema_version_is_a_clean_miss() {
-        // #97, mirroring the single-user-timeline test above: the home
-        // timeline is a separate file, so the version check must apply
-        // there too, not just to `timeline_file`.
-        let root = temp_root("home-timeline-old-schema-version");
-        let paths = test_paths(&root);
-        paths.ensure_dirs().unwrap();
-        let stale = TimelineCacheFile {
-            schema_version: TIMELINE_SCHEMA_VERSION - 1,
-            fetched_at: 0,
-            items: vec![item("1")],
-        };
-        save_json(&paths.home_timeline_file("2244994945"), &stale).unwrap();
-
-        assert_eq!(load_home_timeline(&paths, "2244994945").unwrap(), None);
-
-        std::fs::remove_dir_all(&root).unwrap();
-    }
-
-    #[test]
-    fn a_home_timeline_cache_file_without_a_schema_version_field_is_a_clean_miss() {
-        let root = temp_root("home-timeline-no-schema-version-field");
-        let paths = test_paths(&root);
-        paths.ensure_dirs().unwrap();
-        std::fs::write(
-            paths.home_timeline_file("2244994945"),
-            br#"{"fetched_at": 0, "items": []}"#,
-        )
-        .unwrap();
-
-        assert_eq!(load_home_timeline(&paths, "2244994945").unwrap(), None);
 
         std::fs::remove_dir_all(&root).unwrap();
     }

@@ -208,3 +208,23 @@ rm -rf "$XDG_CACHE_HOME/twigpui"   # or ~/.cache/twigpui if XDG_CACHE_HOME is un
 The directory is recreated automatically on the next run; the next startup
 after that falls back to a full reload since there's nothing cached yet.
 
+**When you have to.** A `since_id`/`pagination_token` walk only ever asks
+the API for posts *outside* the cached range, so a row already on file is
+never re-fetched. Change what a field holds — add one to `TimelineItem`, or
+widen `expansions` the way #104 did to make a repost's images load — and
+every row already cached keeps the old, emptier value indefinitely.
+Deleting the files is what forces them through again. It costs nothing but
+the reload that was going to happen anyway: an empty cache makes `since_id`
+return `None`, and the fetch that follows is the same single request.
+
+`splice` covers part of this on its own, filling a cached row's missing
+fields from the incoming copy whenever the same id turns up again — a page
+boundary, a `since_id` overlap. The rows in between are the ones that need
+the `rm`.
+
+#97 automated it with a schema version stamped on write and checked on
+read. It was removed again: for a single-user development tool the constant
+was one more thing to remember to bump, with the same failure mode as
+forgetting to delete the files, and it threw away 500 rows of scrollback
+every time it fired.
+
