@@ -29,7 +29,7 @@ src/image_cache.rs	150
 src/like.rs	150
 src/log.rs	350
 src/main.rs	550
-src/menu.rs	250
+src/menu.rs	300
 src/oauth/callback.rs	350
 src/oauth/mod.rs	300
 src/oauth/pkce.rs	150
