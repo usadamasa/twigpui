@@ -70,22 +70,37 @@ struct UserIdCacheFile {
 
 /// The current shape of [`TimelineCacheFile`]/[`TimelineItem`] (#97).
 ///
-/// **Bump this whenever a field is added to [`TimelineItem`].** A cached row
-/// written before the field existed deserializes with that field simply
-/// absent (`#[serde(default)]`), and neither `reload` nor `load_older_home`
-/// ever re-fetches an id already on file — a `since_id`/`pagination_token`
-/// walk only ever asks the API for posts *outside* the cached range. So a
-/// pre-existing row's new field stays empty forever unless something forces
-/// a full re-fetch. Bumping this constant is that force: [`load_timeline`]/
+/// **Bump this whenever a cached row can come out wrong in a way that only
+/// re-fetching it fixes** — not only when a field is *added* to
+/// [`TimelineItem`], but also when an existing field starts getting filled
+/// in differently for rows already on disk. #104 is the latter case: adding
+/// `referenced_tweets.id.attachments.media_keys` to the client's
+/// `expansions` (`x_api::client::home_timeline_url`/`timeline_url`) didn't
+/// touch `TimelineItem`'s shape at all, but it changed what `media` holds
+/// for a repost row — empty before, populated after, for the exact same
+/// field that already existed. A cached repost row written under the old
+/// expansions has `media: []` baked in, and nothing about its *shape*
+/// disqualifies it from deserializing cleanly, so without a version bump it
+/// would sit there wrong forever: a `since_id`/`pagination_token` walk only
+/// ever asks the API for posts *outside* the cached range, so an id already
+/// on file is never re-fetched by `reload` or `load_older_home`.
+///
+/// The field-addition case works the same way for the same reason: a row
+/// written before the field existed deserializes with it simply absent
+/// (`#[serde(default)]`), and a pre-existing row's new field stays empty
+/// forever unless something forces a full re-fetch.
+///
+/// Bumping this constant is that force in both cases: [`load_timeline`]/
 /// [`load_home_timeline`] treat a version mismatch as a clean cache miss
 /// (deliberately *not* `#[serde(default)]` on the field below — an old file
 /// must fail to parse as the current shape, not silently coerce into it),
 /// the same "corrupt file → `Ok(None)`" path [`load_json`] already uses, so
-/// every row gets re-fetched with the new field populated on the next
-/// reload. See also `splice`'s merge rule, which fixes the same problem
-/// for rows that recur across a `since_id`/page boundary without requiring
-/// a version bump at all.
-const TIMELINE_SCHEMA_VERSION: u32 = 1;
+/// every row gets re-fetched — with the new field populated, or the
+/// existing one finally filled in correctly — on the next reload. See also
+/// `splice`'s merge rule, which fixes the same problem for rows that recur
+/// across a `since_id`/page boundary without requiring a version bump at
+/// all.
+const TIMELINE_SCHEMA_VERSION: u32 = 2;
 
 /// The whole contents of one [`Paths::timeline_file`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
