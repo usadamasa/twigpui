@@ -34,7 +34,7 @@ src/image_cache.rs	150
 src/like.rs	150
 src/log.rs	350
 src/main.rs	550
-src/menu.rs	300
+src/menu.rs	350
 src/oauth/callback.rs	350
 src/oauth/mod.rs	300
 src/oauth/pkce.rs	150
@@ -45,7 +45,7 @@ src/repost.rs	150
 src/theme.rs	250
 src/thread.rs	100
 src/toggle.rs	200
-src/ui/mod.rs	2350
+src/ui/mod.rs	2400
 src/ui/reload_policy.rs	250
 src/ui/render.rs	900
 src/usage.rs	350

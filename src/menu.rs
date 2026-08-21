@@ -35,6 +35,9 @@ gpui::actions!(
         /// Close the window (#109), bound to `cmd-w`. With one window,
         /// this ends the app just as `cmd-q` does — see [`CLOSE_WINDOW`].
         CloseWindow,
+        /// Jump the timeline back to the newest post (#22), bound to
+        /// `cmd-up`. Purely local — it spends nothing.
+        ScrollToTop,
     ]
 );
 
@@ -180,6 +183,22 @@ const CLOSE_WINDOW: Shortcut = Shortcut {
     menu_label: Some("Close Window"),
 };
 
+/// Back to the newest post (#22).
+///
+/// On the header strip, unlike the other additions since #58: it is the
+/// one binding here that answers a question the reader actually has while
+/// scrolled a long way down, and it costs nothing to press.
+const SCROLL_TO_TOP: Shortcut = Shortcut {
+    keystroke: "cmd-up",
+    context: Some(KEY_CONTEXT),
+    bind: |keystroke, context| gpui::KeyBinding::new(keystroke, ScrollToTop, context),
+    item: |label| gpui::MenuItem::action(label, ScrollToTop),
+    glyphs: "⌘↑",
+    label: "Back to the top",
+    in_header: true,
+    menu_label: Some("Back to Top"),
+};
+
 /// Every binding, in the order [`init`] registers them (#99).
 ///
 /// [`init`] registers exactly this list, [`shortcuts`] filters it to what
@@ -252,7 +271,10 @@ pub(crate) fn menus() -> Vec<gpui::Menu> {
         },
         gpui::Menu {
             name: "View".into(),
-            items: RELOAD.menu_item().into_iter().collect(),
+            items: [RELOAD.menu_item(), SCROLL_TO_TOP.menu_item()]
+                .into_iter()
+                .flatten()
+                .collect(),
         },
         // The name is load-bearing (#109): gpui's macOS platform hands a
         // menu to AppKit's `setWindowsMenu_` only when it is called
