@@ -203,3 +203,43 @@ pub(super) fn cooldown_tick(notice: Option<&ReloadNotice>, now: i64) -> Cooldown
         Some(ReloadNotice::Failed(_)) | None => CooldownTick::NotTicking,
     }
 }
+
+/// Where the reader should be left after a reload prepends new posts
+/// (#22): the index in the *new* list of whatever row was at the top of
+/// the viewport before, or `None` to leave the scroll position alone.
+///
+/// `None` means both "stay where you are" cases, which are the same
+/// instruction to the caller even though they are different situations:
+/// the reader was already at the very top, so the new posts should simply
+/// appear above nothing and be seen; or nothing was prepended, so there is
+/// nothing to compensate for.
+///
+/// Anything else shifts the reader. A reload that brings six new posts
+/// while someone is twenty rows down moves what they were reading twenty-
+/// six rows down the list, and the viewport stays where it was — the text
+/// under their eyes changes without them touching anything. Counting the
+/// leading ids that were not on file is exactly how far to scroll to undo
+/// that.
+///
+/// Takes ids rather than items so it stays a pure function over what
+/// changed, and counts only the *leading* run: an id appearing further
+/// down is a post that moved rather than one that arrived, and moving the
+/// viewport for it would be wrong.
+pub(super) fn preserved_scroll_target(
+    previous_ids: &[&str],
+    new_ids: &[&str],
+    top_item: usize,
+) -> Option<usize> {
+    if top_item == 0 {
+        return None;
+    }
+    let previous: std::collections::HashSet<&str> = previous_ids.iter().copied().collect();
+    let prepended = new_ids
+        .iter()
+        .take_while(|id| !previous.contains(*id))
+        .count();
+    if prepended == 0 {
+        return None;
+    }
+    Some(top_item.saturating_add(prepended))
+}

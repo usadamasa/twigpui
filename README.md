@@ -238,12 +238,13 @@ typo'd theme is cosmetic, not worth blocking the app over — it falls back to
 | `⌘↩` | Post the draft |
 | `⌘N` | Focus the composer |
 | `esc` | Leave the composer (the draft is kept) |
+| `⌘↑` | Back to the newest post |
 | `⌘Q` | Quit |
 | `⌘W` | Close the window |
 | `⌘M` | Minimize |
 
-The first four are shown on screen, under the header — four bindings fit on
-one line, and a help screen nobody opens documents nothing. `⌘Q`, `⌘W` and
+The first five are shown on screen, under the header — they fit on one
+line, and a help screen nobody opens documents nothing. `⌘Q`, `⌘W` and
 `⌘M` are left off that strip: it is for what this app does that another one
 would not, and those three are macOS gestures every app shares.
 
@@ -267,6 +268,12 @@ and a post is not undoable.
 a stray key is unrecoverable, and never losing a draft is the composer's
 main promise (#14).
 
+**A reload does not move you.** Posts arriving at the top of a list you
+are part-way down would otherwise slide everything under your eyes; the
+timeline scrolls by however many posts arrived, so the row you were reading
+stays where it is. At the very top, nothing moves and the new posts simply
+appear (#22).
+
 **"Load older" has no shortcut.** Each press pages backwards for one paid
 request, and a key that spends money on a mis-hit is not a convenience.
 `⌘R` does spend requests, but it is the reload gesture every app shares and
@@ -281,7 +288,7 @@ cannot outrun the interval that exists to stop this app spending in a loop.
 | --- | --- |
 | twigpui | About twigpui, Quit twigpui |
 | File | New Post, Submit Post |
-| View | Reload |
+| View | Reload, Back to Top |
 | Window | Minimize, Close Window |
 
 Every item dispatches the same action its keystroke does, and macOS draws

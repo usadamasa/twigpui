@@ -3,8 +3,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use gpui::{
-    AnyElement, Context, Entity, FocusHandle, FontWeight, SharedString, Subscription, Task, Window,
-    div, img, prelude::*, px, rgb,
+    AnyElement, Context, Entity, FocusHandle, FontWeight, ScrollHandle, SharedString, Subscription,
+    Task, Window, div, img, prelude::*, px, rgb,
 };
 use gpui_component::input::{Input, InputEvent, InputState};
 
@@ -27,7 +27,7 @@ mod render;
 // opposite of what splitting the file was for.
 use reload_policy::{
     CooldownTick, at_the_post_cap, cooldown_label, cooldown_tick, offers_load_older,
-    reload_failure_outcome, reload_gate, reload_start_state,
+    preserved_scroll_target, reload_failure_outcome, reload_gate, reload_start_state,
 };
 use render::{
     AVATAR_SIZE, MAX_RENDERED_MEDIA, MEDIA_CELL_HEIGHT, author_link, avatar_placeholder, byline,
@@ -40,8 +40,8 @@ use render::{
 };
 
 use crate::menu::{
-    BlurComposer, CloseWindow, FocusComposer, KEY_CONTEXT, Minimize, Reload, ShowAbout, SubmitPost,
-    shortcuts,
+    BlurComposer, CloseWindow, FocusComposer, KEY_CONTEXT, Minimize, Reload, ScrollToTop,
+    ShowAbout, SubmitPost, shortcuts,
 };
 use crate::oauth;
 use crate::paths::Paths;
@@ -389,6 +389,12 @@ pub(crate) struct TimelineView {
     /// the next attempt clears it. `None` is the ordinary case — a
     /// successful open leaves the app with nothing to say.
     open_failure: Option<String>,
+    /// Scroll position of the timeline list (#22).
+    ///
+    /// Read before a reload replaces the list and used afterwards to put
+    /// the reader back on the row they were on: prepending posts to a
+    /// scrolled list otherwise slides everything down under them.
+    list_scroll: ScrollHandle,
     /// Focus for the timeline's own root element (#118).
     ///
     /// gpui resolves an action against the focused element's ancestry, so
@@ -469,6 +475,7 @@ impl TimelineView {
             delete_failures: HashMap::new(),
             open_task: None,
             open_failure: None,
+            list_scroll: ScrollHandle::new(),
             focus_handle: cx.focus_handle(),
         };
         // #118: before anything else, so the very first frame has the
@@ -659,6 +666,7 @@ impl TimelineView {
                         this.home_user_id = Some(reloaded.me.id);
                         this.home_username = Some(reloaded.me.username);
                         this.next_page_token = reloaded.next_token;
+                        this.keep_the_reader_in_place(&reloaded.items);
                         this.state = TimelineState::Loaded(reloaded.items);
                         this.reload_notice = None;
                         // Same reasoning as the single-user branch above.
@@ -676,6 +684,26 @@ impl TimelineView {
         }));
 
         cx.notify();
+    }
+
+    /// Undo the shove a reload gives a scrolled reader (#22).
+    ///
+    /// Called with the incoming list *before* `state` is replaced, since
+    /// working out how many posts arrived needs both lists. Delegates the
+    /// decision to [`preserved_scroll_target`] and does nothing when it
+    /// declines — the reader is at the top, where new posts arriving above
+    /// nothing is the behaviour they want.
+    fn keep_the_reader_in_place(&self, incoming: &[TimelineItem]) {
+        let TimelineState::Loaded(previous) = &self.state else {
+            return;
+        };
+        let previous_ids: Vec<&str> = previous.iter().map(|item| item.id.as_str()).collect();
+        let new_ids: Vec<&str> = incoming.iter().map(|item| item.id.as_str()).collect();
+        if let Some(target) =
+            preserved_scroll_target(&previous_ids, &new_ids, self.list_scroll.top_item())
+        {
+            self.list_scroll.scroll_to_top_of_item(target);
+        }
     }
 
     /// Shared `Err` handling for both of [`Self::reload`]'s fetch branches
@@ -2170,7 +2198,12 @@ impl TimelineView {
             .flex()
             .flex_col()
             .flex_1()
-            .overflow_y_scroll();
+            .overflow_y_scroll()
+            // #22: the handle is what makes the scroll position readable
+            // at all. Without it a reload can only ever leave the viewport
+            // where it was in *pixels*, which is the wrong place once rows
+            // have been inserted above it.
+            .track_scroll(&self.list_scroll);
 
         match &self.state {
             TimelineState::NotAuthenticated => content.child(notice(
@@ -2296,6 +2329,13 @@ impl Render for TimelineView {
                     cx,
                 ));
             }))
+            .on_action(cx.listener(|this, _: &ScrollToTop, _window, cx| {
+                // #22: purely local — no request, no gate, nothing to
+                // report. `scroll_to_top_of_item(0)` rather than a pixel
+                // offset so it lands on the newest row itself.
+                this.list_scroll.scroll_to_top_of_item(0);
+                cx.notify();
+            }))
             .on_action(cx.listener(|_this, _: &Minimize, window, _cx| {
                 window.minimize_window();
             }))
@@ -2350,7 +2390,7 @@ impl Render for TimelineView {
 
 #[cfg(test)]
 mod tests {
-    use super::reload_policy::reload_cooldown;
+    use super::reload_policy::{preserved_scroll_target, reload_cooldown};
     use super::render::{
         avatar_initial, is_own_post, like_action_label, post_permalink, profile_url,
         repost_action_label,
@@ -2591,6 +2631,51 @@ mod tests {
         let mut item = item_with(row_id, original_author, Some("bob"));
         item.original_post_id = Some(original_id.to_string());
         item
+    }
+
+    // --- #22: keeping the reader in place across a reload ---
+
+    #[test]
+    fn a_reader_at_the_top_is_left_alone() {
+        // New posts arriving above nothing is what someone at the top
+        // wants to see, so this declines rather than scrolling.
+        assert_eq!(
+            preserved_scroll_target(&["2", "3"], &["1", "2", "3"], 0),
+            None
+        );
+    }
+
+    #[test]
+    fn a_scrolled_reader_is_moved_down_by_the_number_of_new_posts() {
+        // Twenty rows down, six posts arrive: without this the viewport
+        // stays put and the text under the reader's eyes changes.
+        let previous: Vec<String> = (0..30).map(|n| n.to_string()).collect();
+        let previous_ids: Vec<&str> = previous.iter().map(String::as_str).collect();
+        let fresh = ["a", "b", "c", "d", "e", "f"];
+        let new_ids: Vec<&str> = fresh.iter().copied().chain(previous_ids.clone()).collect();
+
+        assert_eq!(
+            preserved_scroll_target(&previous_ids, &new_ids, 20),
+            Some(26)
+        );
+    }
+
+    #[test]
+    fn a_reload_that_brings_nothing_new_leaves_the_position_alone() {
+        assert_eq!(
+            preserved_scroll_target(&["1", "2", "3"], &["1", "2", "3"], 7),
+            None
+        );
+    }
+
+    #[test]
+    fn only_the_leading_run_of_new_ids_counts() {
+        // An id further down is a post that moved, not one that arrived.
+        // Scrolling for it would push the reader past what they were on.
+        assert_eq!(
+            preserved_scroll_target(&["1", "2"], &["new", "1", "also-new", "2"], 5),
+            Some(6)
+        );
     }
 
     // --- #65: attached media ---
