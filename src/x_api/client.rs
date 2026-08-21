@@ -546,6 +546,23 @@ fn user_lookup_url(username: &str) -> String {
 /// `GET /2/users/me` (#11) — resolves the signed-in user's own id and screen
 /// name. Only meaningful with an OAuth user-context credential; an app-only
 /// bearer token gets a 401 here just like the home timeline itself.
+/// The author fields every endpoint asks for (#92) — both timeline URLs
+/// and the single-post lookup. One edit, not three.
+const USER_FIELDS: &str = "&user.fields=name,profile_image_url,username";
+
+/// The `*.fields` and `expansions` both timeline endpoints request (#92),
+/// previously written out twice, identically. #104 is the cost: the fix
+/// for a repost's images meant pasting one long string into two places,
+/// and doing only one would have left reposts broken on whichever
+/// timeline went unedited.
+///
+/// Only the shared part. Path, `max_results`, `since_id` and
+/// `pagination_token` stay with their builders — those are what differ.
+const TIMELINE_FIELDS: &str = "&tweet.fields=created_at,entities,public_metrics,referenced_tweets\
+     &expansions=attachments.media_keys,author_id,referenced_tweets.id,referenced_tweets.id.author_id,referenced_tweets.id.attachments.media_keys\
+     &media.fields=alt_text,height,preview_image_url,type,url,width\
+     &user.fields=name,profile_image_url,username";
+
 fn me_url() -> String {
     format!("{API_BASE}/users/me")
 }
@@ -575,10 +592,7 @@ fn home_timeline_url(
     let mut url = format!(
         "{API_BASE}/users/{user_id}/timelines/reverse_chronological\
          ?max_results={max_results}\
-         &tweet.fields=created_at,entities,public_metrics,referenced_tweets\
-         &expansions=attachments.media_keys,author_id,referenced_tweets.id,referenced_tweets.id.author_id,referenced_tweets.id.attachments.media_keys\
-         &media.fields=alt_text,height,preview_image_url,type,url,width\
-         &user.fields=name,profile_image_url,username"
+         {TIMELINE_FIELDS}"
     );
     if let Some(id) = since_id {
         url = format!("{url}&since_id={id}");
@@ -597,10 +611,7 @@ fn timeline_url(user_id: &str, max_results: u32, since_id: Option<&str>) -> Stri
     let base = format!(
         "{API_BASE}/users/{user_id}/tweets\
          ?max_results={max_results}\
-         &tweet.fields=created_at,entities,public_metrics,referenced_tweets\
-         &expansions=attachments.media_keys,author_id,referenced_tweets.id,referenced_tweets.id.author_id,referenced_tweets.id.attachments.media_keys\
-         &media.fields=alt_text,height,preview_image_url,type,url,width\
-         &user.fields=name,profile_image_url,username"
+         {TIMELINE_FIELDS}"
     );
     match since_id {
         Some(id) => format!("{base}&since_id={id}"),
@@ -645,7 +656,7 @@ fn tweets_by_id_url(ids: &str) -> String {
          ?ids={ids}\
          &tweet.fields=created_at,referenced_tweets\
          &expansions=author_id,referenced_tweets.id,referenced_tweets.id.author_id\
-         &user.fields=name,profile_image_url,username"
+         {USER_FIELDS}"
     )
 }
 
