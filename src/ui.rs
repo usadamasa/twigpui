@@ -1232,7 +1232,7 @@ impl TimelineView {
             Some(path) => img(path.clone())
                 .size(AVATAR_SIZE)
                 .flex_shrink_0()
-                .rounded_full()
+                .rounded(theme::AVATAR_RADIUS)
                 .into_any_element(),
             None => avatar_placeholder(&item.author_name, theme),
         }
@@ -3204,7 +3204,9 @@ fn media_badge(kind: Option<&str>) -> Option<&'static str> {
 /// to a `flex_1` body, and flex's default `flex-shrink: 1` squishes a plain
 /// `.size(AVATAR_SIZE)` element once the body's content pushes past the
 /// available width. Both the `img` and the placeholder `div` need
-/// `flex_shrink_0` alongside this size, not just the size itself.
+/// `flex_shrink_0` alongside this size, not just the size itself. Shape is
+/// the third thing the two must agree on, which is why it is
+/// [`theme::AVATAR_RADIUS`] and not a literal (#98).
 const AVATAR_SIZE: gpui::Pixels = px(44.0);
 
 /// What stands in for an avatar that hasn't downloaded, failed, or never
@@ -3221,7 +3223,7 @@ fn avatar_placeholder(author_name: &str, theme: Theme) -> AnyElement {
     div()
         .size(AVATAR_SIZE)
         .flex_shrink_0()
-        .rounded_full()
+        .rounded(theme::AVATAR_RADIUS)
         .bg(rgb(theme.border))
         .flex()
         .items_center()
