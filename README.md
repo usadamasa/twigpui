@@ -239,10 +239,13 @@ typo'd theme is cosmetic, not worth blocking the app over — it falls back to
 | `⌘N` | Focus the composer |
 | `esc` | Leave the composer (the draft is kept) |
 | `⌘Q` | Quit |
+| `⌘W` | Close the window |
+| `⌘M` | Minimize |
 
 The first four are shown on screen, under the header — four bindings fit on
-one line, and a help screen nobody opens documents nothing. `⌘Q` is left off
-that strip: the strip is for what this app does that another one would not.
+one line, and a help screen nobody opens documents nothing. `⌘Q`, `⌘W` and
+`⌘M` are left off that strip: it is for what this app does that another one
+would not, and those three are macOS gestures every app shares.
 
 **Every binding carries a modifier, deliberately.** The hazard #58 is really
 about is a bare `j`/`k`/`n` firing while you are typing a post; nothing
@@ -278,6 +281,7 @@ cannot outrun the interval that exists to stop this app spending in a loop.
 | twigpui | About twigpui, Quit twigpui |
 | File | New Post, Submit Post |
 | View | Reload |
+| Window | Minimize, Close Window |
 
 Every item dispatches the same action its keystroke does, and macOS draws
 the key equivalent beside it from the keymap — so a keystroke is written in
@@ -287,4 +291,13 @@ on-screen strip and the key bindings cannot drift apart (#99).
 The wordings differ between the two lists on purpose: a menu item is read
 on its own ("New Post"), while the strip is read as a row of hints under a
 heading ("⌘N Focus the composer").
+
+**The Window menu's name is load-bearing.** gpui hands a menu to AppKit's
+`setWindowsMenu_` only when it is called exactly `Window`. Rename it and
+`⌘W`/`⌘M` keep working — they are ordinary bindings — but the menu stops
+being the one macOS treats as the window list (#109).
+
+**`⌘W` ends the app**, since there is one window, exactly as `⌘Q` does. It
+does not prompt, and an unsent draft goes with it — the same hazard `⌘Q` has
+always had.
 

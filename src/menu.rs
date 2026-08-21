@@ -30,6 +30,11 @@ gpui::actions!(
         /// Show the About panel (#99) — the other half of the app menu
         /// every macOS application has.
         ShowAbout,
+        /// Minimise the window to the Dock (#109), bound to `cmd-m`.
+        Minimize,
+        /// Close the window (#109), bound to `cmd-w`. With one window,
+        /// this ends the app just as `cmd-q` does — see [`CLOSE_WINDOW`].
+        CloseWindow,
     ]
 );
 
@@ -115,6 +120,30 @@ const QUIT: Shortcut = Shortcut {
     menu_label: Some("Quit twigpui"),
 };
 
+/// Minimise (#109). Off the header strip for the same reason as [`QUIT`]:
+/// it is a macOS gesture, not something this app invented.
+const MINIMIZE: Shortcut = Shortcut {
+    keystroke: "cmd-m",
+    glyphs: "⌘M",
+    label: "Minimize",
+    in_header: false,
+    menu_label: Some("Minimize"),
+};
+
+/// Close the window (#109).
+///
+/// With a single window this ends the app, the same as [`QUIT`] — which is
+/// what `cmd-w` does in any one-window macOS app, so it is not worth
+/// making it behave differently here. It shares `cmd-q`'s hazard of
+/// discarding an unsent draft (#14) and, like `cmd-q`, does not prompt.
+const CLOSE_WINDOW: Shortcut = Shortcut {
+    keystroke: "cmd-w",
+    glyphs: "⌘W",
+    label: "Close Window",
+    in_header: false,
+    menu_label: Some("Close Window"),
+};
+
 /// Every binding, in the order [`init`] registers them (#99).
 ///
 /// [`shortcuts`] filters it to what the header advertises, and the tests
@@ -157,6 +186,8 @@ pub(crate) fn init(cx: &mut gpui::App) {
         gpui::KeyBinding::new(FOCUS_COMPOSER.keystroke, FocusComposer, Some(KEY_CONTEXT)),
         gpui::KeyBinding::new(BLUR_COMPOSER.keystroke, BlurComposer, Some(KEY_CONTEXT)),
         gpui::KeyBinding::new(QUIT.keystroke, Quit, None),
+        gpui::KeyBinding::new(MINIMIZE.keystroke, Minimize, Some(KEY_CONTEXT)),
+        gpui::KeyBinding::new(CLOSE_WINDOW.keystroke, CloseWindow, Some(KEY_CONTEXT)),
     ]);
 }
 
@@ -190,6 +221,22 @@ pub(crate) fn menus() -> Vec<gpui::Menu> {
         gpui::Menu {
             name: "View".into(),
             items: menu_item(&RELOAD, Reload).into_iter().collect(),
+        },
+        // The name is load-bearing (#109): gpui's macOS platform hands a
+        // menu to AppKit's `setWindowsMenu_` only when it is called
+        // exactly "Window" (`gpui/src/platform/mac/platform.rs`'s
+        // `create_menu_bar`). Rename it and `cmd-w`/`cmd-m` keep working —
+        // they are ordinary bindings — but the menu stops being the one
+        // macOS treats as the window list.
+        gpui::Menu {
+            name: "Window".into(),
+            items: [
+                menu_item(&MINIMIZE, Minimize),
+                menu_item(&CLOSE_WINDOW, CloseWindow),
+            ]
+            .into_iter()
+            .flatten()
+            .collect(),
         },
     ]
 }
@@ -338,6 +385,29 @@ mod tests {
                 .any(|name| name.to_lowercase().contains("quit")),
             "no menu item quits the app"
         );
+    }
+
+    #[test]
+    fn the_window_menu_is_named_exactly_window() {
+        // gpui hands a menu to AppKit's `setWindowsMenu_` only on an exact
+        // name match (#109). A rename would leave `cmd-w`/`cmd-m` working
+        // while quietly demoting the menu to an ordinary one, which is not
+        // the kind of regression anyone notices from a diff.
+        assert!(
+            menus().iter().any(|menu| menu.name.as_ref() == "Window"),
+            "no menu is named \"Window\""
+        );
+    }
+
+    #[test]
+    fn the_window_menu_can_minimize_and_close() {
+        let names = menu_action_names();
+        for expected in ["Minimize", "Close Window"] {
+            assert!(
+                names.iter().any(|name| name == expected),
+                "{expected} is missing from the menu bar"
+            );
+        }
     }
 
     #[test]

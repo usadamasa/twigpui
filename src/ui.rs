@@ -17,7 +17,8 @@ use crate::image_cache;
 use crate::like;
 use crate::log;
 use crate::menu::{
-    BlurComposer, FocusComposer, KEY_CONTEXT, Reload, ShowAbout, SubmitPost, shortcuts,
+    BlurComposer, CloseWindow, FocusComposer, KEY_CONTEXT, Minimize, Reload, ShowAbout, SubmitPost,
+    shortcuts,
 };
 use crate::oauth;
 use crate::paths::Paths;
@@ -2248,6 +2249,16 @@ impl Render for TimelineView {
                     &["OK"],
                     cx,
                 ));
+            }))
+            .on_action(cx.listener(|_this, _: &Minimize, window, _cx| {
+                window.minimize_window();
+            }))
+            .on_action(cx.listener(|_this, _: &CloseWindow, window, _cx| {
+                // With one window this ends the app, exactly as `cmd-q`
+                // does, and like `cmd-q` it does not ask first (#109). An
+                // unsent draft goes with it — the same hazard `cmd-q` has
+                // always had, not a new one this introduces.
+                window.remove_window();
             }))
             .flex()
             .flex_col()
