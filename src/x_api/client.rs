@@ -553,6 +553,15 @@ fn me_url() -> String {
 /// cached post, and "Load older" always resumes from the last response's
 /// `meta.next_token` — but both are accepted here independently so the
 /// pure URL-building logic doesn't need to know which caller it's serving.
+///
+/// `referenced_tweets.id.attachments.media_keys` (#104) is what puts a
+/// repost's *original* post into `includes.media`: plain
+/// `attachments.media_keys` only expands the outer post's own attachments,
+/// and a repost has none of its own — the media lives on the original,
+/// reachable only through the `referenced_tweets.id` expansion this
+/// extends. Without it, `model::post_media` had nothing to join against for
+/// a reposted photo/video, even though the repost-join logic itself
+/// (`item.media = post_media(original, media)`) was already correct.
 fn home_timeline_url(
     user_id: &str,
     max_results: u32,
@@ -563,7 +572,7 @@ fn home_timeline_url(
         "{API_BASE}/users/{user_id}/timelines/reverse_chronological\
          ?max_results={max_results}\
          &tweet.fields=created_at,entities,public_metrics,referenced_tweets\
-         &expansions=attachments.media_keys,author_id,referenced_tweets.id,referenced_tweets.id.author_id\
+         &expansions=attachments.media_keys,author_id,referenced_tweets.id,referenced_tweets.id.author_id,referenced_tweets.id.attachments.media_keys\
          &media.fields=alt_text,height,preview_image_url,type,url,width\
          &user.fields=name,profile_image_url,username"
     );
@@ -578,12 +587,14 @@ fn home_timeline_url(
 
 /// The timeline endpoint returns bare post ids unless `expansions` and the
 /// `*.fields` parameters ask for more, so the query string is load-bearing.
+/// See [`home_timeline_url`]'s doc comment for why
+/// `referenced_tweets.id.attachments.media_keys` (#104) is in here too.
 fn timeline_url(user_id: &str, max_results: u32, since_id: Option<&str>) -> String {
     let base = format!(
         "{API_BASE}/users/{user_id}/tweets\
          ?max_results={max_results}\
          &tweet.fields=created_at,entities,public_metrics,referenced_tweets\
-         &expansions=attachments.media_keys,author_id,referenced_tweets.id,referenced_tweets.id.author_id\
+         &expansions=attachments.media_keys,author_id,referenced_tweets.id,referenced_tweets.id.author_id,referenced_tweets.id.attachments.media_keys\
          &media.fields=alt_text,height,preview_image_url,type,url,width\
          &user.fields=name,profile_image_url,username"
     );
@@ -608,6 +619,22 @@ fn timeline_url(user_id: &str, max_results: u32, since_id: Option<&str>) -> Stri
 /// and `--fetch-post`'s JSON output is [`TimelineItem`] as-is, which came
 /// from the very same response shape, so there is no second URL builder to
 /// give those fields to it instead.
+///
+/// For the same reason, this deliberately does *not* get #104's
+/// `referenced_tweets.id.attachments.media_keys` (nor even the plain
+/// `attachments.media_keys`/`media.fields` the timeline builders have
+/// always had): the parent-chain walk's result lands in
+/// [`crate::thread::ThreadItem`], which has no `media` field at all, and
+/// `thread_row` (`ui.rs`) never draws one — so media fetched for a walked
+/// parent would be parsed and then silently dropped. Wiring media into
+/// "Show thread" (#12) is a display-layer change (`ThreadItem` gaining a
+/// field, `thread_row` gaining a render path), not an expansions fix, so
+/// it stays out of #104's scope. `--fetch-post` (#42) does keep
+/// [`TimelineItem`]'s `media` field in its JSON output, but giving it media
+/// support would mean adding the *base* `attachments.media_keys`/
+/// `media.fields` pair too, since this builder has never had either —
+/// that is new functionality for a currently-unsupported field, not the
+/// repost-specific expansions gap #104 fixes for the timeline endpoints.
 fn tweets_by_id_url(ids: &str) -> String {
     format!(
         "{API_BASE}/tweets\
@@ -730,7 +757,7 @@ mod tests {
         // and author come back in `includes` without a second request.
         assert_eq!(
             timeline_url("2244994945", 20, None),
-            "https://api.x.com/2/users/2244994945/tweets?max_results=20&tweet.fields=created_at,entities,public_metrics,referenced_tweets&expansions=attachments.media_keys,author_id,referenced_tweets.id,referenced_tweets.id.author_id&media.fields=alt_text,height,preview_image_url,type,url,width&user.fields=name,profile_image_url,username"
+            "https://api.x.com/2/users/2244994945/tweets?max_results=20&tweet.fields=created_at,entities,public_metrics,referenced_tweets&expansions=attachments.media_keys,author_id,referenced_tweets.id,referenced_tweets.id.author_id,referenced_tweets.id.attachments.media_keys&media.fields=alt_text,height,preview_image_url,type,url,width&user.fields=name,profile_image_url,username"
         );
     }
 
@@ -815,7 +842,7 @@ mod tests {
     fn builds_the_home_timeline_url_with_every_expansion() {
         assert_eq!(
             home_timeline_url("2244994945", 20, None, None),
-            "https://api.x.com/2/users/2244994945/timelines/reverse_chronological?max_results=20&tweet.fields=created_at,entities,public_metrics,referenced_tweets&expansions=attachments.media_keys,author_id,referenced_tweets.id,referenced_tweets.id.author_id&media.fields=alt_text,height,preview_image_url,type,url,width&user.fields=name,profile_image_url,username"
+            "https://api.x.com/2/users/2244994945/timelines/reverse_chronological?max_results=20&tweet.fields=created_at,entities,public_metrics,referenced_tweets&expansions=attachments.media_keys,author_id,referenced_tweets.id,referenced_tweets.id.author_id,referenced_tweets.id.attachments.media_keys&media.fields=alt_text,height,preview_image_url,type,url,width&user.fields=name,profile_image_url,username"
         );
     }
 
@@ -823,7 +850,7 @@ mod tests {
     fn home_timeline_url_appends_since_id_for_an_incremental_reload() {
         assert_eq!(
             home_timeline_url("2244994945", 20, Some("1700000000000000001"), None),
-            "https://api.x.com/2/users/2244994945/timelines/reverse_chronological?max_results=20&tweet.fields=created_at,entities,public_metrics,referenced_tweets&expansions=attachments.media_keys,author_id,referenced_tweets.id,referenced_tweets.id.author_id&media.fields=alt_text,height,preview_image_url,type,url,width&user.fields=name,profile_image_url,username&since_id=1700000000000000001"
+            "https://api.x.com/2/users/2244994945/timelines/reverse_chronological?max_results=20&tweet.fields=created_at,entities,public_metrics,referenced_tweets&expansions=attachments.media_keys,author_id,referenced_tweets.id,referenced_tweets.id.author_id,referenced_tweets.id.attachments.media_keys&media.fields=alt_text,height,preview_image_url,type,url,width&user.fields=name,profile_image_url,username&since_id=1700000000000000001"
         );
     }
 
@@ -833,7 +860,7 @@ mod tests {
         // response as `pagination_token`.
         assert_eq!(
             home_timeline_url("2244994945", 20, None, Some("cursor-abc")),
-            "https://api.x.com/2/users/2244994945/timelines/reverse_chronological?max_results=20&tweet.fields=created_at,entities,public_metrics,referenced_tweets&expansions=attachments.media_keys,author_id,referenced_tweets.id,referenced_tweets.id.author_id&media.fields=alt_text,height,preview_image_url,type,url,width&user.fields=name,profile_image_url,username&pagination_token=cursor-abc"
+            "https://api.x.com/2/users/2244994945/timelines/reverse_chronological?max_results=20&tweet.fields=created_at,entities,public_metrics,referenced_tweets&expansions=attachments.media_keys,author_id,referenced_tweets.id,referenced_tweets.id.author_id,referenced_tweets.id.attachments.media_keys&media.fields=alt_text,height,preview_image_url,type,url,width&user.fields=name,profile_image_url,username&pagination_token=cursor-abc"
         );
     }
 
@@ -844,7 +871,7 @@ mod tests {
         // credit cost down.
         assert_eq!(
             timeline_url("2244994945", 20, Some("1700000000000000001")),
-            "https://api.x.com/2/users/2244994945/tweets?max_results=20&tweet.fields=created_at,entities,public_metrics,referenced_tweets&expansions=attachments.media_keys,author_id,referenced_tweets.id,referenced_tweets.id.author_id&media.fields=alt_text,height,preview_image_url,type,url,width&user.fields=name,profile_image_url,username&since_id=1700000000000000001"
+            "https://api.x.com/2/users/2244994945/tweets?max_results=20&tweet.fields=created_at,entities,public_metrics,referenced_tweets&expansions=attachments.media_keys,author_id,referenced_tweets.id,referenced_tweets.id.author_id,referenced_tweets.id.attachments.media_keys&media.fields=alt_text,height,preview_image_url,type,url,width&user.fields=name,profile_image_url,username&since_id=1700000000000000001"
         );
     }
 
