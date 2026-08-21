@@ -488,7 +488,6 @@ impl TimelineView {
                 this.refresh_usage(cx);
                 this.refresh_reposted_ids(cx);
                 this.refresh_liked_ids(cx);
-                this.refresh_images(cx);
                 match result {
                     Ok(StartOutcome::NotAuthenticated { session_notice }) => {
                         this.session_notice = session_notice.map(SharedString::from);
@@ -520,6 +519,16 @@ impl TimelineView {
                         cx.notify();
                     }
                 }
+                // #120: after the match, never before it. `refresh_images`
+                // reads `self.state` to decide which avatars and media are
+                // missing, so calling it first hands it the *previous*
+                // state — `Loading` on startup, which fetches nothing at
+                // all, and the outgoing item list on a reload, which
+                // fetches the images the last batch wanted. That is why
+                // avatars only appeared one reload late. Its siblings above
+                // read from disk rather than `state`, so their position
+                // does not matter; this one's does.
+                this.refresh_images(cx);
             });
         }));
 
@@ -607,7 +616,6 @@ impl TimelineView {
                 this.refresh_usage(cx);
                 this.refresh_reposted_ids(cx);
                 this.refresh_liked_ids(cx);
-                this.refresh_images(cx);
                 this.reloading = false;
                 match result {
                     Ok(reloaded) => {
@@ -621,6 +629,11 @@ impl TimelineView {
                     }
                     Err(error) => this.apply_reload_failure(&error, cx),
                 }
+                // After the match, for the reason spelled out in `start`
+                // (#120): before it, this fetched the images the *outgoing*
+                // item list wanted, leaving every newly arrived row on its
+                // placeholder until the reload after this one.
+                this.refresh_images(cx);
                 cx.notify();
             });
         }));
@@ -770,7 +783,6 @@ impl TimelineView {
                 this.refresh_usage(cx);
                 this.refresh_reposted_ids(cx);
                 this.refresh_liked_ids(cx);
-                this.refresh_images(cx);
                 this.reloading = false;
                 match result {
                     Ok((items, next_token)) => {
@@ -782,6 +794,9 @@ impl TimelineView {
                     }
                     Err(error) => this.apply_reload_failure(&error, cx),
                 }
+                // After the match (#120), same as `start` and `reload`: the
+                // page just appended is the one whose images are missing.
+                this.refresh_images(cx);
                 cx.notify();
             });
         }));
@@ -1062,6 +1077,17 @@ impl TimelineView {
     /// timeline: the two are wanted at exactly the same moments, and a
     /// caller that remembered one but not the other would leave half the
     /// row waiting for the next reload.
+    ///
+    /// **Call this after `self.state` has been updated, never before**
+    /// (#120). Both halves read `state` to work out what is missing and do
+    /// nothing at all unless it is `Loaded`, so calling it first asks the
+    /// outgoing item list what it needs: nothing on startup, where `state`
+    /// is still `Loading`, and the previous batch's URLs on a reload. The
+    /// symptom was avatars that only appeared one reload after the rows
+    /// they belonged to. Sibling refreshers at those same call sites
+    /// (`refresh_usage`, `refresh_reposted_ids`, `refresh_liked_ids`) read
+    /// from disk instead and are order-independent, which is what made this
+    /// easy to miss.
     fn refresh_images(&mut self, cx: &mut Context<'_, Self>) {
         self.refresh_avatars(cx);
         self.refresh_media(cx);
