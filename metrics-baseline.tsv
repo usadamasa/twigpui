@@ -10,10 +10,14 @@
 # Raising a ceiling is a legitimate thing to do. Doing it silently is not,
 # which is the whole mechanism.
 #
-# Lower a ceiling whenever a file shrinks below it. `src/ui.rs` is the one
-# that matters: 3,305 implementation lines, more than twice what #48
-# recorded, holding rendering, state transitions, async task management and
-# `EntityInputHandler` in one place.
+# Lower a ceiling whenever a file shrinks below it. `src/ui.rs` used to be
+# the one that matters -- 3,352 implementation lines against a ceiling of
+# the same number, no headroom at all, holding rendering, state
+# transitions, async task management and `EntityInputHandler` together.
+# #126 split it into `src/ui/{mod,render,reload_policy}.rs` and these
+# ceilings are the measurements afterwards, lowered rather than carried
+# over: a ceiling kept at the old number would not notice the file
+# growing back.
 #
 # A new file must be added here before it can be committed — an unlisted
 # file is a failure, not a pass, so this cannot be sidestepped by adding
@@ -40,7 +44,9 @@ src/repost.rs	150
 src/theme.rs	250
 src/thread.rs	100
 src/toggle.rs	200
-src/ui.rs	3400
+src/ui/mod.rs	2350
+src/ui/reload_policy.rs	250
+src/ui/render.rs	900
 src/usage.rs	350
 src/x_api/client.rs	750
 src/x_api/mod.rs	50
