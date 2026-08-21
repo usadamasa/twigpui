@@ -22,7 +22,21 @@
 //! | `danger` on `bg` | 5.8:1 | pass |
 //! | `warning` on `bg` (#18) | 5.0:1 | pass |
 
-use gpui::{App, Window, WindowAppearance};
+use gpui::{App, Pixels, Window, WindowAppearance, px};
+
+/// The corner radius an avatar is drawn with (#98).
+///
+/// Lives here rather than in `ui.rs` so the two places that draw an avatar
+/// — the downloaded image and the initial-carrying placeholder — cannot
+/// drift apart, the same reason `AVATAR_SIZE` is one constant. They are
+/// the same shape or the row visibly changes when a download lands.
+///
+/// Sized against `AVATAR_SIZE`'s 44px: enough to read as deliberately
+/// rounded rather than as a square with softened corners, and far enough
+/// from 22px that it does not read as a circle either. Buttons keep their
+/// own `rounded_full` pill shape — this is the avatar radius, not a
+/// general one.
+pub(crate) const AVATAR_RADIUS: Pixels = px(10.0);
 
 /// One color slot per named UI role, replacing the `BG` / `TEXT` / ... `u32`
 /// constants that used to live directly in `ui.rs`. Grouped per RGB channel,
