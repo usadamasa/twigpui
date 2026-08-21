@@ -247,9 +247,10 @@ one line, and a help screen nobody opens documents nothing. `⌘Q`, `⌘W` and
 `⌘M` are left off that strip: it is for what this app does that another one
 would not, and those three are macOS gestures every app shares.
 
-**Every binding carries a modifier, deliberately.** The hazard #58 is really
-about is a bare `j`/`k`/`n` firing while you are typing a post; nothing
-bound today can. Bare keys become worth having once posts can be selected,
+**No binding is a bare printable key, deliberately.** The hazard #58 is
+really about is a bare `j`/`k`/`n` firing while you are typing a post;
+nothing bound today can, because every binding either carries `⌘` or is a
+named key that types nothing (`esc`). Bare keys become worth having once posts can be selected,
 and that needs a second key context the composer's focus removes — see
 `menu::KEY_CONTEXT`.
 
@@ -284,9 +285,17 @@ cannot outrun the interval that exists to stop this app spending in a loop.
 | Window | Minimize, Close Window |
 
 Every item dispatches the same action its keystroke does, and macOS draws
-the key equivalent beside it from the keymap — so a keystroke is written in
-exactly one place in the source (`menu::Shortcut`), and the menu bar, the
-on-screen strip and the key bindings cannot drift apart (#99).
+the key equivalent beside it from the keymap. One `menu::Shortcut` constant
+holds the keystroke, both wordings, **and the action** (#119), and the key
+bindings, the on-screen strip and the menu items are all built from it — so
+none of the four can be changed for one of them and not the others.
+
+The claim used to be broader than what the code guaranteed. Until #119 the
+constant held only the key and the labels; which action each one dispatched
+was written out again in both `init` and `menus`, and pairing a label with
+the wrong action type compiled cleanly. What is left for a test to catch is
+narrower: `menus` still decides which menu an item belongs to, so a
+shortcut can carry a menu label and be left out of every menu.
 
 The wordings differ between the two lists on purpose: a menu item is read
 on its own ("New Post"), while the strip is read as a row of hints under a

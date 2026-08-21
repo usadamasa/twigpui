@@ -56,6 +56,21 @@ pub(crate) const KEY_CONTEXT: &str = "Timeline";
 struct Shortcut {
     /// The keystroke as `gpui::KeyBinding::new` parses it.
     keystroke: &'static str,
+    /// The key context the binding is scoped to, or `None` to register it
+    /// globally. Only [`QUIT`] is global — see [`init`].
+    context: Option<&'static str>,
+    /// Builds this shortcut's key binding, closing over the action (#119).
+    ///
+    /// A `const` cannot hold an `impl Action`, but a closure capturing
+    /// nothing coerces to a function pointer — enough to name the action
+    /// here instead of at every use. Before this, `init` and [`menus`]
+    /// paired shortcut with action by hand, and
+    /// `menu_item(&RELOAD, FocusComposer)` type-checked into a menu item
+    /// labelled Reload that focused the composer under `cmd-n`.
+    bind: fn(&'static str, Option<&'static str>) -> gpui::KeyBinding,
+    /// Builds this shortcut's menu item, closing over the same action as
+    /// [`Shortcut::bind`] — the pairing is written once, in this constant.
+    item: fn(&'static str) -> gpui::MenuItem,
     /// The same keystroke written for a human — the header's badge (#58).
     glyphs: &'static str,
     /// How the header names the action.
@@ -75,6 +90,9 @@ struct Shortcut {
 /// gesture every app shares rather than a key anyone hits by accident.
 const RELOAD: Shortcut = Shortcut {
     keystroke: "cmd-r",
+    context: Some(KEY_CONTEXT),
+    bind: |keystroke, context| gpui::KeyBinding::new(keystroke, Reload, context),
+    item: |label| gpui::MenuItem::action(label, Reload),
     glyphs: "⌘R",
     label: "Reload",
     in_header: true,
@@ -85,6 +103,9 @@ const RELOAD: Shortcut = Shortcut {
 /// keep inserting a newline, and a post is not undoable.
 const SUBMIT_POST: Shortcut = Shortcut {
     keystroke: "cmd-enter",
+    context: Some(KEY_CONTEXT),
+    bind: |keystroke, context| gpui::KeyBinding::new(keystroke, SubmitPost, context),
+    item: |label| gpui::MenuItem::action(label, SubmitPost),
     glyphs: "⌘↩",
     label: "Post",
     in_header: true,
@@ -94,6 +115,9 @@ const SUBMIT_POST: Shortcut = Shortcut {
 /// Move focus into the composer.
 const FOCUS_COMPOSER: Shortcut = Shortcut {
     keystroke: "cmd-n",
+    context: Some(KEY_CONTEXT),
+    bind: |keystroke, context| gpui::KeyBinding::new(keystroke, FocusComposer, context),
+    item: |label| gpui::MenuItem::action(label, FocusComposer),
     glyphs: "⌘N",
     label: "Focus the composer",
     in_header: true,
@@ -104,6 +128,9 @@ const FOCUS_COMPOSER: Shortcut = Shortcut {
 /// gesture, not a command anyone goes looking for in a menu.
 const BLUR_COMPOSER: Shortcut = Shortcut {
     keystroke: "escape",
+    context: Some(KEY_CONTEXT),
+    bind: |keystroke, context| gpui::KeyBinding::new(keystroke, BlurComposer, context),
+    item: |label| gpui::MenuItem::action(label, BlurComposer),
     glyphs: "esc",
     label: "Leave the composer",
     in_header: true,
@@ -114,6 +141,9 @@ const BLUR_COMPOSER: Shortcut = Shortcut {
 /// only one the header does not advertise — see [`init`].
 const QUIT: Shortcut = Shortcut {
     keystroke: "cmd-q",
+    context: None,
+    bind: |keystroke, context| gpui::KeyBinding::new(keystroke, Quit, context),
+    item: |label| gpui::MenuItem::action(label, Quit),
     glyphs: "⌘Q",
     label: "Quit",
     in_header: false,
@@ -124,6 +154,9 @@ const QUIT: Shortcut = Shortcut {
 /// it is a macOS gesture, not something this app invented.
 const MINIMIZE: Shortcut = Shortcut {
     keystroke: "cmd-m",
+    context: Some(KEY_CONTEXT),
+    bind: |keystroke, context| gpui::KeyBinding::new(keystroke, Minimize, context),
+    item: |label| gpui::MenuItem::action(label, Minimize),
     glyphs: "⌘M",
     label: "Minimize",
     in_header: false,
@@ -138,6 +171,9 @@ const MINIMIZE: Shortcut = Shortcut {
 /// discarding an unsent draft (#14) and, like `cmd-q`, does not prompt.
 const CLOSE_WINDOW: Shortcut = Shortcut {
     keystroke: "cmd-w",
+    context: Some(KEY_CONTEXT),
+    bind: |keystroke, context| gpui::KeyBinding::new(keystroke, CloseWindow, context),
+    item: |label| gpui::MenuItem::action(label, CloseWindow),
     glyphs: "⌘W",
     label: "Close Window",
     in_header: false,
@@ -146,17 +182,15 @@ const CLOSE_WINDOW: Shortcut = Shortcut {
 
 /// Every binding, in the order [`init`] registers them (#99).
 ///
-/// [`shortcuts`] filters it to what the header advertises, and the tests
-/// walk all of it: a binding the header keeps quiet about still has to
-/// hold a keystroke nothing else holds, and still has to agree with the
-/// menu bar. A new shortcut belongs here.
+/// [`init`] registers exactly this list, [`shortcuts`] filters it to what
+/// the header advertises, and [`menus`] draws its items from the same
+/// entries. Since #119 every entry also carries its own action, so a
+/// shortcut added here is bound to the right thing or not bound at all —
+/// there is no longer a second table to keep in step.
 ///
-/// [`init`] and [`menus`] cannot walk it — each entry there names a
-/// concrete action type, and this array carries only the data those two
-/// share — so adding a `Shortcut` without binding or listing it is
-/// possible. What the tests below make impossible is the half-done
-/// version: a binding that says it belongs in the menu bar and isn't
-/// there, or vice versa.
+/// [`menus`] still chooses which menu each item belongs to, so a new
+/// shortcut with a `menu_label` and no place in `menus` remains possible.
+/// That is what `every_menu_labelled_shortcut_is_in_the_menu_bar` catches.
 const ALL_SHORTCUTS: [&Shortcut; 5] = [
     &RELOAD,
     &SUBMIT_POST,
@@ -168,27 +202,28 @@ const ALL_SHORTCUTS: [&Shortcut; 5] = [
 /// Register #58's key bindings. Called once at startup, next to
 /// `gpui_component::init` (which registers its own).
 ///
-/// **Every binding here uses a modifier.** The issue's central hazard is a
-/// bare `j`/`k`/`n` firing while the user is typing a post; nothing bound
-/// here can, because nothing here is a bare letter. When post selection
-/// arrives and bare keys become worth having, they will need a second key
-/// context that the composer's focus removes — this constant is where that
-/// starts.
+/// **No binding here is a bare printable key.** The issue's central hazard
+/// is a bare `j`/`k`/`n` firing while the user is typing a post; nothing
+/// bound here can, because every binding either carries `cmd` or is a
+/// named key that types nothing (`escape`). When post selection arrives
+/// and bare letters become worth having, they will need a second key
+/// context that the composer's focus removes — [`KEY_CONTEXT`] is where
+/// that starts.
 ///
-/// [`QUIT`] is the one binding registered with no key context (#99). The
-/// others answer a question about the timeline and belong to the view that
-/// answers it; quitting is not the window's business, and scoping it would
-/// mean `cmd-q` doing nothing whenever focus sat anywhere else.
+/// Walks [`ALL_SHORTCUTS`] rather than listing the bindings again (#119):
+/// each entry already names its own action through [`Shortcut::bind`], so
+/// there is no second place where a shortcut and an action are paired up.
+///
+/// [`QUIT`] is the one entry with no key context (#99). The others answer
+/// a question about the timeline and belong to the view that answers it;
+/// quitting is not the window's business, and scoping it would mean
+/// `cmd-q` doing nothing whenever focus sat anywhere else.
 pub(crate) fn init(cx: &mut gpui::App) {
-    cx.bind_keys([
-        gpui::KeyBinding::new(RELOAD.keystroke, Reload, Some(KEY_CONTEXT)),
-        gpui::KeyBinding::new(SUBMIT_POST.keystroke, SubmitPost, Some(KEY_CONTEXT)),
-        gpui::KeyBinding::new(FOCUS_COMPOSER.keystroke, FocusComposer, Some(KEY_CONTEXT)),
-        gpui::KeyBinding::new(BLUR_COMPOSER.keystroke, BlurComposer, Some(KEY_CONTEXT)),
-        gpui::KeyBinding::new(QUIT.keystroke, Quit, None),
-        gpui::KeyBinding::new(MINIMIZE.keystroke, Minimize, Some(KEY_CONTEXT)),
-        gpui::KeyBinding::new(CLOSE_WINDOW.keystroke, CloseWindow, Some(KEY_CONTEXT)),
-    ]);
+    cx.bind_keys(
+        ALL_SHORTCUTS
+            .iter()
+            .map(|shortcut| (shortcut.bind)(shortcut.keystroke, shortcut.context)),
+    );
 }
 
 /// The application's menu bar (#99), registered by `main` before the
@@ -205,22 +240,19 @@ pub(crate) fn menus() -> Vec<gpui::Menu> {
                 gpui::MenuItem::separator(),
             ]
             .into_iter()
-            .chain(menu_item(&QUIT, Quit))
+            .chain(QUIT.menu_item())
             .collect(),
         },
         gpui::Menu {
             name: "File".into(),
-            items: [
-                menu_item(&FOCUS_COMPOSER, FocusComposer),
-                menu_item(&SUBMIT_POST, SubmitPost),
-            ]
-            .into_iter()
-            .flatten()
-            .collect(),
+            items: [FOCUS_COMPOSER.menu_item(), SUBMIT_POST.menu_item()]
+                .into_iter()
+                .flatten()
+                .collect(),
         },
         gpui::Menu {
             name: "View".into(),
-            items: menu_item(&RELOAD, Reload).into_iter().collect(),
+            items: RELOAD.menu_item().into_iter().collect(),
         },
         // The name is load-bearing (#109): gpui's macOS platform hands a
         // menu to AppKit's `setWindowsMenu_` only when it is called
@@ -230,23 +262,25 @@ pub(crate) fn menus() -> Vec<gpui::Menu> {
         // macOS treats as the window list.
         gpui::Menu {
             name: "Window".into(),
-            items: [
-                menu_item(&MINIMIZE, Minimize),
-                menu_item(&CLOSE_WINDOW, CloseWindow),
-            ]
-            .into_iter()
-            .flatten()
-            .collect(),
+            items: [MINIMIZE.menu_item(), CLOSE_WINDOW.menu_item()]
+                .into_iter()
+                .flatten()
+                .collect(),
         },
     ]
 }
 
 /// The menu item for one shortcut, or nothing when [`Shortcut::menu_label`]
 /// says it is deliberately absent from the menu bar (#99).
-fn menu_item(shortcut: &Shortcut, action: impl gpui::Action) -> Option<gpui::MenuItem> {
-    shortcut
-        .menu_label
-        .map(|label| gpui::MenuItem::action(label, action))
+impl Shortcut {
+    /// This shortcut's menu item, or nothing when [`Shortcut::menu_label`]
+    /// says it is deliberately absent from the menu bar (#99).
+    ///
+    /// Takes no action argument (#119): it comes from the same constant
+    /// as the label, so there is no second place to get it wrong.
+    fn menu_item(&self) -> Option<gpui::MenuItem> {
+        self.menu_label.map(self.item)
+    }
 }
 
 /// The shortcut list shown in the header (#58) and mirrored in the README —
