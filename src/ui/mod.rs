@@ -3,8 +3,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use gpui::{
-    AnyElement, Context, Entity, FontWeight, SharedString, Subscription, Task, Window, div, img,
-    prelude::*, px, rgb,
+    AnyElement, Context, Entity, FocusHandle, FontWeight, SharedString, Subscription, Task, Window,
+    div, img, prelude::*, px, rgb,
 };
 use gpui_component::input::{Input, InputEvent, InputState};
 
@@ -389,6 +389,15 @@ pub(crate) struct TimelineView {
     /// the next attempt clears it. `None` is the ordinary case — a
     /// successful open leaves the app with nothing to say.
     open_failure: Option<String>,
+    /// Focus for the timeline's own root element (#118).
+    ///
+    /// gpui resolves an action against the focused element's ancestry, so
+    /// without this nothing here is reachable until the composer is
+    /// clicked: `cmd-r` matched nothing and the menu bar's Reload / New
+    /// Post / Submit Post greyed out or dispatched into nowhere. `Quit`
+    /// escaped only by living on the `App`. Focused at startup and
+    /// returned to when the composer is left.
+    focus_handle: FocusHandle,
 }
 
 impl TimelineView {
@@ -460,7 +469,11 @@ impl TimelineView {
             delete_failures: HashMap::new(),
             open_task: None,
             open_failure: None,
+            focus_handle: cx.focus_handle(),
         };
+        // #118: before anything else, so the very first frame has the
+        // timeline on the focus path rather than an empty one.
+        window.focus(&this.focus_handle);
         this.start(cx);
         this.refresh_usage(cx);
         this
@@ -2235,6 +2248,11 @@ impl Render for TimelineView {
             // #58: every binding is scoped to this context rather than
             // registered globally — see `init`.
             .key_context(KEY_CONTEXT)
+            // #118: a context only counts while its element is on the
+            // window's focus path, and the real root is
+            // `gpui_component::Root` (see `main`) — so without this the
+            // path stopped above the context and every binding missed.
+            .track_focus(&self.focus_handle)
             .on_action(cx.listener(|this, _: &Reload, _window, cx| {
                 // Same path the header's button takes, including #10's
                 // interval and #57's cooldown reporting: a shortcut must
@@ -2249,11 +2267,16 @@ impl Render for TimelineView {
                 this.compose_input
                     .update(cx, |input, cx| input.focus(window, cx));
             }))
-            .on_action(cx.listener(|_this, _: &BlurComposer, window, _cx| {
+            .on_action(cx.listener(|this, _: &BlurComposer, window, _cx| {
                 // Focus only. The draft is left exactly as typed: losing it
                 // to a stray `esc` is unrecoverable, and #14 already treats
                 // never losing a draft as the composer's main promise.
-                window.blur();
+                //
+                // Back to the timeline rather than dropped with
+                // `window.blur()` (#118): an empty focus path took the
+                // `Timeline` context out of reach, so `esc` disabled the
+                // shortcuts and half the menu bar until the next click.
+                window.focus(&this.focus_handle);
             }))
             .on_action(cx.listener(|_this, _: &ShowAbout, window, cx| {
                 // The receiver is dropped rather than awaited: there is one
@@ -3384,6 +3407,137 @@ mod tests {
     /// nor the window server -- yet it still walks the same element tree the
     /// real window would, which is exactly where `gpui_component`'s widgets
     /// reach back up for the window root.
+    /// #118: the timeline's own root has to sit on the window's focus
+    /// path from the first frame, with no click anywhere.
+    ///
+    /// This is the property, not the mechanism: gpui resolves an action
+    /// against the focused element's ancestry, so an unfocused timeline
+    /// takes the `Timeline` key context and every handler under it out of
+    /// reach. `cmd-r` matched nothing and the menu bar's Reload / New Post
+    /// / Submit Post either greyed out or dispatched into nowhere. Only
+    /// `Quit` worked, because it lives on the `App`.
+    #[gpui::test]
+    fn the_timeline_is_focused_from_the_first_frame(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext as _;
+
+        cx.update(gpui_component::init);
+        cx.update(crate::menu::init);
+
+        let timeline_slot = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let window = {
+            let slot = timeline_slot.clone();
+            cx.add_window(move |window, cx| {
+                let timeline = cx
+                    .new(|cx| super::TimelineView::new(smoke_config(), smoke_paths(), window, cx));
+                *slot.borrow_mut() = Some(timeline.clone());
+                gpui_component::Root::new(timeline, window, cx)
+            })
+        };
+        let timeline = timeline_slot.borrow().clone().unwrap();
+        cx.run_until_parked();
+
+        // Deliberately no click and no `input.focus(..)` before this: the
+        // bug was that the app needed one.
+        cx.update_window(window.into(), |_, window, cx| {
+            let _ = window.draw(cx);
+            timeline.update(cx, |view, _cx| {
+                assert!(
+                    view.focus_handle.is_focused(window),
+                    "the timeline root is off the focus path, so its actions are unreachable"
+                );
+            });
+        })
+        .unwrap();
+    }
+
+    /// #118: leaving the composer must hand focus back rather than drop it.
+    ///
+    /// `window.blur()` left the window with an empty focus path, which
+    /// disabled the shortcuts and half the menu bar until something was
+    /// clicked — the same failure as the startup one, reached by pressing
+    /// `esc`.
+    #[gpui::test]
+    fn leaving_the_composer_returns_focus_to_the_timeline(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext as _;
+
+        cx.update(gpui_component::init);
+        cx.update(crate::menu::init);
+
+        let timeline_slot = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let window = {
+            let slot = timeline_slot.clone();
+            cx.add_window(move |window, cx| {
+                let timeline = cx.new(|cx| {
+                    let mut view =
+                        super::TimelineView::new(smoke_config(), smoke_paths(), window, cx);
+                    view.signed_in_with_oauth = true;
+                    view
+                });
+                *slot.borrow_mut() = Some(timeline.clone());
+                gpui_component::Root::new(timeline, window, cx)
+            })
+        };
+        let timeline = timeline_slot.borrow().clone().unwrap();
+        cx.run_until_parked();
+
+        cx.update_window(window.into(), |_, window, cx| {
+            timeline.update(cx, |view, cx| {
+                view.compose_input
+                    .update(cx, |input, cx| input.focus(window, cx));
+            });
+        })
+        .unwrap();
+        cx.run_until_parked();
+
+        cx.update_window(window.into(), |_, window, cx| {
+            let _ = window.draw(cx);
+            timeline.update(cx, |view, _cx| {
+                assert!(
+                    !view.focus_handle.is_focused(window),
+                    "the composer should hold focus once focused"
+                );
+            });
+            // The action itself, not `window.focus(..)` directly: the
+            // handler is what this is checking, and reproducing its body
+            // in the test would pass no matter what the handler did.
+            window.dispatch_action(Box::new(crate::menu::BlurComposer), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+
+        cx.update_window(window.into(), |_, window, cx| {
+            let _ = window.draw(cx);
+            timeline.update(cx, |view, _cx| {
+                assert!(
+                    view.focus_handle.is_focused(window),
+                    "focus must return to the timeline, not be dropped"
+                );
+            });
+        })
+        .unwrap();
+    }
+
+    /// The `Config` the window smoke tests run against.
+    fn smoke_config() -> crate::config::Config {
+        crate::config::Config {
+            oauth_client_id: "client-123".to_string(),
+            target_username: "XDevelopers".to_string(),
+            max_results: 20,
+            min_fetch_interval_seconds: 60,
+            theme: crate::theme::ThemeMode::Light,
+            log_level: crate::log::Level::default(),
+            request_price: None,
+            daily_request_budget: None,
+        }
+    }
+
+    /// `Paths` rooted in a scratch directory, for the window smoke tests.
+    fn smoke_paths() -> crate::paths::Paths {
+        let home = std::env::temp_dir().join("twigpui-smoke");
+        let home = home.display().to_string();
+        crate::paths::Paths::from_vars(move |key| (key == "HOME").then(|| home.clone())).unwrap()
+    }
+
     #[gpui::test]
     fn the_window_root_renders_without_panicking(cx: &mut gpui::TestAppContext) {
         use gpui::AppContext as _;
