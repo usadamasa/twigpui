@@ -395,7 +395,11 @@ impl XClient {
     /// `GET /2/tweets?ids=` (#12). `ids` is whatever the caller already
     /// joined with commas — X's own query parameter accepts a
     /// comma-separated list natively, so there is nothing here to loop
-    /// over. Two callers rely on that: `cache::fetch_thread`'s parent-chain
+    /// over *up to 100 ids*, which is where X caps that parameter (#112).
+    /// Neither caller can reach the cap: the parent-chain walk sends one
+    /// id, and `main::parse_post_ids` refuses a longer list before it gets
+    /// here. Chunking is deliberately not done anywhere — it would turn one
+    /// invocation into several paid requests. Two callers rely on that: `cache::fetch_thread`'s parent-chain
     /// walk passes exactly one id at a time (each level's id is only known
     /// once the previous one resolves), while `main::fetch_post` (#42)
     /// joins every id from `--fetch-post` into a single call, so looking up

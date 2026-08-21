@@ -354,12 +354,36 @@ fn extract_post_id(token: &str) -> Option<String> {
 /// shorter-than-expected id list would make the single request this fires
 /// off cover fewer posts than asked for, with no indication why.
 fn parse_post_ids(arg: &str) -> Result<Vec<String>, String> {
-    arg.split(',')
+    let ids: Vec<String> = arg
+        .split(',')
         .map(|token| {
             extract_post_id(token).ok_or_else(|| format!("could not find a post id in {token:?}"))
         })
-        .collect()
+        .collect::<Result<_, _>>()?;
+
+    // #112: refuse here rather than let the API refuse. Over the cap, X
+    // rejects the whole request, so the caller pays nothing either way --
+    // but a 400 arrives as an opaque API error with no hint that the count
+    // is what did it, and the obvious next move (retry) spends a request
+    // to fail the same way. Saying the number is the entire fix.
+    if ids.len() > MAX_POST_IDS {
+        return Err(format!(
+            "{} ids given; `GET /2/tweets?ids=` accepts at most {MAX_POST_IDS} per request. \
+             Split the list and run it again.",
+            ids.len()
+        ));
+    }
+    Ok(ids)
 }
+
+/// How many ids `GET /2/tweets?ids=` accepts in one request (#112).
+///
+/// Chunking past this would mean several paid requests for one invocation,
+/// which is a different feature and not one `--fetch-post` needs: it is a
+/// development-time lookup, and nothing in the app asks for more than a
+/// handful at a time. `cache::fetch_thread`'s walk passes one id per call,
+/// so it cannot reach this either.
+const MAX_POST_IDS: usize = 100;
 
 /// Which of `requested` never showed up in `items` — deleted, protected, or
 /// otherwise absent from the API's response — in `requested`'s own order.
@@ -652,6 +676,29 @@ mod tests {
             parse_post_ids(" 20 , https://x.com/jack/status/30 "),
             Ok(vec!["20".to_string(), "30".to_string()])
         );
+    }
+
+    #[test]
+    fn parse_post_ids_accepts_the_maximum_id_count() {
+        let arg = (1..=100)
+            .map(|n| n.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        assert_eq!(parse_post_ids(&arg).map(|ids| ids.len()), Ok(100));
+    }
+
+    #[test]
+    fn parse_post_ids_rejects_more_ids_than_one_request_accepts() {
+        // #112: over the cap X rejects the whole request, so this costs
+        // nothing to get wrong -- but the message has to name the limit,
+        // or the only visible symptom is an opaque 400.
+        let arg = (1..=101)
+            .map(|n| n.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let message = parse_post_ids(&arg).expect_err("101 ids must be refused");
+        assert!(message.contains("101"), "{message} must name the count");
+        assert!(message.contains("100"), "{message} must name the limit");
     }
 
     #[test]
