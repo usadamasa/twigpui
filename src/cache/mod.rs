@@ -200,7 +200,18 @@ pub(crate) fn save_me(paths: &Paths, id: &str, username: &str, now: i64) -> Resu
 /// reload, never by age alone, matching the issue's "render from cache,
 /// only an explicit reload spends credits" decision.
 pub(crate) fn load_timeline(paths: &Paths, user_id: &str) -> Result<Option<Vec<TimelineItem>>> {
-    let file: Option<TimelineCacheFile> = load_json(&paths.timeline_file(user_id))?;
+    load_timeline_file(&paths.timeline_file(user_id))
+}
+
+/// Read one timeline cache file, whichever of the two it is (#92).
+///
+/// The version check sits here because it is what goes wrong when written
+/// twice: #97 added it to both copies, and a check present on one file but
+/// not the other is a cache that heals half of itself. The two *files*
+/// stay separate — a repost can sit in both — but the rule for reading one
+/// does not.
+fn load_timeline_file(path: &Path) -> Result<Option<Vec<TimelineItem>>> {
+    let file: Option<TimelineCacheFile> = load_json(path)?;
     Ok(file
         .filter(|file| file.schema_version == TIMELINE_SCHEMA_VERSION)
         .map(|file| file.items))
@@ -214,12 +225,18 @@ pub(crate) fn save_timeline(
     items: &[TimelineItem],
     now: i64,
 ) -> Result<()> {
+    save_timeline_file(&paths.timeline_file(user_id), items, now)
+}
+
+/// Write one timeline cache file (#92) — [`load_timeline_file`]'s
+/// counterpart, stamping the version that function checks.
+fn save_timeline_file(path: &Path, items: &[TimelineItem], now: i64) -> Result<()> {
     let file = TimelineCacheFile {
         schema_version: TIMELINE_SCHEMA_VERSION,
         fetched_at: now,
         items: items.to_vec(),
     };
-    save_json(&paths.timeline_file(user_id), &file)
+    save_json(path, &file)
 }
 
 /// The cached home timeline for `user_id`, newest-first, or `None` if there
@@ -231,10 +248,7 @@ pub(crate) fn load_home_timeline(
     paths: &Paths,
     user_id: &str,
 ) -> Result<Option<Vec<TimelineItem>>> {
-    let file: Option<TimelineCacheFile> = load_json(&paths.home_timeline_file(user_id))?;
-    Ok(file
-        .filter(|file| file.schema_version == TIMELINE_SCHEMA_VERSION)
-        .map(|file| file.items))
+    load_timeline_file(&paths.home_timeline_file(user_id))
 }
 
 /// Persist `items` as `user_id`'s home-timeline cache. Mirrors
@@ -245,12 +259,7 @@ pub(crate) fn save_home_timeline(
     items: &[TimelineItem],
     now: i64,
 ) -> Result<()> {
-    let file = TimelineCacheFile {
-        schema_version: TIMELINE_SCHEMA_VERSION,
-        fetched_at: now,
-        items: items.to_vec(),
-    };
-    save_json(&paths.home_timeline_file(user_id), &file)
+    save_timeline_file(&paths.home_timeline_file(user_id), items, now)
 }
 
 /// Render the home timeline straight from cache: `Some` only when both `/me`
