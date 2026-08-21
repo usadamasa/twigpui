@@ -338,6 +338,7 @@ mod tests {
                 author_name: "Developers".to_string(),
                 author_username: "XDevelopers".to_string(),
                 text: "hello from the timeline".to_string(),
+                media: Vec::new(),
             },
         }
     }
@@ -453,6 +454,7 @@ mod tests {
             author_name: "Developers".to_string(),
             author_username: "XDevelopers".to_string(),
             text: "the post being answered".to_string(),
+            media: Vec::new(),
         }
     }
 

@@ -1174,7 +1174,15 @@ impl TimelineView {
         let mut wanted: Vec<String> = Vec::new();
         for url in items
             .iter()
-            .flat_map(|item| item.media.iter())
+            // #123: a quoted post's images download by the same path as
+            // the row's own. Without this the card renders empty frames
+            // that never fill, which is worse than the text-only card it
+            // replaced.
+            .flat_map(|item| {
+                item.media
+                    .iter()
+                    .chain(item.quoted.iter().flat_map(|quoted| quoted.media.iter()))
+            })
             .map(|media| media.url.as_str())
         {
             if !self.media_paths.contains_key(url) && !wanted.iter().any(|seen| seen == url) {
@@ -1215,9 +1223,9 @@ impl TimelineView {
     /// on which images have finished downloading — a timeline that reflows
     /// under the reader as images land is worse than one showing frames
     /// waiting to be filled.
-    fn media_grid(&self, item: &TimelineItem, cx: &mut Context<'_, Self>) -> AnyElement {
+    fn media_grid(&self, media: &[PostMedia], cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = self.theme;
-        let shown: Vec<&PostMedia> = item.media.iter().take(MAX_RENDERED_MEDIA).collect();
+        let shown: Vec<&PostMedia> = media.iter().take(MAX_RENDERED_MEDIA).collect();
         let columns = media_columns(shown.len());
 
         let mut grid = div().flex().flex_col().gap_1();
@@ -1229,6 +1237,17 @@ impl TimelineView {
             grid = grid.child(row);
         }
         grid.into_any_element()
+    }
+
+    /// [`Self::media_grid`], or nothing when there is no media to draw
+    /// (#123) — what a quote card needs, since most quotes have none and
+    /// an empty grid would still add its gap to the card.
+    fn media_grid_for(
+        &self,
+        media: &[PostMedia],
+        cx: &mut Context<'_, Self>,
+    ) -> Option<AnyElement> {
+        (!media.is_empty()).then(|| self.media_grid(media, cx))
     }
 
     /// One thumbnail: the downloaded image once it has arrived, else a
@@ -1648,7 +1667,7 @@ impl TimelineView {
             .flex()
             .flex_col()
             .gap_1()
-            .child(quote_card(&target.quoted, theme))
+            .child(quote_card(&target.quoted, theme, None))
             .child(
                 div()
                     .id("compose-remove-quote")
@@ -1683,7 +1702,7 @@ impl TimelineView {
                     .text_color(rgb(theme.text_muted))
                     .child(reply_target_label(&target.replying_to.author_username)),
             )
-            .child(quote_card(&target.replying_to, theme))
+            .child(quote_card(&target.replying_to, theme, None))
             .child(
                 div()
                     .id("compose-remove-reply")
@@ -2072,12 +2091,16 @@ impl TimelineView {
             })
             // #65: attached images, as thumbnails under the body.
             .when(!item.media.is_empty(), |column| {
-                column.child(self.media_grid(item, cx))
+                column.child(self.media_grid(&item.media, cx))
             })
             // #13: a quote (including a repost of a quote) embeds its source
             // as a bordered card under the text.
             .when_some(item.quoted.as_ref(), |column, quoted| {
-                column.child(quote_card(quoted, theme))
+                column.child(quote_card(
+                    quoted,
+                    theme,
+                    self.media_grid_for(&quoted.media, cx),
+                ))
             })
             // #12: "Show thread" — only offered for a reply, since that's
             // the only case with a parent to walk.

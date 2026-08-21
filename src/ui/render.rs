@@ -111,7 +111,16 @@ pub(super) fn repost_banner_label(reposted_by: &str) -> String {
 /// slot — it's already the app's "distinct region" background (the header
 /// bar), and the card sits directly on `theme.bg`, so it reads as a clearly
 /// separate block without needing its own palette entry.
-pub(super) fn quote_card(quoted: &QuotedPost, theme: Theme) -> impl IntoElement {
+///
+/// `media` is the quoted post's thumbnail grid (#123), or `None` where the
+/// card is a small preview rather than the thing being read: the
+/// composer's "replying to" and "quoting" strips both sit directly under
+/// the row whose images are already on screen.
+pub(super) fn quote_card(
+    quoted: &QuotedPost,
+    theme: Theme,
+    media: Option<AnyElement>,
+) -> impl IntoElement {
     let byline = byline(&quoted.author_username);
 
     div()
@@ -136,6 +145,7 @@ pub(super) fn quote_card(quoted: &QuotedPost, theme: Theme) -> impl IntoElement 
                 .child(div().text_color(rgb(theme.text_muted)).child(byline)),
         )
         .child(div().child(quoted.text.clone()))
+        .children(media)
 }
 
 /// "Replying to @name", or a generic fallback when the parent's author
@@ -571,6 +581,9 @@ pub(super) fn reply_row(
         author_name: item.author_name.clone(),
         author_username: item.author_username.clone(),
         text: item.text.clone(),
+        // The composer's preview of what is being replied to shows text
+        // only (#123): its images are already on screen in the row above.
+        media: Vec::new(),
     };
 
     div()
@@ -665,6 +678,8 @@ pub(super) fn quote_row(
         author_name: item.author_name.clone(),
         author_username: item.author_username.clone(),
         text: item.text.clone(),
+        // As above: the row this quote button belongs to is right there.
+        media: Vec::new(),
     };
 
     div()
