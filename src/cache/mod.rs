@@ -305,23 +305,22 @@ pub(crate) fn forget_post(
     post_id: &str,
     now: i64,
 ) -> Result<Vec<TimelineItem>> {
-    let cached = if home {
-        load_home_timeline(paths, user_id)?
+    // Resolved once (#92). `home` used to be branched on twice, with each
+    // arm naming both a load and a save, so writing to one file and
+    // reading the other back was expressible — which would have defeated
+    // the read-back above: it is meant to prove *this* write landed.
+    let path = if home {
+        paths.home_timeline_file(user_id)
     } else {
-        load_timeline(paths, user_id)?
-    };
-    let Some(cached) = cached else {
-        return Ok(Vec::new());
+        paths.timeline_file(user_id)
     };
 
+    let Some(cached) = load_timeline_file(&path)? else {
+        return Ok(Vec::new());
+    };
     let remaining = without_post(cached, post_id);
-    if home {
-        save_home_timeline(paths, user_id, &remaining, now)?;
-        Ok(load_home_timeline(paths, user_id)?.unwrap_or_default())
-    } else {
-        save_timeline(paths, user_id, &remaining, now)?;
-        Ok(load_timeline(paths, user_id)?.unwrap_or_default())
-    }
+    save_timeline_file(&path, &remaining, now)?;
+    Ok(load_timeline_file(&path)?.unwrap_or_default())
 }
 
 /// What a reload spent: the merged, capped timeline to render, and whether
