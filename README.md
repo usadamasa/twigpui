@@ -26,6 +26,9 @@
 - Runs headless: `--fetch-only` prints a single user's posts,
   `--fetch-post` prints one or more posts as JSON, `--usage` prints what the
   API has cost so far.
+- Opens the window on a file instead of an account with
+  `--fixture fixtures/timeline.json` — no credential, no request, the same
+  screen every run (see [docs/operations.md](docs/operations.md)).
 
 Signing in with X is the only way to authenticate. The app-only bearer token
 was removed: it could not read the home timeline and could not post, repost,

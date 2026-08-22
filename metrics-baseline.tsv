@@ -30,6 +30,7 @@ src/cache/mod.rs	550
 src/cache/timeline.rs	250
 src/compose.rs	350
 src/config.rs	400
+src/fixture.rs	100
 src/image_cache.rs	150
 src/like.rs	150
 src/log.rs	350
@@ -45,7 +46,7 @@ src/repost.rs	150
 src/theme.rs	250
 src/thread.rs	100
 src/toggle.rs	200
-src/ui/mod.rs	2500
+src/ui/mod.rs	2550
 src/ui/reload_policy.rs	300
 src/ui/render.rs	950
 src/usage.rs	350
