@@ -160,6 +160,48 @@ every such tool needs an install step on every CI run and build time is a
 live concern (#46). When one earns that time, this script is what it
 replaces.
 
+## Looking at the window without an account
+
+```sh
+cargo run -- --fixture fixtures/timeline.json
+```
+
+Fills the window from a file instead of from X. **No credential is used and
+no API request is made** — `--fixture` never builds an `XClient`, and every
+paid path in the view goes through one, so a reload, a like, or a thread
+walk has nothing to reach. The buttons are drawn and inert.
+
+The point is that the screen is the same every run. Until this existed the
+window could only be filled from the response cache or from a paid request,
+both of which differ run to run, so "is this laid out correctly?" had no
+fixed thing to ask it of and every UI check ended up on #115 as a sentence
+for a human to act out.
+
+`fixtures/timeline.json` is built to put the awkward cases on one screen:
+
+| Row | What it is there to show |
+| --- | --- |
+| Long unbroken paragraph | Body wraps; the avatar stays a 44px square (#140, #103) |
+| A URL with no spaces in it | Whether a single long token still overflows |
+| Four attachments | The media grid at its widest, with badges (#65) |
+| A quote carrying an image | The quote card's own media (#123) |
+| A repost carrying an image | The original's media on the outer row (#104) |
+| A reply | The "Show thread" toggle and its cost warning (#12) |
+| One of your own posts | The only row offering Delete, the one withholding Repost (#15, #72) |
+| An author with no name | No bare `@` (#13) |
+
+A test loads this file and asserts those rows are still in it, so an edit
+cannot quietly drop the one somebody was relying on.
+
+**Media and avatars still download**, from `pbs.twimg.com` rather than the
+API — no quota, no credits. A fixture whose URLs are unreachable draws the
+same fixed-size frames it would while they were in flight, which is what a
+layout check needs anyway.
+
+Write your own by copying the bundled one. The `items` are
+`x_api::TimelineItem` verbatim, so every field added since #9 is optional
+and a fixture can spell out only the case it is about.
+
 ## Tests
 
 ```sh

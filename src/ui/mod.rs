@@ -13,6 +13,7 @@ use crate::browser;
 use crate::cache;
 use crate::compose::{self, ComposeState, ComposeStatus};
 use crate::config::Config;
+use crate::fixture::Fixture;
 use crate::image_cache;
 use crate::like;
 use crate::log;
@@ -174,6 +175,32 @@ enum StartOutcome {
         cached: Option<(cache::MeEntry, Vec<TimelineItem>)>,
         session_notice: Option<String>,
     },
+}
+
+/// Where the window's first screenful comes from (#146).
+///
+/// The seam this enum draws is the point: until it existed,
+/// [`TimelineView::new`] always went straight to [`TimelineView::start`],
+/// which resolves a credential, reads the response cache and fetches when
+/// that comes back empty. There was no way to hand the view a timeline —
+/// the view went and got one.
+///
+/// So `main` now decides where the data comes from and the view renders
+/// whatever it is given, which is what makes a screen reproducible without
+/// an account.
+#[derive(Debug)]
+pub(crate) enum Startup {
+    /// Resolve a credential, read the cache, fetch if there is nothing on
+    /// file. What every launch did before #146 and what an ordinary launch
+    /// still does.
+    Live,
+    /// Draw these posts and stop.
+    ///
+    /// **No `XClient` is ever built in this mode**, which is not a
+    /// convention but the reason a fixture cannot cost anything: every
+    /// paid path in this view is behind `self.client`, and there is
+    /// nothing there to reach.
+    Fixture(Box<Fixture>),
 }
 
 pub(crate) struct TimelineView {
@@ -410,6 +437,7 @@ impl TimelineView {
     pub(crate) fn new(
         config: Config,
         paths: Paths,
+        startup: Startup,
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) -> Self {
@@ -481,9 +509,42 @@ impl TimelineView {
         // #118: before anything else, so the very first frame has the
         // timeline on the focus path rather than an empty one.
         window.focus(&this.focus_handle);
-        this.start(cx);
+        match startup {
+            Startup::Live => this.start(cx),
+            Startup::Fixture(fixture) => this.show_fixture(*fixture, cx),
+        }
         this.refresh_usage(cx);
         this
+    }
+
+    /// Render a fixture and nothing else (#146).
+    ///
+    /// `client` stays `None`, which is what makes this free rather than
+    /// merely cheap: every request in this view goes through it, so there
+    /// is no path from here to a charge — not a reload, not a like, not a
+    /// thread walk. Buttons that need a client are simply inert.
+    ///
+    /// `signed_in_with_oauth` and the scope are set anyway, because the
+    /// affordances they gate are most of what there is to look at. A
+    /// fixture drawn as a signed-out timeline would be missing the rows
+    /// worth checking.
+    fn show_fixture(&mut self, fixture: Fixture, cx: &mut Context<'_, Self>) {
+        self.signed_in_with_oauth = true;
+        self.oauth_scope = Some(format!(
+            "{} {}",
+            oauth::tokens::TWEET_WRITE_SCOPE,
+            oauth::tokens::LIKE_WRITE_SCOPE
+        ));
+        self.home_user_id = Some(fixture.signed_in_as.id);
+        self.home_username = Some(fixture.signed_in_as.username);
+        self.state = TimelineState::Loaded(fixture.items);
+        // Avatars and attached images still download, from `pbs.twimg.com`
+        // rather than the API — no quota, no credits (see `avatar`). A
+        // fixture whose URLs are unreachable renders the same frames it
+        // would while they were still in flight, which is what a layout
+        // check needs anyway.
+        self.refresh_images(cx);
+        cx.notify();
     }
 
     /// Resolve a credential (stored OAuth session, refreshing if stale, else
@@ -2431,7 +2492,7 @@ mod tests {
     };
     use super::{
         ComposeStatus, Cooldown, CooldownTick, PostLink, PostMedia, PostMetrics, ReloadNotice,
-        ReloadTrigger, RepliedTo, Theme, ThreadFetchState, TimelineItem, TimelineState,
+        ReloadTrigger, RepliedTo, Startup, Theme, ThreadFetchState, TimelineItem, TimelineState,
         ToggleState, action_post_id, at_the_post_cap, byline, compose_error_message,
         cooldown_label, cooldown_tick, format_timestamp, header_title, media_badge, media_columns,
         metrics_label, offers_delete, offers_like, offers_load_older, offers_quote,
@@ -3546,8 +3607,15 @@ mod tests {
         let window = {
             let slot = timeline_slot.clone();
             cx.add_window(move |window, cx| {
-                let timeline = cx
-                    .new(|cx| super::TimelineView::new(smoke_config(), smoke_paths(), window, cx));
+                let timeline = cx.new(|cx| {
+                    super::TimelineView::new(
+                        smoke_config(),
+                        smoke_paths(),
+                        Startup::Live,
+                        window,
+                        cx,
+                    )
+                });
                 *slot.borrow_mut() = Some(timeline.clone());
                 gpui_component::Root::new(timeline, window, cx)
             })
@@ -3587,8 +3655,13 @@ mod tests {
             let slot = timeline_slot.clone();
             cx.add_window(move |window, cx| {
                 let timeline = cx.new(|cx| {
-                    let mut view =
-                        super::TimelineView::new(smoke_config(), smoke_paths(), window, cx);
+                    let mut view = super::TimelineView::new(
+                        smoke_config(),
+                        smoke_paths(),
+                        Startup::Live,
+                        window,
+                        cx,
+                    );
                     view.signed_in_with_oauth = true;
                     view
                 });
@@ -3691,7 +3764,8 @@ mod tests {
             let slot = timeline_slot.clone();
             cx.add_window(move |window, cx| {
                 let timeline = cx.new(|cx| {
-                    let mut view = super::TimelineView::new(config, paths, window, cx);
+                    let mut view =
+                        super::TimelineView::new(config, paths, Startup::Live, window, cx);
                     // #55 hid behind this flag: the composer -- the one widget
                     // that reaches back up for the window root -- is only
                     // rendered for an OAuth session, so every run on a bearer

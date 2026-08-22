@@ -30,6 +30,7 @@ mod browser;
 mod cache;
 mod compose;
 mod config;
+mod fixture;
 mod image_cache;
 mod like;
 mod log;
@@ -101,6 +102,25 @@ fn main() {
         std::process::exit(usage_only(&config, &paths));
     }
 
+    // #146: `--fixture <path>` fills the window from a file instead of
+    // from an account. Resolved here, before the window opens, so a
+    // missing or malformed fixture fails on the terminal it was typed in
+    // rather than as an empty window with no explanation.
+    let startup = match fetch_post_arg(&args, "--fixture") {
+        FetchPostArg::Absent => ui::Startup::Live,
+        FetchPostArg::Value(path) => match fixture::load(std::path::Path::new(path)) {
+            Ok(loaded) => ui::Startup::Fixture(Box::new(loaded)),
+            Err(error) => {
+                eprintln!("--fixture: {error:#}");
+                std::process::exit(1);
+            }
+        },
+        FetchPostArg::MissingValue => {
+            eprintln!("--fixture requires a path to a fixture JSON file.");
+            std::process::exit(1);
+        }
+    };
+
     // #49: from here on, anything worth knowing goes to the log file as
     // well as stderr — which is the only record at all for a `.app`
     // launched from Finder, where stderr goes nowhere (#40, #45).
@@ -150,7 +170,7 @@ fn main() {
         };
 
         let opened = cx.open_window(options, |window, cx| {
-            let timeline = cx.new(|cx| ui::TimelineView::new(config, paths, window, cx));
+            let timeline = cx.new(|cx| ui::TimelineView::new(config, paths, startup, window, cx));
             // #38: gpui-component's widgets reach back up to the window's
             // root expecting to find its `Root` there — its text input asks
             // for it on the very first render, and `Root::read` panics

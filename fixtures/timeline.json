@@ -1,0 +1,94 @@
+{
+  "signed_in_as": { "id": "5685672", "username": "usadamasa" },
+  "items": [
+    {
+      "id": "9000000000000000001",
+      "text": "A single unbroken paragraph with no line breaks at all, written to be longer than the window is wide so that it has to wrap: if the body column cannot shrink below its content it runs past the right edge instead, which is what #140 was, and the avatar beside it must stay a 44px square throughout, which is what #103 was. Both fail visibly in this row and nowhere else.",
+      "created_at": "2026-08-22T09:40:00.000Z",
+      "author_name": "Long Text",
+      "author_username": "longtext",
+      "author_avatar_url": "https://pbs.twimg.com/profile_images/1354479643882004483/Btnfm47p_normal.jpg",
+      "metrics": { "replies": 12, "reposts": 34, "likes": 5600 }
+    },
+    {
+      "id": "9000000000000000002",
+      "text": "https://example.com/a/path/that/never/breaks/because/it/contains/no/spaces/at/all/and/keeps/going",
+      "created_at": "2026-08-22T09:35:00.000Z",
+      "author_name": "Unbroken Token",
+      "author_username": "unbroken",
+      "links": [
+        {
+          "url": "https://example.com/a/path/that/never/breaks/because/it/contains/no/spaces/at/all/and/keeps/going",
+          "label": "example.com/a/path/that/never/breaks"
+        }
+      ]
+    },
+    {
+      "id": "9000000000000000003",
+      "text": "Four attachments, to see the grid at its widest.",
+      "created_at": "2026-08-22T09:30:00.000Z",
+      "author_name": "Four Images",
+      "author_username": "fourimages",
+      "media": [
+        { "url": "https://pbs.twimg.com/media/one.jpg", "kind": "photo", "width": 1200, "height": 675, "alt_text": "first" },
+        { "url": "https://pbs.twimg.com/media/two.jpg", "kind": "photo", "width": 1200, "height": 675 },
+        { "url": "https://pbs.twimg.com/media/three.jpg", "kind": "video", "width": 1280, "height": 720 },
+        { "url": "https://pbs.twimg.com/media/four.jpg", "kind": "animated_gif", "width": 480, "height": 270 }
+      ]
+    },
+    {
+      "id": "9000000000000000004",
+      "text": "Worth reading.",
+      "created_at": "2026-08-22T09:25:00.000Z",
+      "author_name": "Quoter",
+      "author_username": "quoter",
+      "quoted": {
+        "author_name": "Developers",
+        "author_username": "XDevelopers",
+        "text": "The quoted post, carrying the image that is the whole point of the quote (#123).",
+        "media": [
+          { "url": "https://pbs.twimg.com/media/quoted.jpg", "kind": "photo", "width": 1200, "height": 675, "alt_text": "the quoted post's photo" }
+        ]
+      }
+    },
+    {
+      "id": "9000000000000000005",
+      "text": "The original's text, shown in place of a truncated RT (#13), with the original's image carried onto the row (#104).",
+      "created_at": "2026-08-22T09:20:00.000Z",
+      "author_name": "Developers",
+      "author_username": "XDevelopers",
+      "reposted_by": "reposter1",
+      "original_post_id": "9000000000000000105",
+      "media": [
+        { "url": "https://pbs.twimg.com/media/reposted.jpg", "kind": "photo", "width": 1200, "height": 675 }
+      ]
+    },
+    {
+      "id": "9000000000000000006",
+      "text": "A reply, so the \"Show thread\" toggle and its cost warning are on screen.",
+      "created_at": "2026-08-22T09:15:00.000Z",
+      "author_name": "Replier",
+      "author_username": "replier",
+      "replied_to": {
+        "post_id": "9000000000000000106",
+        "author_name": "Developers",
+        "author_username": "XDevelopers"
+      }
+    },
+    {
+      "id": "9000000000000000007",
+      "text": "My own post: the only row that offers Delete, and the one that withholds Repost (#15, #72).",
+      "created_at": "2026-08-22T09:10:00.000Z",
+      "author_name": "UCHIDA Masaru",
+      "author_username": "usadamasa",
+      "metrics": { "replies": 0, "reposts": 0, "likes": 1 }
+    },
+    {
+      "id": "9000000000000000008",
+      "text": "An author whose display name never expanded renders without a bare @ (#13).",
+      "created_at": "2026-08-22T09:05:00.000Z",
+      "author_name": "",
+      "author_username": ""
+    }
+  ]
+}
