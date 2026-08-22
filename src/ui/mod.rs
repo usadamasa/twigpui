@@ -2034,6 +2034,17 @@ impl TimelineView {
             .flex()
             .flex_col()
             .flex_1()
+            // #140: `flex_1` takes the *spare* width; it does not permit
+            // shrinking below the content, because a flex child's
+            // `min-width` defaults to `auto`. Long text therefore pushed
+            // the column wider than the row and the overflow was clipped.
+            // `min_w_0` is what lets it wrap instead.
+            //
+            // #103 is why this surfaced when it did: before the avatar got
+            // `flex_shrink_0`, the avatar absorbed the overrun by
+            // collapsing. Pinning it was right, and left the body as the
+            // only place the extra width could go.
+            .min_w_0()
             .gap_1()
             // #13: a repost shows who reposted it as a small line above the
             // body, which by this point already holds the *original* post
