@@ -313,7 +313,12 @@ heading ("⌘N Focus the composer").
 `⌘W`/`⌘M` keep working — they are ordinary bindings — but the menu stops
 being the one macOS treats as the window list (#109).
 
-**`⌘W` ends the app**, since there is one window, exactly as `⌘Q` does. It
-does not prompt, and an unsent draft goes with it — the same hazard `⌘Q` has
-always had.
+**`⌘W` ends the app**, since there is one window — but only because closing
+the last window quits explicitly (#139). gpui keeps the process alive on
+its own, which is right for an app you can ask for another window; this one
+cannot, so `⌘W` used to leave a process running with nothing on screen and
+nothing but `⌘Q` able to reach it.
+
+Like `⌘Q`, it does not prompt, and an unsent draft goes with it — the same
+hazard `⌘Q` has always had.
 

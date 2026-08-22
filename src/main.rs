@@ -126,6 +126,18 @@ fn main() {
         // window fails to open (below) still has a menu bar.
         cx.on_action(|_: &menu::Quit, cx| cx.quit());
         cx.set_menus(menu::menus());
+        // #139: closing the last window ends the app. gpui keeps the
+        // process alive on its own — right for an app you can ask for
+        // another window, wrong for this one, where `cmd-w` left a process
+        // running with nothing on screen and only `cmd-q` able to reach
+        // it. Counted rather than assumed, so a second window would still
+        // have to be the last one out.
+        cx.on_window_closed(|cx| {
+            if cx.windows().is_empty() {
+                cx.quit();
+            }
+        })
+        .detach();
 
         let bounds = Bounds::centered(None, size(px(560.0), px(820.0)), cx);
         let options = WindowOptions {
