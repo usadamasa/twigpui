@@ -54,6 +54,11 @@ pub(crate) const RADIUS_CONTROL: Pixels = px(6.0);
 /// Image thumbnails, which sit a step tighter than a control (#95).
 pub(crate) const RADIUS_THUMB: Pixels = px(5.0);
 
+/// How big a toolbar icon is drawn (#95) — matched to the meta text size
+/// rather than the body size, since an icon in a toolbar is a control's
+/// label, not prose.
+pub(crate) const ICON_SIZE: Pixels = px(15.0);
+
 /// How tall one attached image renders (#65), cut from 160px by #95.
 ///
 /// Four attachments at the old height filled the window on their own,

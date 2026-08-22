@@ -720,9 +720,54 @@ pub(super) fn quote_row(
 /// because an app-only bearer token could not read the home one.
 pub(super) fn header_title(home_username: Option<&str>) -> String {
     match home_username {
-        Some(username) => format!("@{username} — Home timeline"),
-        None => "Home timeline".to_string(),
+        Some(username) => format!("@{username}"),
+        // Before `/me` resolves there is no account to name, and the app's
+        // own name is what a macOS toolbar shows in its place.
+        None => "twigpui".to_string(),
     }
+}
+
+/// The toolbar's timeline switcher (#95), shaped like a macOS segmented
+/// control: one trough with the selected segment lifted out of it in the
+/// window's own background color.
+///
+/// #63 is what will fill it. Today `header` hands it a single entry, which
+/// is honest — Home is the only timeline this app can fetch — and the
+/// point of building the frame now is that adding the second one is a
+/// change to that array rather than to the toolbar's layout.
+///
+/// Segments carry no click handler yet for the same reason: with one
+/// timeline there is nothing to switch to, and a control that responds to
+/// a click by doing nothing is worse than one that plainly does not.
+pub(super) fn tab_bar(tabs: &[(&str, bool)], theme: Theme) -> AnyElement {
+    let mut trough = div()
+        .flex()
+        .items_center()
+        .p(px(2.0))
+        .rounded(theme::RADIUS_CONTROL)
+        .bg(rgb(theme.border))
+        .text_size(theme::TEXT_META);
+
+    for (label, selected) in tabs {
+        trough = trough.child(
+            div()
+                .px_2()
+                .py_0p5()
+                .rounded(px(4.0))
+                .when(*selected, |segment| {
+                    segment
+                        .bg(rgb(theme.bg))
+                        .text_color(rgb(theme.text))
+                        .font_weight(FontWeight::MEDIUM)
+                })
+                .when(!*selected, |segment| {
+                    segment.text_color(rgb(theme.text_muted))
+                })
+                .child((*label).to_string()),
+        );
+    }
+
+    trough.into_any_element()
 }
 
 /// How many attached images one row will render (#65). X allows up to four

@@ -3,11 +3,12 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use gpui::{
-    AnyElement, Context, Entity, FocusHandle, FontWeight, ScrollHandle, SharedString, Subscription,
-    Task, Window, div, img, prelude::*, px, rgb,
+    AnyElement, Context, Entity, FocusHandle, Focusable as _, FontWeight, ScrollHandle,
+    SharedString, Subscription, Task, Window, div, img, prelude::*, px, rgb, svg,
 };
 use gpui_component::input::{Input, InputEvent, InputState};
 
+use crate::assets;
 use crate::avatar;
 use crate::browser;
 use crate::cache;
@@ -37,8 +38,8 @@ use render::{
     media_columns, notice, offers_delete, offers_like, offers_quote, offers_reauthorize,
     offers_reply, offers_repost, open_post_link, quote_card, quote_row, reload_notice_banner,
     render_thread_chain, reply_banner_label, reply_row, reply_target_label, repost_banner_label,
-    repost_row, session_notice_banner, sign_in_pill, thread_action_label, thread_toggle_row,
-    usage_color, usage_label, with_count,
+    repost_row, session_notice_banner, sign_in_pill, tab_bar, thread_action_label,
+    thread_toggle_row, usage_color, usage_label, with_count,
 };
 use render::{RowCounts, row_counts};
 
@@ -1813,7 +1814,7 @@ impl TimelineView {
     /// OAuth — see [`Render::render`]'s doc on why a missing `tweet.write`
     /// scope doesn't hide this entirely. #16 adds the quote target card, when
     /// one is set — see [`Self::composer_quote_card`].
-    fn composer(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
+    fn composer(&self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let theme = self.theme;
         let text = self.compose.text().to_string();
         let length = compose::weighted_length(&text);
@@ -1825,6 +1826,18 @@ impl TimelineView {
         } else {
             theme.text_muted
         };
+        // #95: the counter and the Post button appear once the field is
+        // being used, so an idle window shows one quiet line instead of a
+        // count and a button for a post nobody is writing.
+        //
+        // A non-empty draft keeps them regardless of focus. Hiding the
+        // button while a draft exists would leave the only way to send it
+        // behind clicking back into the field — and #14 treats never
+        // losing a draft as the composer's main promise, which a hidden
+        // send button quietly breaks.
+        let showing_controls = self.compose_input.focus_handle(cx).is_focused(window)
+            || !text.trim().is_empty()
+            || is_submitting;
 
         div()
             .flex()
@@ -1852,60 +1865,62 @@ impl TimelineView {
                 compose_error_message(self.compose.status()),
                 |column, message| column.child(div().text_color(rgb(theme.danger)).child(message)),
             )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        div()
-                            // #95: a readout beside a control, not body
-                            // text.
-                            .text_size(theme::TEXT_META)
-                            .text_color(rgb(counter_color))
-                            .child(format!("{length}/{}", compose::MAX_WEIGHTED_LENGTH)),
-                    )
-                    .child(
-                        div()
-                            .id("compose-submit")
-                            .px_2()
-                            .py_1()
-                            .rounded(theme::RADIUS_CONTROL)
-                            // #95: this one *is* a default button — it is
-                            // the composer's whole point — so it keeps the
-                            // accent fill while it can be pressed. What
-                            // changes is the other state: an unpressable
-                            // button used to be a solid dark grey block,
-                            // which reads as a control that is merely a
-                            // different color rather than one that is off.
-                            // macOS drains the fill instead.
-                            .when(can_submit, |button| {
-                                button
-                                    .bg(rgb(theme.accent))
-                                    .text_color(rgb(theme.button_label))
-                            })
-                            .when(!can_submit, |button| {
-                                button
-                                    .border_1()
-                                    .border_color(rgb(theme.border))
-                                    .text_color(rgb(theme.text_tertiary))
-                            })
-                            .text_size(theme::TEXT_META)
-                            .child(if is_submitting { "Posting…" } else { "Post" })
-                            // #14's double-submit guard, part two: while a
-                            // submit is in flight (or the draft is blank/
-                            // over-length) the button carries no click
-                            // handler at all, not just a disabled-looking
-                            // style — `submit_post` re-checks the same
-                            // condition regardless, but this is what stops
-                            // the click from ever reaching it.
-                            .when(can_submit, |button| {
-                                button.on_click(cx.listener(|this, _event, window, cx| {
-                                    this.submit_post(window, cx);
-                                }))
-                            }),
-                    ),
-            )
+            .when(showing_controls, |composer| {
+                composer.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .child(
+                            div()
+                                // #95: a readout beside a control, not body
+                                // text.
+                                .text_size(theme::TEXT_META)
+                                .text_color(rgb(counter_color))
+                                .child(format!("{length}/{}", compose::MAX_WEIGHTED_LENGTH)),
+                        )
+                        .child(
+                            div()
+                                .id("compose-submit")
+                                .px_2()
+                                .py_1()
+                                .rounded(theme::RADIUS_CONTROL)
+                                // #95: this one *is* a default button — it is
+                                // the composer's whole point — so it keeps the
+                                // accent fill while it can be pressed. What
+                                // changes is the other state: an unpressable
+                                // button used to be a solid dark grey block,
+                                // which reads as a control that is merely a
+                                // different color rather than one that is off.
+                                // macOS drains the fill instead.
+                                .when(can_submit, |button| {
+                                    button
+                                        .bg(rgb(theme.accent))
+                                        .text_color(rgb(theme.button_label))
+                                })
+                                .when(!can_submit, |button| {
+                                    button
+                                        .border_1()
+                                        .border_color(rgb(theme.border))
+                                        .text_color(rgb(theme.text_tertiary))
+                                })
+                                .text_size(theme::TEXT_META)
+                                .child(if is_submitting { "Posting…" } else { "Post" })
+                                // #14's double-submit guard, part two: while a
+                                // submit is in flight (or the draft is blank/
+                                // over-length) the button carries no click
+                                // handler at all, not just a disabled-looking
+                                // style — `submit_post` re-checks the same
+                                // condition regardless, but this is what stops
+                                // the click from ever reaching it.
+                                .when(can_submit, |button| {
+                                    button.on_click(cx.listener(|this, _event, window, cx| {
+                                        this.submit_post(window, cx);
+                                    }))
+                                }),
+                        ),
+                )
+            })
     }
 
     /// Submit the composer's current draft as a new post (#14), quoting
@@ -2043,7 +2058,6 @@ impl TimelineView {
         div()
             .flex()
             .items_center()
-            .justify_between()
             .gap_3()
             // #95: a toolbar, not a two-line masthead. The request count
             // that used to sit under the title moved to `status_bar`, which
@@ -2054,9 +2068,16 @@ impl TimelineView {
             .bg(rgb(theme.bg_header))
             .border_b_1()
             .border_color(rgb(theme.border))
+            // #95: the frame for #63's timeline switcher. Only Home
+            // exists today, so the control carries one segment — but the
+            // segment is data, not layout, so adding a list later is a
+            // matter of handing this another entry rather than rebuilding
+            // the toolbar around it.
+            .child(tab_bar(&[("Home", true)], theme))
             .child(
                 div()
-                    .font_weight(FontWeight::BOLD)
+                    .text_size(theme::TEXT_META)
+                    .text_color(rgb(theme.text_tertiary))
                     .child(header_title(self.home_username.as_deref())),
             )
             .child(
@@ -2064,6 +2085,7 @@ impl TimelineView {
                     .flex()
                     .items_center()
                     .gap_2()
+                    .ml_auto()
                     // #14: an already-signed-in session from before #14
                     // holds no `tweet.write` scope — #31's exact lesson
                     // repeats here (an already-active session hides its own
@@ -2073,48 +2095,75 @@ impl TimelineView {
                         offers_reauthorize(self.signed_in_with_oauth, self.oauth_scope.as_deref()),
                         |row| row.child(sign_in_pill("reauthorize", "Re-authorize", theme, cx)),
                     )
-                    .child(
-                        div()
-                            .id("primary-action")
-                            .px_2()
-                            .py_1()
-                            .rounded(theme::RADIUS_CONTROL)
-                            // #95: a bordered toolbar control, not a filled
-                            // pill. Reload is the thing this window does
-                            // most often, but it is not the thing to look
-                            // at first — a saturated fill in the corner of
-                            // every frame made it the loudest element on
-                            // screen. macOS reserves the filled treatment
-                            // for a sheet's default button, which this is
-                            // not.
-                            //
-                            // Sign-in is the exception: with no session
-                            // there is nothing else to do in the window, so
-                            // it keeps the fill and reads as the call to
-                            // action it is.
-                            .when(matches!(action, PrimaryAction::SignIn) && !busy, |button| {
-                                button
-                                    .bg(rgb(theme.accent))
-                                    .text_color(rgb(theme.button_label))
-                            })
-                            .when(!matches!(action, PrimaryAction::SignIn) || busy, |button| {
-                                button
-                                    .border_1()
-                                    .border_color(rgb(theme.border))
-                                    .text_color(rgb(if busy {
-                                        theme.text_tertiary
-                                    } else {
-                                        theme.text
-                                    }))
-                            })
-                            .text_size(theme::TEXT_META)
-                            .child(label)
-                            .on_click(cx.listener(move |this, _event, _window, cx| match action {
-                                PrimaryAction::Reload => this.reload(ReloadTrigger::Polling, cx),
-                                PrimaryAction::SignIn => this.sign_in(cx),
-                            })),
-                    ),
+                    .child(self.primary_action_control(&label, busy, action, cx)),
             )
+    }
+
+    /// The toolbar's one action: reload, or sign in when there is no
+    /// session yet (#95).
+    ///
+    /// The two look nothing alike on purpose. Reload is an icon — the
+    /// action is constant, frequent, and named by a symbol every app
+    /// shares, so spelling it out in a bordered button made the corner of
+    /// every frame louder than the timeline. Its `label` still exists for
+    /// the states that have something to say ("Loading…", a rate-limit
+    /// countdown), but those already reach the reader through `body` and
+    /// #57's banner, so here they only dim the icon.
+    ///
+    /// Sign-in keeps its words and its fill: with no session there is
+    /// nothing else to do in the window, and an unlabelled glyph would be
+    /// a puzzle at exactly the moment the app has to explain itself.
+    fn primary_action_control(
+        &self,
+        label: &str,
+        busy: bool,
+        action: PrimaryAction,
+        cx: &mut Context<'_, Self>,
+    ) -> AnyElement {
+        let theme = self.theme;
+        let on_click = cx.listener(move |this, _event, _window, cx| match action {
+            PrimaryAction::Reload => this.reload(ReloadTrigger::Polling, cx),
+            PrimaryAction::SignIn => this.sign_in(cx),
+        });
+
+        match action {
+            PrimaryAction::Reload => div()
+                .id("primary-action")
+                .p_1()
+                .rounded(theme::RADIUS_CONTROL)
+                .child(
+                    svg()
+                        .path(assets::RELOAD_ICON)
+                        .size(theme::ICON_SIZE)
+                        .text_color(rgb(if busy {
+                            theme.text_tertiary
+                        } else {
+                            theme.text_muted
+                        })),
+                )
+                .on_click(on_click)
+                .into_any_element(),
+            PrimaryAction::SignIn => div()
+                .id("primary-action")
+                .px_2()
+                .py_1()
+                .rounded(theme::RADIUS_CONTROL)
+                .text_size(theme::TEXT_META)
+                .when(busy, |button| {
+                    button
+                        .border_1()
+                        .border_color(rgb(theme.border))
+                        .text_color(rgb(theme.text_tertiary))
+                })
+                .when(!busy, |button| {
+                    button
+                        .bg(rgb(theme.accent))
+                        .text_color(rgb(theme.button_label))
+                })
+                .child(label.to_string())
+                .on_click(on_click)
+                .into_any_element(),
+        }
     }
 
     /// The strip along the bottom of the window (#95).
@@ -2520,7 +2569,7 @@ fn load_older_row(theme: Theme, cx: &mut Context<'_, TimelineView>) -> impl Into
 }
 
 impl Render for TimelineView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let theme = self.theme;
 
         div()
@@ -2622,7 +2671,7 @@ impl Render for TimelineView {
             // than hiding the whole composer and leaving no way to
             // discover why it's gone.
             .when(self.signed_in_with_oauth, |column| {
-                column.child(self.composer(cx))
+                column.child(self.composer(window, cx))
             })
             .child(self.body(cx))
             // #95: the status bar, which is where the running request
@@ -3218,14 +3267,19 @@ mod tests {
 
     #[test]
     fn header_title_names_the_signed_in_account() {
-        assert_eq!(header_title(Some("alice")), "@alice — Home timeline");
+        // Only the account. Which timeline is showing is the tab bar's to
+        // say since #95, and saying it twice in one 44px strip was how the
+        // toolbar ran out of room.
+        assert_eq!(header_title(Some("alice")), "@alice");
     }
 
     #[test]
     fn header_title_falls_back_before_me_has_resolved() {
         // The only case left since #33: the window always shows the home
-        // timeline, so the only unknown is whose it is.
-        assert_eq!(header_title(None), "Home timeline");
+        // timeline, so the only unknown is whose it is. Until `/me`
+        // answers there is no account to name, and the app's own name is
+        // what a macOS toolbar carries in its place.
+        assert_eq!(header_title(None), "twigpui");
     }
 
     #[test]

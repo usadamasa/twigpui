@@ -24,6 +24,7 @@
 # code somewhere new.
 #
 # Format: <path><TAB><max implementation lines>
+src/assets.rs	100
 src/avatar.rs	100
 src/browser.rs	100
 src/cache/mod.rs	550
@@ -46,9 +47,9 @@ src/repost.rs	150
 src/theme.rs	350
 src/thread.rs	100
 src/toggle.rs	200
-src/ui/mod.rs	2650
+src/ui/mod.rs	2700
 src/ui/reload_policy.rs	300
-src/ui/render.rs	1000
+src/ui/render.rs	1050
 src/usage.rs	350
 src/x_api/client.rs	750
 src/x_api/mod.rs	50
