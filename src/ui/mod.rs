@@ -41,7 +41,7 @@ use render::{
 
 use crate::menu::{
     BlurComposer, CloseWindow, FocusComposer, KEY_CONTEXT, Minimize, Reload, ScrollToTop,
-    ShowAbout, SubmitPost, shortcuts,
+    ShowAbout, shortcuts,
 };
 use crate::oauth;
 use crate::paths::Paths;
@@ -2326,9 +2326,6 @@ impl Render for TimelineView {
                 // not be a way around the throttle that exists to stop
                 // this app spending money in a loop.
                 this.reload(ReloadTrigger::UserAction, cx);
-            }))
-            .on_action(cx.listener(|this, _: &SubmitPost, window, cx| {
-                this.submit_post(window, cx);
             }))
             .on_action(cx.listener(|this, _: &FocusComposer, window, cx| {
                 this.compose_input

@@ -12,10 +12,6 @@ gpui::actions!(
         /// to `cmd-r` — the reload gesture every app shares, and not a key
         /// anyone hits by accident.
         Reload,
-        /// Submit the composer's draft (#58), bound to `cmd-enter`. Plain
-        /// `enter` is deliberately *not* bound: it has to keep inserting a
-        /// newline, and a post is not undoable.
-        SubmitPost,
         /// Move focus into the composer (#58).
         FocusComposer,
         /// Move focus out of the composer (#58), leaving the draft alone.
@@ -100,19 +96,6 @@ const RELOAD: Shortcut = Shortcut {
     label: "Reload",
     in_header: true,
     menu_label: Some("Reload"),
-};
-
-/// Submit the draft. Plain `enter` is deliberately *not* bound: it has to
-/// keep inserting a newline, and a post is not undoable.
-const SUBMIT_POST: Shortcut = Shortcut {
-    keystroke: "cmd-enter",
-    context: Some(KEY_CONTEXT),
-    bind: |keystroke, context| gpui::KeyBinding::new(keystroke, SubmitPost, context),
-    item: |label| gpui::MenuItem::action(label, SubmitPost),
-    glyphs: "⌘↩",
-    label: "Post",
-    in_header: true,
-    menu_label: Some("Submit Post"),
 };
 
 /// Move focus into the composer.
@@ -216,9 +199,8 @@ const SCROLL_TO_TOP: Shortcut = Shortcut {
 /// `CLOSE_WINDOW` and `SCROLL_TO_TOP` sat here unbound after #109 and #22
 /// added them everywhere except this list. `every_menu_item_has_a_binding`
 /// is the test that now catches it.
-const ALL_SHORTCUTS: [&Shortcut; 8] = [
+const ALL_SHORTCUTS: [&Shortcut; 7] = [
     &RELOAD,
-    &SUBMIT_POST,
     &FOCUS_COMPOSER,
     &BLUR_COMPOSER,
     &QUIT,
@@ -246,6 +228,13 @@ const ALL_SHORTCUTS: [&Shortcut; 8] = [
 /// a question about the timeline and belong to the view that answers it;
 /// quitting is not the window's business, and scoping it would mean
 /// `cmd-q` doing nothing whenever focus sat anywhere else.
+///
+/// **Nothing here submits a post (#142).** `cmd-enter` did from #58 until
+/// the composer's button turned out to be the only way anyone reached for.
+/// Plain `enter` was never bound and still is not, for the reason that
+/// outlives the removal: it has to keep inserting a newline, and a post is
+/// not undoable. Should a keyboard route ever come back, that is still the
+/// constraint it has to satisfy.
 pub(crate) fn init(cx: &mut gpui::App) {
     cx.bind_keys(
         ALL_SHORTCUTS
@@ -273,10 +262,7 @@ pub(crate) fn menus() -> Vec<gpui::Menu> {
         },
         gpui::Menu {
             name: "File".into(),
-            items: [FOCUS_COMPOSER.menu_item(), SUBMIT_POST.menu_item()]
-                .into_iter()
-                .flatten()
-                .collect(),
+            items: FOCUS_COMPOSER.menu_item().into_iter().collect(),
         },
         gpui::Menu {
             name: "View".into(),
