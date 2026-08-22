@@ -54,6 +54,15 @@ pub(crate) const RADIUS_CONTROL: Pixels = px(6.0);
 /// Image thumbnails, which sit a step tighter than a control (#95).
 pub(crate) const RADIUS_THUMB: Pixels = px(5.0);
 
+/// How tall one attached image renders (#65), cut from 160px by #95.
+///
+/// Four attachments at the old height filled the window on their own,
+/// which put the post under them off screen — the timeline stopped being a
+/// timeline whenever someone posted a grid. At this height a full grid of
+/// four still fits beside its neighbours, and a thumbnail is a thing you
+/// click to see properly (#70) rather than the thing you read.
+pub(crate) const MEDIA_CELL_HEIGHT: Pixels = px(96.0);
+
 /// One timeline row's horizontal padding.
 pub(crate) const ROW_PAD_X: Pixels = px(12.0);
 

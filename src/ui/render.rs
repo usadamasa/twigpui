@@ -734,7 +734,9 @@ pub(super) const MAX_RENDERED_MEDIA: usize = 4;
 /// media's own `width`/`height`: a row's height must not depend on which
 /// images have finished downloading, or the timeline reflows under the
 /// reader as they land.
-pub(super) const MEDIA_CELL_HEIGHT: gpui::Pixels = px(160.0);
+///
+/// The value lives in `theme` with the rest of #95's dimensions.
+pub(super) use crate::theme::MEDIA_CELL_HEIGHT;
 
 /// How many columns to lay `count` thumbnails out in (#65): one across for
 /// a single image, two for anything more. Three across would each be too
