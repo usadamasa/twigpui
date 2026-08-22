@@ -43,12 +43,12 @@ src/oauth/tokens.rs	200
 src/paths.rs	300
 src/rate_limit.rs	350
 src/repost.rs	150
-src/theme.rs	250
+src/theme.rs	350
 src/thread.rs	100
 src/toggle.rs	200
-src/ui/mod.rs	2550
+src/ui/mod.rs	2600
 src/ui/reload_policy.rs	300
-src/ui/render.rs	950
+src/ui/render.rs	1000
 src/usage.rs	350
 src/x_api/client.rs	750
 src/x_api/mod.rs	50

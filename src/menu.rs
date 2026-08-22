@@ -70,14 +70,6 @@ struct Shortcut {
     /// Builds this shortcut's menu item, closing over the same action as
     /// [`Shortcut::bind`] — the pairing is written once, in this constant.
     item: fn(&'static str) -> gpui::MenuItem,
-    /// The same keystroke written for a human — the header's badge (#58).
-    glyphs: &'static str,
-    /// How the header names the action.
-    label: &'static str,
-    /// Whether the header's hint strip (#58) advertises it. The strip is
-    /// what this app does that another one would not, so `cmd-q` stays off
-    /// it — the one binding on the list nobody needs told about.
-    in_header: bool,
     /// How the menu bar names the action, or `None` to keep it out of the
     /// menu bar. The wordings differ on purpose: a menu item is read on
     /// its own ("New Post"), while the header's strip is read as a row of
@@ -92,9 +84,6 @@ const RELOAD: Shortcut = Shortcut {
     context: Some(KEY_CONTEXT),
     bind: |keystroke, context| gpui::KeyBinding::new(keystroke, Reload, context),
     item: |label| gpui::MenuItem::action(label, Reload),
-    glyphs: "⌘R",
-    label: "Reload",
-    in_header: true,
     menu_label: Some("Reload"),
 };
 
@@ -104,9 +93,6 @@ const FOCUS_COMPOSER: Shortcut = Shortcut {
     context: Some(KEY_CONTEXT),
     bind: |keystroke, context| gpui::KeyBinding::new(keystroke, FocusComposer, context),
     item: |label| gpui::MenuItem::action(label, FocusComposer),
-    glyphs: "⌘N",
-    label: "Focus the composer",
-    in_header: true,
     menu_label: Some("New Post"),
 };
 
@@ -117,9 +103,6 @@ const BLUR_COMPOSER: Shortcut = Shortcut {
     context: Some(KEY_CONTEXT),
     bind: |keystroke, context| gpui::KeyBinding::new(keystroke, BlurComposer, context),
     item: |label| gpui::MenuItem::action(label, BlurComposer),
-    glyphs: "esc",
-    label: "Leave the composer",
-    in_header: true,
     menu_label: None,
 };
 
@@ -130,9 +113,6 @@ const QUIT: Shortcut = Shortcut {
     context: None,
     bind: |keystroke, context| gpui::KeyBinding::new(keystroke, Quit, context),
     item: |label| gpui::MenuItem::action(label, Quit),
-    glyphs: "⌘Q",
-    label: "Quit",
-    in_header: false,
     menu_label: Some("Quit twigpui"),
 };
 
@@ -143,9 +123,6 @@ const MINIMIZE: Shortcut = Shortcut {
     context: Some(KEY_CONTEXT),
     bind: |keystroke, context| gpui::KeyBinding::new(keystroke, Minimize, context),
     item: |label| gpui::MenuItem::action(label, Minimize),
-    glyphs: "⌘M",
-    label: "Minimize",
-    in_header: false,
     menu_label: Some("Minimize"),
 };
 
@@ -160,9 +137,6 @@ const CLOSE_WINDOW: Shortcut = Shortcut {
     context: Some(KEY_CONTEXT),
     bind: |keystroke, context| gpui::KeyBinding::new(keystroke, CloseWindow, context),
     item: |label| gpui::MenuItem::action(label, CloseWindow),
-    glyphs: "⌘W",
-    label: "Close Window",
-    in_header: false,
     menu_label: Some("Close Window"),
 };
 
@@ -176,9 +150,6 @@ const SCROLL_TO_TOP: Shortcut = Shortcut {
     context: Some(KEY_CONTEXT),
     bind: |keystroke, context| gpui::KeyBinding::new(keystroke, ScrollToTop, context),
     item: |label| gpui::MenuItem::action(label, ScrollToTop),
-    glyphs: "⌘↑",
-    label: "Back to the top",
-    in_header: true,
     menu_label: Some("Back to Top"),
 };
 
@@ -300,38 +271,18 @@ impl Shortcut {
     }
 }
 
-/// The shortcut list shown in the header (#58) and mirrored in the README —
-/// one source for both, so a binding cannot be added without the list that
-/// tells the user it exists.
-///
-/// Deliberately short. Anything spending an API request beyond `cmd-r` is
-/// absent: "Load older" pages backwards one paid request per press, and a
-/// key that spends money on a mis-hit is not a convenience.
-pub(crate) fn shortcuts() -> Vec<(&'static str, &'static str)> {
-    ALL_SHORTCUTS
-        .iter()
-        .filter(|shortcut| shortcut.in_header)
-        .map(|shortcut| (shortcut.glyphs, shortcut.label))
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{ALL_SHORTCUTS, menus, shortcuts};
+    use super::{ALL_SHORTCUTS, menus};
 
     // --- #58: keyboard shortcuts ---
 
     #[test]
     fn no_shortcut_is_a_bare_letter() {
         // The issue's central hazard: a bare `j`/`k`/`n` firing while the
-        // user is typing a post. This has to walk `ALL_SHORTCUTS`, not
-        // `shortcuts()`: the latter is filtered to what the header
-        // advertises, so a binding registered with `in_header: false` —
-        // `QUIT` (#99) today, maybe another one tomorrow — would go
-        // unchecked. It also has to compare `keystroke`, not `glyphs`:
-        // `keystroke` is what `init` actually hands to `KeyBinding::new`,
-        // so that is what determines whether gpui fires the binding while
-        // someone is typing.
+        // user is typing a post. It compares `keystroke` because that is
+        // what `init` hands to `KeyBinding::new`, so that is what decides
+        // whether gpui fires the binding while someone is typing.
         //
         // `"escape"` is allowed with no modifier: it is a named special
         // key, not a letter that ordinary typing would produce.
@@ -339,37 +290,22 @@ mod tests {
             let keystroke = shortcut.keystroke;
             assert!(
                 keystroke.starts_with("cmd-") || keystroke == "escape",
-                "{} is bound to {keystroke}, which would fire while typing",
-                shortcut.label
+                "{keystroke} would fire while typing"
             );
         }
     }
 
     #[test]
-    fn every_shortcut_is_labelled() {
-        for (key, label) in shortcuts() {
-            assert!(!key.is_empty(), "a shortcut with no key");
-            assert!(!label.is_empty(), "{key} has no label");
-        }
-    }
-
-    #[test]
-    fn no_key_is_bound_twice() {
-        let mut keys: Vec<&str> = shortcuts().iter().map(|(key, _)| *key).collect();
-        keys.sort_unstable();
-        let before = keys.len();
-        keys.dedup();
-        assert_eq!(keys.len(), before, "two actions share a key");
-    }
-
-    #[test]
     fn load_older_has_no_shortcut() {
         // Each press pages backwards for one paid request. A key that
-        // spends money on a mis-hit is not a convenience (#58).
+        // spends money on a mis-hit is not a convenience (#58). Checked
+        // against `menu_label` since #95 removed the header's hint strip,
+        // and with it the separate human label every shortcut used to
+        // carry.
         assert!(
-            !shortcuts()
-                .iter()
-                .any(|(_, label)| label.to_lowercase().contains("older")),
+            !ALL_SHORTCUTS.iter().any(|shortcut| shortcut
+                .menu_label
+                .is_some_and(|label| label.to_lowercase().contains("older"))),
             "\"Load older\" must not be bound"
         );
     }
@@ -441,22 +377,23 @@ mod tests {
     #[test]
     fn every_menu_labelled_shortcut_is_in_the_menu_bar() {
         // The drift #99 asks to prevent: a binding gaining a menu label
-        // and never reaching a menu, or losing its item and keeping the
-        // label. Both directions are checked, so `menu_label` means
-        // exactly what it says.
+        // and never reaching a menu.
+        //
+        // Only this direction is checked. The reverse — a menu item with
+        // no shortcut behind it — is not drift but the design: `menus()`
+        // also carries About, which is an action with no binding. #99
+        // checked it by name until #95 removed the separate human label
+        // every shortcut used to carry for the header's hint strip, and a
+        // count would fail on About rather than on real drift.
         let names = menu_action_names();
-        for shortcut in ALL_SHORTCUTS {
-            match shortcut.menu_label {
-                Some(label) => assert!(
-                    names.iter().any(|name| name == label),
-                    "{label} has a menu label but no menu item"
-                ),
-                None => assert!(
-                    !names.iter().any(|name| name == shortcut.label),
-                    "{} is in the menu bar without a menu label",
-                    shortcut.label
-                ),
-            }
+        for label in ALL_SHORTCUTS
+            .iter()
+            .filter_map(|shortcut| shortcut.menu_label)
+        {
+            assert!(
+                names.iter().any(|name| name == label),
+                "{label} has a menu label but no menu item"
+            );
         }
     }
 

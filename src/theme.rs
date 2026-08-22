@@ -17,12 +17,59 @@
 //! | --- | --- | --- |
 //! | `text` on `bg` | 18.5:1 | pass |
 //! | `text_muted` on `bg` | 6.9:1 | pass |
+//! | `text_tertiary` on `bg` (#95) | 5.1:1 | pass |
 //! | `button_label` on `accent` (idle button) | 5.7:1 | pass |
 //! | `button_label` on `button_busy_bg` (busy button) | 6.9:1 | pass |
 //! | `danger` on `bg` | 5.8:1 | pass |
 //! | `warning` on `bg` (#18) | 5.0:1 | pass |
+//! | `like` on `bg` (#95) | 5.8:1 | pass |
+//! | `repost` on `bg` (#95) | 4.9:1 | pass |
+//!
+//! ## Why these are not macOS's literal system colors (#95)
+//!
+//! #95 settles the look as "follow macOS". Its *hues* are taken from the
+//! system palette — systemBlue for the accent, systemRed for `like`,
+//! systemGreen for `repost`, and the four-step label ramp — but the
+//! luminances are not. Apple's own values fail the table above on a white
+//! background: systemBlue (`#007AFF`) reaches 3.6:1, systemGreen
+//! (`#34C759`) only 1.8:1, and `secondaryLabelColor` (black at 50% alpha)
+//! 3.9:1. This project has documented AA for every text pair since #19, and
+//! a look change is not a reason to drop that. So each system hue is kept
+//! and darkened until it passes, which reads as the macOS palette without
+//! shipping text nobody can read.
 
 use gpui::{App, Pixels, Window, WindowAppearance, px};
+
+/// Body text. macOS's own body style is 13pt, not the 14px `text_sm` the
+/// window used to set globally (#95).
+pub(crate) const TEXT_BODY: Pixels = px(13.0);
+
+/// Handles, timestamps, engagement counts, and the status bar — macOS's
+/// supplementary sizes sit at 11 (#95).
+pub(crate) const TEXT_META: Pixels = px(11.0);
+
+/// Buttons, fields, and anything else that reads as a control.
+pub(crate) const RADIUS_CONTROL: Pixels = px(6.0);
+
+/// Image thumbnails, which sit a step tighter than a control (#95).
+pub(crate) const RADIUS_THUMB: Pixels = px(5.0);
+
+/// One timeline row's horizontal padding.
+pub(crate) const ROW_PAD_X: Pixels = px(12.0);
+
+/// One timeline row's vertical padding.
+pub(crate) const ROW_PAD_Y: Pixels = px(8.0);
+
+/// How far a row separator is indented from the left edge, so it starts
+/// where the text does rather than under the avatar — the same inset Mail
+/// and Messages use. [`AVATAR_SIZE`] + [`ROW_PAD_X`] + the row's gap (#95).
+pub(crate) const SEPARATOR_INSET: Pixels = px(52.0);
+
+/// The toolbar strip at the top of the window (#95).
+pub(crate) const TOOLBAR_HEIGHT: Pixels = px(44.0);
+
+/// The status bar at the bottom of the window (#95).
+pub(crate) const STATUS_BAR_HEIGHT: Pixels = px(24.0);
 
 /// The corner radius an avatar is drawn with (#98).
 ///
@@ -31,12 +78,21 @@ use gpui::{App, Pixels, Window, WindowAppearance, px};
 /// drift apart, the same reason `AVATAR_SIZE` is one constant. They are
 /// the same shape or the row visibly changes when a download lands.
 ///
-/// Sized against `AVATAR_SIZE`'s 44px: enough to read as deliberately
-/// rounded rather than as a square with softened corners, and far enough
-/// from 22px that it does not read as a circle either. Buttons keep their
-/// own `rounded_full` pill shape — this is the avatar radius, not a
-/// general one.
-pub(crate) const AVATAR_RADIUS: Pixels = px(10.0);
+/// Sized against [`AVATAR_SIZE`]'s 32px, and matched to
+/// [`RADIUS_CONTROL`] (#95): on macOS a small square image reads as an app
+/// icon at this radius, and using the control radius keeps one rounding in
+/// the window rather than two that almost agree. Buttons share it — the
+/// pill shapes went away with #95.
+pub(crate) const AVATAR_RADIUS: Pixels = RADIUS_CONTROL;
+
+/// The size one row's author avatar is drawn at (#64), reduced from 44px
+/// to macOS's small-icon size by #95 — the old value came from X's own web
+/// timeline, which is built for a much wider column.
+///
+/// Lives here rather than in `ui::render` so it stays next to
+/// [`AVATAR_RADIUS`] and [`SEPARATOR_INSET`], both of which are derived
+/// from it.
+pub(crate) const AVATAR_SIZE: Pixels = px(32.0);
 
 /// One color slot per named UI role, replacing the `BG` / `TEXT` / ... `u32`
 /// constants that used to live directly in `ui.rs`. Grouped per RGB channel,
@@ -52,8 +108,13 @@ pub(crate) struct Theme {
     pub(crate) border: u32,
     /// Primary body text.
     pub(crate) text: u32,
-    /// De-emphasized text (bylines, timestamps, placeholder notices).
+    /// De-emphasized text (bylines, engagement counts, placeholder
+    /// notices) — the second step of macOS's four-level label ramp (#95).
     pub(crate) text_muted: u32,
+    /// The third step of that ramp (#95): timestamps and the "· replying
+    /// to" tail, which have to be readable but must not compete with the
+    /// byline beside them.
+    pub(crate) text_tertiary: u32,
     /// The primary action button's fill while idle (clickable).
     pub(crate) accent: u32,
     /// The primary action button's fill while busy/disabled — deliberately
@@ -78,6 +139,14 @@ pub(crate) struct Theme {
     /// exceeded (and for errors), so the two severities read as visibly
     /// different at a glance.
     pub(crate) warning: u32,
+    /// A liked post's action (#95) — systemRed's hue, darkened to clear
+    /// the module doc's AA table. Its own slot rather than reusing
+    /// `accent`: on macOS "on" states are colored by what they mean, and a
+    /// like that reads the same blue as a link says nothing.
+    pub(crate) like: u32,
+    /// A reposted post's action (#95) — systemGreen's hue, darkened the
+    /// same way and for the same reason as `like`.
+    pub(crate) repost: u32,
 }
 
 impl Theme {
@@ -90,6 +159,9 @@ impl Theme {
             border: 0x38_44_4d,
             text: 0xf7_f9_f9,
             text_muted: 0x88_99_a6,
+            // A step below `text_muted` against the dark `bg`, mirroring
+            // what `light` does in the other direction (#95).
+            text_tertiary: 0x6b_7a_86,
             accent: 0x1d_9b_f0,
             // Reproduces the pre-#19 button exactly: the button used `BORDER`
             // as its busy fill and `TEXT` as its label, unconditionally.
@@ -100,6 +172,10 @@ impl Theme {
             // Amber-400-ish: ~9.9:1 against `bg` (0x15_20_2b) by the same
             // WCAG formula the module doc's light-palette table uses.
             warning: 0xfb_bf_24,
+            // systemRed / systemGreen lightened for a dark ground, the
+            // mirror of what `light` does to them (#95).
+            like: 0xff_6b_6b,
+            repost: 0x4c_d9_8f,
         }
     }
 
@@ -112,6 +188,10 @@ impl Theme {
             border: 0xd7_dc_e0,
             text: 0x0f_14_19,
             text_muted: 0x54_5b_63,
+            // 5.1:1 — one readable step below `text_muted`. macOS's own
+            // tertiaryLabelColor (black at 26% alpha, 3.4:1 over white)
+            // would not clear the module doc's table.
+            text_tertiary: 0x6e_6e_73,
             accent: 0x0b_65_c2,
             // A pale hairline border would leave a white `button_label`
             // unreadable, so the busy fill is a mid gray instead — see the
@@ -124,6 +204,11 @@ impl Theme {
             // AA text threshold (4.5:1) the module doc's table checks the
             // other slots against.
             warning: 0xb4_53_09,
+            // systemRed's hue at `danger`'s luminance — the same color,
+            // since "liked" and "failed" never sit next to each other.
+            like: 0xc4_1e_3a,
+            // systemGreen darkened from 1.8:1 to 4.9:1 (#95).
+            repost: 0x1f_7a_4d,
         }
     }
 }
@@ -243,7 +328,10 @@ mod tests {
         assert_ne!(light.border, dark.border);
         assert_ne!(light.text, dark.text);
         assert_ne!(light.text_muted, dark.text_muted);
+        assert_ne!(light.text_tertiary, dark.text_tertiary);
         assert_ne!(light.accent, dark.accent);
+        assert_ne!(light.like, dark.like);
+        assert_ne!(light.repost, dark.repost);
         assert_ne!(light.button_busy_bg, dark.button_busy_bg);
         assert_ne!(light.button_label, dark.button_label);
         assert_ne!(light.danger, dark.danger);
@@ -258,6 +346,31 @@ mod tests {
         // header couldn't visually distinguish the two severities.
         assert_ne!(Theme::light().warning, Theme::light().danger);
         assert_ne!(Theme::dark().warning, Theme::dark().danger);
+    }
+
+    #[test]
+    fn an_on_state_is_never_the_same_color_as_a_link() {
+        // #95: `like` and `repost` exist so an "on" action says which
+        // action it is. Collapsing either onto `accent` — the color every
+        // link and the primary button already wear — would undo that, and
+        // the two are near enough in hue that a careless edit could.
+        for theme in [Theme::light(), Theme::dark()] {
+            assert_ne!(theme.like, theme.accent);
+            assert_ne!(theme.repost, theme.accent);
+            assert_ne!(theme.like, theme.repost);
+        }
+    }
+
+    #[test]
+    fn the_three_label_steps_are_distinct_within_a_palette() {
+        // #95: the ramp is only a ramp if the steps differ. A palette that
+        // set two of them the same would render a byline and a timestamp
+        // identically, which is the flattening this issue set out to fix.
+        for theme in [Theme::light(), Theme::dark()] {
+            assert_ne!(theme.text, theme.text_muted);
+            assert_ne!(theme.text_muted, theme.text_tertiary);
+            assert_ne!(theme.text, theme.text_tertiary);
+        }
     }
 
     #[test]

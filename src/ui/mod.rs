@@ -34,16 +34,16 @@ use reload_policy::{
 use render::{
     AVATAR_SIZE, MAX_RENDERED_MEDIA, MEDIA_CELL_HEIGHT, author_link, avatar_placeholder, byline,
     compose_error_message, format_timestamp, header_title, like_row, link_row, media_badge,
-    media_columns, metrics_label, notice, offers_delete, offers_like, offers_quote,
-    offers_reauthorize, offers_reply, offers_repost, open_post_link, quote_card, quote_row,
-    reload_notice_banner, render_thread_chain, reply_banner_label, reply_row, reply_target_label,
-    repost_banner_label, repost_row, session_notice_banner, sign_in_pill, thread_action_label,
-    thread_toggle_row, usage_color, usage_label,
+    media_columns, notice, offers_delete, offers_like, offers_quote, offers_reauthorize,
+    offers_reply, offers_repost, open_post_link, quote_card, quote_row, reload_notice_banner,
+    render_thread_chain, reply_banner_label, reply_row, reply_target_label, repost_banner_label,
+    repost_row, session_notice_banner, sign_in_pill, thread_action_label, thread_toggle_row,
+    usage_color, usage_label, with_count,
 };
+use render::{RowCounts, row_counts};
 
 use crate::menu::{
-    BlurComposer, CloseWindow, FocusComposer, KEY_CONTEXT, Minimize, Reload, ScrollToTop,
-    ShowAbout, shortcuts,
+    BlurComposer, CloseWindow, FocusComposer, KEY_CONTEXT, Minimize, Reload, ScrollToTop, ShowAbout,
 };
 use crate::oauth;
 use crate::paths::Paths;
@@ -1359,12 +1359,12 @@ impl TimelineView {
         let inner = match self.media_paths.get(&media.url) {
             Some(path) => img(path.clone())
                 .h(MEDIA_CELL_HEIGHT)
-                .rounded_md()
+                .rounded(theme::RADIUS_THUMB)
                 .into_any_element(),
             None => div()
                 .h(MEDIA_CELL_HEIGHT)
                 .w(MEDIA_CELL_HEIGHT)
-                .rounded_md()
+                .rounded(theme::RADIUS_THUMB)
                 .bg(rgb(theme.border))
                 .into_any_element(),
         };
@@ -1865,9 +1865,9 @@ impl TimelineView {
                     .child(
                         div()
                             .id("compose-submit")
-                            .px_3()
+                            .px_2()
                             .py_1()
-                            .rounded_full()
+                            .rounded(theme::RADIUS_CONTROL)
                             .bg(rgb(if can_submit {
                                 theme.accent
                             } else {
@@ -1991,26 +1991,6 @@ impl TimelineView {
         }));
     }
 
-    /// The shortcut hint strip under the header (#58) — the answer to the
-    /// issue's "how does anyone find out these exist" question.
-    ///
-    /// A permanent muted line rather than a `?` overlay: there are four
-    /// bindings, they fit on one line, and a help screen nobody opens
-    /// documents nothing. Built from [`shortcuts`], which the README quotes
-    /// too, so a binding cannot be added without the list that announces it.
-    fn shortcut_hints(&self) -> impl IntoElement {
-        let theme = self.theme;
-        let mut row = div().flex().gap_3().px_4().pb_2();
-        for (key, label) in shortcuts() {
-            row = row.child(
-                div()
-                    .text_color(rgb(theme.text_muted))
-                    .child(format!("{key} {label}")),
-            );
-        }
-        row
-    }
-
     fn header(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
         // #57: checked ahead of `state` rather than folded into its match —
         // a reload in flight while posts are already showing leaves `state`
@@ -2043,44 +2023,24 @@ impl TimelineView {
 
         let theme = self.theme;
 
-        // #18: request counts are always shown; an estimated amount is
-        // appended only when `request_price` is configured (see
-        // `usage_label`'s doc), and the line's color escalates as today's
-        // count approaches or crosses `daily_request_budget` (see
-        // `usage_color`'s doc).
-        let usage_status =
-            usage::budget_status(self.usage_totals.today, self.config.daily_request_budget);
-        let usage_text = usage_label(
-            self.usage_totals.today,
-            self.usage_totals.total,
-            self.config.request_price,
-        );
-
         div()
             .flex()
             .items_center()
             .justify_between()
             .gap_3()
-            .px_4()
-            .py_3()
+            // #95: a toolbar, not a two-line masthead. The request count
+            // that used to sit under the title moved to `status_bar`, which
+            // leaves one line — so the strip is sized like a macOS toolbar
+            // rather than padded to whatever two stacked lines needed.
+            .h(theme::TOOLBAR_HEIGHT)
+            .px(theme::ROW_PAD_X)
             .bg(rgb(theme.bg_header))
             .border_b_1()
             .border_color(rgb(theme.border))
             .child(
                 div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(
-                        div()
-                            .font_weight(FontWeight::BOLD)
-                            .child(header_title(self.home_username.as_deref())),
-                    )
-                    .child(
-                        div()
-                            .text_color(rgb(usage_color(usage_status, theme)))
-                            .child(usage_text),
-                    ),
+                    .font_weight(FontWeight::BOLD)
+                    .child(header_title(self.home_username.as_deref())),
             )
             .child(
                 div()
@@ -2117,9 +2077,67 @@ impl TimelineView {
             )
     }
 
+    /// The strip along the bottom of the window (#95).
+    ///
+    /// Until #95 the request count sat under the window title, where it
+    /// competed with the account name to be the first thing read on every
+    /// frame. macOS keeps a window's running totals in a status bar
+    /// instead — Finder's item count is the same idea — so that is where
+    /// this one goes. #18's escalating color survives the move unchanged:
+    /// the count still turns `warning` as it approaches
+    /// `daily_request_budget` and `danger` once it is past.
+    ///
+    /// The kept-post count is only shown once a timeline has loaded. While
+    /// signing in or fetching there is no number to give, and "0 / 200"
+    /// would read as an empty cache rather than an unanswered question.
+    fn status_bar(&self) -> impl IntoElement {
+        let theme = self.theme;
+
+        // #18: request counts are always shown; an estimated amount is
+        // appended only when `request_price` is configured (see
+        // `usage_label`'s doc).
+        let usage_status =
+            usage::budget_status(self.usage_totals.today, self.config.daily_request_budget);
+        let usage_text = usage_label(
+            self.usage_totals.today,
+            self.usage_totals.total,
+            self.config.request_price,
+        );
+        let kept = match self.state {
+            TimelineState::Loaded(ref items) => Some(items.len()),
+            _ => None,
+        };
+
+        div()
+            .flex()
+            .items_center()
+            .gap_3()
+            .h(theme::STATUS_BAR_HEIGHT)
+            .px(theme::ROW_PAD_X)
+            .bg(rgb(theme.bg_header))
+            .border_t_1()
+            .border_color(rgb(theme.border))
+            .text_size(theme::TEXT_META)
+            .child(
+                div()
+                    .text_color(rgb(usage_color(usage_status, theme)))
+                    .child(usage_text),
+            )
+            .when_some(kept, |bar, kept| {
+                bar.child(
+                    div()
+                        .ml_auto()
+                        .text_color(rgb(theme.text_tertiary))
+                        .child(format!("{kept} / {} posts kept", cache::MAX_CACHED_POSTS)),
+                )
+            })
+    }
+
     fn post_row(&self, item: &TimelineItem, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = self.theme;
         let byline = byline(&item.author_username);
+
+        let counts = row_counts(item.metrics.as_ref());
 
         // #64: the avatar sits in its own column to the left, so the body
         // below is built separately and then placed beside it.
@@ -2139,31 +2157,17 @@ impl TimelineView {
             // only place the extra width could go.
             .min_w_0()
             .gap_1()
-            // #13: a repost shows who reposted it as a small line above the
-            // body, which by this point already holds the *original* post
-            // (see `TimelineResponse::into_items`'s join) — not the outer
-            // post's own author/text.
-            .when_some(item.reposted_by.as_deref(), |row, reposted_by| {
-                row.child(
-                    div()
-                        .text_color(rgb(theme.text_muted))
-                        .child(repost_banner_label(reposted_by)),
-                )
-            })
-            // #12: who this post is replying to, shown at zero extra
-            // request cost — the parent's author is already in `includes`
-            // per #13's expansions (see `x_api::model::reply_target`).
-            .when_some(item.replied_to.as_ref(), |row, replied_to| {
-                row.child(
-                    div()
-                        .text_color(rgb(theme.text_muted))
-                        .child(reply_banner_label(replied_to)),
-                )
-            })
+            // #95: one meta line. The author, the byline, the timestamp,
+            // and whichever of "reposted" / "replying to" applies all sit
+            // together — until #95 the last two were their own full-width
+            // lines above the name, which pushed a two-line post to four.
             .child(
                 div()
                     .flex()
-                    .gap_2()
+                    .flex_wrap()
+                    .items_center()
+                    .gap_1()
+                    .text_size(theme::TEXT_META)
                     // #70: the author name and handle open the profile on
                     // x.com. `profile_url` returns `None` when the username
                     // never expanded, in which case they stay plain text
@@ -2172,21 +2176,32 @@ impl TimelineView {
                     .child(div().text_color(rgb(theme.text_muted)).child(byline))
                     .child(
                         div()
-                            .text_color(rgb(theme.text_muted))
+                            .text_color(rgb(theme.text_tertiary))
                             .child(format_timestamp(item.created_at.as_deref())),
                     )
-                    // #70: the post itself, on x.com.
-                    .child(open_post_link(item, theme, cx)),
+                    // #13: a repost says who reposted it — the body by this
+                    // point already holds the *original* post (see
+                    // `TimelineResponse::into_items`'s join), not the outer
+                    // post's own author.
+                    .when_some(item.reposted_by.as_deref(), |line, reposted_by| {
+                        line.child(
+                            div()
+                                .text_color(rgb(theme.text_tertiary))
+                                .child(format!("· {}", repost_banner_label(reposted_by))),
+                        )
+                    })
+                    // #12: who this post is replying to, shown at zero extra
+                    // request cost — the parent's author is already in
+                    // `includes` per #13's expansions.
+                    .when_some(item.replied_to.as_ref(), |line, replied_to| {
+                        line.child(
+                            div()
+                                .text_color(rgb(theme.text_tertiary))
+                                .child(format!("· {}", reply_banner_label(replied_to))),
+                        )
+                    }),
             )
             .child(div().child(item.text.clone()))
-            // #67: reply/repost/like counts, muted and only when there is
-            // something to show. They ride along in the timeline response,
-            // so this costs no extra request — but they are a snapshot from
-            // when the row was fetched (see `x_api::model::PostMetrics`).
-            .when_some(
-                item.metrics.as_ref().and_then(metrics_label),
-                |column, label| column.child(div().text_color(rgb(theme.text_muted)).child(label)),
-            )
             // #70: the links in the body, expanded out of the `t.co`
             // shortlinks the text carries — see `link_row`'s doc for why
             // they sit under the text rather than inside it.
@@ -2206,10 +2221,75 @@ impl TimelineView {
                     self.media_grid_for(&quoted.media, cx),
                 ))
             })
+            // #95: every action on one horizontal line, each carrying its
+            // own count. This is the issue's main complaint — the same set
+            // used to stack one label per line down the row.
+            .child(self.action_row(item, &counts, cx))
             // #12: "Show thread" — only offered for a reply, since that's
-            // the only case with a parent to walk.
+            // the only case with a parent to walk. Deliberately not part of
+            // `action_row`: a loaded thread expands into a whole chain of
+            // posts, which cannot sit inside a one-line strip.
             .when_some(item.replied_to.as_ref(), |column, replied_to| {
                 column.child(self.thread_section(&item.id, replied_to, cx))
+            });
+
+        div()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .flex()
+                    .gap_2()
+                    .px(theme::ROW_PAD_X)
+                    .py(theme::ROW_PAD_Y)
+                    .child(self.avatar(item, theme))
+                    .child(body),
+            )
+            // #95: the separator starts where the text does rather than
+            // running under the avatar, which is the inset macOS's own
+            // lists (Mail, Messages) use. It is a sibling of the row rather
+            // than the row's own bottom border so the inset does not have
+            // to be re-stated as padding.
+            .child(
+                div()
+                    .h(px(1.0))
+                    .ml(theme::SEPARATOR_INSET)
+                    .bg(rgb(theme.border)),
+            )
+            .into_any_element()
+    }
+
+    /// Every action for one post on a single horizontal line (#95).
+    ///
+    /// Which actions appear is unchanged — each `offers_*` predicate still
+    /// decides — but they now sit side by side with their engagement count
+    /// beside them instead of stacking one per line above a separate
+    /// metrics line. A like/repost whose request failed still renders its
+    /// message, which grows this strip downward for that one row; that is
+    /// `like_row`/`repost_row`'s own doing and is left alone here.
+    fn action_row(
+        &self,
+        item: &TimelineItem,
+        counts: &RowCounts,
+        cx: &mut Context<'_, Self>,
+    ) -> AnyElement {
+        let theme = self.theme;
+
+        div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap_4()
+            .text_size(theme::TEXT_META)
+            .text_color(rgb(theme.text_muted))
+            // #71: "Reply" — sets the composer's target; nothing is sent
+            // until the draft is submitted.
+            .when(offers_reply(self.signed_in_with_oauth, item), |row| {
+                row.child(with_count(
+                    reply_row(item, theme, cx),
+                    counts.replies.as_deref(),
+                    theme,
+                ))
             })
             // #15: repost/un-repost — see `offers_repost`'s doc for exactly
             // which posts get one.
@@ -2220,28 +2300,13 @@ impl TimelineView {
                     self.home_username.as_deref(),
                     item,
                 ),
-                |column| column.child(self.repost_button(item, cx)),
-            )
-            // #16: "Quote" — see `offers_quote`'s doc for exactly which
-            // posts get one (a repost row is withheld for the same reason
-            // `offers_repost` withholds its own button).
-            .when(offers_quote(self.signed_in_with_oauth, item), |column| {
-                column.child(quote_row(item, theme, cx))
-            })
-            // #71: "Reply" — sets the composer's target; nothing is sent
-            // until the draft is submitted.
-            .when(offers_reply(self.signed_in_with_oauth, item), |column| {
-                column.child(reply_row(item, theme, cx))
-            })
-            // #72: delete — own posts only, and never in one click.
-            .when(
-                offers_delete(
-                    self.signed_in_with_oauth,
-                    self.home_user_id.as_deref(),
-                    self.home_username.as_deref(),
-                    item,
-                ),
-                |column| column.child(self.delete_row(item, cx)),
+                |row| {
+                    row.child(with_count(
+                        self.repost_button(item, cx),
+                        counts.reposts.as_deref(),
+                        theme,
+                    ))
+                },
             )
             // #68: like/unlike — see `offers_like`'s doc for which posts
             // get one. Unlike repost, this is offered on one's own posts.
@@ -2251,18 +2316,32 @@ impl TimelineView {
                     self.home_user_id.as_deref(),
                     item,
                 ),
-                |column| column.child(self.like_button(item, cx)),
-            );
-
-        div()
-            .flex()
-            .gap_3()
-            .px_4()
-            .py_3()
-            .border_b_1()
-            .border_color(rgb(theme.border))
-            .child(self.avatar(item, theme))
-            .child(body)
+                |row| {
+                    row.child(with_count(
+                        self.like_button(item, cx),
+                        counts.likes.as_deref(),
+                        theme,
+                    ))
+                },
+            )
+            // #16: "Quote" — see `offers_quote`'s doc for exactly which
+            // posts get one (a repost row is withheld for the same reason
+            // `offers_repost` withholds its own button).
+            .when(offers_quote(self.signed_in_with_oauth, item), |row| {
+                row.child(quote_row(item, theme, cx))
+            })
+            // #70: the post itself, on x.com.
+            .child(open_post_link(item, theme, cx))
+            // #72: delete — own posts only, and never in one click.
+            .when(
+                offers_delete(
+                    self.signed_in_with_oauth,
+                    self.home_user_id.as_deref(),
+                    self.home_username.as_deref(),
+                    item,
+                ),
+                |row| row.child(self.delete_row(item, cx)),
+            )
             .into_any_element()
     }
 
@@ -2475,11 +2554,8 @@ impl Render for TimelineView {
             .size_full()
             .bg(rgb(theme.bg))
             .text_color(rgb(theme.text))
-            .text_sm()
+            .text_size(theme::TEXT_BODY)
             .child(self.header(cx))
-            // #58: the bindings, stated on screen rather than only in the
-            // README — see `shortcut_hints`.
-            .child(self.shortcut_hints())
             // #54: shown regardless of `state` — the whole defect this
             // fixes is a timeline that renders as if nothing happened, so
             // this banner has to survive independently of whatever `body`
@@ -2509,6 +2585,9 @@ impl Render for TimelineView {
                 column.child(self.composer(cx))
             })
             .child(self.body(cx))
+            // #95: the status bar, which is where the running request
+            // count lives now that the header is a toolbar.
+            .child(self.status_bar())
     }
 }
 
@@ -2523,13 +2602,13 @@ mod tests {
     };
     use super::{
         ComposeStatus, Cooldown, CooldownTick, PostLink, PostMedia, PostMetrics, ReloadNotice,
-        ReloadTrigger, RepliedTo, Startup, Theme, ThreadFetchState, TimelineItem, TimelineState,
-        ToggleState, action_post_id, at_the_post_cap, byline, compose_error_message,
+        ReloadTrigger, RepliedTo, RowCounts, Startup, Theme, ThreadFetchState, TimelineItem,
+        TimelineState, ToggleState, action_post_id, at_the_post_cap, byline, compose_error_message,
         cooldown_label, cooldown_tick, format_timestamp, header_title, media_badge, media_columns,
-        metrics_label, offers_delete, offers_like, offers_load_older, offers_quote,
-        offers_reauthorize, offers_reply, offers_repost, rate_limit, reload_failure_outcome,
-        reload_gate, reload_start_state, reply_banner_label, reply_target_label,
-        repost_banner_label, thread_action_label, usage, usage_color, usage_label,
+        offers_delete, offers_like, offers_load_older, offers_quote, offers_reauthorize,
+        offers_reply, offers_repost, rate_limit, reload_failure_outcome, reload_gate,
+        reload_start_state, reply_banner_label, reply_target_label, repost_banner_label,
+        row_counts, thread_action_label, usage, usage_color, usage_label,
     };
 
     fn item_with(id: &str, author_username: &str, reposted_by: Option<&str>) -> TimelineItem {
@@ -2551,64 +2630,63 @@ mod tests {
     }
 
     #[test]
-    fn metrics_label_lists_replies_reposts_and_likes() {
+    fn a_count_rides_beside_each_action() {
+        // #95: the counts used to be one line of prose under the body.
+        // They are now three separate labels, one per action, so each has
+        // to come back on its own.
+        let counts = row_counts(Some(&PostMetrics {
+            replies: 12,
+            reposts: 34,
+            likes: 56,
+        }));
+        assert_eq!(counts.replies.as_deref(), Some("12"));
+        assert_eq!(counts.reposts.as_deref(), Some("34"));
+        assert_eq!(counts.likes.as_deref(), Some("56"));
+    }
+
+    #[test]
+    fn a_zero_count_is_nothing_rather_than_a_zero() {
+        // #67's rule, carried over by #95: a row that only got likes shows
+        // one number, not two zeros beside the other actions.
+        let counts = row_counts(Some(&PostMetrics {
+            replies: 0,
+            reposts: 0,
+            likes: 3,
+        }));
+        assert_eq!(counts.replies, None);
+        assert_eq!(counts.reposts, None);
+        assert_eq!(counts.likes.as_deref(), Some("3"));
+    }
+
+    #[test]
+    fn a_post_with_no_engagement_yet_carries_no_counts() {
         assert_eq!(
-            metrics_label(&PostMetrics {
-                replies: 12,
-                reposts: 34,
-                likes: 56,
-            })
-            .as_deref(),
-            Some("12 replies · 34 reposts · 56 likes")
+            row_counts(Some(&PostMetrics::default())),
+            RowCounts::default()
         );
     }
 
     #[test]
-    fn metrics_label_omits_the_counts_that_are_zero() {
-        // #67: a row that only got likes should say so, not carry two zeros
-        // along for the ride.
-        assert_eq!(
-            metrics_label(&PostMetrics {
-                replies: 0,
-                reposts: 0,
-                likes: 3,
-            })
-            .as_deref(),
-            Some("3 likes")
-        );
+    fn a_post_whose_metrics_never_expanded_carries_no_counts() {
+        // `metrics: None` is a different thing from all-zero metrics — the
+        // response simply did not include them — but the row renders the
+        // same either way, and this is the case that used to be handled by
+        // `when_some` at the call site.
+        assert_eq!(row_counts(None), RowCounts::default());
     }
 
     #[test]
-    fn metrics_label_is_singular_for_one() {
-        assert_eq!(
-            metrics_label(&PostMetrics {
-                replies: 1,
-                reposts: 1,
-                likes: 1,
-            })
-            .as_deref(),
-            Some("1 reply · 1 repost · 1 like")
-        );
-    }
-
-    #[test]
-    fn metrics_label_is_absent_when_nothing_has_happened_yet() {
-        // A post with no engagement gets no line at all — three zeros are
-        // noise on every fresh post in the timeline.
-        assert_eq!(metrics_label(&PostMetrics::default()), None);
-    }
-
-    #[test]
-    fn metrics_label_abbreviates_large_counts() {
-        assert_eq!(
-            metrics_label(&PostMetrics {
-                replies: 1000,
-                reposts: 12_345,
-                likes: 2_400_000,
-            })
-            .as_deref(),
-            Some("1K replies · 12.3K reposts · 2.4M likes")
-        );
+    fn a_large_count_is_abbreviated() {
+        // Still #67's rule: seven digits beside an action would push the
+        // rest of the strip around.
+        let counts = row_counts(Some(&PostMetrics {
+            replies: 1000,
+            reposts: 12_345,
+            likes: 2_400_000,
+        }));
+        assert_eq!(counts.replies.as_deref(), Some("1K"));
+        assert_eq!(counts.reposts.as_deref(), Some("12.3K"));
+        assert_eq!(counts.likes.as_deref(), Some("2.4M"));
     }
 
     // --- #64: avatars ---

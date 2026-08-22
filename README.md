@@ -245,10 +245,12 @@ typo'd theme is cosmetic, not worth blocking the app over — it falls back to
 | `⌘W` | Close the window |
 | `⌘M` | Minimize |
 
-The first four are shown on screen, under the header — they fit on one
-line, and a help screen nobody opens documents nothing. `⌘Q`, `⌘W` and
-`⌘M` are left off that strip: it is for what this app does that another one
-would not, and those three are macOS gestures every app shares.
+Every one of them is in the menu bar (#99), which is where a macOS user
+looks for a keystroke. #58 also printed the first four in a permanent strip
+under the header, on the reasoning that a help screen nobody opens
+documents nothing; #95 removed that strip, because a line of hints under
+the toolbar is not something a native app does, and the menu bar had made
+it redundant.
 
 **No binding is a bare printable key, deliberately.** The hazard #58 is
 really about is a bare `j`/`k`/`n` firing while you are typing a post;
