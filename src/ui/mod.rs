@@ -26,8 +26,9 @@ mod render;
 // them would mean "anything in the crate may touch this", which is the
 // opposite of what splitting the file was for.
 use reload_policy::{
-    CooldownTick, at_the_post_cap, cooldown_label, cooldown_tick, offers_load_older,
-    preserved_scroll_target, reload_failure_outcome, reload_gate, reload_start_state,
+    CooldownTick, at_the_post_cap, cooldown_label, cooldown_tick, newly_arrived, offers_load_older,
+    preserved_scroll_target, reload_failure_outcome, reload_gate, reload_outcome_label,
+    reload_start_state,
 };
 use render::{
     AVATAR_SIZE, MAX_RENDERED_MEDIA, MEDIA_CELL_HEIGHT, author_link, avatar_placeholder, byline,
@@ -128,6 +129,16 @@ enum ReloadNotice {
     /// The request went out and failed for a reason with no known reset
     /// time.
     Failed(SharedString),
+    /// The request went out and came back (#141) — how many posts it
+    /// brought, including none.
+    ///
+    /// The other two variants report that something went wrong, and until
+    /// this one a successful reload said nothing at all: the header's
+    /// button flicked to `Loading…` and back, which on a fast response is
+    /// a frame or two, and is not where anyone is looking after `cmd-r`.
+    /// Rendered in the muted color rather than `danger`, since it is the
+    /// one variant that is not a problem.
+    Outcome(SharedString),
 }
 
 /// What the header's primary button does, independent of its current label —
@@ -667,8 +678,12 @@ impl TimelineView {
                         this.home_username = Some(reloaded.me.username);
                         this.next_page_token = reloaded.next_token;
                         this.keep_the_reader_in_place(&reloaded.items);
+                        // #141: worked out before `state` is replaced,
+                        // for the same reason the scroll target is — it
+                        // takes both lists.
+                        let outcome = this.reload_outcome(&reloaded.items);
                         this.state = TimelineState::Loaded(reloaded.items);
-                        this.reload_notice = None;
+                        this.reload_notice = Some(ReloadNotice::Outcome(outcome.into()));
                         // Same reasoning as the single-user branch above.
                         this.cooldown_ticker = None;
                     }
@@ -684,6 +699,23 @@ impl TimelineView {
         }));
 
         cx.notify();
+    }
+
+    /// What the finished reload should say for itself (#141).
+    ///
+    /// Called with the incoming list before `state` is replaced, like
+    /// [`Self::keep_the_reader_in_place`] and for the same reason: the
+    /// count is the difference between the two lists.
+    ///
+    /// A first load has no previous list to compare against, so everything
+    /// in it counts as new — which is what it is.
+    fn reload_outcome(&self, incoming: &[TimelineItem]) -> String {
+        let previous: Vec<&str> = match &self.state {
+            TimelineState::Loaded(items) => items.iter().map(|item| item.id.as_str()).collect(),
+            _ => Vec::new(),
+        };
+        let new_ids: Vec<&str> = incoming.iter().map(|item| item.id.as_str()).collect();
+        reload_outcome_label(newly_arrived(&previous, &new_ids))
     }
 
     /// Undo the shove a reload gives a scrolled reader (#22).
@@ -2421,7 +2453,9 @@ impl Render for TimelineView {
 
 #[cfg(test)]
 mod tests {
-    use super::reload_policy::{preserved_scroll_target, reload_cooldown};
+    use super::reload_policy::{
+        newly_arrived, preserved_scroll_target, reload_cooldown, reload_outcome_label,
+    };
     use super::render::{
         avatar_initial, is_own_post, like_action_label, post_permalink, profile_url,
         repost_action_label,
@@ -2662,6 +2696,36 @@ mod tests {
         let mut item = item_with(row_id, original_author, Some("bob"));
         item.original_post_id = Some(original_id.to_string());
         item
+    }
+
+    // --- #141: saying what a reload did ---
+
+    #[test]
+    fn a_reload_that_brought_nothing_says_so() {
+        // The case a reader is most likely to read as "my press did not
+        // register": the screen is identical before and after.
+        assert_eq!(reload_outcome_label(0), "No new posts.");
+    }
+
+    #[test]
+    fn one_new_post_is_not_reported_in_the_plural() {
+        assert_eq!(reload_outcome_label(1), "1 new post.");
+        assert_eq!(reload_outcome_label(6), "6 new posts.");
+    }
+
+    #[test]
+    fn the_outcome_counts_the_same_posts_the_scroll_does() {
+        // Both read the leading run of unseen ids, so a reload cannot say
+        // "3 new posts" while scrolling past a different number of them.
+        let previous = ["1", "2", "3"];
+        let new_ids = ["a", "b", "1", "2", "3"];
+
+        assert_eq!(newly_arrived(&previous, &new_ids), 2);
+        assert_eq!(
+            preserved_scroll_target(&previous, &new_ids, 5),
+            Some(7),
+            "the scroll must move by exactly what the message claims"
+        );
     }
 
     // --- #22: keeping the reader in place across a reload ---
