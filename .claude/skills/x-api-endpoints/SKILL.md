@@ -107,7 +107,15 @@ GET /2/users/{id}/tweets?max_results=5&expansions=bogus
 **すべてに付いていた**ので、上限を知るための追加リクエストは要らない。
 実測値は 10 から 5000 まで開いている
 (403 を返した `/2/tweets/analytics` だけは 40000 と申告してくる)。
-401 / 429 / 5xx では観測していない。
+**ただし 401 では付かない。** アクセストークンが失効した状態で撃つと、
+返ってくる `x-` ヘッダは `x-response-time` `x-served-by` `x-transaction-id` の 3 つだけで、
+`x-rate-limit-*` も `x-access-level` も無い。本文も
+`{"type":"about:blank","title":"Unauthorized","detail":"Unauthorized","status":401}` と、
+`https://api.x.com/2/problems/...` を名乗る他のエラーとは別物になる。
+
+**ヘッダからレートリミットを読む処理は、無い場合を通らなければならない。**
+失効は「上限が 0 になった」ではないので、`x-rate-limit-remaining` の欠落を
+枯渇として扱うと誤診する。429 / 5xx では未観測。
 
 | エンドポイント | 上限 |
 | --- | --- |
@@ -122,8 +130,21 @@ GET /2/users/{id}/tweets?max_results=5&expansions=bogus
 実測した上限をこの表と突き合わせる。**1 操作で複数エンドポイントを叩く設計は、
 その中で一番小さい上限に縛られる。**
 
-`x-access-level` ヘッダも同じ 34 本すべてに付いていた。App の権限 (`read-write` など) が
-開発者コンソールを開かずに分かる。
+`x-access-level` ヘッダも同じ 34 本すべてに付いていた (401 を除く、上記)。
+App の権限 (`read-write` など) が開発者コンソールを開かずに分かる。
+
+## トークンが失効したら、probe ではなくアプリに更新させる
+
+probe の 401 はたいていアクセストークンの失効で、`cargo run -- --fetch-only` を
+一度通せば直る。`oauth::resolve_credential` が更新して保存するため。
+
+**probe 側で refresh token を使ってはいけない。** X は更新のたびに refresh token を
+回転させるので、probe が使って保存しなければアプリが持っている refresh token が
+無効になり、ユーザーは再認可をやり直すはめになる。
+再認可は scope も引き直すので、live token にだけ残っている scope はそこで消える。
+
+`--fetch-only` は 2 リクエスト課金される (`x-api-budget` 参照)。
+更新そのもの (token endpoint) はデータ API ではないので課金されない。
 
 ## スコープと到達範囲
 
