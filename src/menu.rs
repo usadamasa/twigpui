@@ -210,12 +210,21 @@ const SCROLL_TO_TOP: Shortcut = Shortcut {
 /// [`menus`] still chooses which menu each item belongs to, so a new
 /// shortcut with a `menu_label` and no place in `menus` remains possible.
 /// That is what `every_menu_labelled_shortcut_is_in_the_menu_bar` catches.
-const ALL_SHORTCUTS: [&Shortcut; 5] = [
+///
+/// **A `Shortcut` left out of this array is not bound to anything**, and
+/// nothing about the constant itself says so — which is how `MINIMIZE`,
+/// `CLOSE_WINDOW` and `SCROLL_TO_TOP` sat here unbound after #109 and #22
+/// added them everywhere except this list. `every_menu_item_has_a_binding`
+/// is the test that now catches it.
+const ALL_SHORTCUTS: [&Shortcut; 8] = [
     &RELOAD,
     &SUBMIT_POST,
     &FOCUS_COMPOSER,
     &BLUR_COMPOSER,
     &QUIT,
+    &MINIMIZE,
+    &CLOSE_WINDOW,
+    &SCROLL_TO_TOP,
 ];
 
 /// Register #58's key bindings. Called once at startup, next to
@@ -391,6 +400,40 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn every_menu_item_has_a_binding() {
+        // The direction the other tests missed. They all start from
+        // `ALL_SHORTCUTS` and check what is in it, so a `Shortcut` left out
+        // of that array is invisible to every one of them -- while still
+        // appearing in `menus()`, since that names its constants directly.
+        //
+        // Which is exactly what happened: #109's Minimize and Close Window
+        // and #22's Back to Top reached the menu bar and never reached the
+        // keymap, so `cmd-m`, `cmd-w` and `cmd-up` did nothing and macOS
+        // drew no key equivalent beside any of them. The menu item worked,
+        // because it carries its own action; the keystroke had nothing to
+        // match against.
+        //
+        // Walking from the menu inward is what makes the omission visible.
+        let bound: Vec<&str> = ALL_SHORTCUTS
+            .iter()
+            .filter_map(|shortcut| shortcut.menu_label)
+            .collect();
+
+        for name in menu_action_names() {
+            // `About twigpui` is a menu item with no shortcut by design --
+            // the only one, and it is spelled out here rather than skipped
+            // by a rule, so a second one cannot slip past.
+            if name == "About twigpui" {
+                continue;
+            }
+            assert!(
+                bound.contains(&name.as_str()),
+                "{name} is in the menu bar but not in ALL_SHORTCUTS, so its keystroke is never bound"
+            );
+        }
     }
 
     #[test]
