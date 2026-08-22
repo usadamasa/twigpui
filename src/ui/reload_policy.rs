@@ -63,7 +63,13 @@ pub(super) fn map_reload_error(error: &anyhow::Error) -> TimelineState {
         ReloadNotice::Cooldown { reset_at, cooldown } => {
             TimelineState::RateLimited { reset_at, cooldown }
         }
-        ReloadNotice::Failed(message) => TimelineState::Failed(message),
+        // `Outcome` is unreachable here: the argument comes from
+        // `reload_notice_for_error`, which only builds failure variants.
+        // Listed rather than left to a wildcard so a variant added later
+        // has to be considered instead of silently landing in `Failed`.
+        ReloadNotice::Failed(message) | ReloadNotice::Outcome(message) => {
+            TimelineState::Failed(message)
+        }
     }
 }
 
@@ -200,7 +206,10 @@ pub(super) fn cooldown_tick(notice: Option<&ReloadNotice>, now: i64) -> Cooldown
             CooldownTick::StillWaiting
         }
         Some(ReloadNotice::Cooldown { .. }) => CooldownTick::Elapsed,
-        Some(ReloadNotice::Failed(_)) | None => CooldownTick::NotTicking,
+        // An `Outcome` means a reload finished while the ticker was still
+        // running, which is exactly the "something else has replaced it"
+        // case `NotTicking` describes (#141).
+        Some(ReloadNotice::Failed(_) | ReloadNotice::Outcome(_)) | None => CooldownTick::NotTicking,
     }
 }
 
@@ -233,13 +242,44 @@ pub(super) fn preserved_scroll_target(
     if top_item == 0 {
         return None;
     }
-    let previous: std::collections::HashSet<&str> = previous_ids.iter().copied().collect();
-    let prepended = new_ids
-        .iter()
-        .take_while(|id| !previous.contains(*id))
-        .count();
+    let prepended = newly_arrived(previous_ids, new_ids);
     if prepended == 0 {
         return None;
     }
     Some(top_item.saturating_add(prepended))
+}
+
+/// How many posts a reload brought in: the leading run of ids that were
+/// not already on file.
+///
+/// The *leading* run, because an id further down is a post that moved
+/// rather than one that arrived. Both callers depend on that reading —
+/// [`preserved_scroll_target`] would push the reader past what they were
+/// on, and [`reload_outcome_label`] would claim posts that were already
+/// there — so the rule lives in one place rather than in each of them.
+pub(super) fn newly_arrived(previous_ids: &[&str], new_ids: &[&str]) -> usize {
+    let previous: std::collections::HashSet<&str> = previous_ids.iter().copied().collect();
+    new_ids
+        .iter()
+        .take_while(|id| !previous.contains(*id))
+        .count()
+}
+
+/// What a finished reload says for itself (#141).
+///
+/// A reload used to report only its failures. On success the header's
+/// button flicked to `Loading…` and back, which on a fast response is a
+/// frame or two — and never where the reader is looking when they pressed
+/// `cmd-r` or used the menu rather than the button.
+///
+/// So the outcome is stated instead of implied, and "nothing arrived" is
+/// stated too: that is the case where the screen is otherwise identical
+/// before and after, and the one where a reader is most likely to think
+/// the press did not register.
+pub(super) fn reload_outcome_label(new_posts: usize) -> String {
+    match new_posts {
+        0 => "No new posts.".to_string(),
+        1 => "1 new post.".to_string(),
+        n => format!("{n} new posts."),
+    }
 }

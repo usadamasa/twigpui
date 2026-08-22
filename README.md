@@ -238,7 +238,6 @@ typo'd theme is cosmetic, not worth blocking the app over — it falls back to
 | Key | Action |
 | --- | --- |
 | `⌘R` | Reload |
-| `⌘↩` | Post the draft |
 | `⌘N` | Focus the composer |
 | `esc` | Leave the composer (the draft is kept) |
 | `⌘↑` | Back to the newest post |
@@ -246,7 +245,7 @@ typo'd theme is cosmetic, not worth blocking the app over — it falls back to
 | `⌘W` | Close the window |
 | `⌘M` | Minimize |
 
-The first five are shown on screen, under the header — they fit on one
+The first four are shown on screen, under the header — they fit on one
 line, and a help screen nobody opens documents nothing. `⌘Q`, `⌘W` and
 `⌘M` are left off that strip: it is for what this app does that another one
 would not, and those three are macOS gestures every app shares.
@@ -264,8 +263,11 @@ Quitting is not the window's business, and scoping it would mean `⌘Q` doing
 nothing whenever focus sat anywhere else — so it is registered globally and
 handled on the `App` rather than on the window's root (#99).
 
-**`⌘↩` posts; plain `↩` does not.** Enter has to keep inserting a newline,
-and a post is not undoable.
+**No key posts.** The composer's button is the only way, which is how it
+was being used anyway; `⌘↩` was bound for it from #58 until #142 removed
+both that and its menu item. Plain `↩` was never bound and still is not,
+for the reason that outlives the removal — it has to keep inserting a
+newline, and a post is not undoable.
 
 **`esc` moves focus only.** The draft is left exactly as typed: losing it to
 a stray key is unrecoverable, and never losing a draft is the composer's
@@ -276,6 +278,12 @@ are part-way down would otherwise slide everything under your eyes; the
 timeline scrolls by however many posts arrived, so the row you were reading
 stays where it is. At the very top, nothing moves and the new posts simply
 appear (#22).
+
+**A reload says what it did.** A muted line under the header reports how
+many posts arrived — including none, which is the case where the screen is
+otherwise identical before and after and the press looks like it did
+nothing. It counts the same posts the scroll compensates for, so the number
+and the movement always agree (#141).
 
 **"Load older" has no shortcut.** Each press pages backwards for one paid
 request, and a key that spends money on a mis-hit is not a convenience.
@@ -290,7 +298,7 @@ cannot outrun the interval that exists to stop this app spending in a loop.
 | Menu | Items |
 | --- | --- |
 | twigpui | About twigpui, Quit twigpui |
-| File | New Post, Submit Post |
+| File | New Post |
 | View | Reload, Back to Top |
 | Window | Minimize, Close Window |
 
