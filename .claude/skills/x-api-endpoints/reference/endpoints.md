@@ -1,11 +1,17 @@
 # エンドポイント一覧 — 到達範囲・上限・実測値
 
 出典は 2 つ。**spec** は `https://docs.x.com/openapi.json`、
-**実測** は 2026-08-23 に committed scope の OAuth 2.0 ユーザートークンで撃った 34 リクエスト。
+**実測** は 2026-08-23 に OAuth 2.0 ユーザートークンで撃った 34 リクエスト。
 両者が食い違うところは実測を採る (理由は `../SKILL.md` の冒頭)。
+**実測と書いていない数値は spec が出典**で、そこは検証されていない。
 
 committed scope: `tweet.read users.read tweet.write like.write offline.access`
 (`src/oauth/pkce.rs` の `SCOPES`)。
+
+計測に使ったトークンは committed scope に加えて `follows.read` を持っていた
+(#157 の調査中に一度だけ再認可した名残)。本表のどのエンドポイントも
+`follows.read` を要求しないので結果には影響しないが、
+「committed scope ちょうどで撃った」わけではない。
 
 ## アプリが使っている 11 本 (`src/rate_limit.rs` の `Endpoint`)
 
@@ -28,10 +34,11 @@ URL の組み立ては `src/x_api/client.rs` の各 builder が正本。
 書き込み系は実アカウントを変更するため意図的に計測していない。
 必要になったら投稿内容とクリーンアップをユーザーに確認してから撃つ。
 
-### `BearerToken` を受け付けないもの
+### `BearerToken` を受け付けないもの (spec 由来・未計測)
 
 多くの読み取りは `OAuth2UserToken` / `UserToken` (OAuth 1.0a) に加えて
 `BearerToken` (アプリ専用) も受け付けるが、受け付けないものがある。
+以下は spec の `security` ブロックを読んだもので、**Bearer で撃って 401 を確認してはいない**。
 このドキュメントが扱う範囲では次の 9 本:
 
 `/2/users/me` `/2/users/{id}/timelines/reverse_chronological` `/2/users/search`
@@ -41,7 +48,7 @@ URL の組み立ては `src/x_api/client.rs` の各 builder が正本。
 
 このリポジトリの資格情報は OAuth 2.0 ユーザーコンテキストだけなので実害はないが、
 **「Bearer で試して切り分ける」という手はこれらでは使えない。**
-`src/x_api/client.rs` の `me_url` の doc コメントが同じことを書いている。
+`src/x_api/client.rs` の `fn me()` の doc コメントが同じことを書いている。
 
 ## committed scope で届くその他の読み取り
 
@@ -72,6 +79,11 @@ URL の組み立ては `src/x_api/client.rs` の各 builder が正本。
 `/2/media/analytics` は必須の `media_keys` が手元に無いため撃っていない。
 残りは twigpui の用途から遠いので撃っていない。
 
+この 26 本という数え方は「`OAuth2UserToken` に scope を明示する GET」に限っている。
+`OAuth2UserToken: []` (scope の指定なし) の GET が別に 2 本あり
+(`/2/trends/by/woeid/{woeid}` `/2/tweets/counts/recent`)、
+「空 = 任意のユーザートークンで可」と読むならこれらも届く。どちらも未計測。
+
 ### 届かないもの
 
 `GET /2/users/{id}/following` と `GET /2/users/{id}/followers` は `follows.read` を要求する。
@@ -84,13 +96,18 @@ committed code は要求していない。**次に認証フローを回した時
 
 ## `max_results` の下限は 3 通りある
 
-これが一番踏みやすい。上限はどれも 100 (`users/search` と `affiliates` だけ 1000)。
+これが一番踏みやすい。**下の表はほとんどが spec 由来**で、実測は 2 か所しかない。
 
-| 下限 | エンドポイント |
-| --- | --- |
-| 1 | `timelines/reverse_chronological` `retweeted_by` `retweets` `users/search` `affiliates` |
-| 5 | `users/{id}/tweets` `users/{id}/mentions` |
-| 10 | `search/recent` `quote_tweets` `communities/search` |
+| 下限 | エンドポイント | 出典 |
+| --- | --- | --- |
+| 1 | `timelines/reverse_chronological` | **実測** (`max_results=1` が 200) |
+| 1 | `retweeted_by` `retweets` `users/search` `affiliates` | spec |
+| 5 | `users/{id}/tweets` | **実測** (`max_results=4` が 400、本文が「5 と 100 の間」) |
+| 5 | `users/{id}/mentions` | spec (5 が通ることは確認、4 は未計測) |
+| 10 | `search/recent` `quote_tweets` `communities/search` | spec (10 が通ることは確認、9 は未計測) |
+
+上限はどれも 100 (`users/search` と `affiliates` だけ 1000)。**これは全部 spec 由来。**
+上限側を境界まで撃ったのは `ids` の 1-100 だけで、そこは 101 個で 400 を確認している。
 
 ホームタイムラインと `users/{id}/tweets` は見た目がよく似ているのに下限が違う。
 範囲外は 400 で、本文が範囲を教えてくれる。
@@ -99,12 +116,15 @@ committed code は要求していない。**次に認証フローを回した時
 "The `max_results` query parameter value [4] is not between 5 and 100"
 ```
 
+**範囲を確かめたいときは範囲外を 1 本撃つ。** 本文が下限と上限を両方言う。
+
 ## 受け付ける値の実測 (2026-08-23)
 
 400 の本文から取った実際の enum。**公開 spec の enum とは中身が違う。**
 
-`tweet.fields` — spec の `post.fields` enum には無い `author_id` `referenced_tweets`
-`in_reply_to_user_id` `rest_id` `note_tweet` を含む:
+`tweet.fields` — spec の `post.fields` enum に無い値を含む。
+綴りの違いを除いて本当に spec 側に存在しないのは
+`rest_id` `author_id` `in_reply_to_user_id` `username` `edit_history_*` `referenced_*` の各項:
 
 ```
 id text edit_history_tweet_ids withheld rest_id created_at author_id conversation_id
@@ -126,9 +146,18 @@ attachments.media_keys attachments.poll_ids attachments.media_source_tweet usern
 entities.mentions.username geo.place_id article.cover_media article.media_entities
 ```
 
-**この列挙も完全ではない。** アプリが使っている `referenced_tweets.id`
-`referenced_tweets.id.author_id` `referenced_tweets.id.attachments.media_keys` は
-どれもこの列挙に無いが、200 で通り `includes.tweets` を返す。
+**この列挙も完全ではない。** 反例を 2 つ実測している。
+
+- `expansions=referenced_tweets.id` — 列挙に無いが 200、`includes.tweets` を返す
+- `expansions=referenced_posts` — 別語彙で列挙にも無いが 200、
+  レスポンスは tweet 語彙 (`referenced_tweets` / `includes.tweets`) で返る
+
+つまり tweet モードで受け付ける集合は、spec の列挙とも 400 の列挙とも一致せず、
+**両方より広い。理由は分かっていない。**
+
+アプリが使っている `referenced_tweets.id.author_id` と
+`referenced_tweets.id.attachments.media_keys` も列挙に無いが、これらは probe ではなく
+**`src/x_api/client.rs` の `TIMELINE_FIELDS` が実行時に動いていることが根拠**。
 
 `user.fields`:
 
@@ -159,10 +188,17 @@ public_metrics organic_metrics promoted_metrics non_public_metrics
 `GET /2/users/{id}/tweets` (自分のタイムライン) を使う。こちらは決定的に動く。
 
 同じトークンで `GET /2/tweets/search/recent` は正常に動く。
-`from:` クエリで特定アカウントの直近投稿は引ける。7 日窓の制約は同じで、
-クエリ文字列に長さ上限があるため、多数のフォロー先を一括で追う用途には向かない。
+ただし計測したのは `from:usadamasa` (自分自身) だけで、
+**フォロー先など他人のアカウントに対して同じように引けるかは未計測**。
+代替経路として使えるかを判断するにはそこを撃つ必要がある。
+クエリ文字列に長さ上限があるため、いずれにせよ多数のフォロー先を
+一括で追う用途には向かない。
 
-## 仕様上の取得範囲
+## 取得範囲 (docs.x.com の散文より・未確認)
 
-`timelines/reverse_chronological` の取得可能範囲は直近 7 日または最新 800 件。
-どちらか先に尽きたほうで止まる。ページングでこれより古くは辿れない。
+`timelines/reverse_chronological` の取得可能範囲は直近 7 日または最新 800 件、
+どちらか先に尽きたほうで止まる、とされる。
+
+**この数字の出典は `openapi.json` ではなく docs.x.com の散文ページ**で、
+spec のどこにも 7 日も 800 も現れない。ページングで末尾まで辿った計測もしていない。
+このドキュメントの他の記述と違い、一次資料で裏を取れていない項目として扱う。

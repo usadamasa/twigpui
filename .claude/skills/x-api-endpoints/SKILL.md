@@ -29,7 +29,9 @@ X API には post 語彙と tweet 語彙という 2 系統が並存していて�
 | 無指定 または `tweet.fields` | `edit_history_tweet_ids` `referenced_tweets` | `includes.tweets` |
 | `post.fields` | `edit_history_post_ids` `referenced_posts` | `includes.posts` |
 
-`expansions` が受け付ける値も同じ規則で切り替わる。
+`expansions` については、切り替わるのは**レスポンスの語彙と 400 が返す列挙**であって、
+受け付ける値そのものではない。`post.fields` を付けずに `expansions=referenced_posts` を
+送っても 200 が返り、レスポンスは tweet 語彙 (`referenced_tweets` / `includes.tweets`) になる。
 
 `src/x_api/model.rs` の `Includes::tweets` と `Post::referenced_tweets` はどちらも
 `#[serde(default)]` なので、spec に合わせて `post.fields` へ「近代化」すると
@@ -46,9 +48,13 @@ X API には post 語彙と tweet 語彙という 2 系統が並存していて�
    `in_reply_to_user_id` `rest_id` を含まない。
 2. **400 の本文** — 不正な値を 1 つ送ると、そのパラメータが実際に受け付ける
    enum を全部返す。spec より実態に近い。
-3. **それでもまだ足りない** — `expansions=referenced_tweets.id` は 400 の列挙に
-   載っていないのに 200 で通り、`includes.tweets` を返す。
-   ドット付きのパス表記は列挙外でも受け付けられる。
+3. **それでもまだ足りない** — 反例が 2 つある。
+   `expansions=referenced_tweets.id` (ドット付き) も
+   `expansions=referenced_posts` (別語彙) も、tweet モードの 400 の列挙には
+   載っていないのに 200 で通る。tweet モードで実際に受け付ける集合は、
+   spec の列挙とも 400 の列挙とも一致せず、両方より広い。
+   **なぜ広いのかは分かっていない。** ドット付きだから通る、という説明ではない
+   (`referenced_posts` はドット付きではない)。
 
 **実リクエストだけが真。** spec は出発点、400 の列挙は近道、確認は実測。
 
@@ -68,20 +74,28 @@ GET /2/users/{id}/tweets?max_results=5&expansions=bogus
 
 ## 4xx の読み方
 
-エラー本文は RFC 7807 風の `{type, title, detail, errors[]}`。
-`type` は `https://api.x.com/2/problems/...`。
+エラー本文は RFC 7807 風で `type` は `https://api.x.com/2/problems/...`。
+ただし形は一定でない。400 は `{type, title, detail, errors[]}` を返すが、
+403 (`/2/tweets/analytics`) は `errors[]` を持たず
+`{type, title, detail, client_id, reason, registration_url, required_enrollment}` だった。
+**`errors[]` があるものとして書くと 403 で落ちる。**
 
-- **404 ではなく 400 が返る場面がある。** 存在しない username を引くと 404 ではなく
-  400 で、しかも理由は「存在しない」ではなく正規表現 `^[A-Za-z0-9_]{1,15}$` 不一致。
-  username の 15 文字上限は spec のパラメータ制約に書かれていない。
+- **形式違反は 404 ではなく 400。** username を引くとき、正規表現
+  `^[A-Za-z0-9_]{1,15}$` に一致しない値 (16 文字など) は 404 ではなく 400 で、
+  理由も「存在しない」ではなく regex 不一致と返る。
+  この regex は spec のパラメータ制約にも書かれており、ここは spec と API が一致している。
+  **形式を満たす不存在の username がどう返るかは未計測。**
+  `ids` の挙動 (下記) から類推すると 200 + `errors[]` の可能性がある。
 - **部分成功は 200 で返る。** `GET /2/tweets?ids=` に実在 id と不存在 id を混ぜると
   200 が返り、`data` に取れた分だけ、`errors[]` に `Not Found Error` が入る。
   `meta.result_count` は返った分しか数えない。**`errors[]` を見ないと欠落に気づけない。**
 - **403 の文面は誤解を招く。** `/2/tweets/analytics` の 403 は
-  「Project に紐づいた App のキーを使え」(`reason: client-not-enrolled`) と言うが、
-  同じトークンで他の v2 エンドポイントは 200 を返す。本当の意味は
-  `required_enrollment` のほう、つまりアクセス階層不足。
-  文面どおりに App 設定を疑うと時間を溶かす。
+  「Project に紐づいた App のキーを使え」(`reason: client-not-enrolled`) と言う。
+  **これは Project 紐付けの問題ではない。** 同じトークンで他の v2 エンドポイント
+  17 本が 200 を返しており、v2 は Project 配下の App を要求するのだから、紐付けは生きている。
+  残る候補は同じ本文の `required_enrollment: "Appropriate Level of API Access"`、
+  つまりアクセス階層だが、**こちらは推定で未検証**。
+  計測で言えるのは「App 設定を疑うな」までで、階層だと断定はできない。
 - **エラー本文は送ったパラメータをエコーバックする。** `ids` に 101 件送った 400 の
   本文には 101 件全部が入る。そのままログへ出すと膨れる。
 - 429 は 2 種類ある。レートリミットと `UsageCapExceeded` (残高切れ) の区別は
@@ -89,9 +103,11 @@ GET /2/users/{id}/tweets?max_results=5&expansions=bogus
 
 ## レートリミットはエンドポイントごとに桁が違う
 
-`x-rate-limit-limit` レスポンスヘッダは**どのリクエストにも付いてくる**ので、
-上限を知るための追加リクエストは要らない。実測値は 10 から 5000 まで開いている
+`x-rate-limit-limit` レスポンスヘッダは、観測した 34 本 (200 / 400 / 403) の
+**すべてに付いていた**ので、上限を知るための追加リクエストは要らない。
+実測値は 10 から 5000 まで開いている
 (403 を返した `/2/tweets/analytics` だけは 40000 と申告してくる)。
+401 / 429 / 5xx では観測していない。
 
 | エンドポイント | 上限 |
 | --- | --- |
@@ -106,23 +122,53 @@ GET /2/users/{id}/tweets?max_results=5&expansions=bogus
 実測した上限をこの表と突き合わせる。**1 操作で複数エンドポイントを叩く設計は、
 その中で一番小さい上限に縛られる。**
 
-`x-access-level` ヘッダも毎回付く。App の権限 (`read-write` など) が
+`x-access-level` ヘッダも同じ 34 本すべてに付いていた。App の権限 (`read-write` など) が
 開発者コンソールを開かずに分かる。
 
 ## スコープと到達範囲
 
 committed scope は `src/oauth/pkce.rs` の `SCOPES`:
 `tweet.read users.read tweet.write like.write offline.access`。
-この scope で届く GET は spec 上 26 本で、到達可否は `reference/endpoints.md` にある。
+この scope で届く GET は spec 上 26 本 (scope を明示する GET のみを数えた場合)。
+到達可否は `reference/endpoints.md` にある。
 
 **`GET /2/users/{id}/following` は届かない。** `follows.read` が要る。
 手元の live token がこの scope を持っていることがあるが、それは過去の再認可の名残で、
-committed code は要求していない。**次の再認可で黙って消える。**
-`/following` に依存するコードや probe を書くと、そのときに落ちる。
+committed code は要求していない。**次に認証フローを回した時点で消える。**
+`offline.access` によるリフレッシュは元の scope を保つので、消えるのは
+リフレッシュ時ではなく再認可時。`/following` に依存するコードや probe は、そのときに落ちる。
+
+## 挙動を確かめるときは書き捨ての Rust を書く
+
+**シェルからは撃てない。** sandbox の制約が 3 つ重なっている。
+
+- `~/.local/state/twigpui/oauth_tokens.json` は read deny-list に入っていて読めない
+- `curl` は permission-denied
+- `.env` も Claude セッションからは読めない
+
+**抜け道は `cargo` ひとつ。** `.claude/settings.json` の `sandbox.excludedCommands` に
+`cargo *` があるので、`cargo run` で起動したプロセスだけが sandbox の外で動き、
+トークンを読めて `api.x.com` に届く。
+
+したがって probe は**書き捨ての Rust クレートとして書く**。
+`./tmp/probe` (gitignore 済み) に置き、`ureq` + `serde_json` で撃ち、
+終わったら `~/.claude/scripts/clean-tmp.sh ./tmp/probe` で消す。
+どちらの crate もローカルの registry キャッシュにあるのでビルドは速い。
+
+```sh
+cargo run --quiet --manifest-path ./tmp/probe/Cargo.toml -- ./tmp/probes/round1.tsv
+```
+
+アプリ本体にデバッグ用のフラグやコードを足して確かめようとしない。
+確かめたいことは毎回違うのに、本体に残ると次から邪魔になる。
+書き捨ては書き捨てのまま捨てる。
+
+クレートの中身 (非 2xx をエラーにしない設定、ヘッダの保存、TSV での入力) は
+`reference/probing.md` に全部ある。
 
 ## 実測の作法
 
-課金が発生する調査には 2 つの規則がある。
+課金が発生する調査には 3 つの規則がある。
 
 **仮説は、別の仮説と区別できる計測が出るまで閉じない。**
 #157 の調査では「スコープ不足」という仮説に対して `follows.read` を足す修正を入れ、
@@ -131,10 +177,14 @@ spec の `security` ブロックがそれを反証した。
 「直したら直った気がする」は計測ではない。
 
 **観測は撃った実行の中でファイルへ落とす。**
+1 リクエストにつき生のレスポンス 1 ファイルと ledger 1 行を、受け取った直後に書く。
 端末が流れたせいで同じリクエストを撃ち直すのは、そのまま二重課金になる。
+probe のリクエストは `usage.json` に計上されないので、数えるのは自分の仕事。
 
-probe crate の組み方 (Bash からトークンが読めない制約への対処を含む) は
-`reference/probing.md`。
+**1 リクエストで 2 つ以上の問いに答えさせる。**
+`?max_results=5&tweet.fields=...` なら下限境界とフィールド名の両方が同時に分かる。
+撃つ前に「この結果がどちらに転んでも何かが決まるか」を言えるようにする。
+言えないなら、それは課金するだけで何も決まらないリクエストになる。
 
 ## テスト
 
