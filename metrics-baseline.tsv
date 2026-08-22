@@ -46,7 +46,7 @@ src/repost.rs	150
 src/theme.rs	350
 src/thread.rs	100
 src/toggle.rs	200
-src/ui/mod.rs	2600
+src/ui/mod.rs	2650
 src/ui/reload_policy.rs	300
 src/ui/render.rs	1000
 src/usage.rs	350

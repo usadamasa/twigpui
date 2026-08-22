@@ -1859,6 +1859,9 @@ impl TimelineView {
                     .justify_between()
                     .child(
                         div()
+                            // #95: a readout beside a control, not body
+                            // text.
+                            .text_size(theme::TEXT_META)
                             .text_color(rgb(counter_color))
                             .child(format!("{length}/{}", compose::MAX_WEIGHTED_LENGTH)),
                     )
@@ -1868,12 +1871,26 @@ impl TimelineView {
                             .px_2()
                             .py_1()
                             .rounded(theme::RADIUS_CONTROL)
-                            .bg(rgb(if can_submit {
-                                theme.accent
-                            } else {
-                                theme.button_busy_bg
-                            }))
-                            .text_color(rgb(theme.button_label))
+                            // #95: this one *is* a default button — it is
+                            // the composer's whole point — so it keeps the
+                            // accent fill while it can be pressed. What
+                            // changes is the other state: an unpressable
+                            // button used to be a solid dark grey block,
+                            // which reads as a control that is merely a
+                            // different color rather than one that is off.
+                            // macOS drains the fill instead.
+                            .when(can_submit, |button| {
+                                button
+                                    .bg(rgb(theme.accent))
+                                    .text_color(rgb(theme.button_label))
+                            })
+                            .when(!can_submit, |button| {
+                                button
+                                    .border_1()
+                                    .border_color(rgb(theme.border))
+                                    .text_color(rgb(theme.text_tertiary))
+                            })
+                            .text_size(theme::TEXT_META)
                             .child(if is_submitting { "Posting…" } else { "Post" })
                             // #14's double-submit guard, part two: while a
                             // submit is in flight (or the draft is blank/
@@ -2059,15 +2076,38 @@ impl TimelineView {
                     .child(
                         div()
                             .id("primary-action")
-                            .px_3()
+                            .px_2()
                             .py_1()
-                            .rounded_full()
-                            .bg(rgb(if busy {
-                                theme.button_busy_bg
-                            } else {
-                                theme.accent
-                            }))
-                            .text_color(rgb(theme.button_label))
+                            .rounded(theme::RADIUS_CONTROL)
+                            // #95: a bordered toolbar control, not a filled
+                            // pill. Reload is the thing this window does
+                            // most often, but it is not the thing to look
+                            // at first — a saturated fill in the corner of
+                            // every frame made it the loudest element on
+                            // screen. macOS reserves the filled treatment
+                            // for a sheet's default button, which this is
+                            // not.
+                            //
+                            // Sign-in is the exception: with no session
+                            // there is nothing else to do in the window, so
+                            // it keeps the fill and reads as the call to
+                            // action it is.
+                            .when(matches!(action, PrimaryAction::SignIn) && !busy, |button| {
+                                button
+                                    .bg(rgb(theme.accent))
+                                    .text_color(rgb(theme.button_label))
+                            })
+                            .when(!matches!(action, PrimaryAction::SignIn) || busy, |button| {
+                                button
+                                    .border_1()
+                                    .border_color(rgb(theme.border))
+                                    .text_color(rgb(if busy {
+                                        theme.text_tertiary
+                                    } else {
+                                        theme.text
+                                    }))
+                            })
+                            .text_size(theme::TEXT_META)
                             .child(label)
                             .on_click(cx.listener(move |this, _event, _window, cx| match action {
                                 PrimaryAction::Reload => this.reload(ReloadTrigger::Polling, cx),
