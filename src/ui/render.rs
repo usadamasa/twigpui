@@ -71,9 +71,16 @@ pub(super) fn reload_notice_banner(
     theme: Theme,
     now: i64,
 ) -> impl IntoElement {
-    let message = match *notice {
-        ReloadNotice::Cooldown { reset_at, cooldown } => cooldown_label(cooldown, reset_at, now),
-        ReloadNotice::Failed(ref message) => message.to_string(),
+    // #141: the color says which kind of line this is before the words do.
+    // `Outcome` is the only variant that reports success, and painting it
+    // `danger` alongside the other two would make a finished reload look
+    // like a failed one.
+    let (message, color) = match *notice {
+        ReloadNotice::Cooldown { reset_at, cooldown } => {
+            (cooldown_label(cooldown, reset_at, now), theme.danger)
+        }
+        ReloadNotice::Failed(ref message) => (message.to_string(), theme.danger),
+        ReloadNotice::Outcome(ref message) => (message.to_string(), theme.text_muted),
     };
     div()
         .px_4()
@@ -81,7 +88,7 @@ pub(super) fn reload_notice_banner(
         .bg(rgb(theme.bg_header))
         .border_b_1()
         .border_color(rgb(theme.border))
-        .text_color(rgb(theme.danger))
+        .text_color(rgb(color))
         .child(message)
 }
 

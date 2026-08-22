@@ -274,6 +274,12 @@ timeline scrolls by however many posts arrived, so the row you were reading
 stays where it is. At the very top, nothing moves and the new posts simply
 appear (#22).
 
+**A reload says what it did.** A muted line under the header reports how
+many posts arrived — including none, which is the case where the screen is
+otherwise identical before and after and the press looks like it did
+nothing. It counts the same posts the scroll compensates for, so the number
+and the movement always agree (#141).
+
 **"Load older" has no shortcut.** Each press pages backwards for one paid
 request, and a key that spends money on a mis-hit is not a convenience.
 `⌘R` does spend requests, but it is the reload gesture every app shares and
