@@ -25,6 +25,7 @@
     )
 )]
 
+mod assets;
 mod avatar;
 mod browser;
 mod cache;
@@ -127,65 +128,70 @@ fn main() {
     log::init(&paths, config.log_level);
     log::info("starting twigpui");
 
-    Application::new().run(move |cx| {
-        // #38: registers gpui-component's global keybindings, theme, and
-        // other per-App state (see its own `init`'s doc) — required once,
-        // before any of its widgets (the composer's text input) can be
-        // constructed.
-        gpui_component::init(cx);
-        // #58: twigpui's own key bindings, registered alongside
-        // gpui-component's for the same reason — once, before the window
-        // that dispatches to them exists.
-        menu::init(cx);
-        // #99: the menu bar, and the one action behind it that the window
-        // cannot own. A menu item dispatches into the focused window, so
-        // Reload/New Post/Submit Post reach the timeline's own handlers —
-        // but quitting has to work with no window focused at all, which is
-        // what `App::on_action` registers and a handler on the window's
-        // root would not. Both run before the window opens: an app whose
-        // window fails to open (below) still has a menu bar.
-        cx.on_action(|_: &menu::Quit, cx| cx.quit());
-        cx.set_menus(menu::menus());
-        // #139: closing the last window ends the app. gpui keeps the
-        // process alive on its own — right for an app you can ask for
-        // another window, wrong for this one, where `cmd-w` left a process
-        // running with nothing on screen and only `cmd-q` able to reach
-        // it. Counted rather than assumed, so a second window would still
-        // have to be the last one out.
-        cx.on_window_closed(|cx| {
-            if cx.windows().is_empty() {
-                cx.quit();
-            }
-        })
-        .detach();
+    // #95: the icons the toolbar draws. gpui resolves an `svg()` path
+    // through this, and without it every icon renders as nothing at all.
+    Application::new()
+        .with_assets(assets::Assets)
+        .run(move |cx| {
+            // #38: registers gpui-component's global keybindings, theme, and
+            // other per-App state (see its own `init`'s doc) — required once,
+            // before any of its widgets (the composer's text input) can be
+            // constructed.
+            gpui_component::init(cx);
+            // #58: twigpui's own key bindings, registered alongside
+            // gpui-component's for the same reason — once, before the window
+            // that dispatches to them exists.
+            menu::init(cx);
+            // #99: the menu bar, and the one action behind it that the window
+            // cannot own. A menu item dispatches into the focused window, so
+            // Reload/New Post/Submit Post reach the timeline's own handlers —
+            // but quitting has to work with no window focused at all, which is
+            // what `App::on_action` registers and a handler on the window's
+            // root would not. Both run before the window opens: an app whose
+            // window fails to open (below) still has a menu bar.
+            cx.on_action(|_: &menu::Quit, cx| cx.quit());
+            cx.set_menus(menu::menus());
+            // #139: closing the last window ends the app. gpui keeps the
+            // process alive on its own — right for an app you can ask for
+            // another window, wrong for this one, where `cmd-w` left a process
+            // running with nothing on screen and only `cmd-q` able to reach
+            // it. Counted rather than assumed, so a second window would still
+            // have to be the last one out.
+            cx.on_window_closed(|cx| {
+                if cx.windows().is_empty() {
+                    cx.quit();
+                }
+            })
+            .detach();
 
-        let bounds = Bounds::centered(None, size(px(560.0), px(820.0)), cx);
-        let options = WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(bounds)),
-            titlebar: Some(TitlebarOptions {
-                title: Some("twigpui".into()),
+            let bounds = Bounds::centered(None, size(px(560.0), px(820.0)), cx);
+            let options = WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                titlebar: Some(TitlebarOptions {
+                    title: Some("twigpui".into()),
+                    ..Default::default()
+                }),
                 ..Default::default()
-            }),
-            ..Default::default()
-        };
+            };
 
-        let opened = cx.open_window(options, |window, cx| {
-            let timeline = cx.new(|cx| ui::TimelineView::new(config, paths, startup, window, cx));
-            // #38: gpui-component's widgets reach back up to the window's
-            // root expecting to find its `Root` there — its text input asks
-            // for it on the very first render, and `Root::read` panics
-            // outright if the root view is anything else. Making the
-            // timeline the root directly aborted the app at startup.
-            cx.new(|cx| gpui_component::Root::new(timeline, window, cx))
+            let opened = cx.open_window(options, |window, cx| {
+                let timeline =
+                    cx.new(|cx| ui::TimelineView::new(config, paths, startup, window, cx));
+                // #38: gpui-component's widgets reach back up to the window's
+                // root expecting to find its `Root` there — its text input asks
+                // for it on the very first render, and `Root::read` panics
+                // outright if the root view is anything else. Making the
+                // timeline the root directly aborted the app at startup.
+                cx.new(|cx| gpui_component::Root::new(timeline, window, cx))
+            });
+            if let Err(error) = opened {
+                log::error(&format!("could not open the window: {error:#}"));
+                cx.quit();
+                return;
+            }
+
+            cx.activate(true);
         });
-        if let Err(error) = opened {
-            log::error(&format!("could not open the window: {error:#}"));
-            cx.quit();
-            return;
-        }
-
-        cx.activate(true);
-    });
 }
 
 /// Report a fatal startup error both to stderr and — when there is no

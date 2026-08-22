@@ -26,9 +26,9 @@ pub(super) fn sign_in_pill(
 ) -> impl IntoElement {
     div()
         .id(id)
-        .px_3()
+        .px_2()
         .py_1()
-        .rounded_full()
+        .rounded(theme::RADIUS_CONTROL)
         .border_1()
         .border_color(rgb(theme.accent))
         .text_color(rgb(theme.accent))
@@ -136,7 +136,7 @@ pub(super) fn quote_card(
         .gap_1()
         .p_2()
         .mt_1()
-        .rounded_md()
+        .rounded(theme::RADIUS_CONTROL)
         .border_1()
         .border_color(rgb(theme.border))
         .bg(rgb(theme.bg_header))
@@ -371,8 +371,9 @@ pub(super) fn repost_row(
     cx: &mut Context<'_, TimelineView>,
 ) -> AnyElement {
     let label = repost_action_label(state);
+    // #95, as in `like_row`.
     let color = if state.is_on() {
-        theme.accent
+        theme.repost
     } else {
         theme.text_muted
     };
@@ -429,8 +430,10 @@ pub(super) fn like_row(
     cx: &mut Context<'_, TimelineView>,
 ) -> AnyElement {
     let label = like_action_label(state);
+    // #95: an "on" action is colored by what it means, not by the link
+    // color every clickable thing in the row already wears.
     let color = if state.is_on() {
-        theme.accent
+        theme.like
     } else {
         theme.text_muted
     };
@@ -717,9 +720,59 @@ pub(super) fn quote_row(
 /// because an app-only bearer token could not read the home one.
 pub(super) fn header_title(home_username: Option<&str>) -> String {
     match home_username {
-        Some(username) => format!("@{username} — Home timeline"),
-        None => "Home timeline".to_string(),
+        Some(username) => format!("@{username}"),
+        // Before `/me` resolves there is no account to name, and the app's
+        // own name is what a macOS toolbar shows in its place.
+        None => "twigpui".to_string(),
     }
+}
+
+/// The toolbar's timeline switcher (#95), shaped like a macOS segmented
+/// control: one trough with the selected segment lifted out of it in the
+/// window's own background color.
+///
+/// #63 is what will fill it. Today `header` hands it a single entry, which
+/// is honest — Home is the only timeline this app can fetch — and the
+/// point of building the frame now is that adding the second one is a
+/// change to that array rather than to the toolbar's layout.
+///
+/// Segments carry no click handler yet for the same reason: with one
+/// timeline there is nothing to switch to, and a control that responds to
+/// a click by doing nothing is worse than one that plainly does not.
+pub(super) fn tab_bar(tabs: &[(&str, bool)], theme: Theme) -> AnyElement {
+    let mut trough = div()
+        .flex()
+        .items_center()
+        .p(px(2.0))
+        .rounded(theme::RADIUS_CONTROL)
+        .bg(rgb(theme.control_trough))
+        .text_size(theme::TEXT_META);
+
+    for (label, selected) in tabs {
+        trough = trough.child(
+            div()
+                .px_2()
+                .py_0p5()
+                .rounded(px(4.0))
+                .when(*selected, |segment| {
+                    // Lifted out of the track rather than merely tinted:
+                    // without the shadow the segment reads as a bordered
+                    // chip beside plain text, which is a different control
+                    // entirely.
+                    segment
+                        .bg(rgb(theme.bg))
+                        .shadow_sm()
+                        .text_color(rgb(theme.text))
+                        .font_weight(FontWeight::MEDIUM)
+                })
+                .when(!*selected, |segment| {
+                    segment.text_color(rgb(theme.text_muted))
+                })
+                .child((*label).to_string()),
+        );
+    }
+
+    trough.into_any_element()
 }
 
 /// How many attached images one row will render (#65). X allows up to four
@@ -731,7 +784,9 @@ pub(super) const MAX_RENDERED_MEDIA: usize = 4;
 /// media's own `width`/`height`: a row's height must not depend on which
 /// images have finished downloading, or the timeline reflows under the
 /// reader as they land.
-pub(super) const MEDIA_CELL_HEIGHT: gpui::Pixels = px(160.0);
+///
+/// The value lives in `theme` with the rest of #95's dimensions.
+pub(super) use crate::theme::MEDIA_CELL_HEIGHT;
 
 /// How many columns to lay `count` thumbnails out in (#65): one across for
 /// a single image, two for anything more. Three across would each be too
@@ -764,7 +819,10 @@ pub(super) fn media_badge(kind: Option<&str>) -> Option<&'static str> {
 /// `flex_shrink_0` alongside this size, not just the size itself. Shape is
 /// the third thing the two must agree on, which is why it is
 /// [`theme::AVATAR_RADIUS`] and not a literal (#98).
-pub(super) const AVATAR_SIZE: gpui::Pixels = px(44.0);
+///
+/// The value itself lives in `theme` alongside the radius and the row
+/// separator's inset, both of which are derived from it (#95).
+pub(super) use crate::theme::AVATAR_SIZE;
 
 /// What stands in for an avatar that hasn't downloaded, failed, or never
 /// existed (#64): a filled circle carrying the author's initial.
@@ -832,30 +890,71 @@ pub(super) fn profile_url(author_username: &str) -> Option<String> {
     (!author_username.is_empty()).then(|| format!("https://x.com/{author_username}"))
 }
 
-/// The engagement line shown under a post's body (#67), or `None` when the
-/// post has no engagement at all — three zeros on every fresh post would be
-/// noise, and #67 asks for counts that stay out of the way.
+/// The engagement counts a row shows beside its actions (#67, reshaped by
+/// #95).
 ///
-/// Zero counts are dropped individually for the same reason, so a post with
-/// only likes reads "3 likes" rather than "0 replies · 0 reposts · 3 likes".
-pub(super) fn metrics_label(metrics: &PostMetrics) -> Option<String> {
-    let parts: Vec<String> = [
-        (metrics.replies, "reply", "replies"),
-        (metrics.reposts, "repost", "reposts"),
-        (metrics.likes, "like", "likes"),
-    ]
-    .into_iter()
-    .filter(|(count, _, _)| *count > 0)
-    .map(|(count, singular, plural)| {
-        let noun = if count == 1 { singular } else { plural };
-        format!("{} {noun}", compact_count(count))
-    })
-    .collect();
+/// Until #95 these were one standalone line under the body — "12 replies ·
+/// 34 reposts · 56 likes" — sitting above a column of stacked action
+/// labels that named the very same three things. #95 folds the two
+/// together: the count now rides next to the action it belongs to, and the
+/// separate line is gone, which is one row of height back on every post.
+///
+/// Each field is `None` when that count is zero, or when the post carried
+/// no metrics at all, so a fresh post renders bare actions rather than a
+/// run of zeros — the same rule the old line followed by dropping zero
+/// parts. The counts are a snapshot from when the row was fetched (see
+/// [`PostMetrics`]); nothing here re-reads them.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(super) struct RowCounts {
+    /// Beside "Reply".
+    pub(super) replies: Option<String>,
+    /// Beside "Repost" / "Reposted".
+    pub(super) reposts: Option<String>,
+    /// Beside "Like" / "Liked".
+    pub(super) likes: Option<String>,
+}
 
-    if parts.is_empty() {
-        return None;
+/// Build one row's [`RowCounts`] from whatever metrics it carries.
+pub(super) fn row_counts(metrics: Option<&PostMetrics>) -> RowCounts {
+    let Some(metrics) = metrics else {
+        return RowCounts::default();
+    };
+    RowCounts {
+        replies: non_zero_count(metrics.replies),
+        reposts: non_zero_count(metrics.reposts),
+        likes: non_zero_count(metrics.likes),
     }
-    Some(parts.join(" · "))
+}
+
+/// One count, abbreviated, or `None` for zero — see [`RowCounts`] for why
+/// zero is nothing rather than "0".
+fn non_zero_count(count: u64) -> Option<String> {
+    (count > 0).then(|| compact_count(count))
+}
+
+/// One action with its engagement count beside it (#95), or the action on
+/// its own when there is no count to show.
+///
+/// The count is a sibling rather than part of the action's own element so
+/// that clicking the number does nothing: the actions are toggles that
+/// spend a request, and a count that looks like part of the button would
+/// widen the target for an action the reader only meant to read.
+pub(super) fn with_count(action: AnyElement, count: Option<&str>, theme: Theme) -> AnyElement {
+    let Some(count) = count else {
+        return action;
+    };
+
+    div()
+        .flex()
+        .items_center()
+        .gap_1()
+        .child(action)
+        .child(
+            div()
+                .text_color(rgb(theme.text_muted))
+                .child(count.to_string()),
+        )
+        .into_any_element()
 }
 
 /// Abbreviate a count the way X's own UI does — `12345` becomes `12.3K` —
