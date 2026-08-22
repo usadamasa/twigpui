@@ -745,7 +745,7 @@ pub(super) fn tab_bar(tabs: &[(&str, bool)], theme: Theme) -> AnyElement {
         .items_center()
         .p(px(2.0))
         .rounded(theme::RADIUS_CONTROL)
-        .bg(rgb(theme.border))
+        .bg(rgb(theme.control_trough))
         .text_size(theme::TEXT_META);
 
     for (label, selected) in tabs {
@@ -755,8 +755,13 @@ pub(super) fn tab_bar(tabs: &[(&str, bool)], theme: Theme) -> AnyElement {
                 .py_0p5()
                 .rounded(px(4.0))
                 .when(*selected, |segment| {
+                    // Lifted out of the track rather than merely tinted:
+                    // without the shadow the segment reads as a bordered
+                    // chip beside plain text, which is a different control
+                    // entirely.
                     segment
                         .bg(rgb(theme.bg))
+                        .shadow_sm()
                         .text_color(rgb(theme.text))
                         .font_weight(FontWeight::MEDIUM)
                 })

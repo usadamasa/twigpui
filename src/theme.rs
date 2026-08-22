@@ -120,6 +120,11 @@ pub(crate) struct Theme {
     pub(crate) bg_header: u32,
     /// Header/row separator lines.
     pub(crate) border: u32,
+    /// The recessed track a segmented control's segments sit in (#95).
+    /// Its own slot rather than reusing `border`: a separator is a
+    /// hairline drawn against the window's white background, and the same
+    /// value used as a fill against the toolbar's grey is invisible.
+    pub(crate) control_trough: u32,
     /// Primary body text.
     pub(crate) text: u32,
     /// De-emphasized text (bylines, engagement counts, placeholder
@@ -171,6 +176,7 @@ impl Theme {
             bg: 0x15_20_2b,
             bg_header: 0x1b_28_36,
             border: 0x38_44_4d,
+            control_trough: 0x0f_18_20,
             text: 0xf7_f9_f9,
             text_muted: 0x88_99_a6,
             // A step below `text_muted` against the dark `bg`, mirroring
@@ -200,6 +206,7 @@ impl Theme {
             bg: 0xff_ff_ff,
             bg_header: 0xf5_f7_f8,
             border: 0xd7_dc_e0,
+            control_trough: 0xe4_e8_eb,
             text: 0x0f_14_19,
             text_muted: 0x54_5b_63,
             // 5.1:1 — one readable step below `text_muted`. macOS's own
@@ -340,6 +347,7 @@ mod tests {
         assert_ne!(light.bg, dark.bg);
         assert_ne!(light.bg_header, dark.bg_header);
         assert_ne!(light.border, dark.border);
+        assert_ne!(light.control_trough, dark.control_trough);
         assert_ne!(light.text, dark.text);
         assert_ne!(light.text_muted, dark.text_muted);
         assert_ne!(light.text_tertiary, dark.text_tertiary);

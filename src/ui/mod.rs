@@ -1843,8 +1843,8 @@ impl TimelineView {
             .flex()
             .flex_col()
             .gap_2()
-            .px_4()
-            .py_3()
+            .px(theme::ROW_PAD_X)
+            .py(theme::ROW_PAD_Y)
             .border_b_1()
             .border_color(rgb(theme.border))
             // Refuses edits while a submit is in flight, mirroring the
