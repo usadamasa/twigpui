@@ -1044,29 +1044,89 @@ mod tests {
         );
     }
 
+    // --- #165: reading a built URL back apart ---
+    //
+    // The tests below used to be one long literal each, and #161 is what
+    // they cost: adding a single scope meant editing several of them by
+    // hand, character by character, with nothing but eyesight standing
+    // between a typo and a green run.
+    //
+    // So a test now says what it is actually about — "this one adds
+    // `since_id` and nothing else", "these two ask for the same fields" —
+    // and the field list it does not care about stays out of it.
+    //
+    // Two full-URL pins survive on purpose, one per escaping policy:
+    // `builds_the_home_timeline_url_with_every_expansion` here and
+    // `build_authorize_url_includes_every_required_parameter` in
+    // `oauth::pkce`. Between them every byte this crate puts on the wire
+    // is still fixed somewhere, which is what makes the rest safe to
+    // loosen.
+
+    /// The path of `url`, without the query string.
+    fn path_of(url: &str) -> &str {
+        url.split_once('?').map_or(url, |(path, _)| path)
+    }
+
+    /// The query parameters of `url`, in the order they appear.
+    fn query_of(url: &str) -> Vec<(&str, &str)> {
+        let Some((_, query)) = url.split_once('?') else {
+            return Vec::new();
+        };
+        query
+            .split('&')
+            .filter_map(|pair| pair.split_once('='))
+            .collect()
+    }
+
+    /// What `later` adds to `earlier`, in order.
+    ///
+    /// Every optional-parameter test is really this assertion: the cursor
+    /// arrived, and nothing else moved. Written as a difference so the
+    /// long shared prefix never has to be restated.
+    fn added<'a>(earlier: &str, later: &'a str) -> Vec<(&'a str, &'a str)> {
+        let before = query_of(earlier);
+        query_of(later)
+            .into_iter()
+            .filter(|pair| !before.iter().any(|seen| seen.0 == pair.0))
+            .collect()
+    }
+
     #[test]
-    fn builds_the_timeline_url_with_every_expansion() {
-        // Spelled out on one line on purpose: the implementation splits the
-        // query across `\` line continuations, and repeating that trick here
-        // would hide exactly the stray-whitespace bug this guards against.
-        // #13 adds `referenced_tweets` so a repost's/quote's real content
-        // and author come back in `includes` without a second request.
+    fn the_single_user_timeline_asks_for_the_same_fields_as_the_home_one() {
+        // #92 pulled the field set into `TIMELINE_FIELDS` precisely so
+        // these two could not drift; this is the assertion that says so,
+        // rather than two copies of the same long literal that drift in
+        // step only if someone remembers to edit both.
+        let url = timeline_url("2244994945", 20, None);
+        assert_eq!(path_of(&url), "https://api.x.com/2/users/2244994945/tweets");
         assert_eq!(
-            timeline_url("2244994945", 20, None),
-            "https://api.x.com/2/users/2244994945/tweets?max_results=20&tweet.fields=created_at,entities,public_metrics,referenced_tweets&expansions=attachments.media_keys,author_id,referenced_tweets.id,referenced_tweets.id.author_id,referenced_tweets.id.attachments.media_keys&media.fields=alt_text,height,preview_image_url,type,url,width&user.fields=name,profile_image_url,username"
+            query_of(&url),
+            query_of(&home_timeline_url("2244994945", 20, None, None))
         );
     }
 
     #[test]
-    fn builds_the_tweets_by_id_url_with_every_expansion() {
-        // #12: the parent-chain walk fetches one id per level, with the
-        // same expansions as the timeline endpoints so a fetched parent's
-        // own author — and, if it's itself a reply, its own parent's id —
-        // comes back in the same response.
-        assert_eq!(
-            tweets_by_id_url("1700000000000000001"),
-            "https://api.x.com/2/tweets?ids=1700000000000000001&tweet.fields=created_at,referenced_tweets&expansions=author_id,referenced_tweets.id,referenced_tweets.id.author_id&user.fields=name,profile_image_url,username"
+    fn builds_the_tweets_by_id_url_asking_for_less_than_a_timeline_does() {
+        // #12: the parent-chain walk fetches one id per level. It asks for
+        // *fewer* fields than the timeline endpoints — no metrics, no
+        // entities, no media (see `tweets_by_id_url`'s doc for why each is
+        // deliberate) — so this asserts the difference rather than
+        // restating either list.
+        let url = tweets_by_id_url("1700000000000000001");
+        assert_eq!(path_of(&url), "https://api.x.com/2/tweets");
+
+        let query = query_of(&url);
+        assert_eq!(query.first(), Some(&("ids", "1700000000000000001")));
+        assert!(
+            !query.iter().any(|(key, _)| *key == "media.fields"),
+            "a walked parent renders as a ThreadItem, which has no media: {query:?}"
         );
+        for (key, value) in &query {
+            if *key == "tweet.fields" {
+                assert!(!value.contains("public_metrics"), "{value}");
+                assert!(!value.contains("entities"), "{value}");
+            }
+        }
     }
 
     #[test]
@@ -1075,10 +1135,11 @@ mod tests {
         // calling `tweets_by_id`, relying on `ids` landing in the query
         // string verbatim rather than this builder looping over it — X's
         // own `ids=` parameter already accepts a comma-separated list, so
-        // three ids still cost exactly one request.
+        // three ids still cost exactly one request. Since #165 that also
+        // pins `Escaping::Api`'s one rule: the commas stay raw.
         assert_eq!(
-            tweets_by_id_url("1,2,3"),
-            "https://api.x.com/2/tweets?ids=1,2,3&tweet.fields=created_at,referenced_tweets&expansions=author_id,referenced_tweets.id,referenced_tweets.id.author_id&user.fields=name,profile_image_url,username"
+            query_of(&tweets_by_id_url("1,2,3")).first(),
+            Some(&("ids", "1,2,3"))
         );
     }
 
@@ -1145,8 +1206,11 @@ mod tests {
     #[test]
     fn home_timeline_url_appends_since_id_for_an_incremental_reload() {
         assert_eq!(
-            home_timeline_url("2244994945", 20, Some("1700000000000000001"), None),
-            "https://api.x.com/2/users/2244994945/timelines/reverse_chronological?max_results=20&tweet.fields=created_at,entities,public_metrics,referenced_tweets&expansions=attachments.media_keys,author_id,referenced_tweets.id,referenced_tweets.id.author_id,referenced_tweets.id.attachments.media_keys&media.fields=alt_text,height,preview_image_url,type,url,width&user.fields=name,profile_image_url,username&since_id=1700000000000000001"
+            added(
+                &home_timeline_url("2244994945", 20, None, None),
+                &home_timeline_url("2244994945", 20, Some("1700000000000000001"), None),
+            ),
+            vec![("since_id", "1700000000000000001")]
         );
     }
 
@@ -1155,26 +1219,39 @@ mod tests {
         // #11: "Load older" resends `meta.next_token` from the previous
         // response as `pagination_token`.
         assert_eq!(
-            home_timeline_url("2244994945", 20, None, Some("cursor-abc")),
-            "https://api.x.com/2/users/2244994945/timelines/reverse_chronological?max_results=20&tweet.fields=created_at,entities,public_metrics,referenced_tweets&expansions=attachments.media_keys,author_id,referenced_tweets.id,referenced_tweets.id.author_id,referenced_tweets.id.attachments.media_keys&media.fields=alt_text,height,preview_image_url,type,url,width&user.fields=name,profile_image_url,username&pagination_token=cursor-abc"
+            added(
+                &home_timeline_url("2244994945", 20, None, None),
+                &home_timeline_url("2244994945", 20, None, Some("cursor-abc")),
+            ),
+            vec![("pagination_token", "cursor-abc")]
         );
     }
 
     #[test]
     fn builds_the_list_timeline_url_with_every_expansion() {
         // #161: the same field set as the home timeline, so a list row and
-        // a home row parse into the same `TimelineItem`.
+        // a home row parse into the same `TimelineItem`. Compared against
+        // the home builder rather than against a literal, because "the
+        // same as the home timeline" is the whole claim.
+        let url = list_timeline_url("2091351590695588200", 20, None);
         assert_eq!(
-            list_timeline_url("2091351590695588200", 20, None),
-            "https://api.x.com/2/lists/2091351590695588200/tweets?max_results=20&tweet.fields=created_at,entities,public_metrics,referenced_tweets&expansions=attachments.media_keys,author_id,referenced_tweets.id,referenced_tweets.id.author_id,referenced_tweets.id.attachments.media_keys&media.fields=alt_text,height,preview_image_url,type,url,width&user.fields=name,profile_image_url,username"
+            path_of(&url),
+            "https://api.x.com/2/lists/2091351590695588200/tweets"
+        );
+        assert_eq!(
+            query_of(&url),
+            query_of(&home_timeline_url("2244994945", 20, None, None))
         );
     }
 
     #[test]
     fn list_timeline_url_appends_pagination_token_for_load_older() {
         assert_eq!(
-            list_timeline_url("2091351590695588200", 20, Some("cursor-abc")),
-            "https://api.x.com/2/lists/2091351590695588200/tweets?max_results=20&tweet.fields=created_at,entities,public_metrics,referenced_tweets&expansions=attachments.media_keys,author_id,referenced_tweets.id,referenced_tweets.id.author_id,referenced_tweets.id.attachments.media_keys&media.fields=alt_text,height,preview_image_url,type,url,width&user.fields=name,profile_image_url,username&pagination_token=cursor-abc"
+            added(
+                &list_timeline_url("2091351590695588200", 20, None),
+                &list_timeline_url("2091351590695588200", 20, Some("cursor-abc")),
+            ),
+            vec![("pagination_token", "cursor-abc")]
         );
     }
 
@@ -1190,10 +1267,16 @@ mod tests {
 
     #[test]
     fn builds_the_following_url() {
+        let url = following_url("2244994945", None);
         assert_eq!(
-            following_url("2244994945", None),
-            "https://api.x.com/2/users/2244994945/following?max_results=100&user.fields=name,username"
+            path_of(&url),
+            "https://api.x.com/2/users/2244994945/following"
         );
+        // The page size is what this costs — reads bill per account
+        // returned — so it is pinned; the field list is not, since #163's
+        // two reads share `SYNC_USER_FIELDS` and the test next door
+        // already says they must match.
+        assert_eq!(query_of(&url).first(), Some(&("max_results", "100")));
     }
 
     #[test]
@@ -1201,24 +1284,43 @@ mod tests {
         // #163 pages this until the cursor runs out; a dropped token would
         // re-read page one forever and never finish the diff.
         assert_eq!(
-            following_url("2244994945", Some("cursor-abc")),
-            "https://api.x.com/2/users/2244994945/following?max_results=100&user.fields=name,username&pagination_token=cursor-abc"
+            added(
+                &following_url("2244994945", None),
+                &following_url("2244994945", Some("cursor-abc")),
+            ),
+            vec![("pagination_token", "cursor-abc")]
         );
     }
 
     #[test]
     fn builds_the_list_members_url() {
+        let url = list_members_url("2091351590695588200", None);
         assert_eq!(
-            list_members_url("2091351590695588200", None),
-            "https://api.x.com/2/lists/2091351590695588200/members?max_results=100&user.fields=name,username"
+            path_of(&url),
+            "https://api.x.com/2/lists/2091351590695588200/members"
+        );
+        assert_eq!(query_of(&url).first(), Some(&("max_results", "100")));
+    }
+
+    #[test]
+    fn both_of_the_sync_reads_ask_for_the_same_user_fields() {
+        // #163 reads the follow list and the list members and diffs them.
+        // Asking the two sides for different fields would make one side's
+        // accounts unprintable in the report the other side's fill in.
+        assert_eq!(
+            query_of(&following_url("2244994945", None)),
+            query_of(&list_members_url("2091351590695588200", None))
         );
     }
 
     #[test]
     fn list_members_url_appends_the_pagination_token() {
         assert_eq!(
-            list_members_url("2091351590695588200", Some("cursor-abc")),
-            "https://api.x.com/2/lists/2091351590695588200/members?max_results=100&user.fields=name,username&pagination_token=cursor-abc"
+            added(
+                &list_members_url("2091351590695588200", None),
+                &list_members_url("2091351590695588200", Some("cursor-abc")),
+            ),
+            vec![("pagination_token", "cursor-abc")]
         );
     }
 
@@ -1264,8 +1366,11 @@ mod tests {
         // API returns only what's new, keeping both the response and the
         // credit cost down.
         assert_eq!(
-            timeline_url("2244994945", 20, Some("1700000000000000001")),
-            "https://api.x.com/2/users/2244994945/tweets?max_results=20&tweet.fields=created_at,entities,public_metrics,referenced_tweets&expansions=attachments.media_keys,author_id,referenced_tweets.id,referenced_tweets.id.author_id,referenced_tweets.id.attachments.media_keys&media.fields=alt_text,height,preview_image_url,type,url,width&user.fields=name,profile_image_url,username&since_id=1700000000000000001"
+            added(
+                &timeline_url("2244994945", 20, None),
+                &timeline_url("2244994945", 20, Some("1700000000000000001")),
+            ),
+            vec![("since_id", "1700000000000000001")]
         );
     }
 
