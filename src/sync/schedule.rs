@@ -86,7 +86,15 @@ pub(crate) fn next_step(situation: &Situation, now: i64) -> Step {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Outcome {
     /// Nothing was due. Nothing was sent.
-    Idle { until: i64 },
+    ///
+    /// `pending` is what the plan on file still owes, and it is not
+    /// always zero: [`next_step`] checks `blocked_until` *before* it
+    /// checks `pending`, so a live rate limit part way through a
+    /// catch-up produces an idle tick sitting on hundreds of
+    /// outstanding writes. #174's manual sync uses exactly that
+    /// distinction to decide when it is finished — "idle" alone would
+    /// have it walk away from a plan a full diff was paid for.
+    Idle { until: i64, pending: usize },
     /// Both sides were read and a fresh plan written.
     Diffed { adds: usize, removals: usize },
     /// A batch of the plan's writes went out.
@@ -126,7 +134,7 @@ pub(crate) fn settle(outcome: Option<&Outcome>, now: i64, interval_seconds: u32)
             wake_at: now.saturating_add(i64::from(interval_seconds)),
             blocked_until: None,
         },
-        Some(Outcome::Idle { until }) => Settled {
+        Some(Outcome::Idle { until, .. }) => Settled {
             wake_at: *until,
             blocked_until: None,
         },
@@ -165,6 +173,46 @@ pub(crate) fn notice(outcome: &Outcome) -> Option<String> {
         | Outcome::Idle { .. }
         | Outcome::RateLimited { .. } => None,
     }
+}
+
+/// What [`Situation::last_diff_at`] should be for this tick, given
+/// whether the caller forced it (#174).
+///
+/// The whole of the manual trigger's mechanism, and a named function
+/// rather than an `if` inside [`super::auto::tick`] because that function
+/// makes HTTP requests and so has no test of its own — this had none
+/// either until it moved out here, which for a switch that decides
+/// whether both sides get re-read is not a good place to leave it.
+///
+/// Forcing discards the recorded time rather than shortening the interval.
+/// `None` is what [`next_step`] already reads as "a diff has never run",
+/// so the decision below it is untouched: a live rate limit still refuses
+/// the tick, and an undrained plan is still drained before anything is
+/// bought again.
+pub(crate) fn last_diff_for(forced: bool, recorded: Option<i64>) -> Option<i64> {
+    if forced { None } else { recorded }
+}
+
+/// Whether a run that was asked for one pass has nothing left to do
+/// (#174).
+///
+/// Only for a loop that is meant to stop — the scheduled sync never does,
+/// and asks this nothing. What it is protecting is the plan file: a diff
+/// against a few thousand follows costs dollars, so a manual run that
+/// walks away leaving entries unsent has thrown that money at a list it
+/// did not finish rewriting.
+///
+/// So "idle" is not the test; **idle with nothing outstanding** is. The
+/// two come apart exactly where it matters: [`next_step`] checks
+/// `blocked_until` before `pending`, so a rate limit hit half way through
+/// a catch-up produces `Idle` with hundreds of writes still owed. That run
+/// has to keep waiting, not declare itself done.
+///
+/// A failed tick (`None`) does not end the run either — [`settle`] has
+/// already given it a full interval to come back on, and the plan it was
+/// draining is still on disk.
+pub(crate) fn is_finished(outcome: Option<&Outcome>) -> bool {
+    matches!(outcome, Some(Outcome::Idle { pending: 0, .. }))
 }
 
 /// The next `limit` entries the loop should send, taken alternately from
@@ -372,9 +420,116 @@ mod tests {
 
     #[test]
     fn an_idle_tick_waits_out_the_deadline_it_was_handed() {
-        let settled = settle(Some(&Outcome::Idle { until: 9_000 }), 1_000, 21_600);
+        let settled = settle(
+            Some(&Outcome::Idle {
+                until: 9_000,
+                pending: 0,
+            }),
+            1_000,
+            21_600,
+        );
         assert_eq!(settled.wake_at, 9_000);
         assert_eq!(settled.blocked_until, None);
+    }
+
+    // --- #174: forcing a tick past the interval ---
+
+    #[test]
+    fn an_ordinary_tick_is_paced_by_the_recorded_diff_time() {
+        assert_eq!(last_diff_for(false, Some(1_000)), Some(1_000));
+    }
+
+    #[test]
+    fn a_forced_tick_discards_the_recorded_diff_time() {
+        assert_eq!(last_diff_for(true, Some(1_000)), None);
+    }
+
+    // The end-to-end shape of the button: a diff four hours from due
+    // becomes due now, and nothing else about the decision moves.
+    #[test]
+    fn forcing_turns_a_tick_that_would_have_waited_into_a_diff() {
+        let recorded = Some(1_000);
+        let waiting = Situation {
+            last_diff_at: last_diff_for(false, recorded),
+            interval_seconds: 21_600,
+            ..idle()
+        };
+        assert_eq!(
+            next_step(&waiting, 1_100),
+            Step::Wait { until: 22_600 },
+            "unforced, this is hours away"
+        );
+
+        let forced = Situation {
+            last_diff_at: last_diff_for(true, recorded),
+            ..waiting
+        };
+        assert_eq!(next_step(&forced, 1_100), Step::Diff);
+    }
+
+    // Forcing drops the interval and *only* the interval. Both of the
+    // checks above it in `next_step` still hold, which is what keeps the
+    // button from being a way to spend around them.
+    #[test]
+    fn forcing_does_not_get_past_a_live_rate_limit() {
+        let situation = Situation {
+            last_diff_at: last_diff_for(true, Some(1_000)),
+            blocked_until: Some(5_000),
+            ..idle()
+        };
+        assert_eq!(next_step(&situation, 1_100), Step::Wait { until: 5_000 });
+    }
+
+    #[test]
+    fn forcing_drains_an_outstanding_plan_before_buying_a_new_one() {
+        let situation = Situation {
+            last_diff_at: last_diff_for(true, Some(1_000)),
+            pending: 340,
+            ..idle()
+        };
+        assert_eq!(next_step(&situation, 1_100), Step::Apply);
+    }
+
+    // --- #174: when a one-pass run may stop ---
+
+    #[test]
+    fn a_run_is_finished_once_it_goes_idle_with_nothing_owed() {
+        assert!(is_finished(Some(&Outcome::Idle {
+            until: 9_000,
+            pending: 0
+        })));
+    }
+
+    // The case the whole function exists for. `next_step` weighs
+    // `blocked_until` ahead of `pending`, so a rate limit part way through
+    // a catch-up looks idle — and stopping there abandons a plan a full
+    // paid diff produced.
+    #[test]
+    fn a_run_blocked_part_way_through_a_catch_up_is_not_finished() {
+        assert!(!is_finished(Some(&Outcome::Idle {
+            until: 9_000,
+            pending: 340
+        })));
+    }
+
+    #[test]
+    fn a_run_that_just_sent_a_batch_is_not_finished() {
+        assert!(!is_finished(Some(&Outcome::Applied {
+            sent: 20,
+            remaining: 0
+        })));
+    }
+
+    #[test]
+    fn a_run_that_was_refused_by_the_rate_limit_is_not_finished() {
+        assert!(!is_finished(Some(&Outcome::RateLimited { until: 9_000 })));
+    }
+
+    // `settle` has already handed a failed tick a full interval to come
+    // back on, and whatever it was draining is still on disk.
+    #[test]
+    fn a_run_whose_tick_failed_is_not_finished() {
+        assert!(!is_finished(None));
     }
 
     #[test]
@@ -480,7 +635,13 @@ mod tests {
         // The rate limit especially: the loop re-reaches it on every tick
         // until the window reopens, so a banner would come back however
         // many times it was dismissed.
-        assert_eq!(notice(&Outcome::Idle { until: 9_000 }), None);
+        assert_eq!(
+            notice(&Outcome::Idle {
+                until: 9_000,
+                pending: 0
+            }),
+            None
+        );
         assert_eq!(notice(&Outcome::RateLimited { until: 9_000 }), None);
     }
 

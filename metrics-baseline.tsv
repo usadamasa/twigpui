@@ -92,7 +92,11 @@ src/sync/run.rs	400
 # schedule.rs and auto.rs are the background sync, split on the same line
 # mod.rs and run.rs are: schedule.rs decides what a tick should do and
 # carries every test, auto.rs performs it and makes the requests.
-src/sync/schedule.rs	250
+# sync/schedule.rs 250 -> 300: #174's `is_finished` and `last_diff_for`,
+# the two decisions the manual sync turns on. Both are three lines with a
+# paragraph above them, which is the right ratio here — one protects a
+# plan a paid diff produced, the other is the whole of what "force" means.
+src/sync/schedule.rs	300
 src/sync/auto.rs	200
 src/theme.rs	350
 src/thread.rs	100
@@ -114,7 +118,12 @@ src/toggle.rs	200
 # the buffer are NOT here — they went to `ui/auto_refresh.rs` below, which
 # is why this is 100 rather than 300. #137 is still open on splitting
 # `impl TimelineView`; this raise does not settle it.
-src/ui/mod.rs	3000
+# 3000 -> 2900, back where #21 found it: #174 moved `start_auto_sync` out
+# to `ui/list_sync.rs` and put back only the three fields and the status
+# bar's segment, which is a net loss of about a hundred lines. Lowered
+# rather than left with the headroom, so the next time this file grows
+# there is something to notice it against.
+src/ui/mod.rs	2900
 src/ui/reload_policy.rs	300
 # New in #21. Holds the whole of auto-refresh: the pure tick/pending
 # decisions with their tests, and an `impl TimelineView` block for the
@@ -122,6 +131,13 @@ src/ui/reload_policy.rs	300
 # carries both halves where `reload_policy` and `render` carry only pure
 # functions.
 src/ui/auto_refresh.rs	400
+# New in #174, and the reason `ui/mod.rs` did not have to rise again for
+# it: `start_auto_sync` moved here out of `ui` and came back as
+# `start_sync`, joined by the status enum the status bar reports, the two
+# labels, and the manual trigger's two-step. Same shape as
+# `auto_refresh.rs` above — pure functions with their tests, then an
+# `impl TimelineView` block.
+src/ui/list_sync.rs	650
 # ui/render.rs 1050 -> 1100: #21's `new_posts_bar`, the one element in the
 # banner column that is a button rather than a report.
 src/ui/render.rs	1100
