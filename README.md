@@ -118,6 +118,7 @@ each time.
 | `X_OAUTH_CLIENT_ID` | **yes** | — | OAuth 2.0 client id for "Sign in with X" — non-secret, may also live in `config.toml` as `oauth_client_id` |
 | `X_TARGET_USERNAME` | no | `XDevelopers` | Screen name `--fetch-only` fetches, without a leading `@` |
 | `X_MAX_RESULTS` | no | `20` | Posts per fetch, 5–100 |
+| `X_LIST_ID` | no | unset | Numeric id of an X List to show in the window **instead of** the home timeline — also `list_id` in `config.toml` (#161) |
 | `X_MIN_FETCH_INTERVAL_SECONDS` | no | `60` | Floor on how often a fetch may run, in seconds (#10) |
 | `X_THEME` | no | `light` | Color theme: `light`, `dark`, or `system` (follows the OS appearance) — also `theme` in `config.toml` (#19) |
 | `X_REQUEST_PRICE` | no | unset | Price per API request, in whatever unit you have in mind — also `request_price` in `config.toml` (#18, see [Usage tracking](.claude/skills/x-api-budget/reference/app-behavior.md#usage-tracking)) |
@@ -205,6 +206,7 @@ file with the same keys as the environment variables above:
 ```toml
 target_username = "XDevelopers"
 max_results = 20
+list_id = "2091351590695588200"
 min_fetch_interval_seconds = 60
 oauth_client_id = "…"
 theme = "light"
@@ -216,6 +218,14 @@ A missing file is fine — it just means there are no file-level settings.
 Precedence is **environment variable > `config.toml` > built-in default**,
 so an env var always wins over the file. `oauth_client_id` is safe to check
 in — it is a public client id, not a secret.
+
+`list_id` is the number in a list's own URL on x.com
+(`https://x.com/i/lists/<list_id>`). Setting it replaces the home timeline
+rather than adding a second view: `GET /2/users/:id/timelines/reverse_chronological`
+stopped returning followed authors' posts for this account (#157) and nothing
+here can fix that, so a List is how a following-shaped feed is read at all.
+A non-numeric value fails startup instead of being ignored — silently falling
+back to the empty home timeline would look like the list was empty.
 
 A `bearer_token` key is **rejected** rather than ignored (#33): the
 credential it named no longer exists, and a file that still carries it would

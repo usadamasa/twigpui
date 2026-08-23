@@ -211,6 +211,13 @@ pub(crate) enum Endpoint {
     /// `GET /2/users/:id/timelines/reverse_chronological` (#11) — X limits
     /// the home timeline separately from the single-user `Timeline` fetch.
     HomeTimeline,
+    /// `GET /2/lists/:id/tweets` (#161) — the List timeline, which replaces
+    /// the home timeline as the window's primary source once a list id is
+    /// configured. Its own bucket for the usual reason: X limits it on its
+    /// own schedule, and the two are alternatives rather than a pair, so a
+    /// shared bucket would carry state from a source that is not even
+    /// being fetched.
+    ListTimeline,
     /// `GET /2/tweets?ids=` (#12) — the parent-chain walk behind "Show
     /// thread". Tracked independently: reusing e.g. `Timeline`'s bucket
     /// would corrupt the tracked state for both, since X limits each
@@ -251,11 +258,12 @@ impl Endpoint {
     /// failure #18 exists to prevent. `CreatePost` was missing here until
     /// #50; the test below now fails to compile rather than silently pass if
     /// a new variant is left out again.
-    pub(crate) const ALL: [Self; 11] = [
+    pub(crate) const ALL: [Self; 12] = [
         Self::UserLookup,
         Self::Timeline,
         Self::Me,
         Self::HomeTimeline,
+        Self::ListTimeline,
         Self::TweetById,
         Self::CreatePost,
         Self::CreateRepost,
@@ -274,6 +282,7 @@ impl Endpoint {
             Self::Timeline => "timeline",
             Self::Me => "me",
             Self::HomeTimeline => "home_timeline",
+            Self::ListTimeline => "list_timeline",
             Self::TweetById => "tweet_by_id",
             Self::CreatePost => "create_post",
             Self::CreateRepost => "create_repost",
@@ -773,6 +782,7 @@ mod tests {
             Endpoint::Timeline,
             Endpoint::Me,
             Endpoint::HomeTimeline,
+            Endpoint::ListTimeline,
             Endpoint::TweetById,
             Endpoint::CreatePost,
             Endpoint::CreateRepost,
@@ -787,6 +797,7 @@ mod tests {
                 | Endpoint::Timeline
                 | Endpoint::Me
                 | Endpoint::HomeTimeline
+                | Endpoint::ListTimeline
                 | Endpoint::TweetById
                 | Endpoint::CreatePost
                 | Endpoint::CreateRepost

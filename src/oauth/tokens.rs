@@ -124,6 +124,14 @@ pub(crate) const TWEET_WRITE_SCOPE: &str = "tweet.write";
 /// header's "Re-authorize" button is the fix, exactly as for #14.
 pub(crate) const LIKE_WRITE_SCOPE: &str = "like.write";
 
+/// The scope #161's List timeline needs (`GET /2/lists/:id/tweets`), added
+/// to `SCOPES` by #167. Unlike the two above this one gates a *read*, and
+/// only when a list is configured — see `ui::render::offers_reauthorize`.
+/// A session authorized before #167 has everything the app needs except
+/// this, so configuring a list on an old session is the one way to reach a
+/// 403 the app can actually explain.
+pub(crate) const LIST_READ_SCOPE: &str = "list.read";
+
 /// Whether a granted scope string includes `required`, per RFC 6749 §3.3's
 /// space-separated list — matched by exact token, not a substring check, so
 /// e.g. a hypothetical `tweet.write.extra` scope wouldn't false-match a
