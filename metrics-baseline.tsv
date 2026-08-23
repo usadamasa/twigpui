@@ -154,6 +154,10 @@ src/ui/render.rs	1100
 # request's result is written to), which is why `ui/mod.rs`'s test module
 # did not move and the test count did not change.
 src/ui/tasks.rs	1200
+# New in #165. One builder and two escaping policies, shared by
+# `x_api::client` and `oauth::pkce` — which is why it sits at the top
+# level rather than inside either of them.
+src/url.rs	200
 src/usage.rs	350
 # x_api/client.rs 750 -> 800: `list_timeline` and `list_timeline_url`,
 # carrying the doc comment that explains why neither takes a `since_id`.
@@ -161,7 +165,14 @@ src/usage.rs	350
 # the shared user-page parser, and the POST body sender for the one write
 # whose body is a `user_id`. The bulk is doc comments marking which parts
 # are spec-derived and unverified — this PR spent no requests.
-src/x_api/client.rs	1000
+# 1000 -> 1050: #165's builder. This file grew rather than shrank, which
+# is the honest outcome: a `.segment("users").segment(user_id)` chain is
+# more lines than the format string it replaces, and `TIMELINE_FIELDS`
+# went from one four-line literal to a sixteen-line array of pairs. What
+# was bought is that a value can no longer reach a URL unescaped and a
+# separator can no longer be misplaced — neither of which the old shape
+# let the compiler check.
+src/x_api/client.rs	1050
 src/x_api/mod.rs	50
 # x_api/model.rs 750 -> 800: `UserIdRequest` and `UserPageResponse` for
 # #163's reads and writes.

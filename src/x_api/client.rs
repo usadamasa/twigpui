@@ -9,6 +9,7 @@ use super::model::{
 };
 use crate::paths::Paths;
 use crate::rate_limit::{self, Endpoint, RateLimitState};
+use crate::url::Url;
 use crate::usage;
 
 const API_BASE: &str = "https://api.x.com/2";
@@ -684,12 +685,21 @@ fn is_retryable_status(status: u16) -> bool {
 }
 
 fn user_lookup_url(username: &str) -> String {
-    format!("{API_BASE}/users/by/username/{username}")
+    Url::api(API_BASE)
+        .segment("users")
+        .segment("by")
+        .segment("username")
+        .segment(username)
+        .build()
 }
 
 /// The author fields every endpoint asks for (#92) — both timeline URLs
 /// and the single-post lookup. One edit, not three.
-const USER_FIELDS: &str = "&user.fields=name,profile_image_url,username";
+///
+/// A pair rather than a `&user.fields=…` fragment since #165: the `&` and
+/// the `=` are [`Url`]'s to write, and a constant that carried its own
+/// separator could only be spliced into a query in one position.
+const USER_FIELDS: &[(&str, &str)] = &[("user.fields", "name,profile_image_url,username")];
 
 /// The `*.fields` and `expansions` both timeline endpoints request (#92),
 /// previously written out twice, identically. #104 is the cost: the fix
@@ -699,16 +709,28 @@ const USER_FIELDS: &str = "&user.fields=name,profile_image_url,username";
 ///
 /// Only the shared part. Path, `max_results`, `since_id` and
 /// `pagination_token` stay with their builders — those are what differ.
-const TIMELINE_FIELDS: &str = "&tweet.fields=created_at,entities,public_metrics,referenced_tweets\
-     &expansions=attachments.media_keys,author_id,referenced_tweets.id,referenced_tweets.id.author_id,referenced_tweets.id.attachments.media_keys\
-     &media.fields=alt_text,height,preview_image_url,type,url,width\
-     &user.fields=name,profile_image_url,username";
+const TIMELINE_FIELDS: &[(&str, &str)] = &[
+    (
+        "tweet.fields",
+        "created_at,entities,public_metrics,referenced_tweets",
+    ),
+    (
+        "expansions",
+        "attachments.media_keys,author_id,referenced_tweets.id,\
+         referenced_tweets.id.author_id,referenced_tweets.id.attachments.media_keys",
+    ),
+    (
+        "media.fields",
+        "alt_text,height,preview_image_url,type,url,width",
+    ),
+    ("user.fields", "name,profile_image_url,username"),
+];
 
 /// `GET /2/users/me` (#11) — resolves the signed-in user's own id and screen
 /// name. Only meaningful with an OAuth user-context credential; an app-only
 /// bearer token gets a 401 here just like the home timeline itself.
 fn me_url() -> String {
-    format!("{API_BASE}/users/me")
+    Url::api(API_BASE).segment("users").segment("me").build()
 }
 
 /// The home timeline endpoint (#11), with the same expansions as
@@ -733,18 +755,16 @@ fn home_timeline_url(
     since_id: Option<&str>,
     pagination_token: Option<&str>,
 ) -> String {
-    let mut url = format!(
-        "{API_BASE}/users/{user_id}/timelines/reverse_chronological\
-         ?max_results={max_results}\
-         {TIMELINE_FIELDS}"
-    );
-    if let Some(id) = since_id {
-        url = format!("{url}&since_id={id}");
-    }
-    if let Some(token) = pagination_token {
-        url = format!("{url}&pagination_token={token}");
-    }
-    url
+    Url::api(API_BASE)
+        .segment("users")
+        .segment(user_id)
+        .segment("timelines")
+        .segment("reverse_chronological")
+        .number("max_results", max_results)
+        .params(TIMELINE_FIELDS)
+        .maybe("since_id", since_id)
+        .maybe("pagination_token", pagination_token)
+        .build()
 }
 
 /// The timeline endpoint returns bare post ids unless `expansions` and the
@@ -752,15 +772,14 @@ fn home_timeline_url(
 /// See [`home_timeline_url`]'s doc comment for why
 /// `referenced_tweets.id.attachments.media_keys` (#104) is in here too.
 fn timeline_url(user_id: &str, max_results: u32, since_id: Option<&str>) -> String {
-    let base = format!(
-        "{API_BASE}/users/{user_id}/tweets\
-         ?max_results={max_results}\
-         {TIMELINE_FIELDS}"
-    );
-    match since_id {
-        Some(id) => format!("{base}&since_id={id}"),
-        None => base,
-    }
+    Url::api(API_BASE)
+        .segment("users")
+        .segment(user_id)
+        .segment("tweets")
+        .number("max_results", max_results)
+        .params(TIMELINE_FIELDS)
+        .maybe("since_id", since_id)
+        .build()
 }
 
 /// The List timeline endpoint (#161), with the same expansions as
@@ -771,15 +790,14 @@ fn timeline_url(user_id: &str, max_results: u32, since_id: Option<&str>) -> Stri
 /// No `since_id` parameter, and not by omission: the endpoint does not
 /// take one. See [`XClient::list_timeline`] for what that costs.
 fn list_timeline_url(list_id: &str, max_results: u32, pagination_token: Option<&str>) -> String {
-    let base = format!(
-        "{API_BASE}/lists/{list_id}/tweets\
-         ?max_results={max_results}\
-         {TIMELINE_FIELDS}"
-    );
-    match pagination_token {
-        Some(token) => format!("{base}&pagination_token={token}"),
-        None => base,
-    }
+    Url::api(API_BASE)
+        .segment("lists")
+        .segment(list_id)
+        .segment("tweets")
+        .number("max_results", max_results)
+        .params(TIMELINE_FIELDS)
+        .maybe("pagination_token", pagination_token)
+        .build()
 }
 
 /// `GET /2/tweets?ids=` (#12), with the same expansions as the timeline
@@ -814,13 +832,20 @@ fn list_timeline_url(list_id: &str, max_results: u32, pagination_token: Option<&
 /// that is new functionality for a currently-unsupported field, not the
 /// repost-specific expansions gap #104 fixes for the timeline endpoints.
 fn tweets_by_id_url(ids: &str) -> String {
-    format!(
-        "{API_BASE}/tweets\
-         ?ids={ids}\
-         &tweet.fields=created_at,referenced_tweets\
-         &expansions=author_id,referenced_tweets.id,referenced_tweets.id.author_id\
-         {USER_FIELDS}"
-    )
+    Url::api(API_BASE)
+        .segment("tweets")
+        .param("ids", ids)
+        // Its own pairs rather than [`TIMELINE_FIELDS`], for the reasons
+        // above: this endpoint deliberately asks for less.
+        .params(&[
+            ("tweet.fields", "created_at,referenced_tweets"),
+            (
+                "expansions",
+                "author_id,referenced_tweets.id,referenced_tweets.id.author_id",
+            ),
+        ])
+        .params(USER_FIELDS)
+        .build()
 }
 
 /// The page size #163's two paged reads request.
@@ -836,45 +861,52 @@ const USER_PAGE_SIZE: u32 = 100;
 /// The `user.fields` both paged reads request. Only what the dry-run's
 /// report needs to name an account — asking for avatars or metrics here
 /// would be fields nothing prints.
-const SYNC_USER_FIELDS: &str = "&user.fields=name,username";
+const SYNC_USER_FIELDS: &[(&str, &str)] = &[("user.fields", "name,username")];
 
 /// `GET /2/users/:id/following` (#163) — one page of the accounts this app
 /// follows.
 fn following_url(user_id: &str, pagination_token: Option<&str>) -> String {
-    let base = format!(
-        "{API_BASE}/users/{user_id}/following\
-         ?max_results={USER_PAGE_SIZE}\
-         {SYNC_USER_FIELDS}"
-    );
-    match pagination_token {
-        Some(token) => format!("{base}&pagination_token={token}"),
-        None => base,
-    }
+    Url::api(API_BASE)
+        .segment("users")
+        .segment(user_id)
+        .segment("following")
+        .number("max_results", USER_PAGE_SIZE)
+        .params(SYNC_USER_FIELDS)
+        .maybe("pagination_token", pagination_token)
+        .build()
 }
 
 /// `GET /2/lists/:id/members` (#163) — one page of a list's members.
 fn list_members_url(list_id: &str, pagination_token: Option<&str>) -> String {
-    let base = format!(
-        "{API_BASE}/lists/{list_id}/members\
-         ?max_results={USER_PAGE_SIZE}\
-         {SYNC_USER_FIELDS}"
-    );
-    match pagination_token {
-        Some(token) => format!("{base}&pagination_token={token}"),
-        None => base,
-    }
+    Url::api(API_BASE)
+        .segment("lists")
+        .segment(list_id)
+        .segment("members")
+        .number("max_results", USER_PAGE_SIZE)
+        .params(SYNC_USER_FIELDS)
+        .maybe("pagination_token", pagination_token)
+        .build()
 }
 
 /// `POST /2/lists/:id/members` (#163) — the added account's id travels in
 /// the JSON body ([`UserIdRequest`]), not the URL.
 fn list_members_write_url(list_id: &str) -> String {
-    format!("{API_BASE}/lists/{list_id}/members")
+    Url::api(API_BASE)
+        .segment("lists")
+        .segment(list_id)
+        .segment("members")
+        .build()
 }
 
 /// `DELETE /2/lists/:id/members/:user_id` (#163) — here the acted-on id is
 /// a path segment, mirroring [`delete_repost_url`].
 fn remove_list_member_url(list_id: &str, member_user_id: &str) -> String {
-    format!("{API_BASE}/lists/{list_id}/members/{member_user_id}")
+    Url::api(API_BASE)
+        .segment("lists")
+        .segment(list_id)
+        .segment("members")
+        .segment(member_user_id)
+        .build()
 }
 
 /// Parse one page of users from either of #163's paged reads. `what` names
@@ -890,41 +922,62 @@ fn parse_user_page(body: &str, what: &str) -> Result<(Vec<User>, Option<String>)
 
 /// `POST /2/tweets` (#14) — no query string, unlike every `GET` above.
 fn create_post_url() -> String {
-    format!("{API_BASE}/tweets")
+    Url::api(API_BASE).segment("tweets").build()
 }
 
 /// `POST /2/users/:id/retweets` (#15) — `user_id` is the signed-in
 /// account's own id (`/me`, #11); the target post's id travels in the JSON
 /// body ([`TweetIdRequest`]), not the URL.
 fn create_repost_url(user_id: &str) -> String {
-    format!("{API_BASE}/users/{user_id}/retweets")
+    Url::api(API_BASE)
+        .segment("users")
+        .segment(user_id)
+        .segment("retweets")
+        .build()
 }
 
 /// `DELETE /2/users/:id/retweets/:source_tweet_id` (#15) — the only
 /// endpoint in this crate where the *acted-on* resource's own id is a URL
 /// path segment rather than a query parameter or JSON body field.
 fn delete_repost_url(user_id: &str, source_tweet_id: &str) -> String {
-    format!("{API_BASE}/users/{user_id}/retweets/{source_tweet_id}")
+    Url::api(API_BASE)
+        .segment("users")
+        .segment(user_id)
+        .segment("retweets")
+        .segment(source_tweet_id)
+        .build()
 }
 
 /// `DELETE /2/tweets/:id` (#72) — unlike every other write endpoint here,
 /// this one names no user: X infers the account from the credential and
 /// rejects a post that is not its own.
 fn delete_post_url(post_id: &str) -> String {
-    format!("{API_BASE}/tweets/{post_id}")
+    Url::api(API_BASE)
+        .segment("tweets")
+        .segment(post_id)
+        .build()
 }
 
 /// `POST /2/users/:id/likes` (#68) — `user_id` is the signed-in account's
 /// own id (`/me`, #11); the target post's id travels in the JSON body
 /// ([`TweetIdRequest`]), not the URL, exactly as for a repost.
 fn create_like_url(user_id: &str) -> String {
-    format!("{API_BASE}/users/{user_id}/likes")
+    Url::api(API_BASE)
+        .segment("users")
+        .segment(user_id)
+        .segment("likes")
+        .build()
 }
 
 /// `DELETE /2/users/:id/likes/:tweet_id` (#68) — the acted-on post's id is
 /// a URL path segment here, mirroring [`delete_repost_url`].
 fn delete_like_url(user_id: &str, tweet_id: &str) -> String {
-    format!("{API_BASE}/users/{user_id}/likes/{tweet_id}")
+    Url::api(API_BASE)
+        .segment("users")
+        .segment(user_id)
+        .segment("likes")
+        .segment(tweet_id)
+        .build()
 }
 
 /// Pull the API's own error text out of a response body, if it has any.
