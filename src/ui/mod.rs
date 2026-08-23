@@ -38,7 +38,7 @@ use render::{
     media_columns, notice, offers_delete, offers_like, offers_quote, offers_reauthorize,
     offers_reply, offers_repost, open_post_link, quote_card, quote_row, reload_notice_banner,
     render_thread_chain, reply_banner_label, reply_row, reply_target_label, repost_banner_label,
-    repost_row, session_notice_banner, sign_in_pill, tab_bar, thread_action_label,
+    repost_row, session_notice_banner, sign_in_pill, tab_bar, tab_label, thread_action_label,
     thread_toggle_row, usage_color, usage_label, with_count,
 };
 use render::{RowCounts, row_counts};
@@ -260,6 +260,17 @@ pub(crate) struct TimelineView {
     /// The signed-in user's own screen name (also from `/me`), shown in the
     /// header — see [`header_title`].
     home_username: Option<String>,
+    /// Which timeline fills the window (#161) — resolved once in
+    /// [`Self::new`] from `config.list_id` and never reassigned. Switching
+    /// between lists at runtime is #164; until then the source is a
+    /// startup decision, which is why this is a plain field rather than
+    /// something the header can drive.
+    ///
+    /// Read by every path that touches the timeline: [`Self::start`],
+    /// [`Self::reload`], [`Self::load_older`] and [`Self::confirm_delete`]
+    /// all take it so the cache file they read, the endpoint they spend a
+    /// request on, and the file a delete rewrites are the same source.
+    source: cache::TimelineSource,
     /// `meta.next_token` from the most recent home-timeline response, if
     /// any (#11). Drives whether the "Load older" button appears — see
     /// [`offers_load_older`]. `None` whenever there is nothing further back
@@ -472,6 +483,9 @@ impl TimelineView {
         });
         let compose_input_subscription = cx.subscribe(&compose_input, Self::on_compose_input_event);
 
+        // #161: a startup decision, taken before `config` is moved below.
+        let source = primary_source(config.list_id.as_deref());
+
         let mut this = Self {
             config,
             paths,
@@ -485,6 +499,7 @@ impl TimelineView {
             signed_in_with_oauth: false,
             home_user_id: None,
             home_username: None,
+            source,
             next_page_token: None,
             threads: HashMap::new(),
             thread_fetches: HashMap::new(),
@@ -571,6 +586,7 @@ impl TimelineView {
 
         let config = self.config.clone();
         let paths = self.paths.clone();
+        let source = self.source.clone();
 
         self.fetch = Some(cx.spawn(async move |this, cx| {
             let result = cx
@@ -586,13 +602,14 @@ impl TimelineView {
                     let Some(credential) = resolution.credential else {
                         return anyhow::Ok(StartOutcome::NotAuthenticated { session_notice });
                     };
-                    // #33: the window always shows the home timeline now.
-                    // Which timeline to show used to follow from the kind of
-                    // credential — the app-only bearer token got a 401 from
-                    // the home endpoint — and with that credential gone
-                    // there is nothing left to branch on. `SingleUser`
-                    // survives for `--fetch-only` and #24's panels.
-                    let cached = cache::startup_home(&paths, oauth::unix_now())?;
+                    // #161: which timeline this is comes from
+                    // `config.list_id`, resolved into `self.source` at
+                    // construction. #33 had removed the branch entirely
+                    // (the app-only bearer token, the one thing that used
+                    // to decide it, was gone); #157 put one back, because
+                    // the home timeline stopped carrying followed authors'
+                    // posts and a List is the way to read them now.
+                    let cached = cache::startup_primary(&paths, &source, oauth::unix_now())?;
                     anyhow::Ok(StartOutcome::Home {
                         credential,
                         cached,
@@ -717,15 +734,16 @@ impl TimelineView {
 
         let paths = self.paths.clone();
         let max_results = self.config.max_results;
+        let source = self.source.clone();
 
-        // #33: the window always shows the home timeline — see
-        // `TimelineSource`'s removal. The single-user endpoint and its cache
-        // stay for `--fetch-only`.
+        // #161: `source` decides which endpoint this spends its request on
+        // and which cache file the result lands in. The single-user
+        // endpoint and its cache stay out of it, for `--fetch-only`.
         self.fetch = Some(cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    cache::reload_home(&paths, &client, max_results, oauth::unix_now())
+                    cache::reload_primary(&paths, &client, &source, max_results, oauth::unix_now())
                 })
                 .await;
 
@@ -922,14 +940,16 @@ impl TimelineView {
 
         let paths = self.paths.clone();
         let max_results = self.config.max_results;
+        let source = self.source.clone();
 
         self.fetch = Some(cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    cache::load_older_home(
+                    cache::load_older_primary(
                         &paths,
                         &client,
+                        &source,
                         &user_id,
                         max_results,
                         &token,
@@ -1447,9 +1467,9 @@ impl TimelineView {
         let Some(user_id) = self.home_user_id.clone() else {
             return;
         };
-        // #33: the window only ever shows the home timeline, so that is
-        // the cache file a delete has to be removed from.
-        let home = true;
+        // #161: the cache file a delete has to be removed from is
+        // whichever one the window is rendering.
+        let source = self.source.clone();
 
         self.pending_delete = None;
         cx.notify();
@@ -1464,7 +1484,7 @@ impl TimelineView {
                     client.delete_post(&paths, &request_id, oauth::unix_now())?;
                     // Only once X has confirmed the deletion: forgetting it
                     // locally first would hide a post that still exists.
-                    cache::forget_post(&paths, home, &user_id, &request_id, oauth::unix_now())
+                    cache::forget_post(&paths, &source, &user_id, &request_id, oauth::unix_now())
                 })
                 .await;
 
@@ -2068,12 +2088,11 @@ impl TimelineView {
             .bg(rgb(theme.bg_header))
             .border_b_1()
             .border_color(rgb(theme.border))
-            // #95: the frame for #63's timeline switcher. Only Home
-            // exists today, so the control carries one segment — but the
-            // segment is data, not layout, so adding a list later is a
-            // matter of handing this another entry rather than rebuilding
-            // the toolbar around it.
-            .child(tab_bar(&[("Home", true)], theme))
+            // #95's frame for #63's timeline switcher, now carrying what
+            // #161 actually reads. Still one segment: a list replaces the
+            // home timeline rather than sitting beside it, so there is
+            // nothing to switch *to* until #164 offers a second list.
+            .child(tab_bar(&[(tab_label(&self.source), true)], theme))
             .child(
                 div()
                     .text_size(theme::TEXT_META)
@@ -2680,6 +2699,21 @@ impl Render for TimelineView {
     }
 }
 
+/// Which timeline the window reads (#161), from `config.list_id`.
+///
+/// A configured list id is a request to read that list *instead of* the
+/// home timeline, not alongside it: #157 left the home timeline returning
+/// none of the followed authors' posts for this account, so there is no
+/// fallback worth keeping and nothing to show beside it. Blank and
+/// malformed values never reach here — `Config::resolve` turns the first
+/// into `None` and rejects the second at startup.
+fn primary_source(list_id: Option<&str>) -> cache::TimelineSource {
+    match list_id {
+        Some(list_id) => cache::TimelineSource::List(list_id.to_string()),
+        None => cache::TimelineSource::Home,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::reload_policy::{
@@ -2687,7 +2721,7 @@ mod tests {
     };
     use super::render::{
         avatar_initial, is_own_post, like_action_label, post_permalink, profile_url,
-        repost_action_label,
+        repost_action_label, tab_label,
     };
     use super::{
         ComposeStatus, Cooldown, CooldownTick, PostLink, PostMedia, PostMetrics, ReloadNotice,
@@ -2695,9 +2729,9 @@ mod tests {
         TimelineState, ToggleState, action_post_id, at_the_post_cap, byline, compose_error_message,
         cooldown_label, cooldown_tick, format_timestamp, header_title, media_badge, media_columns,
         offers_delete, offers_like, offers_load_older, offers_quote, offers_reauthorize,
-        offers_reply, offers_repost, rate_limit, reload_failure_outcome, reload_gate,
-        reload_start_state, reply_banner_label, reply_target_label, repost_banner_label,
-        row_counts, thread_action_label, usage, usage_color, usage_label,
+        offers_reply, offers_repost, primary_source, rate_limit, reload_failure_outcome,
+        reload_gate, reload_start_state, reply_banner_label, reply_target_label,
+        repost_banner_label, row_counts, thread_action_label, usage, usage_color, usage_label,
     };
 
     fn item_with(id: &str, author_username: &str, reposted_by: Option<&str>) -> TimelineItem {
@@ -3280,6 +3314,32 @@ mod tests {
         // answers there is no account to name, and the app's own name is
         // what a macOS toolbar carries in its place.
         assert_eq!(header_title(None), "twigpui");
+    }
+
+    // --- #161: which timeline the window reads ---
+
+    #[test]
+    fn no_configured_list_reads_the_home_timeline() {
+        assert_eq!(primary_source(None), crate::cache::TimelineSource::Home);
+    }
+
+    #[test]
+    fn a_configured_list_replaces_the_home_timeline() {
+        // Replaces, not supplements: #157 left nothing in the home
+        // timeline worth falling back to.
+        assert_eq!(
+            primary_source(Some("2091351590695588200")),
+            crate::cache::TimelineSource::List("2091351590695588200".to_string())
+        );
+    }
+
+    #[test]
+    fn the_tab_bar_names_the_timeline_being_read() {
+        assert_eq!(tab_label(&crate::cache::TimelineSource::Home), "Home");
+        assert_eq!(
+            tab_label(&crate::cache::TimelineSource::List("111".to_string())),
+            "List"
+        );
     }
 
     #[test]
@@ -3953,6 +4013,7 @@ mod tests {
             log_level: crate::log::Level::default(),
             request_price: None,
             daily_request_budget: None,
+            list_id: None,
         }
     }
 
@@ -3981,6 +4042,7 @@ mod tests {
             log_level: crate::log::Level::default(),
             request_price: None,
             daily_request_budget: None,
+            list_id: None,
         };
 
         cx.update(gpui_component::init);

@@ -727,6 +727,19 @@ pub(super) fn header_title(home_username: Option<&str>) -> String {
     }
 }
 
+/// What the toolbar's segment calls the timeline being shown (#161).
+///
+/// The list's own name is deliberately not fetched: `GET /2/lists/:id`
+/// is another billed endpoint, and a label is not worth a request on every
+/// start. #164 is where a list gains a name, because a switcher has to
+/// name the things it switches between — one segment does not.
+pub(super) fn tab_label(source: &cache::TimelineSource) -> &'static str {
+    match source {
+        cache::TimelineSource::Home => "Home",
+        cache::TimelineSource::List(_) => "List",
+    }
+}
+
 /// The toolbar's timeline switcher (#95), shaped like a macOS segmented
 /// control: one trough with the selected segment lifted out of it in the
 /// window's own background color.

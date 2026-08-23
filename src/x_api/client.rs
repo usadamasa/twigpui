@@ -392,6 +392,37 @@ impl XClient {
         Ok((response.into_items(), next_token))
     }
 
+    /// Fetch a page of a List's timeline (#161), newest first, alongside
+    /// `meta.next_token` for "Load older" — the same pair
+    /// [`Self::home_timeline`] returns, so the caller treats the two
+    /// sources identically once the response is in hand.
+    ///
+    /// **There is no `since_id` here**, unlike every other timeline call in
+    /// this file. `GET /2/lists/:id/tweets` documents `max_results` and
+    /// `pagination_token` and nothing else, so an incremental reload is not
+    /// expressible: every reload re-reads the head page. That is safe
+    /// (`cache::timeline::splice` merges by id, so no row is duplicated)
+    /// but not free — see `x-api-budget`: reads bill per returned resource,
+    /// and while the same post is billed once per UTC day, the first reload
+    /// after a day boundary pays for the whole head page again whether or
+    /// not anything in it is new.
+    pub(crate) fn list_timeline(
+        &self,
+        paths: &Paths,
+        list_id: &str,
+        max_results: u32,
+        pagination_token: Option<&str>,
+        now: i64,
+    ) -> Result<(Vec<TimelineItem>, Option<String>)> {
+        let url = list_timeline_url(list_id, max_results, pagination_token);
+        let body = self.get(paths, Endpoint::ListTimeline, &url, now)?;
+
+        let response: TimelineResponse =
+            serde_json::from_str(&body).context("could not parse the list timeline response")?;
+        let next_token = response.next_token().map(str::to_string);
+        Ok((response.into_items(), next_token))
+    }
+
     /// `GET /2/tweets?ids=` (#12). `ids` is whatever the caller already
     /// joined with commas — X's own query parameter accepts a
     /// comma-separated list natively, so there is nothing here to loop
@@ -615,6 +646,25 @@ fn timeline_url(user_id: &str, max_results: u32, since_id: Option<&str>) -> Stri
     );
     match since_id {
         Some(id) => format!("{base}&since_id={id}"),
+        None => base,
+    }
+}
+
+/// The List timeline endpoint (#161), with the same expansions as
+/// [`home_timeline_url`] since it returns the same post shape — including
+/// #104's `referenced_tweets.id.attachments.media_keys`, so a member's
+/// repost carries the original's media here too.
+///
+/// No `since_id` parameter, and not by omission: the endpoint does not
+/// take one. See [`XClient::list_timeline`] for what that costs.
+fn list_timeline_url(list_id: &str, max_results: u32, pagination_token: Option<&str>) -> String {
+    let base = format!(
+        "{API_BASE}/lists/{list_id}/tweets\
+         ?max_results={max_results}\
+         {TIMELINE_FIELDS}"
+    );
+    match pagination_token {
+        Some(token) => format!("{base}&pagination_token={token}"),
         None => base,
     }
 }
@@ -877,6 +927,34 @@ mod tests {
             home_timeline_url("2244994945", 20, None, Some("cursor-abc")),
             "https://api.x.com/2/users/2244994945/timelines/reverse_chronological?max_results=20&tweet.fields=created_at,entities,public_metrics,referenced_tweets&expansions=attachments.media_keys,author_id,referenced_tweets.id,referenced_tweets.id.author_id,referenced_tweets.id.attachments.media_keys&media.fields=alt_text,height,preview_image_url,type,url,width&user.fields=name,profile_image_url,username&pagination_token=cursor-abc"
         );
+    }
+
+    #[test]
+    fn builds_the_list_timeline_url_with_every_expansion() {
+        // #161: the same field set as the home timeline, so a list row and
+        // a home row parse into the same `TimelineItem`.
+        assert_eq!(
+            list_timeline_url("2091351590695588200", 20, None),
+            "https://api.x.com/2/lists/2091351590695588200/tweets?max_results=20&tweet.fields=created_at,entities,public_metrics,referenced_tweets&expansions=attachments.media_keys,author_id,referenced_tweets.id,referenced_tweets.id.author_id,referenced_tweets.id.attachments.media_keys&media.fields=alt_text,height,preview_image_url,type,url,width&user.fields=name,profile_image_url,username"
+        );
+    }
+
+    #[test]
+    fn list_timeline_url_appends_pagination_token_for_load_older() {
+        assert_eq!(
+            list_timeline_url("2091351590695588200", 20, Some("cursor-abc")),
+            "https://api.x.com/2/lists/2091351590695588200/tweets?max_results=20&tweet.fields=created_at,entities,public_metrics,referenced_tweets&expansions=attachments.media_keys,author_id,referenced_tweets.id,referenced_tweets.id.author_id,referenced_tweets.id.attachments.media_keys&media.fields=alt_text,height,preview_image_url,type,url,width&user.fields=name,profile_image_url,username&pagination_token=cursor-abc"
+        );
+    }
+
+    #[test]
+    fn the_list_timeline_url_carries_no_since_id() {
+        // The endpoint takes no `since_id` (see `XClient::list_timeline`),
+        // so sending one would be a parameter the API does not know. This
+        // asserts the absence rather than trusting the builder's shape:
+        // the field list is long enough that an accidental paste from
+        // `home_timeline_url` would not stand out in review.
+        assert!(!list_timeline_url("2091351590695588200", 20, None).contains("since_id"));
     }
 
     #[test]

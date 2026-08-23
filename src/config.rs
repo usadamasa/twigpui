@@ -41,6 +41,15 @@ pub(crate) struct Config {
     /// to know it from here, so no estimated amount is ever shown unless
     /// this is explicitly configured. See `usage.rs`'s module doc.
     pub request_price: Option<f64>,
+    /// The list whose timeline fills the window (#161), or `None` to show
+    /// the home timeline as every launch did before it.
+    ///
+    /// `GET /2/users/:id/timelines/reverse_chronological` stopped returning
+    /// followed authors' posts for this account (#157) and no change here
+    /// can fix that, so a list is how the app reads a following-shaped feed
+    /// at all. Validated to be all ASCII digits by [`Config::resolve`]: the
+    /// value is interpolated into a URL path segment.
+    pub list_id: Option<String>,
     /// Daily request-count budget (#18): once today's total across every
     /// tracked endpoint approaches or reaches this, the header's usage line
     /// switches to a warning/danger color — see `usage::budget_status`.
@@ -95,6 +104,12 @@ struct FileSettings {
     /// Non-secret, same reasoning as `request_price`.
     #[serde(default)]
     daily_request_budget: Option<u32>,
+    /// Raw `list_id` value (#161). Non-secret — a list id is visible in the
+    /// list's own URL on x.com — so it belongs in `config.toml` like every
+    /// key above. Validated by [`Config::resolve`] rather than here, so the
+    /// error can name whichever of the two sources it came from.
+    #[serde(default)]
+    list_id: Option<String>,
     /// Present only so [`Config::resolve`] can reject a file that still
     /// carries one. It was a credential that must never sit in a
     /// dotfiles-repo file; since #33 it is not a credential at all, and
@@ -251,6 +266,8 @@ impl Config {
 
         let log_level = resolve_log_level(&var, file.log_level);
 
+        let list_id = resolve_list_id(&var, file.list_id)?;
+
         let request_price = resolve_request_price(&var, file.request_price)?;
         let daily_request_budget = resolve_daily_request_budget(&var, file.daily_request_budget)?;
 
@@ -262,9 +279,46 @@ impl Config {
             theme,
             log_level,
             request_price,
+            list_id,
             daily_request_budget,
         })
     }
+}
+
+/// Resolve `list_id` (#161): env > file > unset, the same layering as
+/// everything else, with a blank value on either side treated as unset —
+/// an `X_LIST_ID=` left behind in a shell should mean "no list", not a
+/// request to `/2/lists//tweets`.
+///
+/// A non-empty value that is not all ASCII digits is a startup failure
+/// rather than a warn-and-ignore (unlike `theme` and `log_level`): those
+/// two are cosmetic, whereas this one decides which timeline is fetched,
+/// and silently falling back to the home timeline would leave someone
+/// believing they are reading their list when they are reading the feed
+/// #157 found empty. The error names whichever source the value came from,
+/// so it points at the thing to edit.
+fn resolve_list_id(
+    var: impl Fn(&str) -> Option<String>,
+    file_value: Option<String>,
+) -> Result<Option<String>> {
+    let (raw, source) = match var("X_LIST_ID")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    {
+        Some(value) => (value, "X_LIST_ID"),
+        None => match file_value
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+        {
+            Some(value) => (value, "list_id in config.toml"),
+            None => return Ok(None),
+        },
+    };
+
+    if !raw.chars().all(|c| c.is_ascii_digit()) {
+        bail!("{source} must be a numeric list id, got {raw:?}");
+    }
+    Ok(Some(raw))
 }
 
 /// Resolve `request_price` (#18): env > file > unset, the same precedence
@@ -1006,5 +1060,99 @@ mod tests {
         assert!(error.contains(&path.display().to_string()), "{error}");
 
         std::fs::remove_file(&path).unwrap();
+    }
+
+    // --- #161: the list id that selects the window's primary source ---
+
+    #[test]
+    fn no_list_id_is_configured_by_default() {
+        // Absent means "show the home timeline", which is what every launch
+        // did before #161. Nothing about that path changes until a list id
+        // is set on purpose.
+        let config = Config::resolve(
+            vars(&[("X_OAUTH_CLIENT_ID", "client-123")]),
+            FileSettings::default(),
+        )
+        .unwrap();
+        assert_eq!(config.list_id, None);
+    }
+
+    #[test]
+    fn reads_the_list_id_from_the_environment() {
+        let config = Config::resolve(
+            vars(&[
+                ("X_OAUTH_CLIENT_ID", "client-123"),
+                ("X_LIST_ID", " 2091351590695588200 "),
+            ]),
+            FileSettings::default(),
+        )
+        .unwrap();
+        assert_eq!(config.list_id.as_deref(), Some("2091351590695588200"));
+    }
+
+    #[test]
+    fn resolve_reads_the_list_id_from_the_file_when_env_is_unset() {
+        // The `.app` launched from Finder sees no shell environment (#40),
+        // so the file is the only way to configure this there.
+        let file = FileSettings {
+            list_id: Some("2091351590695588200".to_string()),
+            ..FileSettings::default()
+        };
+        let config = Config::resolve(vars(&[("X_OAUTH_CLIENT_ID", "client-123")]), file).unwrap();
+        assert_eq!(config.list_id.as_deref(), Some("2091351590695588200"));
+    }
+
+    #[test]
+    fn resolve_prefers_the_env_list_id_over_the_file() {
+        let file = FileSettings {
+            list_id: Some("111".to_string()),
+            ..FileSettings::default()
+        };
+        let config = Config::resolve(
+            vars(&[("X_OAUTH_CLIENT_ID", "client-123"), ("X_LIST_ID", "222")]),
+            file,
+        )
+        .unwrap();
+        assert_eq!(config.list_id.as_deref(), Some("222"));
+    }
+
+    #[test]
+    fn a_blank_list_id_is_the_same_as_not_setting_one() {
+        // Otherwise an empty `X_LIST_ID=` left over in a shell would build
+        // `/2/lists//tweets` and spend a request on a 404.
+        let config = Config::resolve(
+            vars(&[("X_OAUTH_CLIENT_ID", "client-123"), ("X_LIST_ID", "   ")]),
+            FileSettings::default(),
+        )
+        .unwrap();
+        assert_eq!(config.list_id, None);
+    }
+
+    #[test]
+    fn rejects_a_list_id_that_is_not_all_digits() {
+        // This value is interpolated into a URL path segment, so anything
+        // that is not a snowflake id is rejected here rather than sent.
+        let error = Config::resolve(
+            vars(&[
+                ("X_OAUTH_CLIENT_ID", "client-123"),
+                ("X_LIST_ID", "../users/me"),
+            ]),
+            FileSettings::default(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("X_LIST_ID"), "{error}");
+    }
+
+    #[test]
+    fn a_rejected_list_id_names_the_file_key_when_that_is_where_it_came_from() {
+        let file = FileSettings {
+            list_id: Some("not-an-id".to_string()),
+            ..FileSettings::default()
+        };
+        let error = Config::resolve(vars(&[("X_OAUTH_CLIENT_ID", "client-123")]), file)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("list_id in config.toml"), "{error}");
     }
 }

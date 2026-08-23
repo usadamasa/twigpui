@@ -174,7 +174,7 @@ fn sort_by_created_at_desc(items: &mut [TimelineItem]) {
 /// whatever fields it is missing from the incoming copy (#97) — otherwise a
 /// row cached before a field like `author_avatar_url` existed would keep
 /// recurring at a page boundary or `since_id` overlap without ever picking
-/// the field up, since neither `reload` nor `load_older_home` re-fetches an
+/// the field up, since neither `reload` nor `load_older_primary` re-fetches an
 /// id already on file by any other path. This was true of both functions
 /// this replaces before the merge existed (#92: they were the same
 /// operation with the concatenation reversed, keeping the cached copy
