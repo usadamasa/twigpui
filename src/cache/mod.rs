@@ -51,7 +51,7 @@ pub(crate) use timeline::{Side, since_id, splice, without_post};
 
 use crate::paths::Paths;
 use crate::thread::{self, ThreadChain};
-use crate::x_api::{TimelineItem, XClient};
+use crate::x_api::{ListSummary, TimelineItem, XClient};
 
 /// How long a cached screen-name → user-id mapping stays usable before a
 /// reload re-resolves it via the API. User ids are effectively permanent, so
@@ -87,6 +87,22 @@ struct UserIdEntry {
 pub(crate) struct MeEntry {
     pub id: String,
     pub username: String,
+    cached_at: i64,
+}
+
+/// The cached result of `GET /2/users/:id/owned_lists` (#164): every list
+/// the signed-in account owns, in the order the API returned them, which
+/// is the order the picker draws them in.
+///
+/// No TTL, unlike [`MeEntry`]. A user id never changes, so its cache can
+/// expire on a clock; a list's name can change any day, and no clock
+/// knows which. The picker's own refresh is the only thing that moves
+/// this — the same rule [`load_timeline`] follows, where staleness is
+/// bounded by an explicit reload rather than by age. `cached_at` is
+/// recorded anyway so the file says when it was last believed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct OwnedListsEntry {
+    lists: Vec<ListSummary>,
     cached_at: i64,
 }
 
@@ -180,6 +196,22 @@ pub(crate) fn save_me(paths: &Paths, id: &str, username: &str, now: i64) -> Resu
         cached_at: now,
     };
     save_json(&paths.me_file(), &entry)
+}
+
+/// The lists the picker last fetched (#164), or `None` if it never has —
+/// which is the picker's cue to offer the fetch rather than to spend it.
+pub(crate) fn cached_owned_lists(paths: &Paths) -> Result<Option<Vec<ListSummary>>> {
+    let entry: Option<OwnedListsEntry> = load_json(&paths.owned_lists_file())?;
+    Ok(entry.map(|entry| entry.lists))
+}
+
+/// Persist the lists `GET /2/users/:id/owned_lists` returned (#164).
+pub(crate) fn save_owned_lists(paths: &Paths, lists: &[ListSummary], now: i64) -> Result<()> {
+    let entry = OwnedListsEntry {
+        lists: lists.to_vec(),
+        cached_at: now,
+    };
+    save_json(&paths.owned_lists_file(), &entry)
 }
 
 /// The cached timeline for `user_id`, newest-first, or `None` if there is
@@ -1094,6 +1126,69 @@ mod tests {
         std::fs::write(paths.me_file(), b"not json at all").unwrap();
 
         assert_eq!(cached_me(&paths, 0).unwrap(), None);
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    // --- cached_owned_lists / save_owned_lists (#164) ---
+
+    fn list(id: &str, name: &str) -> ListSummary {
+        ListSummary {
+            id: id.to_string(),
+            name: name.to_string(),
+        }
+    }
+
+    #[test]
+    fn owned_lists_round_trip_in_the_order_the_api_returned_them() {
+        let root = temp_root("owned-lists-roundtrip");
+        let paths = test_paths(&root);
+        paths.ensure_dirs().unwrap();
+
+        let lists = vec![list("2", "second"), list("1", "first")];
+        save_owned_lists(&paths, &lists, 100).unwrap();
+        assert_eq!(cached_owned_lists(&paths).unwrap(), Some(lists));
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn owned_lists_never_expire_by_age() {
+        // #164: staleness is bounded by the picker's explicit refresh,
+        // the way `load_timeline` is bounded by an explicit reload —
+        // a list renamed last month is still the right list to switch to.
+        let root = temp_root("owned-lists-old");
+        let paths = test_paths(&root);
+        paths.ensure_dirs().unwrap();
+
+        save_owned_lists(&paths, &[list("1", "old name")], 0).unwrap();
+        assert_eq!(
+            cached_owned_lists(&paths).unwrap(),
+            Some(vec![list("1", "old name")])
+        );
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn owned_lists_are_none_when_the_file_is_missing() {
+        let root = temp_root("owned-lists-missing");
+        let paths = test_paths(&root);
+        paths.ensure_dirs().unwrap();
+
+        assert_eq!(cached_owned_lists(&paths).unwrap(), None);
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_corrupted_owned_lists_file_is_a_clean_miss_not_an_error() {
+        let root = temp_root("owned-lists-corrupt");
+        let paths = test_paths(&root);
+        paths.ensure_dirs().unwrap();
+        std::fs::write(paths.owned_lists_file(), b"not json at all").unwrap();
+
+        assert_eq!(cached_owned_lists(&paths).unwrap(), None);
 
         std::fs::remove_dir_all(&root).unwrap();
     }
