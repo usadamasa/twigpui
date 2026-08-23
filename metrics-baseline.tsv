@@ -42,6 +42,7 @@ src/oauth/mod.rs	300
 src/oauth/pkce.rs	150
 src/oauth/tokens.rs	200
 src/paths.rs	300
+src/profile.rs	100
 src/rate_limit.rs	350
 src/repost.rs	150
 src/theme.rs	350

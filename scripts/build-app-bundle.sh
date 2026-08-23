@@ -4,6 +4,14 @@
 # a .app is just a directory layout, and building it in ~100 lines of shell
 # keeps the whole thing legible.
 #
+# With `--dev` (#169) it assembles twigpui-dev.app instead: a *debug* build,
+# a bundle id of its own, and a desaturated icon. Debug is not an aesthetic
+# choice — `Profile::current` reads `debug_assertions`, so a debug build is
+# exactly what addresses the development XDG directories and the development
+# OAuth callback port. Building the dev bundle with `--release` would produce
+# an app that looks like the development one and writes to the real
+# installation's files.
+#
 # Ad-hoc signing (`codesign -s -`) only, per the project's non-goals: this is
 # a development-only, single-machine build. It is not notarized and is not
 # meant to be distributed. Ad-hoc signing is still required, though — an
@@ -30,8 +38,37 @@ done
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
 
-APP_NAME="twigpui"
-BUNDLE_ID="com.github.usadamasa.twigpui"
+# The cargo package, which does not change with the profile — it names both
+# the metadata entry read below and the binary cargo drops in target/.
+CRATE_NAME="twigpui"
+
+# --- profile selection (#169) ---
+#
+# Rejecting an unrecognized argument rather than ignoring it is the point: a
+# mistyped `--dev` that silently built the real bundle would put the wrong
+# app in dist/ under the right-looking name.
+DEV=0
+for arg in "$@"; do
+  case "$arg" in
+    --dev) DEV=1 ;;
+    *)
+      log "ERROR: unknown argument: $arg"
+      log "usage: $0 [--dev]"
+      exit 1
+      ;;
+  esac
+done
+
+if [ "$DEV" -eq 1 ]; then
+  APP_NAME="twigpui-dev"
+  BUNDLE_ID="com.github.usadamasa.twigpui.dev"
+  CARGO_PROFILE_DIR="debug"
+else
+  APP_NAME="$CRATE_NAME"
+  BUNDLE_ID="com.github.usadamasa.twigpui"
+  CARGO_PROFILE_DIR="release"
+fi
+
 DIST_DIR="$REPO_ROOT/dist"
 APP_BUNDLE="$DIST_DIR/$APP_NAME.app"
 CONTENTS_DIR="$APP_BUNDLE/Contents"
@@ -51,20 +88,27 @@ if ! err=$(printf '%s' "$metadata" | jq empty 2>&1); then
   log "ERROR: cargo metadata did not produce valid JSON: $err"
   exit 1
 fi
-version=$(printf '%s' "$metadata" | jq -r --arg name "$APP_NAME" \
+version=$(printf '%s' "$metadata" | jq -r --arg name "$CRATE_NAME" \
   '.packages[] | select(.name == $name) | .version')
 if [ -z "$version" ]; then
-  log "ERROR: package \"$APP_NAME\" not found in cargo metadata output"
+  log "ERROR: package \"$CRATE_NAME\" not found in cargo metadata output"
   exit 1
 fi
 log "twigpui version: $version"
 
-# --- release build ---
-log "building the release binary..."
-(cd "$REPO_ROOT" && cargo build --release)
-BIN_PATH="$REPO_ROOT/target/release/$APP_NAME"
+# --- build ---
+log "building the $CARGO_PROFILE_DIR binary..."
+# Spelled out per branch rather than through an array of extra arguments:
+# an empty array expanded under `set -u` is an "unbound variable" error on
+# the bash 3.2 that ships with macOS, which is the shell this runs under.
+if [ "$DEV" -eq 1 ]; then
+  (cd "$REPO_ROOT" && cargo build)
+else
+  (cd "$REPO_ROOT" && cargo build --release)
+fi
+BIN_PATH="$REPO_ROOT/target/$CARGO_PROFILE_DIR/$CRATE_NAME"
 if [ ! -x "$BIN_PATH" ]; then
-  log "ERROR: expected release binary not found or not executable: $BIN_PATH"
+  log "ERROR: expected $CARGO_PROFILE_DIR binary not found or not executable: $BIN_PATH"
   exit 1
 fi
 
@@ -85,8 +129,16 @@ chmod +x "$MACOS_DIR/$APP_NAME"
 # CFBundleIconFile pointing at a file that was never copied in — not the
 # absence of the key itself, which macOS handles by falling back to the
 # generic app icon.
+#
+# `--dev` (#169) desaturates the same artwork rather than taking a second
+# hand-drawn file: one source of truth stays one source of truth, and a
+# gray icon next to the color one reads as "the same app, the development
+# copy" at Dock size. That derivation needs pixels, so the dev bundle takes
+# the PNG path even when a prebuilt .icns is sitting there — an .icns is
+# what the release bundle ships, and reusing it would put the real app's
+# icon on the development one.
 have_icon=0
-if [ -f "$ICON_ICNS_SRC" ]; then
+if [ "$DEV" -eq 0 ] && [ -f "$ICON_ICNS_SRC" ]; then
   log "using existing icon: $ICON_ICNS_SRC"
   cp "$ICON_ICNS_SRC" "$RESOURCES_DIR/$ICON_NAME"
   have_icon=1
@@ -98,6 +150,23 @@ elif [ -f "$ICON_PNG_SRC" ]; then
     { log "ERROR: mktemp -d failed"; exit 1; }
   trap 'rm -rf "$iconset_dir"' EXIT
   mkdir -p "$iconset_dir/AppIcon.iconset"
+
+  icon_source="$ICON_PNG_SRC"
+  if [ "$DEV" -eq 1 ]; then
+    log "desaturating the icon for the development bundle..."
+    # Two passes on purpose, into two files rather than in place. The first
+    # drops the color by matching the image to a gray ColorSync profile; the
+    # second brings it back to RGB, because `iconutil` wants ordinary RGBA
+    # PNGs and a one-channel gray PNG is not that. The result is an RGB
+    # image whose channels happen to be equal — visibly gray, structurally
+    # what iconutil expects.
+    sips -m "/System/Library/ColorSync/Profiles/Generic Gray Profile.icc" \
+      "$ICON_PNG_SRC" --out "$iconset_dir/AppIcon-gray.png" >/dev/null
+    sips -m "/System/Library/ColorSync/Profiles/sRGB Profile.icc" \
+      "$iconset_dir/AppIcon-gray.png" --out "$iconset_dir/AppIcon-dev.png" >/dev/null
+    icon_source="$iconset_dir/AppIcon-dev.png"
+  fi
+
   # size:label pairs iconutil requires — see `iconutil --help` / the
   # Apple Human Interface Guidelines icon size table.
   for spec in \
@@ -108,11 +177,15 @@ elif [ -f "$ICON_PNG_SRC" ]; then
     512:icon_512x512 1024:icon_512x512@2x; do
     px="${spec%%:*}"
     label="${spec##*:}"
-    sips -z "$px" "$px" "$ICON_PNG_SRC" \
+    sips -z "$px" "$px" "$icon_source" \
       --out "$iconset_dir/AppIcon.iconset/$label.png" >/dev/null
   done
   iconutil -c icns "$iconset_dir/AppIcon.iconset" -o "$RESOURCES_DIR/$ICON_NAME"
   have_icon=1
+elif [ "$DEV" -eq 1 ] && [ -f "$ICON_ICNS_SRC" ]; then
+  log "NOTE: the development bundle derives its icon from assets/AppIcon.png," \
+    "which is missing — assets/AppIcon.icns is the release icon and is not" \
+    "reused here, so this builds without a custom icon."
 else
   log "NOTE: no icon source at assets/AppIcon.icns or assets/AppIcon.png —" \
     "building without a custom icon (macOS shows the generic app icon)." \

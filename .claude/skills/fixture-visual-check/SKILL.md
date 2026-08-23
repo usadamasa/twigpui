@@ -31,6 +31,19 @@ cleanshot-capture window --app twigpui --out ./tmp/shot.png
 撮ったら `Read` で開く。撮り方の詳細と、別のウィンドウが写るときの対処は
 `cleanshot-capture` スキルに従う。
 
+### dev ビルドと本番ビルドの見分け (#169)
+
+`cargo run` は debug ビルドなので dev プロファイルで動き、ウィンドウタイトルは
+`twigpui (dev)` になる。本番の `.app` は `twigpui`。プロセス名はどちらも
+`twigpui` (dev の `.app` を組んだときだけ `twigpui-dev`) なので、
+本番の `.app` を開いたまま `cargo run` すると `--app twigpui` が両方に当たる。
+
+そのときは `--title` で絞る:
+
+```sh
+cleanshot-capture window --app twigpui --title "twigpui (dev)" --out ./tmp/shot.png
+```
+
 ### `--fixture` と素の起動を使い分ける
 
 **レイアウトを見るなら `--fixture`。** ネットワークにも実キャッシュにも触らず、

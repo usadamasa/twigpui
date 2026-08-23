@@ -19,6 +19,7 @@ use ureq::Agent;
 
 use crate::config::Config;
 use crate::paths::Paths;
+use crate::profile::Profile;
 use tokens::{TokenResponse, TokenSet};
 
 /// `https://api.x.com/2/oauth2/token`, per the issue's confirmed design.
@@ -59,7 +60,11 @@ pub(crate) async fn sign_in(executor: &BackgroundExecutor, client_id: &str) -> R
     let verifier = pkce::generate_code_verifier(&random)?;
     let challenge = pkce::code_challenge(&verifier);
     let state = pkce::generate_state(&random)?;
-    let redirect_uri = callback::redirect_uri();
+    // #169: the port, and so the redirect URI, belong to whichever
+    // installation this binary is — a development build must not send the
+    // real app's redirect URI, nor bind the port the real one listens on.
+    let profile = Profile::current();
+    let redirect_uri = callback::redirect_uri(profile);
 
     let url = pkce::build_authorize_url(client_id, &redirect_uri, &challenge, &state);
     std::process::Command::new("open")
@@ -67,7 +72,7 @@ pub(crate) async fn sign_in(executor: &BackgroundExecutor, client_id: &str) -> R
         .status()
         .context("could not open the browser")?;
 
-    let code = callback::await_authorization_code(executor, &state).await?;
+    let code = callback::await_authorization_code(executor, &state, profile).await?;
     let response = exchange_authorization_code(client_id, &code, &verifier, &redirect_uri)?;
     Ok(TokenSet::from_response(response, unix_now()))
 }

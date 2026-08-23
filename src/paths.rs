@@ -7,12 +7,18 @@
 //! land: the OAuth token store ([`Paths::oauth_token_file`], #7), the
 //! response cache (#9), and the panel layout (#24) each add their own
 //! accessor with their own issue rather than being anticipated here.
+//!
+//! Which component is appended to each base directory comes from
+//! [`crate::profile::Profile`] (#169), so a development build and the real
+//! installation never read or overwrite each other's files.
 
 use anyhow::{Context as _, Result};
 use std::path::{Path, PathBuf};
 
-/// The three XDG Base Directory locations twigpui writes under, each with a
-/// `twigpui` component appended.
+use crate::profile::Profile;
+
+/// The three XDG Base Directory locations twigpui writes under, each with
+/// the running profile's directory component appended.
 // The shared `_dir` postfix is the point, not redundancy — it names what each
 // field is (a directory) alongside which XDG category it resolves.
 #[allow(clippy::struct_field_names)]
@@ -21,11 +27,21 @@ pub(crate) struct Paths {
     config_dir: PathBuf,
     cache_dir: PathBuf,
     state_dir: PathBuf,
+    /// Which installation these three belong to (#169). Kept alongside them
+    /// so a caller that has a `Paths` — the window title, the OAuth
+    /// redirect URI — doesn't have to re-derive it and risk disagreeing
+    /// with the directories actually in use.
+    profile: Profile,
 }
 
 impl Paths {
     pub(crate) fn from_env() -> Result<Self> {
         Self::from_vars(|key| std::env::var(key).ok())
+    }
+
+    /// The profile whose directories this `Paths` resolved to (#169).
+    pub(crate) fn profile(&self) -> Profile {
+        self.profile
     }
 
     /// Resolve the three directories from an arbitrary variable lookup.
@@ -38,13 +54,29 @@ impl Paths {
     /// tests need a `Paths` pointed at a scratch directory too, and this is
     /// the same seam `paths.rs`'s own tests already use.
     pub(crate) fn from_vars(var: impl Fn(&str) -> Option<String>) -> Result<Self> {
-        let config_dir = resolve_dir(&var, "XDG_CONFIG_HOME", ".config")?;
-        let cache_dir = resolve_dir(&var, "XDG_CACHE_HOME", ".cache")?;
-        let state_dir = resolve_dir(&var, "XDG_STATE_HOME", ".local/state")?;
+        Self::for_profile(var, Profile::current())
+    }
+
+    /// Resolve the three directories for an arbitrary profile (#169).
+    ///
+    /// Only the tests below name a profile explicitly — every caller in the
+    /// application goes through [`Paths::from_env`], which uses the profile
+    /// this binary was compiled as. Without this seam a test could only ever
+    /// observe the profile it happens to be running under, which is exactly
+    /// the assertion that matters least.
+    pub(crate) fn for_profile(
+        var: impl Fn(&str) -> Option<String>,
+        profile: Profile,
+    ) -> Result<Self> {
+        let component = profile.dir_component();
+        let config_dir = resolve_dir(&var, "XDG_CONFIG_HOME", ".config", component)?;
+        let cache_dir = resolve_dir(&var, "XDG_CACHE_HOME", ".cache", component)?;
+        let state_dir = resolve_dir(&var, "XDG_STATE_HOME", ".local/state", component)?;
         Ok(Self {
             config_dir,
             cache_dir,
             state_dir,
+            profile,
         })
     }
 
@@ -214,8 +246,11 @@ impl Paths {
     }
 }
 
-/// Resolve one XDG base directory: `$<xdg_var>/twigpui` if `xdg_var` holds a
-/// non-blank absolute path, else `$HOME/<default_relative>/twigpui`.
+/// Resolve one XDG base directory: `$<xdg_var>/<component>` if `xdg_var`
+/// holds a non-blank absolute path, else `$HOME/<default_relative>/<component>`.
+///
+/// `component` is the running profile's directory name (#169) — `twigpui`
+/// for the real installation, `twigpui-dev` for a development build.
 ///
 /// Per the XDG Base Directory spec, a relative path in an `XDG_*` variable
 /// must be treated as if it were unset, and this also treats a blank value
@@ -224,6 +259,7 @@ fn resolve_dir(
     var: &impl Fn(&str) -> Option<String>,
     xdg_var: &str,
     default_relative: &str,
+    component: &str,
 ) -> Result<PathBuf> {
     let base = var(xdg_var)
         .as_deref()
@@ -237,7 +273,7 @@ fn resolve_dir(
         let home = var("HOME").context("HOME is unset")?;
         PathBuf::from(home).join(default_relative)
     };
-    Ok(base.join("twigpui"))
+    Ok(base.join(component))
 }
 
 /// Create `dir`, and any missing parents, with `0o700` (owner-only)
@@ -259,6 +295,8 @@ fn create_private_dir(dir: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::Paths;
+    use crate::profile::Profile;
+    use anyhow::Result;
     use std::path::PathBuf;
 
     /// Build a lookup over a fixed `(key, value)` table, mirroring
@@ -271,9 +309,22 @@ mod tests {
         move |key| pairs.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone())
     }
 
+    /// Resolve the *release* profile's paths, whichever profile the test
+    /// binary itself was built as.
+    ///
+    /// Every path literal asserted below is the one README documents and an
+    /// existing installation already has on disk, so it has to be pinned
+    /// against a named profile. Going through [`Paths::from_vars`] would
+    /// instead assert whatever the test build happens to be — under
+    /// `cargo test` that is the dev profile, which is the one case where a
+    /// wrong answer costs nothing.
+    fn release_paths(var: impl Fn(&str) -> Option<String>) -> Result<Paths> {
+        Paths::for_profile(var, Profile::Release)
+    }
+
     #[test]
     fn falls_back_to_the_xdg_defaults_under_home() {
-        let paths = Paths::from_vars(vars(&[("HOME", "/home/alice")])).unwrap();
+        let paths = release_paths(vars(&[("HOME", "/home/alice")])).unwrap();
         assert_eq!(
             paths.config_dir,
             PathBuf::from("/home/alice/.config/twigpui")
@@ -287,7 +338,7 @@ mod tests {
 
     #[test]
     fn honors_xdg_overrides_when_absolute() {
-        let paths = Paths::from_vars(vars(&[
+        let paths = release_paths(vars(&[
             ("HOME", "/home/alice"),
             ("XDG_CONFIG_HOME", "/etc/xdg-config"),
             ("XDG_CACHE_HOME", "/var/xdg-cache"),
@@ -301,7 +352,7 @@ mod tests {
 
     #[test]
     fn ignores_a_relative_xdg_override_and_falls_back_to_the_default() {
-        let paths = Paths::from_vars(vars(&[
+        let paths = release_paths(vars(&[
             ("HOME", "/home/alice"),
             ("XDG_CONFIG_HOME", "relative/path"),
         ]))
@@ -315,13 +366,13 @@ mod tests {
     #[test]
     fn ignores_a_blank_xdg_override_and_falls_back_to_the_default() {
         let paths =
-            Paths::from_vars(vars(&[("HOME", "/home/alice"), ("XDG_CACHE_HOME", "   ")])).unwrap();
+            release_paths(vars(&[("HOME", "/home/alice"), ("XDG_CACHE_HOME", "   ")])).unwrap();
         assert_eq!(paths.cache_dir, PathBuf::from("/home/alice/.cache/twigpui"));
     }
 
     #[test]
     fn does_not_need_home_when_all_three_overrides_are_absolute() {
-        let paths = Paths::from_vars(vars(&[
+        let paths = release_paths(vars(&[
             ("XDG_CONFIG_HOME", "/etc/xdg-config"),
             ("XDG_CACHE_HOME", "/var/xdg-cache"),
             ("XDG_STATE_HOME", "/var/xdg-state"),
@@ -332,13 +383,106 @@ mod tests {
 
     #[test]
     fn errors_naming_home_when_a_default_is_needed_and_home_is_unset() {
-        let error = Paths::from_vars(vars(&[])).unwrap_err().to_string();
+        let error = release_paths(vars(&[])).unwrap_err().to_string();
         assert!(error.contains("HOME"), "{error}");
+    }
+
+    // --- #169: the dev profile shares no file with the real installation ---
+
+    #[test]
+    fn the_dev_profile_resolves_a_separate_directory_in_each_xdg_category() {
+        let dev = Paths::for_profile(vars(&[("HOME", "/home/alice")]), Profile::Dev).unwrap();
+        assert_eq!(
+            dev.config_dir,
+            PathBuf::from("/home/alice/.config/twigpui-dev")
+        );
+        assert_eq!(
+            dev.cache_dir,
+            PathBuf::from("/home/alice/.cache/twigpui-dev")
+        );
+        assert_eq!(
+            dev.state_dir,
+            PathBuf::from("/home/alice/.local/state/twigpui-dev")
+        );
+    }
+
+    #[test]
+    fn no_file_the_dev_profile_writes_lands_where_the_release_profile_reads() {
+        // The issue in one assertion: a development run must not be able to
+        // overwrite the real installation's OAuth session, cache or ledger.
+        // Enumerated rather than spot-checked so a *new* accessor added
+        // without a thought for #169 — one that hardcodes a directory
+        // instead of going through `config_dir`/`cache_dir`/`state_dir` —
+        // fails here rather than the first time someone signs in.
+        let release = release_paths(vars(&[("HOME", "/home/alice")])).unwrap();
+        let dev = Paths::for_profile(vars(&[("HOME", "/home/alice")]), Profile::Dev).unwrap();
+
+        let user = "2244994945";
+        let reply = "1800000000000000003";
+        let pairs: [(PathBuf, PathBuf); 15] = [
+            (release.settings_file(), dev.settings_file()),
+            (release.oauth_token_file(), dev.oauth_token_file()),
+            (release.user_ids_file(), dev.user_ids_file()),
+            (release.timeline_file(user), dev.timeline_file(user)),
+            (
+                release.home_timeline_file(user),
+                dev.home_timeline_file(user),
+            ),
+            (release.me_file(), dev.me_file()),
+            (release.thread_file(reply), dev.thread_file(reply)),
+            (release.rate_limit_file(), dev.rate_limit_file()),
+            (release.usage_file(), dev.usage_file()),
+            (release.reposted_posts_file(), dev.reposted_posts_file()),
+            (release.liked_posts_file(), dev.liked_posts_file()),
+            (release.avatar_dir(), dev.avatar_dir()),
+            (release.media_dir(), dev.media_dir()),
+            (release.log_dir(), dev.log_dir()),
+            (release.log_file(), dev.log_file()),
+        ];
+        for (release_path, dev_path) in pairs {
+            assert_ne!(release_path, dev_path, "shared between the two profiles");
+        }
+    }
+
+    #[test]
+    fn an_xdg_override_still_separates_the_two_profiles() {
+        // Pointing `XDG_STATE_HOME` somewhere of your own must not collapse
+        // the split — the profile component is appended after the override,
+        // not instead of it.
+        let table = [
+            ("HOME", "/home/alice"),
+            ("XDG_STATE_HOME", "/var/xdg-state"),
+        ];
+        let release = Paths::for_profile(vars(&table), Profile::Release).unwrap();
+        let dev = Paths::for_profile(vars(&table), Profile::Dev).unwrap();
+        assert_eq!(release.state_dir, PathBuf::from("/var/xdg-state/twigpui"));
+        assert_eq!(dev.state_dir, PathBuf::from("/var/xdg-state/twigpui-dev"));
+    }
+
+    #[test]
+    fn paths_remembers_which_profile_it_resolved() {
+        let dev = Paths::for_profile(vars(&[("HOME", "/home/alice")]), Profile::Dev).unwrap();
+        assert_eq!(dev.profile(), Profile::Dev);
+        assert_eq!(
+            release_paths(vars(&[("HOME", "/home/alice")]))
+                .unwrap()
+                .profile(),
+            Profile::Release
+        );
+    }
+
+    #[test]
+    fn from_env_resolves_the_profile_this_binary_was_compiled_as() {
+        // `from_vars` is the seam every other test uses; this pins that it
+        // still defaults to the compiled-in profile rather than to a
+        // hardcoded one.
+        let paths = Paths::from_vars(vars(&[("HOME", "/home/alice")])).unwrap();
+        assert_eq!(paths.profile(), Profile::current());
     }
 
     #[test]
     fn settings_file_is_config_dot_toml_under_the_config_dir() {
-        let paths = Paths::from_vars(vars(&[("HOME", "/home/alice")])).unwrap();
+        let paths = release_paths(vars(&[("HOME", "/home/alice")])).unwrap();
         assert_eq!(
             paths.settings_file(),
             PathBuf::from("/home/alice/.config/twigpui/config.toml")
@@ -347,7 +491,7 @@ mod tests {
 
     #[test]
     fn oauth_token_file_is_under_the_state_dir() {
-        let paths = Paths::from_vars(vars(&[("HOME", "/home/alice")])).unwrap();
+        let paths = release_paths(vars(&[("HOME", "/home/alice")])).unwrap();
         assert_eq!(
             paths.oauth_token_file(),
             PathBuf::from("/home/alice/.local/state/twigpui/oauth_tokens.json")
@@ -356,7 +500,7 @@ mod tests {
 
     #[test]
     fn user_ids_file_is_under_the_cache_dir() {
-        let paths = Paths::from_vars(vars(&[("HOME", "/home/alice")])).unwrap();
+        let paths = release_paths(vars(&[("HOME", "/home/alice")])).unwrap();
         assert_eq!(
             paths.user_ids_file(),
             PathBuf::from("/home/alice/.cache/twigpui/user_ids.json")
@@ -365,7 +509,7 @@ mod tests {
 
     #[test]
     fn timeline_file_is_under_the_cache_dir_named_by_user_id() {
-        let paths = Paths::from_vars(vars(&[("HOME", "/home/alice")])).unwrap();
+        let paths = release_paths(vars(&[("HOME", "/home/alice")])).unwrap();
         assert_eq!(
             paths.timeline_file("2244994945"),
             PathBuf::from("/home/alice/.cache/twigpui/timeline-2244994945.json")
@@ -374,7 +518,7 @@ mod tests {
 
     #[test]
     fn home_timeline_file_is_under_the_cache_dir_named_by_user_id() {
-        let paths = Paths::from_vars(vars(&[("HOME", "/home/alice")])).unwrap();
+        let paths = release_paths(vars(&[("HOME", "/home/alice")])).unwrap();
         assert_eq!(
             paths.home_timeline_file("2244994945"),
             PathBuf::from("/home/alice/.cache/twigpui/home-timeline-2244994945.json")
@@ -385,7 +529,7 @@ mod tests {
     fn home_timeline_file_does_not_collide_with_the_single_user_timeline_file() {
         // #11: same user id, different content — overwriting one with the
         // other would silently corrupt whichever mode wasn't showing.
-        let paths = Paths::from_vars(vars(&[("HOME", "/home/alice")])).unwrap();
+        let paths = release_paths(vars(&[("HOME", "/home/alice")])).unwrap();
         assert_ne!(
             paths.timeline_file("2244994945"),
             paths.home_timeline_file("2244994945")
@@ -394,7 +538,7 @@ mod tests {
 
     #[test]
     fn me_file_is_under_the_cache_dir() {
-        let paths = Paths::from_vars(vars(&[("HOME", "/home/alice")])).unwrap();
+        let paths = release_paths(vars(&[("HOME", "/home/alice")])).unwrap();
         assert_eq!(
             paths.me_file(),
             PathBuf::from("/home/alice/.cache/twigpui/me.json")
@@ -403,7 +547,7 @@ mod tests {
 
     #[test]
     fn thread_file_is_under_the_cache_dir_named_by_reply_post_id() {
-        let paths = Paths::from_vars(vars(&[("HOME", "/home/alice")])).unwrap();
+        let paths = release_paths(vars(&[("HOME", "/home/alice")])).unwrap();
         assert_eq!(
             paths.thread_file("1800000000000000003"),
             PathBuf::from("/home/alice/.cache/twigpui/thread-1800000000000000003.json")
@@ -412,7 +556,7 @@ mod tests {
 
     #[test]
     fn rate_limit_file_is_under_the_state_dir() {
-        let paths = Paths::from_vars(vars(&[("HOME", "/home/alice")])).unwrap();
+        let paths = release_paths(vars(&[("HOME", "/home/alice")])).unwrap();
         assert_eq!(
             paths.rate_limit_file(),
             PathBuf::from("/home/alice/.local/state/twigpui/rate_limit.json")
@@ -421,7 +565,7 @@ mod tests {
 
     #[test]
     fn usage_file_is_under_the_state_dir() {
-        let paths = Paths::from_vars(vars(&[("HOME", "/home/alice")])).unwrap();
+        let paths = release_paths(vars(&[("HOME", "/home/alice")])).unwrap();
         assert_eq!(
             paths.usage_file(),
             PathBuf::from("/home/alice/.local/state/twigpui/usage.json")
@@ -430,7 +574,7 @@ mod tests {
 
     #[test]
     fn media_and_avatar_caches_are_separate_directories() {
-        let paths = Paths::from_vars(vars(&[("HOME", "/home/alice")])).unwrap();
+        let paths = release_paths(vars(&[("HOME", "/home/alice")])).unwrap();
         assert_eq!(
             paths.media_dir(),
             PathBuf::from("/home/alice/.cache/twigpui/media")
@@ -440,7 +584,7 @@ mod tests {
 
     #[test]
     fn the_log_file_is_under_the_state_dir() {
-        let paths = Paths::from_vars(vars(&[("HOME", "/home/alice")])).unwrap();
+        let paths = release_paths(vars(&[("HOME", "/home/alice")])).unwrap();
         assert_eq!(
             paths.log_file(),
             PathBuf::from("/home/alice/.local/state/twigpui/logs/twigpui.log")
@@ -450,7 +594,7 @@ mod tests {
 
     #[test]
     fn liked_posts_file_is_under_the_state_dir() {
-        let paths = Paths::from_vars(vars(&[("HOME", "/home/alice")])).unwrap();
+        let paths = release_paths(vars(&[("HOME", "/home/alice")])).unwrap();
         assert_eq!(
             paths.liked_posts_file(),
             PathBuf::from("/home/alice/.local/state/twigpui/liked_posts.json")
@@ -459,13 +603,13 @@ mod tests {
 
     #[test]
     fn liked_and_reposted_records_are_separate_files() {
-        let paths = Paths::from_vars(vars(&[("HOME", "/home/alice")])).unwrap();
+        let paths = release_paths(vars(&[("HOME", "/home/alice")])).unwrap();
         assert_ne!(paths.liked_posts_file(), paths.reposted_posts_file());
     }
 
     #[test]
     fn reposted_posts_file_is_under_the_state_dir() {
-        let paths = Paths::from_vars(vars(&[("HOME", "/home/alice")])).unwrap();
+        let paths = release_paths(vars(&[("HOME", "/home/alice")])).unwrap();
         assert_eq!(
             paths.reposted_posts_file(),
             PathBuf::from("/home/alice/.local/state/twigpui/reposted_posts.json")
@@ -480,7 +624,7 @@ mod tests {
             std::env::temp_dir().join(format!("twigpui-test-ensure-dirs-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
 
-        let paths = Paths::from_vars(vars(&[("HOME", &root.display().to_string())])).unwrap();
+        let paths = release_paths(vars(&[("HOME", &root.display().to_string())])).unwrap();
         paths.ensure_dirs().unwrap();
 
         for dir in [
@@ -508,7 +652,7 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&root);
 
-        let paths = Paths::from_vars(vars(&[("HOME", &root.display().to_string())])).unwrap();
+        let paths = release_paths(vars(&[("HOME", &root.display().to_string())])).unwrap();
         assert!(paths.ensure_dirs().unwrap(), "first call creates cache_dir");
         assert!(
             !paths.ensure_dirs().unwrap(),

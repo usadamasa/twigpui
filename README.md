@@ -141,8 +141,9 @@ http://127.0.0.1:8733/callback
 ```
 
 X requires an exact match, so the port can't be ephemeral — `8733` is fixed
-in the code (`oauth::callback::LOOPBACK_PORT`) and must match the Portal
-registration verbatim.
+in the code (`profile::Profile::loopback_port`) and must match the Portal
+registration verbatim. A development build uses `8734` and its own X app;
+see [Development builds](#development-builds).
 
 **Client id.** Copy the client id the Portal shows you into `X_OAUTH_CLIENT_ID`
 (env or `.env`) or `oauth_client_id` in `config.toml`. It's non-secret — a
@@ -166,7 +167,9 @@ result.
 
 **What happens when you click "Sign in with X":** the app opens your default
 browser at X's consent screen, and a short-lived HTTP listener on
-`127.0.0.1:8733` catches the redirect back (waiting up to two minutes). Once
+`127.0.0.1:8733` (`8734` for a development build) catches the redirect back
+(waiting up to two minutes). The two ports never collide, so a sign-in in
+one build and a sign-in in the other can be in flight at once. Once
 X redirects with an authorization code, twigpui exchanges it for an access
 token and a refresh token, then falls straight into a normal reload.
 
@@ -196,6 +199,50 @@ created (mode `0700`) on startup:
 
 An `XDG_*` variable is only honored if it is set to a non-blank absolute
 path; a relative or blank value falls back to the default, per spec.
+
+A development build appends `twigpui-dev` instead of `twigpui` to all three,
+so it shares no file with the installed app — see
+[Development builds](#development-builds).
+
+### Development builds
+
+A debug build (`cargo run`, or `./scripts/build-app-bundle.sh --dev`) is a
+separate installation from the release build the `.app` bundle ships. It
+signs into a separate X app, keeps its own session and cache, and says so in
+its window title (#169):
+
+| | release build | debug build |
+| --- | --- | --- |
+| Directories | `~/.config/twigpui/` etc. | `~/.config/twigpui-dev/` etc. |
+| OAuth redirect URI | `http://127.0.0.1:8733/callback` | `http://127.0.0.1:8734/callback` |
+| Window title | `twigpui` | `twigpui (dev)` |
+| Bundle | `dist/twigpui.app` | `dist/twigpui-dev.app` |
+| Bundle id | `com.github.usadamasa.twigpui` | `com.github.usadamasa.twigpui.dev` |
+| Icon | `assets/AppIcon.png` | the same artwork, desaturated |
+
+Which one you get is decided at compile time by `debug_assertions`, with no
+flag and no environment variable. That is deliberate: the failure this
+guards against is *forgetting*, and a debug binary cannot be talked into
+addressing the release installation's tokens or cache. The cost is the one
+case where the two disagree — **`cargo run --release` from this checkout
+uses the release profile**, and so the installed app's files. Use
+`./scripts/build-app-bundle.sh --dev` when you want an optimized-looking
+development app; it builds debug on purpose, for exactly this reason.
+
+**Setting one up.** Register a second public client in the X Developer
+Portal with `http://127.0.0.1:8734/callback` as its redirect URI, then put
+its client id where only the development build will read it:
+
+```sh
+mkdir -p ~/.config/twigpui-dev
+cat >> ~/.config/twigpui-dev/config.toml <<'EOF'
+oauth_client_id = "…the development app's client id…"
+EOF
+```
+
+`config.toml` rather than `.env`: a `.env` in this checkout is read by
+whichever profile runs from here, so a client id left there would follow a
+release-profile run into the installed app's state.
 
 ### `config.toml`
 

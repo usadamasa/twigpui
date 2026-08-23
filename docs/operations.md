@@ -33,6 +33,35 @@ as-is. With neither file present the bundle simply carries no
 `CFBundleIconFile` and macOS shows the generic app icon — the script never
 writes a dangling reference to a file it did not copy in.
 
+### The development bundle
+
+```sh
+./scripts/build-app-bundle.sh --dev
+```
+
+Assembles `dist/twigpui-dev.app` instead: the development profile (#169),
+with its own XDG directories, its own OAuth callback port, its own bundle
+id, and a desaturated icon. See [Development
+builds](../README.md#development-builds) for what the split covers and how
+to give it a client id.
+
+Two things about it are easy to get wrong:
+
+- **It is a debug build, on purpose.** `Profile::current` reads
+  `debug_assertions`, so debug *is* what selects the development
+  directories and port. Building this bundle with `--release` would produce
+  an app that carries the development name and icon while writing to the
+  installed app's files — the exact confusion the split exists to prevent.
+- **It never reuses `assets/AppIcon.icns`.** The gray icon is derived from
+  `assets/AppIcon.png` with `sips`, so a prebuilt `.icns` — which is the
+  release artwork — is skipped rather than copied onto the development
+  bundle. With no PNG present, the development bundle builds without a
+  custom icon and says so.
+
+Both bundles can be installed side by side; `open` and `cleanshot-capture`
+address them by their distinct executable names (`twigpui` and
+`twigpui-dev`).
+
 ### Configuration for a bundled launch — read this before double-clicking
 
 **A process launched from Finder, Spotlight, or the Dock does not inherit
@@ -65,10 +94,10 @@ effect on a bundled launch. Two things follow:
 
 ### What a bundled launch changes, and what it doesn't
 
-- **The OAuth loopback listener** binds `127.0.0.1:8733` the same way
-  whether twigpui is bundled or not — nothing in `oauth::callback` depends
-  on the current working directory or the shell environment, only on the
-  port being free. macOS may still prompt ("twigpui would like to accept
+- **The OAuth loopback listener** binds `127.0.0.1:8733` (`8734` for a
+  development build, #169) the same way whether twigpui is bundled or not —
+  nothing in `oauth::callback` depends on the current working directory or
+  the shell environment, only on the port being free. macOS may still prompt ("twigpui would like to accept
   incoming network connections") the first time a *newly signed* binary
   binds a listening socket, and since ad-hoc-signed builds get a fresh
   signing identity on every rebuild (the same reason Keychain isn't used for
