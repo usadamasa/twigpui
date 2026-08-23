@@ -41,7 +41,7 @@ use reload_policy::{
 use render::Addressable as _;
 use render::{
     AVATAR_SIZE, MAX_RENDERED_MEDIA, MEDIA_CELL_HEIGHT, author_link, avatar_placeholder, byline,
-    compose_error_message, format_timestamp, header_title, like_row, link_row, media_badge,
+    compose_error_message, format_timestamp, header_title_element, like_row, link_row, media_badge,
     media_columns, new_posts_bar, notice, offers_delete, offers_like, offers_quote,
     offers_reauthorize, offers_reply, offers_repost, open_post_link, quote_card, quote_row,
     reload_notice_banner, render_thread_chain, reply_banner_label, reply_row, reply_target_label,
@@ -1147,12 +1147,7 @@ impl TimelineView {
             // #95's frame, #164's segments: Home and every owned list.
             .child(self.list_picker(cx))
             .children(self.lists_control(cx))
-            .child(
-                div()
-                    .text_size(theme::TEXT_META)
-                    .text_color(rgb(theme.text_tertiary))
-                    .child(header_title(self.home_username.as_deref())),
-            )
+            .child(header_title_element(self.home_username.as_deref(), theme))
             .child(
                 div()
                     .flex()
@@ -1804,7 +1799,7 @@ mod tests {
         newly_arrived, preserved_scroll_target, reload_cooldown, reload_outcome_label,
     };
     use super::render::{
-        avatar_initial, is_own_post, like_action_label, post_permalink, profile_url,
+        avatar_initial, header_title, is_own_post, like_action_label, post_permalink, profile_url,
         repost_action_label,
     };
     use super::{
@@ -1812,7 +1807,7 @@ mod tests {
         ReloadNotice, ReloadTrigger, RepliedTo, RowCounts, Startup, SyncStatus, Theme,
         ThreadFetchState, TimelineItem, TimelineState, ToggleState, action_post_id,
         at_the_post_cap, byline, compose_error_message, cooldown_label, cooldown_tick,
-        format_timestamp, header_title, media_badge, media_columns, offers_delete, offers_like,
+        format_timestamp, media_badge, media_columns, offers_delete, offers_like,
         offers_load_older, offers_quote, offers_reauthorize, offers_reply, offers_repost,
         rate_limit, reload_failure_outcome, reload_gate, reload_start_state, reply_banner_label,
         reply_target_label, repost_banner_label, row_counts, thread_action_label, usage,
@@ -3536,6 +3531,18 @@ mod tests {
             .expect("the second fixture list is a segment");
         assert!(first.left() >= home.right(), "{home:?} then {first:?}");
         assert!(second.left() >= first.right(), "{first:?} then {second:?}");
+
+        // #182 again, one strip up: `gap` on the toolbar row leaves the
+        // title flush against the trough, which reads as `List@usadamasa`.
+        let title = visual
+            .debug_bounds("header-title")
+            .expect("the title is always shown");
+        assert!(
+            title.left() > second.right(),
+            "the title runs into the picker: picker ends at {:?}, title starts at {:?}",
+            second.right(),
+            title.left()
+        );
     }
 
     /// #164: a fixture window has no client, so it must not offer the one
@@ -3579,6 +3586,17 @@ mod tests {
         assert!(
             button.left() >= last_segment.right(),
             "the button sits after the picker: {last_segment:?} then {button:?}"
+        );
+        // The live window showed `Load lists (1 request)@usadamasa` — the
+        // same zero-gap #182 found in the status bar.
+        let title = visual
+            .debug_bounds("header-title")
+            .expect("the title is always shown");
+        assert!(
+            title.left() > button.right(),
+            "the title runs into the button: button ends at {:?}, title starts at {:?}",
+            button.right(),
+            title.left()
         );
         assert!(
             button.size.width > gpui::px(0.0) && button.size.height > gpui::px(0.0),
