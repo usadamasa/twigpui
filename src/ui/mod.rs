@@ -736,7 +736,7 @@ impl TimelineView {
         };
 
         let mut cell = div()
-            .id(SharedString::from(format!("media-{}", media.url)))
+            .addressable(format!("media-{}", media.url))
             .flex()
             .flex_col()
             .gap_1()
@@ -809,7 +809,7 @@ impl TimelineView {
                 .gap_3()
                 .child(
                     div()
-                        .id(SharedString::from(format!("delete-confirm-{}", item.id)))
+                        .addressable(format!("delete-confirm-{}", item.id))
                         .text_color(rgb(theme.danger))
                         .child("Delete permanently")
                         .on_click(cx.listener(move |this, _event, _window, cx| {
@@ -818,7 +818,7 @@ impl TimelineView {
                 )
                 .child(
                     div()
-                        .id(SharedString::from(format!("delete-cancel-{}", item.id)))
+                        .addressable(format!("delete-cancel-{}", item.id))
                         .text_color(rgb(theme.text_muted))
                         .child("Cancel")
                         .on_click(cx.listener(|this, _event, _window, cx| {
@@ -829,7 +829,7 @@ impl TimelineView {
             let ask_id = item.id.clone();
             div().child(
                 div()
-                    .id(SharedString::from(format!("delete-{}", item.id)))
+                    .addressable(format!("delete-{}", item.id))
                     .text_color(rgb(theme.text_muted))
                     .child("Delete")
                     .on_click(cx.listener(move |this, _event, _window, cx| {
@@ -922,7 +922,7 @@ impl TimelineView {
             .child(quote_card(&target.quoted, theme, None))
             .child(
                 div()
-                    .id("compose-remove-quote")
+                    .addressable("compose-remove-quote")
                     .text_color(rgb(theme.accent))
                     .child("Remove quote")
                     .on_click(cx.listener(|this, _event, _window, cx| {
@@ -957,7 +957,7 @@ impl TimelineView {
             .child(quote_card(&target.replying_to, theme, None))
             .child(
                 div()
-                    .id("compose-remove-reply")
+                    .addressable("compose-remove-reply")
                     .text_color(rgb(theme.accent))
                     .child("Remove reply")
                     .on_click(cx.listener(|this, _event, _window, cx| {
@@ -1039,7 +1039,7 @@ impl TimelineView {
                         )
                         .child(
                             div()
-                                .id("compose-submit")
+                                .addressable("compose-submit")
                                 .px_2()
                                 .py_1()
                                 .rounded(theme::RADIUS_CONTROL)
@@ -1189,7 +1189,7 @@ impl TimelineView {
 
         match action {
             PrimaryAction::Reload => div()
-                .id("primary-action")
+                .addressable("primary-action")
                 .p_1()
                 .rounded(theme::RADIUS_CONTROL)
                 .child(
@@ -1205,7 +1205,7 @@ impl TimelineView {
                 .on_click(on_click)
                 .into_any_element(),
             PrimaryAction::SignIn => div()
-                .id("primary-action")
+                .addressable("primary-action")
                 .px_2()
                 .py_1()
                 .rounded(theme::RADIUS_CONTROL)
@@ -1636,7 +1636,7 @@ impl TimelineView {
 /// via `cache::splice`, never merged ahead like a normal reload.
 fn load_older_row(theme: Theme, cx: &mut Context<'_, TimelineView>) -> impl IntoElement {
     div()
-        .id("load-older")
+        .addressable("load-older")
         .px_4()
         .py_3()
         .text_color(rgb(theme.accent))

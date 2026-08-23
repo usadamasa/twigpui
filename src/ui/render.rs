@@ -62,7 +62,7 @@ pub(super) fn sign_in_pill(
     cx: &mut Context<'_, TimelineView>,
 ) -> impl IntoElement {
     div()
-        .id(id)
+        .addressable(id)
         .px_2()
         .py_1()
         .rounded(theme::RADIUS_CONTROL)
@@ -260,7 +260,7 @@ pub(super) fn thread_toggle_row(
     cx: &mut Context<'_, TimelineView>,
 ) -> impl IntoElement {
     div()
-        .id(SharedString::from(format!("show-thread-{reply_post_id}")))
+        .addressable(format!("show-thread-{reply_post_id}"))
         .text_color(rgb(theme.accent))
         .child(label.to_string())
         .on_click(cx.listener(move |this, _event, _window, cx| {
@@ -463,7 +463,7 @@ pub(super) fn repost_row(
     };
 
     let toggle = div()
-        .id(SharedString::from(format!("repost-{row_id}")))
+        .addressable(format!("repost-{row_id}"))
         .text_color(rgb(color))
         .child(label)
         .when(state.can_toggle(), |element| {
@@ -523,7 +523,7 @@ pub(super) fn like_row(
     };
 
     let toggle = div()
-        .id(SharedString::from(format!("like-{row_id}")))
+        .addressable(format!("like-{row_id}"))
         .text_color(rgb(color))
         .child(label)
         .when(state.can_toggle(), |element| {
@@ -595,7 +595,7 @@ pub(super) fn author_link(
 
     match profile_url(&item.author_username) {
         Some(url) => name
-            .id(SharedString::from(format!("profile-{}", item.id)))
+            .addressable(format!("profile-{}", item.id))
             .text_color(rgb(theme.accent))
             .on_click(cx.listener(move |this, _event, _window, cx| {
                 this.open_in_browser(url.clone(), cx);
@@ -617,7 +617,7 @@ pub(super) fn open_post_link(
     // the row displays, and x.com would only redirect there anyway.
     let url = post_permalink(&item.author_username, action_post_id(item));
     div()
-        .id(SharedString::from(format!("open-{}", item.id)))
+        .addressable(format!("open-{}", item.id))
         .text_color(rgb(theme.text_muted))
         .child("Open in X")
         .on_click(cx.listener(move |this, _event, _window, cx| {
@@ -646,7 +646,7 @@ pub(super) fn link_row(
         let url = link.url.clone();
         row = row.child(
             div()
-                .id(SharedString::from(format!("link-{url}")))
+                .addressable(format!("link-{url}"))
                 .text_color(rgb(theme.accent))
                 .child(link.label.clone())
                 .on_click(cx.listener(move |this, _event, _window, cx| {
@@ -681,7 +681,7 @@ pub(super) fn reply_row(
     };
 
     div()
-        .id(SharedString::from(format!("reply-{}", item.id)))
+        .addressable(format!("reply-{}", item.id))
         .text_color(rgb(theme.text_muted))
         .child("Reply")
         .on_click(cx.listener(move |this, _event, _window, cx| {
@@ -777,7 +777,7 @@ pub(super) fn quote_row(
     };
 
     div()
-        .id(SharedString::from(format!("quote-{}", item.id)))
+        .addressable(format!("quote-{}", item.id))
         .text_color(rgb(theme.text_muted))
         .child("Quote")
         .on_click(cx.listener(move |this, _event, _window, cx| {
