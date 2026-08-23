@@ -1277,7 +1277,16 @@ impl TimelineView {
             // request count rather than off in the toolbar because it is
             // the same kind of fact: a running total about the app rather
             // than about the timeline.
-            .child(self.sync_segment(cx))
+            //
+            // The margin is not redundant with the row's `gap_3`, however
+            // it reads. This is the only place in the window where two
+            // bare text spans are siblings — everywhere else the children
+            // carry their own padding — and on screen the gap does not
+            // separate them at all: "Total: 11 req" and "List sync: …"
+            // render touching, as "11 reqList sync". Raising the gap to
+            // `gap_8` changes nothing, so the spacing has to come from
+            // somewhere that demonstrably works here.
+            .child(div().ml(theme::ROW_PAD_X).child(self.sync_segment(cx)))
             .when_some(kept, |bar, kept| {
                 bar.child(
                     div()
