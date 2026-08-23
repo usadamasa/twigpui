@@ -1794,14 +1794,15 @@ mod tests {
         repost_action_label, tab_label,
     };
     use super::{
-        ComposeStatus, Cooldown, CooldownTick, PostLink, PostMedia, PostMetrics, ReloadNotice,
-        ReloadTrigger, RepliedTo, RowCounts, Startup, Theme, ThreadFetchState, TimelineItem,
-        TimelineState, ToggleState, action_post_id, at_the_post_cap, byline, compose_error_message,
-        cooldown_label, cooldown_tick, format_timestamp, header_title, media_badge, media_columns,
-        offers_delete, offers_like, offers_load_older, offers_quote, offers_reauthorize,
-        offers_reply, offers_repost, primary_source, rate_limit, reload_failure_outcome,
-        reload_gate, reload_start_state, reply_banner_label, reply_target_label,
-        repost_banner_label, row_counts, thread_action_label, usage, usage_color, usage_label,
+        ComposeStatus, Cooldown, CooldownTick, Fixture, PostLink, PostMedia, PostMetrics,
+        ReloadNotice, ReloadTrigger, RepliedTo, RowCounts, Startup, SyncStatus, Theme,
+        ThreadFetchState, TimelineItem, TimelineState, ToggleState, action_post_id,
+        at_the_post_cap, byline, compose_error_message, cooldown_label, cooldown_tick,
+        format_timestamp, header_title, media_badge, media_columns, offers_delete, offers_like,
+        offers_load_older, offers_quote, offers_reauthorize, offers_reply, offers_repost,
+        primary_source, rate_limit, reload_failure_outcome, reload_gate, reload_start_state,
+        reply_banner_label, reply_target_label, repost_banner_label, row_counts,
+        thread_action_label, usage, usage_color, usage_label,
     };
 
     fn item_with(id: &str, author_username: &str, reposted_by: Option<&str>) -> TimelineItem {
@@ -3134,6 +3135,243 @@ mod tests {
         let home = std::env::temp_dir().join("twigpui-smoke");
         let home = home.display().to_string();
         crate::paths::Paths::from_vars(move |key| (key == "HOME").then(|| home.clone())).unwrap()
+    }
+
+    // --- #146 層 3: what a window can be asked without drawing it ---
+    //
+    // gpui does not run layout on the test platform, so nothing about
+    // spacing, wrapping or size is assertable here — #182 is the standing
+    // reminder of what that costs, and `--fixture` plus a screenshot
+    // (#146's layer 2) is the only check that applies to those.
+    //
+    // What *is* observable is state and dispatch. So these tests cover
+    // the half of the window that has nothing to do with pixels: which
+    // action reaches which method, what a keystroke changes, and — since
+    // most of this file spends money — which paths are guaranteed not to.
+    //
+    // Every one of them dispatches the real action rather than calling
+    // the handler's body, for the reason
+    // `leaving_the_composer_returns_focus_to_the_timeline` already
+    // states: a test that reproduces the body passes no matter what the
+    // handler is actually wired to.
+
+    /// A window filled from `fixture`, and the view inside it.
+    ///
+    /// Extracted because the three tests above already triplicate this
+    /// block and the ones below would have made it nine copies. Returns
+    /// the handle as well as the view: dispatching an action needs the
+    /// window, asserting the result needs the view.
+    fn fixture_window(
+        cx: &mut gpui::TestAppContext,
+        fixture: Fixture,
+    ) -> (
+        gpui::WindowHandle<gpui_component::Root>,
+        gpui::Entity<super::TimelineView>,
+    ) {
+        use gpui::AppContext as _;
+
+        cx.update(gpui_component::init);
+        cx.update(crate::menu::init);
+
+        let slot = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let window = {
+            let slot = slot.clone();
+            cx.add_window(move |window, cx| {
+                let timeline = cx.new(|cx| {
+                    super::TimelineView::new(
+                        smoke_config(),
+                        smoke_paths(),
+                        Startup::Fixture(Box::new(fixture)),
+                        window,
+                        cx,
+                    )
+                });
+                *slot.borrow_mut() = Some(timeline.clone());
+                gpui_component::Root::new(timeline, window, cx)
+            })
+        };
+        let timeline = slot.borrow().clone().unwrap();
+        cx.run_until_parked();
+        (window, timeline)
+    }
+
+    /// A fixture with `shown` already on screen and `waiting` held back —
+    /// the shape #21's "N new posts" bar exists for.
+    fn fixture_with(shown: &[&str], waiting: &[&str]) -> Fixture {
+        Fixture {
+            signed_in_as: crate::fixture::FixtureUser {
+                id: "5685672".to_string(),
+                username: "usadamasa".to_string(),
+            },
+            items: shown
+                .iter()
+                .map(|id| item_with(id, "someone", None))
+                .collect(),
+            pending: waiting
+                .iter()
+                .map(|id| item_with(id, "someone", None))
+                .collect(),
+        }
+    }
+
+    /// The ids the window is currently rendering.
+    fn shown_ids(view: &super::TimelineView) -> Vec<String> {
+        match &view.state {
+            TimelineState::Loaded(items) => items.iter().map(|item| item.id.clone()).collect(),
+            other => panic!("expected a loaded timeline, got {other:?}"),
+        }
+    }
+
+    /// #146: a fixture window builds no `XClient` at all.
+    ///
+    /// `show_fixture`'s doc calls this "not a convention but the reason a
+    /// fixture cannot cost anything" — every paid path in this view goes
+    /// through `self.client`, so an absent one is what makes a screenshot
+    /// free. Until now that was a sentence; this is the enforcement.
+    #[gpui::test]
+    fn a_fixture_window_holds_no_client_to_spend_with(cx: &mut gpui::TestAppContext) {
+        let (_window, timeline) = fixture_window(cx, fixture_with(&["2", "1"], &[]));
+
+        cx.update(|cx| {
+            timeline.update(cx, |view, _cx| {
+                assert!(
+                    view.client.is_none(),
+                    "a fixture must not be able to reach the API"
+                );
+            });
+        });
+    }
+
+    /// #21: the fixture's held-back posts become the bar's count.
+    #[gpui::test]
+    fn a_fixtures_waiting_posts_fill_the_new_posts_buffer(cx: &mut gpui::TestAppContext) {
+        let (_window, timeline) = fixture_window(cx, fixture_with(&["2", "1"], &["4", "3"]));
+
+        cx.update(|cx| {
+            timeline.update(cx, |view, _cx| {
+                assert_eq!(view.pending.as_ref().map(|pending| pending.count), Some(2));
+                assert_eq!(
+                    shown_ids(view),
+                    ["2", "1"],
+                    "a poll's posts must not reach the screen on their own"
+                );
+            });
+        });
+    }
+
+    /// #21: pressing "Show New Posts" is what puts them on screen.
+    ///
+    /// The gap this closes is a real one: the bar and its `cmd-shift-r`
+    /// binding could not be exercised by hand from a session with no way
+    /// to click a desktop window, so until #146 the whole click path was
+    /// unverified. `dispatch_action` is the sanctioned equivalent — it
+    /// goes through the same `on_action` registration a keystroke does.
+    #[gpui::test]
+    fn showing_new_posts_moves_them_onto_the_timeline(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext as _;
+
+        let (window, timeline) = fixture_window(cx, fixture_with(&["2", "1"], &["4", "3"]));
+
+        cx.update_window(window.into(), |_, window, cx| {
+            let _ = window.draw(cx);
+            window.dispatch_action(Box::new(crate::menu::ShowNewPosts), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+
+        cx.update(|cx| {
+            timeline.update(cx, |view, _cx| {
+                assert_eq!(shown_ids(view), ["4", "3", "2", "1"]);
+                assert!(
+                    view.pending.is_none(),
+                    "the buffer must be emptied, or the bar keeps offering posts already shown"
+                );
+            });
+        });
+    }
+
+    /// #21: pressing it again changes nothing.
+    ///
+    /// Asserts the timeline is *identical*, not merely that nothing
+    /// crashed. `apply_pending` early-returns on an empty buffer today;
+    /// the regression this guards is someone later making it set `state`
+    /// unconditionally, which would blank the screen on a second press.
+    #[gpui::test]
+    fn showing_new_posts_with_none_waiting_leaves_the_timeline_alone(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use gpui::AppContext as _;
+
+        let (window, timeline) = fixture_window(cx, fixture_with(&["2", "1"], &["3"]));
+
+        for _ in 0..2 {
+            cx.update_window(window.into(), |_, window, cx| {
+                let _ = window.draw(cx);
+                window.dispatch_action(Box::new(crate::menu::ShowNewPosts), cx);
+            })
+            .unwrap();
+            cx.run_until_parked();
+        }
+
+        cx.update(|cx| {
+            timeline.update(cx, |view, _cx| {
+                assert_eq!(shown_ids(view), ["3", "2", "1"]);
+            });
+        });
+    }
+
+    /// #21: `cmd-shift-r` spends nothing.
+    ///
+    /// The pairing with `cmd-r` is the whole design — one buys a fetch,
+    /// the other reveals one already paid for — and `menu.rs` says so in
+    /// prose. This is the part of that claim a test can hold: after the
+    /// dispatch there is still no client, and `last_reload_at` has not
+    /// moved, so nothing went out and nothing was even attempted.
+    #[gpui::test]
+    fn showing_new_posts_sends_nothing(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext as _;
+
+        let (window, timeline) = fixture_window(cx, fixture_with(&["2", "1"], &["3"]));
+
+        cx.update_window(window.into(), |_, window, cx| {
+            let _ = window.draw(cx);
+            window.dispatch_action(Box::new(crate::menu::ShowNewPosts), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+
+        cx.update(|cx| {
+            timeline.update(cx, |view, _cx| {
+                assert!(view.client.is_none());
+                assert!(
+                    view.last_reload_at.is_none(),
+                    "showing a buffered fetch must not count as one"
+                );
+            });
+        });
+    }
+
+    /// #174: the sync segment cannot be armed while the sync is stopped.
+    ///
+    /// A money guard, not a tidiness one. `ask_to_sync` is the first of
+    /// the two clicks that spend a full read of both the follow list and
+    /// the list membership; a fixture window is stopped at
+    /// `SyncOff::NotSignedIn`, and arming there would put a "Sync anyway?"
+    /// button on a window that has no credential to sync with.
+    #[gpui::test]
+    fn a_stopped_sync_cannot_be_armed(cx: &mut gpui::TestAppContext) {
+        let (_window, timeline) = fixture_window(cx, fixture_with(&["1"], &[]));
+
+        cx.update(|cx| {
+            timeline.update(cx, |view, cx| {
+                assert!(matches!(view.sync_status, SyncStatus::Off(_)));
+                view.ask_to_sync(cx);
+                assert!(
+                    !view.pending_sync,
+                    "a window with no credential must not offer to spend a sync"
+                );
+            });
+        });
     }
 
     #[gpui::test]
