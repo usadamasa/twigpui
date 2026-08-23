@@ -41,7 +41,6 @@ quote, like or delete, which is most of what this app does.
 | [docs/timeline.md](docs/timeline.md) | What the window shows and how a row is assembled |
 | [docs/writing.md](docs/writing.md) | Posting, replying, quoting, reposting, liking, deleting, opening in a browser |
 | [docs/media.md](docs/media.md) | Attached images and author avatars |
-| [docs/api-budget.md](docs/api-budget.md) | Request cost per action, rate limits, usage tracking, local cache |
 | [docs/operations.md](docs/operations.md) | Building the `.app` bundle, logs, code metrics, tests |
 
 ## Requirements
@@ -121,7 +120,7 @@ each time.
 | `X_MAX_RESULTS` | no | `20` | Posts per fetch, 5–100 |
 | `X_MIN_FETCH_INTERVAL_SECONDS` | no | `60` | Floor on how often a fetch may run, in seconds (#10) |
 | `X_THEME` | no | `light` | Color theme: `light`, `dark`, or `system` (follows the OS appearance) — also `theme` in `config.toml` (#19) |
-| `X_REQUEST_PRICE` | no | unset | Price per API request, in whatever unit you have in mind — also `request_price` in `config.toml` (#18, see [Usage tracking](docs/api-budget.md#usage-tracking)) |
+| `X_REQUEST_PRICE` | no | unset | Price per API request, in whatever unit you have in mind — also `request_price` in `config.toml` (#18, see [Usage tracking](.claude/skills/x-api-budget/reference/app-behavior.md#usage-tracking)) |
 | `X_DAILY_REQUEST_BUDGET` | no | unset | Daily request-count budget that colors the header's usage line as it's approached — also `daily_request_budget` in `config.toml` (#18) |
 
 `.env` is gitignored. Do not commit credentials.

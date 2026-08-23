@@ -43,7 +43,7 @@ absent), whichever comes first. Reaching the cap is reported explicitly
 ("Reached the 5-level limit…") rather than the thread just quietly trailing
 off, and a fetch that errors offers a retry in place. A missing first parent
 renders "The parent post is no longer available" instead of an empty gap.
-Once walked, a thread is cached (`thread-<reply_id>.json`, see [Local cache](api-budget.md#local-cache)), so
+Once walked, a thread is cached (`thread-<reply_id>.json`, see [Local cache](../.claude/skills/x-api-budget/reference/app-behavior.md#local-cache)), so
 re-opening the same reply's thread — even after restarting the app — costs
 nothing further. Listing the replies *to* a post (the other direction) needs
 a different endpoint (`search/recent`) and is out of scope here — see #36.
