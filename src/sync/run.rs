@@ -60,7 +60,7 @@ fn read_all(
 /// for [`apply`] to consume.
 ///
 /// Not unit-tested, for the reason [`read_all`] isn't.
-fn plan_sync(
+pub(super) fn plan_sync(
     paths: &Paths,
     client: &XClient,
     user_id: &str,
@@ -96,29 +96,44 @@ fn plan_sync(
 ///
 /// Not unit-tested, for the reason [`read_all`] isn't.
 fn apply(paths: &Paths, client: &XClient, plan: &mut Plan, prune: bool, now: i64) -> Result<()> {
-    let adds: Vec<String> = plan
-        .pending(Action::Add)
-        .map(|entry| entry.user_id.clone())
-        .collect();
-    for user_id in adds {
-        client.add_list_member(paths, &plan.list_id, &user_id, now)?;
-        plan.mark_applied(&user_id, Action::Add);
-        save_plan(&paths.sync_plan_file(), plan)?;
-    }
+    apply_some(paths, client, plan, prune, now, usize::MAX).map(|_| ())
+}
 
-    if !prune {
-        return Ok(());
-    }
-    let removals: Vec<String> = plan
-        .pending(Action::Remove)
-        .map(|entry| entry.user_id.clone())
-        .collect();
-    for user_id in removals {
-        client.remove_list_member(paths, &plan.list_id, &user_id, now)?;
-        plan.mark_applied(&user_id, Action::Remove);
+/// [`apply`], but sending at most `limit` entries before returning — the
+/// background sync's unit of work. Returns how many actually went through.
+///
+/// The CLI has no use for a bound: `--apply` is a foreground command whose
+/// whole job is to finish. The loop does, for two reasons that have nothing
+/// to do with rate limits (the tracked window already stops it on its own):
+/// a tick that sends two thousand requests holds the background executor
+/// for as long as that takes and cannot be shut down cleanly in the middle,
+/// and it would send every addition before the first removal, so a list
+/// that is badly out of date would show the additions hours before the
+/// stale members went away.
+///
+/// Removals are interleaved for that second reason — `limit` is split
+/// across both actions rather than spent on additions first.
+///
+/// Not unit-tested, for the reason [`read_all`] isn't.
+pub(super) fn apply_some(
+    paths: &Paths,
+    client: &XClient,
+    plan: &mut Plan,
+    prune: bool,
+    now: i64,
+    limit: usize,
+) -> Result<usize> {
+    let mut sent = 0usize;
+    for (action, user_id) in super::schedule::next_batch(plan, prune, limit) {
+        match action {
+            Action::Add => client.add_list_member(paths, &plan.list_id, &user_id, now)?,
+            Action::Remove => client.remove_list_member(paths, &plan.list_id, &user_id, now)?,
+        }
+        plan.mark_applied(&user_id, action);
+        sent = sent.saturating_add(1);
         save_plan(&paths.sync_plan_file(), plan)?;
     }
-    Ok(())
+    Ok(sent)
 }
 
 /// What `--sync-list` was asked to do.

@@ -58,6 +58,23 @@ pub(crate) struct Config {
     /// counts are always known), so it works whether or not a price is
     /// configured.
     pub daily_request_budget: Option<u32>,
+    /// Whether the window keeps `list_id`'s membership mirroring the
+    /// accounts this app follows while it runs.
+    ///
+    /// On by default, and effective only once a `list_id` is configured and
+    /// the session carries the scopes `sync::missing_scope` asks for — both
+    /// of which are already deliberate acts. Turning it off is how someone
+    /// keeps a configured list under their own hand instead.
+    ///
+    /// **This spends money on a timer**, which is why the interval below is
+    /// long and why the README says so out loud.
+    pub auto_sync_list: bool,
+    /// How long the background sync waits between diffs, in seconds.
+    ///
+    /// Not `min_fetch_interval_seconds`: that one throttles a reload that
+    /// costs a page of posts, this one paces a pair of full reads that cost
+    /// one billed resource per followed account.
+    pub sync_interval_seconds: u32,
 }
 
 const DEFAULT_USERNAME: &str = "XDevelopers";
@@ -67,6 +84,28 @@ const MAX_RESULTS_RANGE: std::ops::RangeInclusive<u32> = 5..=100;
 /// two requests) against even X's tighter per-endpoint rate-limit windows,
 /// while still being responsive to a human clicking the reload button.
 const DEFAULT_MIN_FETCH_INTERVAL_SECONDS: u32 = 60;
+
+/// 6 hours between diffs.
+///
+/// Both sides of the diff bill per returned resource, so one diff of a
+/// few thousand follows is dollars. X documents that resources are
+/// deduplicated within a 24-hour UTC day, which would make every diff
+/// after the day's first nearly free — but `x-api-budget` has that
+/// measured for Posts only, not for Users or Owned Reads. This interval is
+/// picked so the unverified half cannot cost much either way: four diffs a
+/// day is roughly $2 per thousand follows if dedup holds and roughly $8 if
+/// it does not.
+const DEFAULT_SYNC_INTERVAL_SECONDS: u32 = 21_600;
+
+/// The shortest interval the sync will accept.
+///
+/// A floor rather than a warning, because the failure it prevents is not
+/// recoverable by noticing it later: `X_SYNC_INTERVAL_SECONDS=60` typed
+/// where `6000` was meant would, if dedup turns out not to apply to Users,
+/// buy both full reads sixty times an hour against a prepaid balance. 15
+/// minutes is far below any cadence this feature has a use for and still
+/// two orders of magnitude away from that.
+const MIN_SYNC_INTERVAL_SECONDS: u32 = 900;
 
 /// The file-level settings loaded from `config.toml`.
 ///
@@ -104,6 +143,14 @@ struct FileSettings {
     /// Non-secret, same reasoning as `request_price`.
     #[serde(default)]
     daily_request_budget: Option<u32>,
+    /// Non-secret, same reasoning as `request_price`. This is the key that
+    /// matters for a `.app` launched from Finder, where no shell variable
+    /// is visible (#40) — the same reason `log_level` belongs here.
+    #[serde(default)]
+    auto_sync_list: Option<bool>,
+    /// Non-secret, same reasoning as `request_price`.
+    #[serde(default)]
+    sync_interval_seconds: Option<u32>,
     /// Raw `list_id` value (#161). Non-secret — a list id is visible in the
     /// list's own URL on x.com — so it belongs in `config.toml` like every
     /// key above. Validated by [`Config::resolve`] rather than here, so the
@@ -271,6 +318,9 @@ impl Config {
         let request_price = resolve_request_price(&var, file.request_price)?;
         let daily_request_budget = resolve_daily_request_budget(&var, file.daily_request_budget)?;
 
+        let auto_sync_list = resolve_auto_sync_list(&var, file.auto_sync_list)?;
+        let sync_interval_seconds = resolve_sync_interval(&var, file.sync_interval_seconds)?;
+
         Ok(Self {
             oauth_client_id,
             target_username,
@@ -281,6 +331,8 @@ impl Config {
             request_price,
             list_id,
             daily_request_budget,
+            auto_sync_list,
+            sync_interval_seconds,
         })
     }
 }
@@ -319,6 +371,65 @@ fn resolve_list_id(
         bail!("{source} must be a numeric list id, got {raw:?}");
     }
     Ok(Some(raw))
+}
+
+/// Resolve `auto_sync_list`: env > file > on.
+///
+/// Rejects an unrecognized value rather than falling back the way `theme`
+/// does. A typo'd theme is cosmetic; a typo'd `X_AUTO_SYNC_LIST=flase` read
+/// as the default would leave a paid background loop running for someone
+/// who was trying to switch it off.
+fn resolve_auto_sync_list(
+    var: impl Fn(&str) -> Option<String>,
+    file_value: Option<bool>,
+) -> Result<bool> {
+    let Some(raw) = var("X_AUTO_SYNC_LIST")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(file_value.unwrap_or(true));
+    };
+    match raw.to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" | "on" => Ok(true),
+        "false" | "0" | "no" | "off" => Ok(false),
+        _ => bail!("X_AUTO_SYNC_LIST must be true or false, got {raw:?}"),
+    }
+}
+
+/// Resolve `sync_interval_seconds`: env > file > [`DEFAULT_SYNC_INTERVAL_SECONDS`],
+/// refusing anything under [`MIN_SYNC_INTERVAL_SECONDS`].
+///
+/// The floor's error names what the number buys rather than just the
+/// bound, because the mistake it catches is a decimal point, and "must be
+/// at least 900" does not tell someone why 60 was a bad idea.
+fn resolve_sync_interval(
+    var: impl Fn(&str) -> Option<String>,
+    file_value: Option<u32>,
+) -> Result<u32> {
+    let (seconds, source) = match var("X_SYNC_INTERVAL_SECONDS")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    {
+        Some(raw) => (
+            raw.parse::<u32>()
+                .with_context(|| format!("X_SYNC_INTERVAL_SECONDS is not a number: {raw:?}"))?,
+            "X_SYNC_INTERVAL_SECONDS",
+        ),
+        None => match file_value {
+            Some(seconds) => (seconds, "sync_interval_seconds in config.toml"),
+            None => return Ok(DEFAULT_SYNC_INTERVAL_SECONDS),
+        },
+    };
+
+    if seconds < MIN_SYNC_INTERVAL_SECONDS {
+        bail!(
+            "{source} must be at least {MIN_SYNC_INTERVAL_SECONDS} seconds, got {seconds}. \
+             Each sync reads the whole follow list and the whole list membership, and both \
+             bill per account returned — this floor is what stops a mistyped interval from \
+             buying them over and over."
+        );
+    }
+    Ok(seconds)
 }
 
 /// Resolve `request_price` (#18): env > file > unset, the same precedence
@@ -1154,5 +1265,163 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("list_id in config.toml"), "{error}");
+    }
+
+    // --- auto_sync_list (env > file > on) ---
+
+    #[test]
+    fn the_background_sync_is_on_unless_someone_turns_it_off() {
+        let config = Config::resolve(
+            vars(&[("X_OAUTH_CLIENT_ID", "client-123")]),
+            FileSettings::default(),
+        )
+        .unwrap();
+        assert!(config.auto_sync_list);
+    }
+
+    #[test]
+    fn resolve_reads_auto_sync_list_from_the_file_when_env_is_unset() {
+        let file = FileSettings {
+            auto_sync_list: Some(false),
+            ..FileSettings::default()
+        };
+        let config = Config::resolve(vars(&[("X_OAUTH_CLIENT_ID", "client-123")]), file).unwrap();
+        assert!(!config.auto_sync_list);
+    }
+
+    #[test]
+    fn resolve_prefers_the_env_auto_sync_list_over_the_file() {
+        let file = FileSettings {
+            auto_sync_list: Some(true),
+            ..FileSettings::default()
+        };
+        let config = Config::resolve(
+            vars(&[
+                ("X_OAUTH_CLIENT_ID", "client-123"),
+                ("X_AUTO_SYNC_LIST", "false"),
+            ]),
+            file,
+        )
+        .unwrap();
+        assert!(!config.auto_sync_list);
+    }
+
+    #[test]
+    fn auto_sync_list_takes_the_usual_spellings_of_off() {
+        for raw in ["false", "FALSE", "0", "no", "off", " off "] {
+            let config = Config::resolve(
+                vars(&[
+                    ("X_OAUTH_CLIENT_ID", "client-123"),
+                    ("X_AUTO_SYNC_LIST", raw),
+                ]),
+                FileSettings::default(),
+            )
+            .unwrap();
+            assert!(!config.auto_sync_list, "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn resolve_rejects_an_auto_sync_list_it_does_not_understand() {
+        // Not a fall-back-to-default like `theme`: a typo'd theme is
+        // cosmetic, whereas a typo here would leave a paid loop running for
+        // someone who was trying to switch it off.
+        let error = Config::resolve(
+            vars(&[
+                ("X_OAUTH_CLIENT_ID", "client-123"),
+                ("X_AUTO_SYNC_LIST", "flase"),
+            ]),
+            FileSettings::default(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("X_AUTO_SYNC_LIST"), "{error}");
+        assert!(error.contains("flase"), "{error}");
+    }
+
+    // --- sync_interval_seconds (env > file > default, with a floor) ---
+
+    #[test]
+    fn the_sync_interval_defaults_to_six_hours() {
+        let config = Config::resolve(
+            vars(&[("X_OAUTH_CLIENT_ID", "client-123")]),
+            FileSettings::default(),
+        )
+        .unwrap();
+        assert_eq!(config.sync_interval_seconds, 21_600);
+    }
+
+    #[test]
+    fn resolve_reads_the_sync_interval_from_the_file_when_env_is_unset() {
+        let file = FileSettings {
+            sync_interval_seconds: Some(3_600),
+            ..FileSettings::default()
+        };
+        let config = Config::resolve(vars(&[("X_OAUTH_CLIENT_ID", "client-123")]), file).unwrap();
+        assert_eq!(config.sync_interval_seconds, 3_600);
+    }
+
+    #[test]
+    fn resolve_prefers_the_env_sync_interval_over_the_file() {
+        let file = FileSettings {
+            sync_interval_seconds: Some(3_600),
+            ..FileSettings::default()
+        };
+        let config = Config::resolve(
+            vars(&[
+                ("X_OAUTH_CLIENT_ID", "client-123"),
+                ("X_SYNC_INTERVAL_SECONDS", "43200"),
+            ]),
+            file,
+        )
+        .unwrap();
+        assert_eq!(config.sync_interval_seconds, 43_200);
+    }
+
+    #[test]
+    fn resolve_rejects_a_sync_interval_below_the_floor() {
+        // The decimal-point mistake: 60 where 6000 was meant. Both full
+        // reads bill per account returned, so this one is not a typo
+        // anybody gets to find out about later.
+        let error = Config::resolve(
+            vars(&[
+                ("X_OAUTH_CLIENT_ID", "client-123"),
+                ("X_SYNC_INTERVAL_SECONDS", "60"),
+            ]),
+            FileSettings::default(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("at least 900"), "{error}");
+        assert!(error.contains("bill per account"), "{error}");
+    }
+
+    #[test]
+    fn a_rejected_sync_interval_names_the_file_key_when_that_is_where_it_came_from() {
+        let file = FileSettings {
+            sync_interval_seconds: Some(0),
+            ..FileSettings::default()
+        };
+        let error = Config::resolve(vars(&[("X_OAUTH_CLIENT_ID", "client-123")]), file)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("sync_interval_seconds in config.toml"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn resolve_rejects_a_non_numeric_sync_interval() {
+        let error = Config::resolve(
+            vars(&[
+                ("X_OAUTH_CLIENT_ID", "client-123"),
+                ("X_SYNC_INTERVAL_SECONDS", "soon"),
+            ]),
+            FileSettings::default(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("is not a number"), "{error}");
     }
 }
