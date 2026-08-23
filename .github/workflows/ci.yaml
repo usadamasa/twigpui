@@ -102,8 +102,6 @@ jobs:
       # Codecov or anything else later needs no change here. Both come from
       # the profile already on disk.
       - name: Export lcov
-        env:
-          COVERAGE_REUSE: "1"
         run: cargo llvm-cov report --lcov --output-path tmp/coverage/lcov.info
 
       - name: Upload coverage data

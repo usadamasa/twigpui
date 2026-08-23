@@ -101,16 +101,50 @@ write_cutoffs() {
   } >"$cutoffs_json"
 }
 
-# Run the instrumented tests once, then report from that data. `report`
-# re-reads the profile without rebuilding, so the three modes below cost
-# one build between them rather than one each.
+# Whether the profile on disk predates the code it claims to describe.
+#
+# This is what makes reading the report cheap without ever making it wrong.
+# An instrumented build takes 1-2 minutes, and the loop this script exists
+# for — read the table, list the gaps for one file, write a test, check it
+# closed — would pay that four times over if every invocation rebuilt. But
+# reusing a profile from before an edit reports the old code, which is
+# worse than being slow. So the mtime decides.
+profile_is_stale() {
+  if [ ! -f "$cov_json" ]; then
+    return 0
+  fi
+  # `-print -quit` stops at the first newer file rather than walking the
+  # whole tree; the answer is the same and it does not depend on the count.
+  local newer
+  newer=$(find src Cargo.toml Cargo.lock -newer "$cov_json" -print -quit)
+  [ -n "$newer" ]
+}
+
+# Run the instrumented tests, then report from that data. `report` re-reads
+# the profile without rebuilding, so the three modes below share one build.
+#
+# `COVERAGE_REUSE=1` forces reuse even when the profile is stale. CI sets it
+# for the second and third passes over a profile it just built, where the
+# tree cannot have changed in between.
 measure() {
   ensure_llvm_tools
   mkdir -p "$work_dir"
 
-  if [ -z "${COVERAGE_REUSE:-}" ]; then
+  if [ -n "${COVERAGE_REUSE:-}" ]; then
+    if [ ! -f "$cov_json" ]; then
+      printf 'COVERAGE_REUSE is set but %s does not exist. Run without it first.\n' \
+        "$cov_json" >&2
+      exit 1
+    fi
+    printf 'Reusing the existing profile (COVERAGE_REUSE is set).\n' >&2
+  elif profile_is_stale; then
+    printf 'Building instrumented and running the tests (1-2 minutes).\n' >&2
     cargo llvm-cov --locked --all-targets --no-report
+  else
+    printf 'Reusing the profile in %s; nothing under src has changed since.\n' \
+      "$work_dir" >&2
   fi
+
   cargo llvm-cov report --json --output-path "$cov_json"
   write_cutoffs
 }
