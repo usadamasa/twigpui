@@ -31,6 +31,25 @@ though, still follows the number of posts that come back.
 When credits run out the API answers `429` with a `UsageCapExceeded` problem
 body; the app surfaces that text directly in the window.
 
+## `--sync-list`, and why a debug build syncs something else
+
+`--sync-list` (#163) is the one action here whose read cost has no ceiling:
+its dry run pages through the whole follow graph and the whole list
+membership, and both are billed per account returned. Against a few
+thousand follows that is dollars for a run that writes nothing.
+
+Since #169, that read only happens in a **release** build. A debug build is
+the development profile, and it replaces the follow-graph read with four
+fixed screen names (`DEV_SYNC_SEED` in `src/profile.rs`), resolved through
+the same 30-day `user_ids.json` cache a reload uses — four billed lookups a
+month, then nothing. It also defaults `list_id` to a throwaway list, so a
+development `--apply` cannot rewrite the real one.
+
+The consequence to keep in mind when reading or writing docs: **a
+`--sync-list` example without `--release` is a development sync.** It does
+not fail, it syncs the other pair. The list membership read is paginated
+and billed in both profiles — only the follow-graph side is stood in for.
+
 ## Rate limits
 
 X's per-endpoint rate limits and the prepaid usage cap above both surface as

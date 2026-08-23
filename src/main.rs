@@ -38,6 +38,7 @@ mod log;
 mod menu;
 mod oauth;
 mod paths;
+mod profile;
 mod rate_limit;
 mod repost;
 mod sync;
@@ -180,10 +181,17 @@ fn main() {
             .detach();
 
             let bounds = Bounds::centered(None, size(px(560.0), px(820.0)), cx);
+            // #169: the title names which installation this is, so a
+            // development window and the real one are told apart in the
+            // window list — and so a screenshot can be aimed at one of them
+            // by title. Read off `paths` rather than `Profile::current()`
+            // directly, so the title can never claim one profile while the
+            // files being read belong to the other.
+            let title = paths.profile().window_title();
             let options = WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 titlebar: Some(TitlebarOptions {
-                    title: Some("twigpui".into()),
+                    title: Some(title.into()),
                     ..Default::default()
                 }),
                 ..Default::default()

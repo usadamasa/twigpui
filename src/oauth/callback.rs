@@ -15,11 +15,7 @@ use std::time::Duration;
 use anyhow::{Context as _, Result, bail};
 use gpui::BackgroundExecutor;
 
-/// The fixed loopback port. X requires an exact redirect-URI match, so this
-/// can't be an ephemeral port — see [`redirect_uri`]. Kept as the single
-/// named constant the README and the Developer Portal registration both
-/// have to agree with.
-pub(crate) const LOOPBACK_PORT: u16 = 8733;
+use crate::profile::Profile;
 
 /// How long the loopback listener waits for the browser to complete the
 /// consent flow before giving up.
@@ -41,10 +37,12 @@ const MAX_HEADER_LINES: usize = 100;
 /// (favicon probe, prefetch) and moves on.
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// The redirect URI registered with X's Developer Portal, derived from
-/// [`LOOPBACK_PORT`] so the two can never drift apart in code.
-pub(crate) fn redirect_uri() -> String {
-    format!("http://127.0.0.1:{LOOPBACK_PORT}/callback")
+/// The redirect URI registered with X's Developer Portal for `profile` —
+/// one registration per profile (#169), each carrying this string verbatim.
+/// Derived from [`Profile::loopback_port`] so the URI sent to X and the port
+/// [`await_authorization_code`] binds can never drift apart in code.
+pub(crate) fn redirect_uri(profile: Profile) -> String {
+    format!("http://127.0.0.1:{}/callback", profile.loopback_port())
 }
 
 /// One parsed HTTP request line: method, path, and decoded query
@@ -220,13 +218,18 @@ pub(crate) fn http_response(status_line: &str, body: &str) -> String {
 /// extra connections against a loopback listener (favicon, prefetch,
 /// connection probing) and none of those are the redirect, so the first
 /// connection accepted is never treated as authoritative.
+///
+/// Binds `profile`'s own port (#169), which is what lets a development
+/// sign-in and a real one be in flight at the same time without either
+/// listener catching the other's redirect.
 pub(crate) async fn await_authorization_code(
     executor: &BackgroundExecutor,
     expected_state: &str,
+    profile: Profile,
 ) -> Result<String> {
-    let listener = TcpListener::bind(("127.0.0.1", LOOPBACK_PORT)).with_context(|| {
-        format!("could not bind the loopback listener on 127.0.0.1:{LOOPBACK_PORT}")
-    })?;
+    let port = profile.loopback_port();
+    let listener = TcpListener::bind(("127.0.0.1", port))
+        .with_context(|| format!("could not bind the loopback listener on 127.0.0.1:{port}"))?;
     listener
         .set_nonblocking(true)
         .context("could not set the loopback listener to non-blocking")?;
@@ -349,7 +352,18 @@ mod tests {
 
     #[test]
     fn redirect_uri_uses_the_loopback_port_and_the_callback_path() {
-        assert_eq!(redirect_uri(), "http://127.0.0.1:8733/callback");
+        assert_eq!(
+            redirect_uri(Profile::Release),
+            "http://127.0.0.1:8733/callback"
+        );
+    }
+
+    #[test]
+    fn the_dev_profile_redirects_to_its_own_port() {
+        // Registered verbatim against the development X app (#169) — X
+        // rejects the authorization request outright if these disagree by
+        // so much as a character.
+        assert_eq!(redirect_uri(Profile::Dev), "http://127.0.0.1:8734/callback");
     }
 
     #[test]

@@ -41,7 +41,8 @@ quote, like or delete, which is most of what this app does.
 | [docs/timeline.md](docs/timeline.md) | What the window shows and how a row is assembled |
 | [docs/writing.md](docs/writing.md) | Posting, replying, quoting, reposting, liking, deleting, opening in a browser |
 | [docs/media.md](docs/media.md) | Attached images and author avatars |
-| [docs/operations.md](docs/operations.md) | Building the `.app` bundle, logs, code metrics, tests |
+| [docs/operations.md](docs/operations.md) | Logs, code metrics, tests |
+| [.claude/skills/app-bundle](.claude/skills/app-bundle/SKILL.md) | Building the `.app` bundle, release and development |
 
 ## Requirements
 
@@ -118,7 +119,7 @@ each time.
 | `X_OAUTH_CLIENT_ID` | **yes** | — | OAuth 2.0 client id for "Sign in with X" — non-secret, may also live in `config.toml` as `oauth_client_id` |
 | `X_TARGET_USERNAME` | no | `XDevelopers` | Screen name `--fetch-only` fetches, without a leading `@` |
 | `X_MAX_RESULTS` | no | `20` | Posts per fetch, 5–100 |
-| `X_LIST_ID` | no | unset | Numeric id of an X List to show in the window **instead of** the home timeline — also `list_id` in `config.toml` (#161) |
+| `X_LIST_ID` | no | unset (a development build defaults to its own list, #169) | Numeric id of an X List to show in the window **instead of** the home timeline — also `list_id` in `config.toml` (#161) |
 | `X_MIN_FETCH_INTERVAL_SECONDS` | no | `60` | Floor on how often a fetch may run, in seconds (#10) |
 | `X_THEME` | no | `light` | Color theme: `light`, `dark`, or `system` (follows the OS appearance) — also `theme` in `config.toml` (#19) |
 | `X_REQUEST_PRICE` | no | unset | Price per API request, in whatever unit you have in mind — also `request_price` in `config.toml` (#18, see [Usage tracking](.claude/skills/x-api-budget/reference/app-behavior.md#usage-tracking)) |
@@ -133,10 +134,16 @@ list's membership. `--sync-list` diffs the accounts you follow against the
 list's members and mirrors one onto the other.
 
 ```sh
-cargo run -- --sync-list            # dry run: read both sides, write a plan, print it
-cargo run -- --sync-list --apply    # send the additions
-cargo run -- --sync-list --apply --prune   # …and the removals
+cargo run --release -- --sync-list          # dry run: read both sides, write a plan, print it
+cargo run --release -- --sync-list --apply  # send the additions
+cargo run --release -- --sync-list --apply --prune   # …and the removals
 ```
+
+**`--release` is load-bearing here** (#169). A debug build is the
+development profile: it syncs *its* list from four fixed X accounts, not
+your list from your follows. Dropping `--release` does not fail — it
+quietly syncs the wrong pair, which is exactly what the development profile
+is for. See [Development builds](#development-builds).
 
 **A dry run is not free.** Both reads are billed per account returned, so
 one against a few thousand follows costs dollars, not cents. Check the
@@ -172,8 +179,9 @@ http://127.0.0.1:8733/callback
 ```
 
 X requires an exact match, so the port can't be ephemeral — `8733` is fixed
-in the code (`oauth::callback::LOOPBACK_PORT`) and must match the Portal
-registration verbatim.
+in the code (`profile::Profile::loopback_port`) and must match the Portal
+registration verbatim. A development build uses `8734` and its own X app;
+see [Development builds](#development-builds).
 
 **Client id.** Copy the client id the Portal shows you into `X_OAUTH_CLIENT_ID`
 (env or `.env`) or `oauth_client_id` in `config.toml`. It's non-secret — a
@@ -197,7 +205,9 @@ result.
 
 **What happens when you click "Sign in with X":** the app opens your default
 browser at X's consent screen, and a short-lived HTTP listener on
-`127.0.0.1:8733` catches the redirect back (waiting up to two minutes). Once
+`127.0.0.1:8733` (`8734` for a development build) catches the redirect back
+(waiting up to two minutes). The two ports never collide, so a sign-in in
+one build and a sign-in in the other can be in flight at once. Once
 X redirects with an authorization code, twigpui exchanges it for an access
 token and a refresh token, then falls straight into a normal reload.
 
@@ -227,6 +237,61 @@ created (mode `0700`) on startup:
 
 An `XDG_*` variable is only honored if it is set to a non-blank absolute
 path; a relative or blank value falls back to the default, per spec.
+
+A development build appends `twigpui-dev` instead of `twigpui` to all three,
+so it shares no file with the installed app — see
+[Development builds](#development-builds).
+
+### Development builds
+
+A debug build (`cargo run`, or `./scripts/build-app-bundle.sh --dev`) is a
+separate installation from the release build the `.app` bundle ships. It
+signs into a separate X app, keeps its own session and cache, and says so in
+its window title (#169):
+
+| | release build | debug build |
+| --- | --- | --- |
+| Directories | `~/.config/twigpui/` etc. | `~/.config/twigpui-dev/` etc. |
+| OAuth redirect URI | `http://127.0.0.1:8733/callback` | `http://127.0.0.1:8734/callback` |
+| Window title | `twigpui` | `twigpui (dev)` |
+| Bundle | `dist/twigpui.app` | `dist/twigpui-dev.app` (see the [`app-bundle` skill](.claude/skills/app-bundle/SKILL.md)) |
+| Bundle id | `com.github.usadamasa.twigpui` | `com.github.usadamasa.twigpui.dev` |
+| Icon | `assets/AppIcon.png` | the same artwork, desaturated |
+| Default `list_id` | none — the home timeline | a throwaway list, in `profile.rs` |
+| `--sync-list` source | everyone you follow | four fixed X accounts |
+
+The last two rows are what keep the parts of this app that cost money from
+being expensive to work on. A development `--sync-list` that read the real
+follow graph would bill a dry run for every account on it (#163), and one
+that defaulted to the real List could rewrite it over a forgotten export —
+so the development build carries its own list id and its own four-account
+source, both in `src/profile.rs`. `X_LIST_ID` and `list_id` still override
+the default; there is no override for the sync source, because a
+development build spending the real read cost is the thing being prevented.
+
+Which one you get is decided at compile time by `debug_assertions`, with no
+flag and no environment variable. That is deliberate: the failure this
+guards against is *forgetting*, and a debug binary cannot be talked into
+addressing the release installation's tokens or cache. The cost is the one
+case where the two disagree — **`cargo run --release` from this checkout
+uses the release profile**, and so the installed app's files. Use
+`./scripts/build-app-bundle.sh --dev` when you want an optimized-looking
+development app; it builds debug on purpose, for exactly this reason.
+
+**Setting one up.** Register a second public client in the X Developer
+Portal with `http://127.0.0.1:8734/callback` as its redirect URI, then put
+its client id where only the development build will read it:
+
+```sh
+mkdir -p ~/.config/twigpui-dev
+cat >> ~/.config/twigpui-dev/config.toml <<'EOF'
+oauth_client_id = "…the development app's client id…"
+EOF
+```
+
+`config.toml` rather than `.env`: a `.env` in this checkout is read by
+whichever profile runs from here, so a client id left there would follow a
+release-profile run into the installed app's state.
 
 ### `config.toml`
 
