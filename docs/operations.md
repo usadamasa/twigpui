@@ -1,124 +1,30 @@
-# Operations: building, logging, metrics, tests
+# Operations: logging, metrics, tests
 
 ## Building the `.app` bundle
 
-`cargo run` only opens a window from a terminal, in this checkout. For
-something Spotlight, Launchpad, and the Dock can all see:
+Moved to the `app-bundle` skill
+(`.claude/skills/app-bundle/SKILL.md`), which is where this repository keeps
+its operational how-to — alongside `code-metrics-ratchet` and
+`fixture-visual-check`.
 
 ```sh
-./scripts/build-app-bundle.sh
+./scripts/build-app-bundle.sh          # dist/twigpui.app     (release)
+./scripts/build-app-bundle.sh --dev    # dist/twigpui-dev.app (development, #169)
 ```
 
-This builds a release binary, assembles `dist/twigpui.app`, writes an
-`Info.plist` (bundle id, name, executable, package type,
-`NSHighResolutionCapable`, and `CFBundleVersion` /
-`CFBundleShortVersionString` read straight from `Cargo.toml`'s `version` via
-`cargo metadata` — never hand-duplicated), and signs it ad hoc
-(`codesign -s -`). Ad-hoc signing only, per this project's non-goals
-(macOS-only, development use — no notarization, no Developer ID): it exists
-solely so Gatekeeper doesn't refuse a bundle built on your own machine, not
-to make it distributable. Move the result wherever you like, e.g.:
-
-```sh
-mv dist/twigpui.app /Applications/
-```
-
-**Icon.** `assets/AppIcon.png` is the source (#85, the crab holding a bird
-at the top of this file). The script resizes it into the ten sizes
-`iconutil` wants and writes the `.icns` into the bundle — `sips` and
-`iconutil` both ship with macOS, so there is nothing to install.
-
-`assets/AppIcon.icns` takes precedence if you drop one in, and is used
-as-is. With neither file present the bundle simply carries no
-`CFBundleIconFile` and macOS shows the generic app icon — the script never
-writes a dangling reference to a file it did not copy in.
-
-### The development bundle
-
-```sh
-./scripts/build-app-bundle.sh --dev
-```
-
-Assembles `dist/twigpui-dev.app` instead: the development profile (#169),
-with its own XDG directories, its own OAuth callback port, its own bundle
-id, and a desaturated icon. See [Development
-builds](../README.md#development-builds) for what the split covers and how
-to give it a client id.
-
-Two things about it are easy to get wrong:
-
-- **It is a debug build, on purpose.** `Profile::current` reads
-  `debug_assertions`, so debug *is* what selects the development
-  directories and port. Building this bundle with `--release` would produce
-  an app that carries the development name and icon while writing to the
-  installed app's files — the exact confusion the split exists to prevent.
-- **It never reuses `assets/AppIcon.icns`.** The gray icon is derived from
-  `assets/AppIcon.png` with `sips`, so a prebuilt `.icns` — which is the
-  release artwork — is skipped rather than copied onto the development
-  bundle. With no PNG present, the development bundle builds without a
-  custom icon and says so.
-
-Both bundles can be installed side by side; `open` and `cleanshot-capture`
-address them by their distinct executable names (`twigpui` and
-`twigpui-dev`).
-
-### Configuration for a bundled launch — read this before double-clicking
-
-**A process launched from Finder, Spotlight, or the Dock does not inherit
-your shell's environment**, and its working directory is not this
-checkout — so `X_OAUTH_CLIENT_ID`, `X_TARGET_USERNAME`, and friends being
-exported in your shell profile, or sitting in this repo's `.env`, has no
-effect on a bundled launch. Two things follow:
-
-- **`oauth_client_id`** is non-secret (see [`config.toml`](../README.md#configtoml)) and
-  already works from `$XDG_CONFIG_HOME/twigpui/config.toml` (default
-  `~/.config/twigpui/config.toml`) regardless of how twigpui is started —
-  `HOME` is set for every process launchd starts on your behalf, which is
-  all `Paths::from_env` needs (`XDG_*` being unset just falls back to the
-  same defaults a terminal launch with no `XDG_*` exported would use). Put
-  your client id there and "Sign in with X" works from the bundle with zero
-  environment setup. Once signed in, the session persists to
-  `$XDG_STATE_HOME/twigpui/oauth_tokens.json` and needs no environment
-  variable on the next bundled launch either.
-- **A `bearer_token` left in `config.toml` is rejected outright** (#33).
-  The key is no longer read, and silently ignoring it would leave you
-  believing you are configured when nothing reads it — so startup fails with
-  a message naming `oauth_client_id` as the replacement. The value itself is
-  never echoed into that message.
-- **A missing or invalid configuration now names where to look.**
-  Previously, a configuration error before the window opened only printed
-  to stderr — which a bundled launch has no terminal to show, so the
-  process just silently exited. It now also raises a native alert
-  (`osascript … display alert`) that names the resolved `config.toml` path,
-  whenever stderr isn't a terminal.
-
-### What a bundled launch changes, and what it doesn't
-
-- **The OAuth loopback listener** binds `127.0.0.1:8733` (`8734` for a
-  development build, #169) the same way whether twigpui is bundled or not —
-  nothing in `oauth::callback` depends on the current working directory or
-  the shell environment, only on the port being free. macOS may still prompt ("twigpui would like to accept
-  incoming network connections") the first time a *newly signed* binary
-  binds a listening socket, and since ad-hoc-signed builds get a fresh
-  signing identity on every rebuild (the same reason Keychain isn't used for
-  token storage — see "Where tokens are stored" in the [README](../README.md#signing-in-with-x-oauth-20-authorization-code--pkce)), that prompt can
-  reappear after each rebuild rather than being remembered once and for all.
-- **`macos-blade` and WindowServer.** A bundled `.app` launched by
-  Finder/Dock/Spotlight has a normal user WindowServer session, the same as
-  a binary launched from Terminal.app — nothing about being bundled changes
-  that connection. This could not be verified from the environment that
-  wrote this bundling script: it runs under a sandbox with no WindowServer
-  access (`gpui` panics there with `NoSupportedDeviceFound` even for
-  `cargo run`), so building `dist/twigpui.app` and inspecting its layout,
-  `Info.plist`, and code signature was possible, but actually launching it
-  was not. A human double-clicking the built `.app` is the only way to
-  confirm the window opens.
+The skill covers the icon pipeline, what a Finder launch does and does not
+inherit, and why the development bundle is a debug build on purpose. For
+what the two profiles differ in beyond the bundle itself, see [Development
+builds](../README.md#development-builds).
 
 ## Logs
 
 `$XDG_STATE_HOME/twigpui/logs/twigpui.log`, with one rotated predecessor at
 `twigpui.log.1`. `state`, not `cache`: a log deleted on the next boot
 answers no questions about what happened yesterday.
+
+A debug build writes under `twigpui-dev` instead (#169), so a `cargo run`
+you are trying to read the log of is not in the file above.
 
 ```sh
 tail -f ~/.local/state/twigpui/logs/twigpui.log

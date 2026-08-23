@@ -41,7 +41,8 @@ quote, like or delete, which is most of what this app does.
 | [docs/timeline.md](docs/timeline.md) | What the window shows and how a row is assembled |
 | [docs/writing.md](docs/writing.md) | Posting, replying, quoting, reposting, liking, deleting, opening in a browser |
 | [docs/media.md](docs/media.md) | Attached images and author avatars |
-| [docs/operations.md](docs/operations.md) | Building the `.app` bundle, logs, code metrics, tests |
+| [docs/operations.md](docs/operations.md) | Logs, code metrics, tests |
+| [.claude/skills/app-bundle](.claude/skills/app-bundle/SKILL.md) | Building the `.app` bundle, release and development |
 
 ## Requirements
 
@@ -253,7 +254,7 @@ its window title (#169):
 | Directories | `~/.config/twigpui/` etc. | `~/.config/twigpui-dev/` etc. |
 | OAuth redirect URI | `http://127.0.0.1:8733/callback` | `http://127.0.0.1:8734/callback` |
 | Window title | `twigpui` | `twigpui (dev)` |
-| Bundle | `dist/twigpui.app` | `dist/twigpui-dev.app` |
+| Bundle | `dist/twigpui.app` | `dist/twigpui-dev.app` (see the [`app-bundle` skill](.claude/skills/app-bundle/SKILL.md)) |
 | Bundle id | `com.github.usadamasa.twigpui` | `com.github.usadamasa.twigpui.dev` |
 | Icon | `assets/AppIcon.png` | the same artwork, desaturated |
 | Default `list_id` | none — the home timeline | a throwaway list, in `profile.rs` |

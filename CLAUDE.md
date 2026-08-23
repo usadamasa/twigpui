@@ -84,7 +84,8 @@ cargo test
   切り替えは `debug_assertions` のみで、フラグも環境変数も無い。
   課金する既定値をプロファイルで分けるときも `src/profile.rs` に置く
   (list_id の既定と `--sync-list` の同期元がそう)。本番のデータを触る操作は
-  `cargo run --release` か `.app` から実行する。
+  `cargo run --release` か `.app` から実行する。`.app` の組み立ては
+  `app-bundle` スキルに従う。
 - **`.env` は編集不可**: パーミッション設定により Claude セッションからは `.env` を
   読み書きできない。認証情報が要るときは環境変数を export してもらう。
   `.env` は cwd で効くのでプロファイルを跨ぐ。dev 専用の設定は
