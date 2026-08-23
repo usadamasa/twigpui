@@ -12,12 +12,17 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use sha2::{Digest as _, Sha256};
 
-/// Scopes requested at authorize time. `tweet.write` was added by #14 and
-/// `like.write` by #68 — #7 deliberately left both out until posting and
-/// liking needed them. Already-signed-in users from before each addition
-/// hold a token without it, which is exactly what `oauth::tokens::has_scope`
-/// plus the header's "Re-authorize" button (#14) exist to detect and fix.
-const SCOPES: &str = "tweet.read users.read tweet.write like.write offline.access";
+/// Scopes requested at authorize time. `tweet.write` was added by #14,
+/// `like.write` by #68, and `list.read` by #161 — #7 deliberately left them
+/// out until posting, liking and reading a List needed them. Already-signed-in
+/// users from before each addition hold a token without it, which is exactly
+/// what `oauth::tokens::has_scope` plus the header's "Re-authorize" button
+/// (#14) exist to detect and fix.
+///
+/// `list.write` is **not** requested. Creating and populating a List is #163;
+/// asking for write access the app cannot yet use would be a permission
+/// granted for nothing.
+const SCOPES: &str = "tweet.read users.read tweet.write like.write list.read offline.access";
 
 /// `https://x.com/i/oauth2/authorize` per the issue's confirmed design.
 const AUTHORIZE_URL: &str = "https://x.com/i/oauth2/authorize";
@@ -210,7 +215,8 @@ mod tests {
             url,
             "https://x.com/i/oauth2/authorize?response_type=code&client_id=client-123\
              &redirect_uri=http%3A%2F%2F127.0.0.1%3A8733%2Fcallback\
-             &scope=tweet.read%20users.read%20tweet.write%20like.write%20offline.access&state=state-abc\
+             &scope=tweet.read%20users.read%20tweet.write%20like.write%20list.read%20offline.access\
+             &state=state-abc\
              &code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM\
              &code_challenge_method=S256"
         );
@@ -223,6 +229,27 @@ mod tests {
         assert!(
             SCOPES.split_whitespace().any(|scope| scope == "like.write"),
             "SCOPES must request like.write"
+        );
+    }
+
+    #[test]
+    fn scopes_include_what_161s_list_timeline_needs() {
+        // #161: `GET /2/lists/:id/tweets` requires `list.read`. Split rather
+        // than substring-matched for the same reason as the checks around it.
+        assert!(
+            SCOPES.split_whitespace().any(|scope| scope == "list.read"),
+            "SCOPES must request list.read"
+        );
+    }
+
+    #[test]
+    fn scopes_leave_out_write_access_nothing_uses_yet() {
+        // Creating a List is #163. Until something calls it, requesting
+        // `list.write` would ask the user to grant what the app cannot use —
+        // the same reason #7 left `tweet.write` and `like.write` out.
+        assert!(
+            !SCOPES.split_whitespace().any(|scope| scope == "list.write"),
+            "SCOPES must not request list.write until #163 needs it"
         );
     }
 
