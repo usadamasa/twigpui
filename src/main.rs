@@ -46,6 +46,7 @@ mod theme;
 mod thread;
 mod toggle;
 mod ui;
+mod url;
 mod usage;
 mod x_api;
 

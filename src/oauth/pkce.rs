@@ -5,12 +5,12 @@
 //! and [`crate::paths`] inject a variable lookup. Tests supply a fixed byte
 //! sequence; [`OsRandom`] is the only implementation used outside tests.
 
-use std::fmt::Write as _;
-
 use anyhow::{Context as _, Result, bail};
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use sha2::{Digest as _, Sha256};
+
+use crate::url::Url;
 
 /// Scopes requested at authorize time. `tweet.write` was added by #14,
 /// `like.write` by #68, and `list.read` by #161 — #7 deliberately left them
@@ -82,43 +82,34 @@ pub(crate) fn verify_state(expected: &str, received: &str) -> Result<()> {
     }
 }
 
-/// Percent-encode one query-parameter value per RFC 3986's `unreserved` set.
-/// `client_id`, `redirect_uri`, and `scope` all need this when they're
-/// spliced into the authorize URL by hand — unlike the token request body,
-/// which `ureq::send_form` encodes for us.
-fn percent_encode(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    for byte in value.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
-                out.push(char::from(byte));
-            }
-            _ => {
-                // `write!` to a `String` is infallible.
-                let _ = write!(out, "%{byte:02X}");
-            }
-        }
-    }
-    out
-}
-
 /// Build the `https://x.com/i/oauth2/authorize` URL for the interactive
 /// sign-in step.
+///
+/// [`Url::form`] rather than [`Url::api`] (#165): OAuth 2.0 §3.1 asks for
+/// `application/x-www-form-urlencoded` parameters, so nothing outside RFC
+/// 3986's `unreserved` set survives — the space between scopes travels as
+/// `%20` and `redirect_uri`'s `:` and `/` travel escaped. The X API's own
+/// query values keep their commas; these do not. See `url`'s module doc.
+///
+/// Until #165 this had a hand-written `percent_encode` and a format string
+/// that called it once per value. Nothing checked that every value got the
+/// call, and #161 showed what that costs: adding one scope meant editing a
+/// URL literal in a test by hand.
 pub(crate) fn build_authorize_url(
     client_id: &str,
     redirect_uri: &str,
     code_challenge: &str,
     state: &str,
 ) -> String {
-    format!(
-        "{AUTHORIZE_URL}?response_type=code&client_id={client_id}&redirect_uri={redirect_uri}\
-         &scope={scope}&state={state}&code_challenge={code_challenge}&code_challenge_method=S256",
-        client_id = percent_encode(client_id),
-        redirect_uri = percent_encode(redirect_uri),
-        scope = percent_encode(SCOPES),
-        state = percent_encode(state),
-        code_challenge = percent_encode(code_challenge),
-    )
+    Url::form(AUTHORIZE_URL)
+        .param("response_type", "code")
+        .param("client_id", client_id)
+        .param("redirect_uri", redirect_uri)
+        .param("scope", SCOPES)
+        .param("state", state)
+        .param("code_challenge", code_challenge)
+        .param("code_challenge_method", "S256")
+        .build()
 }
 
 #[cfg(test)]
@@ -194,15 +185,12 @@ mod tests {
         assert!(error.to_lowercase().contains("csrf"), "{error}");
     }
 
-    #[test]
-    fn percent_encode_leaves_unreserved_characters_alone() {
-        assert_eq!(percent_encode("abcXYZ019-._~"), "abcXYZ019-._~");
-    }
-
-    #[test]
-    fn percent_encode_escapes_everything_else() {
-        assert_eq!(percent_encode("a b/c"), "a%20b%2Fc");
-    }
+    // The two `percent_encode` tests that were here moved to `url` with
+    // the function itself (#165), assertion for assertion:
+    // `both_policies_leave_the_unreserved_set_alone` and
+    // `both_policies_escape_a_space_and_a_slash` check the same inputs
+    // against the same expected output, now for both policies rather than
+    // the one this file used to own.
 
     #[test]
     fn build_authorize_url_includes_every_required_parameter() {
