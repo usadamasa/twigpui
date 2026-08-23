@@ -2111,7 +2111,11 @@ impl TimelineView {
                     // upgrade path) unless this stays reachable regardless
                     // of what the primary button currently says.
                     .when(
-                        offers_reauthorize(self.signed_in_with_oauth, self.oauth_scope.as_deref()),
+                        offers_reauthorize(
+                            self.signed_in_with_oauth,
+                            self.oauth_scope.as_deref(),
+                            matches!(self.source, cache::TimelineSource::List(_)),
+                        ),
                         |row| row.child(sign_in_pill("reauthorize", "Re-authorize", theme, cx)),
                     )
                     .child(self.primary_action_control(&label, busy, action, cx)),
@@ -2947,7 +2951,8 @@ mod tests {
         // that, since `toggle_like`'s refusal points at this very button.
         assert!(offers_reauthorize(
             true,
-            Some("tweet.read users.read tweet.write offline.access")
+            Some("tweet.read users.read tweet.write offline.access"),
+            false
         ));
     }
 
@@ -3250,14 +3255,15 @@ mod tests {
         // creates — a real, working OAuth session that simply can't post.
         assert!(offers_reauthorize(
             true,
-            Some("tweet.read users.read offline.access")
+            Some("tweet.read users.read offline.access"),
+            false
         ));
     }
 
     #[test]
     fn offers_reauthorize_when_the_scope_was_never_recorded() {
         // A pre-#14 token: "unknown" is treated the same as "insufficient".
-        assert!(offers_reauthorize(true, None));
+        assert!(offers_reauthorize(true, None, false));
     }
 
     #[test]
@@ -3267,7 +3273,40 @@ mod tests {
         // pins down.
         assert!(!offers_reauthorize(
             true,
-            Some("tweet.read tweet.write like.write offline.access")
+            Some("tweet.read tweet.write like.write offline.access"),
+            false
+        ));
+    }
+
+    #[test]
+    fn offers_reauthorize_for_a_session_that_predates_the_list_scope() {
+        // #161: configuring a list on a session authorized before #167
+        // added `list.read` gets a 403 from the only endpoint the window
+        // reads. The button is the whole explanation, so it has to appear.
+        assert!(offers_reauthorize(
+            true,
+            Some("tweet.read tweet.write like.write offline.access"),
+            true
+        ));
+    }
+
+    #[test]
+    fn does_not_offer_reauthorize_for_a_list_once_list_read_is_granted() {
+        assert!(!offers_reauthorize(
+            true,
+            Some("tweet.read tweet.write like.write list.read offline.access"),
+            true
+        ));
+    }
+
+    #[test]
+    fn does_not_ask_for_list_read_when_no_list_is_configured() {
+        // Someone reading the home timeline can never reach the 403, so
+        // nagging them about a scope they do not use is noise.
+        assert!(!offers_reauthorize(
+            true,
+            Some("tweet.read tweet.write like.write offline.access"),
+            false
         ));
     }
 
@@ -3275,7 +3314,7 @@ mod tests {
     fn does_not_offer_reauthorize_without_an_oauth_session() {
         // Not signed in with OAuth at all — `offers_sign_in` is the
         // relevant affordance here, not this one.
-        assert!(!offers_reauthorize(false, None));
+        assert!(!offers_reauthorize(false, None, false));
     }
 
     // --- compose_error_message (#14) ---
