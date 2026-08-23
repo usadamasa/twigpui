@@ -35,7 +35,7 @@
 //! discarded 500 rows of scrollback each time it fired.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
 use serde::de::DeserializeOwned;
@@ -218,43 +218,90 @@ fn save_timeline_file(path: &Path, items: &[TimelineItem], now: i64) -> Result<(
     save_json(path, &file)
 }
 
-/// The cached home timeline for `user_id`, newest-first, or `None` if there
-/// is nothing usable cached. Mirrors [`load_timeline`] exactly, but reads
-/// [`Paths::home_timeline_file`] — a distinct file, so a single-user
-/// timeline cached for the same id is never read back as home-timeline
-/// content or vice versa (#11).
-pub(crate) fn load_home_timeline(
-    paths: &Paths,
-    user_id: &str,
-) -> Result<Option<Vec<TimelineItem>>> {
-    load_timeline_file(&paths.home_timeline_file(user_id))
+/// Which timeline fills the window (#161).
+///
+/// The name is a revival: a `TimelineSource` existed until #33, when the
+/// app-only bearer token went away and left nothing to branch on. #157 put
+/// a branch back — `GET /2/users/:id/timelines/reverse_chronological`
+/// stopped returning followed authors' posts for this account, and a List
+/// is how a following-shaped feed is read at all now.
+///
+/// Two variants, deliberately. Choosing among several lists is #164 and
+/// blending sources into one lane is #43; both want more than this, and
+/// neither is served by guessing at the shape here first. The single-user
+/// timeline (`--fetch-only`) is not a variant: it is fetched by
+/// [`reload`], never shown in the window, and giving it one would mean
+/// every match arm below carrying a case the window cannot reach.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TimelineSource {
+    /// `GET /2/users/:id/timelines/reverse_chronological` (#11), cached per
+    /// signed-in user id. What every launch shows with no list configured.
+    Home,
+    /// `GET /2/lists/:id/tweets` (#161), cached per list id.
+    List(String),
 }
 
-/// Persist `items` as `user_id`'s home-timeline cache. Mirrors
-/// [`save_timeline`], writing to [`Paths::home_timeline_file`] instead.
-pub(crate) fn save_home_timeline(
+impl TimelineSource {
+    /// Which cache file this source's posts belong in.
+    ///
+    /// `user_id` is the signed-in account's own id, and only [`Self::Home`]
+    /// uses it: a list's contents are the same whoever reads them, so
+    /// keying its cache by the reader would write the same posts to a
+    /// second file the moment a different account opened the same list.
+    fn cache_file(&self, paths: &Paths, user_id: &str) -> PathBuf {
+        match self {
+            Self::Home => paths.home_timeline_file(user_id),
+            Self::List(list_id) => paths.list_timeline_file(list_id),
+        }
+    }
+}
+
+/// The cached timeline for whichever source the window is showing (#161),
+/// newest-first, or `None` if there is nothing usable cached. Mirrors
+/// [`load_timeline`] exactly, but reads the file
+/// [`TimelineSource::cache_file`] picks — a distinct file per source, so a
+/// single-user timeline cached for the same id is never read back as home
+/// content (#11), and a list's posts never land on top of the home
+/// timeline (#161).
+pub(crate) fn load_primary_timeline(
     paths: &Paths,
+    source: &TimelineSource,
+    user_id: &str,
+) -> Result<Option<Vec<TimelineItem>>> {
+    load_timeline_file(&source.cache_file(paths, user_id))
+}
+
+/// Persist `items` as `source`'s cache. Mirrors [`save_timeline`], writing
+/// to whichever file [`TimelineSource::cache_file`] picks instead.
+pub(crate) fn save_primary_timeline(
+    paths: &Paths,
+    source: &TimelineSource,
     user_id: &str,
     items: &[TimelineItem],
     now: i64,
 ) -> Result<()> {
-    save_timeline_file(&paths.home_timeline_file(user_id), items, now)
+    save_timeline_file(&source.cache_file(paths, user_id), items, now)
 }
 
-/// Render the home timeline straight from cache: `Some` only when both `/me`
-/// and a home timeline are already cached (and `/me` is still within its
-/// TTL) — mirrors [`startup`], but for #11's home-timeline mode. Returns the
-/// resolved [`MeEntry`] alongside the items so the caller (`ui.rs`) can
-/// populate the header and the id needed for "Load older" even on a
-/// cache-only render.
-pub(crate) fn startup_home(
+/// Render the window's timeline straight from cache: `Some` only when both
+/// `/me` and `source`'s own timeline are already cached (and `/me` is still
+/// within its TTL) — mirrors [`startup`], but for the window's primary
+/// source (#11, extended to lists by #161). Returns the resolved
+/// [`MeEntry`] alongside the items so the caller (`ui.rs`) can populate the
+/// header and the id needed for "Load older" even on a cache-only render.
+///
+/// `/me` is required in list mode too, even though no list request needs
+/// it: the header names the signed-in account, and liking or reposting from
+/// a list row calls endpoints that take the signed-in id in their path.
+pub(crate) fn startup_primary(
     paths: &Paths,
+    source: &TimelineSource,
     now: i64,
 ) -> Result<Option<(MeEntry, Vec<TimelineItem>)>> {
     let Some(me) = cached_me(paths, now)? else {
         return Ok(None);
     };
-    let Some(items) = load_home_timeline(paths, &me.id)? else {
+    let Some(items) = load_primary_timeline(paths, source, &me.id)? else {
         return Ok(None);
     };
     Ok(Some((me, items)))
@@ -270,29 +317,31 @@ pub(crate) fn startup_home(
 /// on disk rather than what was just written; a write that silently did
 /// nothing shows up as the post still being present.
 ///
-/// `home` selects which of the two cache files to touch, mirroring the
-/// split [`load_timeline`]/[`load_home_timeline`] already keep — a repost
-/// of the same id can sit in both, and only the one being displayed is
-/// what the user just acted on.
+/// `source` selects which cache file to touch — the same post can sit in
+/// the home timeline and in a list at once, and only the one being
+/// displayed is what the user just acted on.
+///
+/// This used to be a `home: bool` whose `false` arm reached the
+/// single-user cache. Nothing passed `false`: that cache is written only
+/// by [`reload`], which serves `--fetch-only`, and a headless fetch has no
+/// delete affordance to reach this from. #161 replaced the flag with
+/// [`TimelineSource`] rather than growing it a third state for a path the
+/// window cannot take.
 ///
 /// A missing cache file is not an error: there is nothing to remove, and
 /// the post is gone from X either way.
 pub(crate) fn forget_post(
     paths: &Paths,
-    home: bool,
+    source: &TimelineSource,
     user_id: &str,
     post_id: &str,
     now: i64,
 ) -> Result<Vec<TimelineItem>> {
-    // Resolved once (#92). `home` used to be branched on twice, with each
-    // arm naming both a load and a save, so writing to one file and
+    // Resolved once (#92). The selector used to be branched on twice, with
+    // each arm naming both a load and a save, so writing to one file and
     // reading the other back was expressible — which would have defeated
     // the read-back above: it is meant to prove *this* write landed.
-    let path = if home {
-        paths.home_timeline_file(user_id)
-    } else {
-        paths.timeline_file(user_id)
-    };
+    let path = source.cache_file(paths, user_id);
 
     let Some(cached) = load_timeline_file(&path)? else {
         return Ok(Vec::new());
@@ -347,38 +396,46 @@ pub(crate) fn reload(
     })
 }
 
-/// What a home-timeline reload spent (#11): the merged, capped timeline to
-/// render, the resolved [`MeEntry`] itself (so `ui.rs` can populate the
-/// header and remember the id for a later "Load older"), and the response's
-/// `meta.next_token`, if any.
+/// What a reload of the window's primary timeline spent (#11, #161): the
+/// merged, capped timeline to render, the resolved [`MeEntry`] itself (so
+/// `ui.rs` can populate the header and remember the id for a later "Load
+/// older"), and the response's `meta.next_token`, if any.
 ///
 /// Unlike [`Reloaded`], this carries no `me_cache_hit` flag: nothing in this
-/// crate currently reports per-reload request cost for the home-timeline
-/// path the way `main.rs`'s `--fetch-only` does for [`Reloaded`] via
+/// crate currently reports per-reload request cost for the window's path
+/// the way `main.rs`'s `--fetch-only` does for [`Reloaded`] via
 /// `user_id_cache_hit`, so tracking it here would be dead weight. Add it back
 /// if a caller needs it.
 #[derive(Debug)]
-pub(crate) struct ReloadedHome {
+pub(crate) struct ReloadedPrimary {
     pub items: Vec<TimelineItem>,
     pub me: MeEntry,
     pub next_token: Option<String>,
 }
 
-/// Spend the credits a home-timeline reload is allowed to spend: resolve
-/// `/me` (from cache if fresh, else one API request, then cached for next
-/// time), fetch posts newer than the newest cached one, merge them ahead of
-/// what's cached (never appended behind — that's [`load_older_home`]'s job),
+/// Spend the credits a reload of the window's timeline is allowed to spend:
+/// resolve `/me` (from cache if fresh, else one API request, then cached
+/// for next time), fetch a page from `source`, merge it ahead of what's
+/// cached (never appended behind — that's [`load_older_primary`]'s job),
 /// persist the result, and return it alongside `meta.next_token`.
+///
+/// **Only [`TimelineSource::Home`] fetches incrementally.** It passes
+/// `since_id` so the API returns nothing already on file;
+/// `GET /2/lists/:id/tweets` accepts no such parameter, so a list reload
+/// always re-reads the head page. [`splice`] merges by id either way, so
+/// the difference is in what is billed, not in what is rendered — see
+/// [`XClient::list_timeline`].
 ///
 /// Mirrors [`reload`], the single-user equivalent. Not unit-tested directly
 /// for the same reason `reload` isn't — it makes real HTTP requests through
 /// `client`. Everything it composes is tested standalone.
-pub(crate) fn reload_home(
+pub(crate) fn reload_primary(
     paths: &Paths,
     client: &XClient,
+    source: &TimelineSource,
     max_results: u32,
     now: i64,
-) -> Result<ReloadedHome> {
+) -> Result<ReloadedPrimary> {
     let me = if let Some(entry) = cached_me(paths, now)? {
         entry
     } else {
@@ -391,12 +448,18 @@ pub(crate) fn reload_home(
         }
     };
 
-    let cached = load_home_timeline(paths, &me.id)?.unwrap_or_default();
-    let since = since_id(&cached);
-    let (fresh, next_token) = client.home_timeline(paths, &me.id, max_results, since, None, now)?;
+    let cached = load_primary_timeline(paths, source, &me.id)?.unwrap_or_default();
+    let (fresh, next_token) = match source {
+        TimelineSource::Home => {
+            client.home_timeline(paths, &me.id, max_results, since_id(&cached), None, now)?
+        }
+        TimelineSource::List(list_id) => {
+            client.list_timeline(paths, list_id, max_results, None, now)?
+        }
+    };
     let items = splice(cached, fresh, Side::Ahead);
-    save_home_timeline(paths, &me.id, &items, now)?;
-    Ok(ReloadedHome {
+    save_primary_timeline(paths, source, &me.id, &items, now)?;
+    Ok(ReloadedPrimary {
         items,
         me,
         next_token,
@@ -408,30 +471,40 @@ pub(crate) fn reload_home(
 /// [`Side::Ahead`] — persist the combined result, and return it
 /// alongside the next `meta.next_token` (`None` once there's nothing further
 /// back). `user_id` is the caller's responsibility to supply — `ui.rs` keeps
-/// it around from the last [`reload_home`] or [`startup_home`], since this
-/// function has no reason to re-resolve `/me` just to page further back
+/// it around from the last [`reload_primary`] or [`startup_primary`], since
+/// this function has no reason to re-resolve `/me` just to page further back
 /// through content it's already showing.
 ///
-/// Not unit-tested directly, for the same reason [`reload_home`] isn't.
-pub(crate) fn load_older_home(
+/// Paging back through a list works the same way: `pagination_token` is the
+/// one parameter `GET /2/lists/:id/tweets` shares with the home timeline,
+/// so this is the one direction where the two sources are not asymmetric.
+///
+/// Not unit-tested directly, for the same reason [`reload_primary`] isn't.
+pub(crate) fn load_older_primary(
     paths: &Paths,
     client: &XClient,
+    source: &TimelineSource,
     user_id: &str,
     max_results: u32,
     pagination_token: &str,
     now: i64,
 ) -> Result<(Vec<TimelineItem>, Option<String>)> {
-    let cached = load_home_timeline(paths, user_id)?.unwrap_or_default();
-    let (older, next_token) = client.home_timeline(
-        paths,
-        user_id,
-        max_results,
-        None,
-        Some(pagination_token),
-        now,
-    )?;
+    let cached = load_primary_timeline(paths, source, user_id)?.unwrap_or_default();
+    let (older, next_token) = match source {
+        TimelineSource::Home => client.home_timeline(
+            paths,
+            user_id,
+            max_results,
+            None,
+            Some(pagination_token),
+            now,
+        )?,
+        TimelineSource::List(list_id) => {
+            client.list_timeline(paths, list_id, max_results, Some(pagination_token), now)?
+        }
+    };
     let items = splice(cached, older, Side::Behind);
-    save_home_timeline(paths, user_id, &items, now)?;
+    save_primary_timeline(paths, source, user_id, &items, now)?;
     Ok((items, next_token))
 }
 
@@ -595,7 +668,7 @@ mod tests {
         Paths::from_vars(move |key| (key == "HOME").then(|| home.clone())).unwrap()
     }
 
-    fn temp_root(label: &str) -> std::path::PathBuf {
+    fn temp_root(label: &str) -> PathBuf {
         let root =
             std::env::temp_dir().join(format!("twigpui-test-cache-{label}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
@@ -631,35 +704,30 @@ mod tests {
     }
 
     #[test]
-    fn forget_post_rewrites_the_home_cache_and_reads_it_back() {
+    fn forget_post_rewrites_the_displayed_cache_and_reads_it_back() {
         // The issue's actual completion criterion: gone from the cache too,
         // so it cannot come back on the next start. Asserted by reading the
         // file again rather than trusting the write.
         let root = temp_root("forget-home");
         let paths = test_paths(&root);
         paths.ensure_dirs().unwrap();
-        save_home_timeline(&paths, "me", &[item("1"), item("2")], 0).unwrap();
+        save_primary_timeline(
+            &paths,
+            &TimelineSource::Home,
+            "me",
+            &[item("1"), item("2")],
+            0,
+        )
+        .unwrap();
 
-        let remaining = forget_post(&paths, true, "me", "1", 1).unwrap();
+        let remaining = forget_post(&paths, &TimelineSource::Home, "me", "1", 1).unwrap();
         assert_eq!(ids(&remaining), ["2"]);
         assert_eq!(
-            ids(&load_home_timeline(&paths, "me").unwrap().unwrap()),
+            ids(&load_primary_timeline(&paths, &TimelineSource::Home, "me")
+                .unwrap()
+                .unwrap()),
             ["2"]
         );
-
-        std::fs::remove_dir_all(&root).unwrap();
-    }
-
-    #[test]
-    fn forget_post_rewrites_the_single_user_cache() {
-        let root = temp_root("forget-single");
-        let paths = test_paths(&root);
-        paths.ensure_dirs().unwrap();
-        save_timeline(&paths, "me", &[item("1"), item("2")], 0).unwrap();
-
-        let remaining = forget_post(&paths, false, "me", "2", 1).unwrap();
-        assert_eq!(ids(&remaining), ["1"]);
-        assert_eq!(ids(&load_timeline(&paths, "me").unwrap().unwrap()), ["1"]);
 
         std::fs::remove_dir_all(&root).unwrap();
     }
@@ -671,13 +739,13 @@ mod tests {
         let root = temp_root("forget-one-file");
         let paths = test_paths(&root);
         paths.ensure_dirs().unwrap();
-        save_home_timeline(&paths, "me", &[item("1")], 0).unwrap();
+        save_primary_timeline(&paths, &TimelineSource::Home, "me", &[item("1")], 0).unwrap();
         save_timeline(&paths, "me", &[item("1")], 0).unwrap();
 
-        forget_post(&paths, true, "me", "1", 1).unwrap();
+        forget_post(&paths, &TimelineSource::Home, "me", "1", 1).unwrap();
 
         assert!(
-            load_home_timeline(&paths, "me")
+            load_primary_timeline(&paths, &TimelineSource::Home, "me")
                 .unwrap()
                 .unwrap()
                 .is_empty()
@@ -693,7 +761,11 @@ mod tests {
         let paths = test_paths(&root);
         paths.ensure_dirs().unwrap();
 
-        assert!(forget_post(&paths, true, "me", "1", 1).unwrap().is_empty());
+        assert!(
+            forget_post(&paths, &TimelineSource::Home, "me", "1", 1)
+                .unwrap()
+                .is_empty()
+        );
 
         std::fs::remove_dir_all(&root).unwrap();
     }
@@ -1212,28 +1284,31 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
     }
 
-    // --- load_home_timeline / save_home_timeline ---
+    // --- load_primary_timeline / save_primary_timeline ---
 
     #[test]
-    fn load_home_timeline_is_none_when_the_file_is_missing() {
+    fn load_primary_timeline_is_none_when_the_file_is_missing() {
         let root = temp_root("home-timeline-missing");
         let paths = test_paths(&root);
         paths.ensure_dirs().unwrap();
 
-        assert_eq!(load_home_timeline(&paths, "2244994945").unwrap(), None);
+        assert_eq!(
+            load_primary_timeline(&paths, &TimelineSource::Home, "2244994945").unwrap(),
+            None
+        );
 
         std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
-    fn save_home_timeline_then_load_home_timeline_roundtrips() {
+    fn save_primary_timeline_then_load_primary_timeline_roundtrips() {
         let root = temp_root("home-timeline-roundtrip");
         let paths = test_paths(&root);
         paths.ensure_dirs().unwrap();
 
         let items = vec![item("2"), item("1")];
-        save_home_timeline(&paths, "2244994945", &items, 1_000).unwrap();
-        let loaded = load_home_timeline(&paths, "2244994945").unwrap();
+        save_primary_timeline(&paths, &TimelineSource::Home, "2244994945", &items, 1_000).unwrap();
+        let loaded = load_primary_timeline(&paths, &TimelineSource::Home, "2244994945").unwrap();
         assert_eq!(loaded, Some(items));
 
         std::fs::remove_dir_all(&root).unwrap();
@@ -1249,33 +1324,186 @@ mod tests {
         paths.ensure_dirs().unwrap();
 
         save_timeline(&paths, "123", &[item("single-user-post")], 0).unwrap();
-        save_home_timeline(&paths, "123", &[item("home-timeline-post")], 0).unwrap();
+        save_primary_timeline(
+            &paths,
+            &TimelineSource::Home,
+            "123",
+            &[item("home-timeline-post")],
+            0,
+        )
+        .unwrap();
 
         assert_eq!(
             load_timeline(&paths, "123").unwrap().unwrap()[0].id,
             "single-user-post"
         );
         assert_eq!(
-            load_home_timeline(&paths, "123").unwrap().unwrap()[0].id,
+            load_primary_timeline(&paths, &TimelineSource::Home, "123")
+                .unwrap()
+                .unwrap()[0]
+                .id,
             "home-timeline-post"
         );
 
         std::fs::remove_dir_all(&root).unwrap();
     }
 
-    // --- startup_home ---
+    // --- #161: the list source ---
 
     #[test]
-    fn startup_home_renders_from_cache_when_both_me_and_the_timeline_are_cached() {
+    fn a_lists_cache_and_the_home_cache_do_not_collide() {
+        // #161: the window shows one or the other, and switching between
+        // them must not have the newcomer overwrite what the other had.
+        let root = temp_root("list-vs-home");
+        let paths = test_paths(&root);
+        paths.ensure_dirs().unwrap();
+
+        let list = TimelineSource::List("2091351590695588200".to_string());
+        save_primary_timeline(&paths, &TimelineSource::Home, "me", &[item("home-post")], 0)
+            .unwrap();
+        save_primary_timeline(&paths, &list, "me", &[item("list-post")], 0).unwrap();
+
+        assert_eq!(
+            ids(&load_primary_timeline(&paths, &TimelineSource::Home, "me")
+                .unwrap()
+                .unwrap()),
+            ["home-post"]
+        );
+        assert_eq!(
+            ids(&load_primary_timeline(&paths, &list, "me").unwrap().unwrap()),
+            ["list-post"]
+        );
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_lists_cache_is_keyed_by_the_list_not_the_reader() {
+        // The same list read by two accounts is the same posts, so the
+        // signed-in id must not appear in the filename — otherwise the
+        // second account re-fetches everything the first already paid for.
+        let root = temp_root("list-not-per-reader");
+        let paths = test_paths(&root);
+        paths.ensure_dirs().unwrap();
+
+        let list = TimelineSource::List("2091351590695588200".to_string());
+        save_primary_timeline(&paths, &list, "alice", &[item("1")], 0).unwrap();
+
+        assert_eq!(
+            ids(&load_primary_timeline(&paths, &list, "bob")
+                .unwrap()
+                .unwrap()),
+            ["1"]
+        );
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn two_lists_keep_separate_caches() {
+        let root = temp_root("two-lists");
+        let paths = test_paths(&root);
+        paths.ensure_dirs().unwrap();
+
+        let one = TimelineSource::List("111".to_string());
+        let two = TimelineSource::List("222".to_string());
+        save_primary_timeline(&paths, &one, "me", &[item("from-one")], 0).unwrap();
+        save_primary_timeline(&paths, &two, "me", &[item("from-two")], 0).unwrap();
+
+        assert_eq!(
+            ids(&load_primary_timeline(&paths, &one, "me").unwrap().unwrap()),
+            ["from-one"]
+        );
+        assert_eq!(
+            ids(&load_primary_timeline(&paths, &two, "me").unwrap().unwrap()),
+            ["from-two"]
+        );
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn re_reading_the_whole_head_page_adds_no_rows() {
+        // #161's cost of having no `since_id`: every list reload returns
+        // the same head page. `splice` has to absorb a batch that overlaps
+        // the cache completely, or the timeline grows a duplicate of itself
+        // on every reload.
+        let cached = vec![item("3"), item("2"), item("1")];
+        let head_page_again = vec![item("3"), item("2"), item("1")];
+
+        let spliced = splice(cached, head_page_again, Side::Ahead);
+
+        assert_eq!(ids(&spliced), ["3", "2", "1"]);
+    }
+
+    #[test]
+    fn forget_post_removes_a_post_from_a_lists_cache() {
+        let root = temp_root("forget-list");
+        let paths = test_paths(&root);
+        paths.ensure_dirs().unwrap();
+
+        let list = TimelineSource::List("2091351590695588200".to_string());
+        save_primary_timeline(&paths, &list, "me", &[item("1"), item("2")], 0).unwrap();
+
+        let remaining = forget_post(&paths, &list, "me", "1", 1).unwrap();
+        assert_eq!(ids(&remaining), ["2"]);
+        assert_eq!(
+            ids(&load_primary_timeline(&paths, &list, "me").unwrap().unwrap()),
+            ["2"]
+        );
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn startup_primary_renders_a_list_from_cache() {
+        let root = temp_root("startup-list");
+        let paths = test_paths(&root);
+        paths.ensure_dirs().unwrap();
+
+        let list = TimelineSource::List("2091351590695588200".to_string());
+        save_me(&paths, "2244994945", "alice", 0).unwrap();
+        save_primary_timeline(&paths, &list, "2244994945", &[item("1")], 0).unwrap();
+
+        let (me, items) = startup_primary(&paths, &list, 0).unwrap().unwrap();
+        assert_eq!(me.username, "alice");
+        assert_eq!(ids(&items), ["1"]);
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn startup_primary_is_none_for_a_list_with_only_the_home_cache_on_file() {
+        // Configuring a list on an install that has been running on the
+        // home timeline must not render the home timeline's posts under a
+        // list's name.
+        let root = temp_root("startup-list-miss");
+        let paths = test_paths(&root);
+        paths.ensure_dirs().unwrap();
+
+        save_me(&paths, "2244994945", "alice", 0).unwrap();
+        save_primary_timeline(&paths, &TimelineSource::Home, "2244994945", &[item("1")], 0)
+            .unwrap();
+
+        let list = TimelineSource::List("2091351590695588200".to_string());
+        assert_eq!(startup_primary(&paths, &list, 0).unwrap(), None);
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    // --- startup_primary ---
+
+    #[test]
+    fn startup_primary_renders_from_cache_when_both_me_and_the_timeline_are_cached() {
         let root = temp_root("startup-home-hit");
         let paths = test_paths(&root);
         paths.ensure_dirs().unwrap();
 
         save_me(&paths, "2244994945", "alice", 0).unwrap();
         let items = vec![item("2"), item("1")];
-        save_home_timeline(&paths, "2244994945", &items, 0).unwrap();
+        save_primary_timeline(&paths, &TimelineSource::Home, "2244994945", &items, 0).unwrap();
 
-        let rendered = startup_home(&paths, 0).unwrap();
+        let rendered = startup_primary(&paths, &TimelineSource::Home, 0).unwrap();
         let (me, rendered_items) = rendered.unwrap();
         assert_eq!(me.id, "2244994945");
         assert_eq!(me.username, "alice");
@@ -1285,25 +1513,33 @@ mod tests {
     }
 
     #[test]
-    fn startup_home_is_none_when_me_is_not_cached() {
+    fn startup_primary_is_none_when_me_is_not_cached() {
         let root = temp_root("startup-home-no-me");
         let paths = test_paths(&root);
         paths.ensure_dirs().unwrap();
 
-        assert!(startup_home(&paths, 0).unwrap().is_none());
+        assert!(
+            startup_primary(&paths, &TimelineSource::Home, 0)
+                .unwrap()
+                .is_none()
+        );
 
         std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
-    fn startup_home_is_none_when_me_is_cached_but_the_timeline_is_not() {
+    fn startup_primary_is_none_when_me_is_cached_but_the_timeline_is_not() {
         let root = temp_root("startup-home-no-timeline");
         let paths = test_paths(&root);
         paths.ensure_dirs().unwrap();
 
         save_me(&paths, "2244994945", "alice", 0).unwrap();
 
-        assert!(startup_home(&paths, 0).unwrap().is_none());
+        assert!(
+            startup_primary(&paths, &TimelineSource::Home, 0)
+                .unwrap()
+                .is_none()
+        );
 
         std::fs::remove_dir_all(&root).unwrap();
     }

@@ -124,6 +124,26 @@ pub(crate) const TWEET_WRITE_SCOPE: &str = "tweet.write";
 /// header's "Re-authorize" button is the fix, exactly as for #14.
 pub(crate) const LIKE_WRITE_SCOPE: &str = "like.write";
 
+/// The scope #161's List timeline needs (`GET /2/lists/:id/tweets`), added
+/// to `SCOPES` by #167. Unlike the two above this one gates a *read*, and
+/// only when a list is configured — see `ui::render::offers_reauthorize`.
+/// A session authorized before #167 has everything the app needs except
+/// this, so configuring a list on an old session is the one way to reach a
+/// 403 the app can actually explain.
+pub(crate) const LIST_READ_SCOPE: &str = "list.read";
+
+/// The scope #163's sync needs to *change* a list
+/// (`POST`/`DELETE /2/lists/:id/members`). Granted separately from
+/// `list.read`, the same way `like.write` is from `tweet.read`.
+pub(crate) const LIST_WRITE_SCOPE: &str = "list.write";
+
+/// The scope #163's sync needs to read the accounts this app follows
+/// (`GET /2/users/:id/following`). Requested for the first time by #163 —
+/// a live token seen holding it before that was a leftover from a single
+/// re-authorization during #157's investigation, and re-authorizing wiped
+/// it, which is exactly why the sync checks for it rather than assuming.
+pub(crate) const FOLLOWS_READ_SCOPE: &str = "follows.read";
+
 /// Whether a granted scope string includes `required`, per RFC 6749 §3.3's
 /// space-separated list — matched by exact token, not a substring check, so
 /// e.g. a hypothetical `tweet.write.extra` scope wouldn't false-match a

@@ -313,10 +313,26 @@ pub(super) fn compose_error_message(status: &ComposeStatus) -> Option<SharedStri
 /// `like.write`, which X grants separately, so a session authorized before
 /// #68 holds `tweet.write` alone. Without this, `toggle_like`'s refusal
 /// would point at a "Re-authorize" button that was not being rendered.
-pub(super) fn offers_reauthorize(signed_in_with_oauth: bool, oauth_scope: Option<&str>) -> bool {
+///
+/// `list.read` (#167) joins them, but only while a list is configured
+/// (#161). It is the first *read* scope here, and the first one whose
+/// absence stops the window filling at all rather than disabling a button:
+/// a session authorized before #167 gets a 403 from
+/// `GET /2/lists/:id/tweets` and nothing else to go on. Gating it on
+/// `reads_a_list` rather than asking for it unconditionally keeps the
+/// button off the toolbar for someone who never configured a list and so
+/// can never hit that 403.
+pub(super) fn offers_reauthorize(
+    signed_in_with_oauth: bool,
+    oauth_scope: Option<&str>,
+    reads_a_list: bool,
+) -> bool {
+    let list_read_satisfied =
+        !reads_a_list || oauth::tokens::has_scope(oauth_scope, oauth::tokens::LIST_READ_SCOPE);
     signed_in_with_oauth
         && !(oauth::tokens::has_scope(oauth_scope, oauth::tokens::TWEET_WRITE_SCOPE)
-            && oauth::tokens::has_scope(oauth_scope, oauth::tokens::LIKE_WRITE_SCOPE))
+            && oauth::tokens::has_scope(oauth_scope, oauth::tokens::LIKE_WRITE_SCOPE)
+            && list_read_satisfied)
 }
 
 /// Whether post `item` should offer a repost/un-repost toggle (#15).
@@ -724,6 +740,19 @@ pub(super) fn header_title(home_username: Option<&str>) -> String {
         // Before `/me` resolves there is no account to name, and the app's
         // own name is what a macOS toolbar shows in its place.
         None => "twigpui".to_string(),
+    }
+}
+
+/// What the toolbar's segment calls the timeline being shown (#161).
+///
+/// The list's own name is deliberately not fetched: `GET /2/lists/:id`
+/// is another billed endpoint, and a label is not worth a request on every
+/// start. #164 is where a list gains a name, because a switcher has to
+/// name the things it switches between — one segment does not.
+pub(super) fn tab_label(source: &cache::TimelineSource) -> &'static str {
+    match source {
+        cache::TimelineSource::Home => "Home",
+        cache::TimelineSource::List(_) => "List",
     }
 }
 

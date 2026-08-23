@@ -290,6 +290,7 @@ mod tests {
             log_level: crate::log::Level::default(),
             request_price: None,
             daily_request_budget: None,
+            list_id: None,
         }
     }
 

@@ -41,6 +41,7 @@ mod paths;
 mod profile;
 mod rate_limit;
 mod repost;
+mod sync;
 mod theme;
 mod thread;
 mod toggle;
@@ -95,6 +96,20 @@ fn main() {
             );
             std::process::exit(1);
         }
+    }
+
+    // #163: `--sync-list` mirrors the accounts this app follows into the
+    // configured List. A dry-run by default — it reads both sides, writes
+    // a plan and prints it — with `--apply` to send the writes and
+    // `--prune` to include removals. Headless like every flag above:
+    // #163's own design says this must never run on a timer, because both
+    // reads are billed per account.
+    if args.iter().any(|arg| arg == "--sync-list") {
+        let request = sync::Request {
+            apply: args.iter().any(|arg| arg == "--apply"),
+            prune: args.iter().any(|arg| arg == "--prune"),
+        };
+        std::process::exit(sync::run_cli(&config, &paths, request));
     }
 
     // Print the same usage numbers the header shows, as JSON (#18). Reads

@@ -27,10 +27,18 @@
 src/assets.rs	100
 src/avatar.rs	100
 src/browser.rs	100
-src/cache/mod.rs	550
+# #161 raised four ceilings; each reason sits above the line it explains.
+#
+# cache/mod.rs 550 -> 650: `TimelineSource` and the switch from a
+# home-only trio (`startup_home`/`reload_home`/`load_older_home`) to a
+# source-parameterized one. A fourth parallel copy of the trio would have
+# been the alternative and is what #92 exists to stop.
+src/cache/mod.rs	650
 src/cache/timeline.rs	250
 src/compose.rs	350
-src/config.rs	400
+# config.rs 400 -> 450: `list_id` plus `resolve_list_id`, which validates
+# the value because it lands in a URL path segment.
+src/config.rs	450
 src/fixture.rs	100
 src/image_cache.rs	150
 src/like.rs	150
@@ -43,15 +51,35 @@ src/oauth/pkce.rs	150
 src/oauth/tokens.rs	200
 src/paths.rs	300
 src/profile.rs	100
-src/rate_limit.rs	350
+# rate_limit.rs 350 -> 400: four `Endpoint` variants for #163's sync,
+# each with the doc explaining why it needs its own bucket.
+src/rate_limit.rs	400
 src/repost.rs	150
+# sync/ is new in #163, split the way `cache` is: mod.rs holds the pure
+# diff, the plan file and the report (where the tests are), run.rs holds
+# the paged reads, the apply loop and the CLI entry point (where the
+# spending is).
+src/sync/mod.rs	250
+src/sync/run.rs	300
 src/theme.rs	350
 src/thread.rs	100
 src/toggle.rs	200
-src/ui/mod.rs	2700
+# ui/mod.rs 2700 -> 2750: a `source` field threaded through `start`,
+# `reload`, `load_older` and `confirm_delete`, and `primary_source`. #137 is
+# already open on whether to split `impl TimelineView`; this raise does not
+# settle it, and the file is now 16 lines past where #137 found it.
+src/ui/mod.rs	2750
 src/ui/reload_policy.rs	300
 src/ui/render.rs	1050
 src/usage.rs	350
-src/x_api/client.rs	750
+# x_api/client.rs 750 -> 800: `list_timeline` and `list_timeline_url`,
+# carrying the doc comment that explains why neither takes a `since_id`.
+# x_api/client.rs 800 -> 1000: #163's four endpoints, their URL builders,
+# the shared user-page parser, and the POST body sender for the one write
+# whose body is a `user_id`. The bulk is doc comments marking which parts
+# are spec-derived and unverified — this PR spent no requests.
+src/x_api/client.rs	1000
 src/x_api/mod.rs	50
-src/x_api/model.rs	750
+# x_api/model.rs 750 -> 800: `UserIdRequest` and `UserPageResponse` for
+# #163's reads and writes.
+src/x_api/model.rs	800

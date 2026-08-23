@@ -116,6 +116,33 @@ impl Paths {
         self.cache_dir.join(format!("home-timeline-{user_id}.json"))
     }
 
+    /// Path to one list's cached timeline, under `cache_dir` (#161). Keyed
+    /// by the list id rather than by the signed-in user, because that is
+    /// what the content belongs to: two accounts reading the same list read
+    /// the same posts, and one account reading two lists must not have the
+    /// second overwrite the first — which is what #164's switcher will do
+    /// several times a session.
+    ///
+    /// A different filename from [`Self::timeline_file`] and
+    /// [`Self::home_timeline_file`] for the same reason those two differ
+    /// from each other: a list id and a user id are both bare digits, so
+    /// without the prefix a list would be indistinguishable from a user
+    /// whose id happened to match.
+    pub(crate) fn list_timeline_file(&self, list_id: &str) -> PathBuf {
+        self.cache_dir.join(format!("list-timeline-{list_id}.json"))
+    }
+
+    /// Path to #163's sync plan, under `state_dir`.
+    ///
+    /// State rather than cache: losing it does not cost a re-fetch of
+    /// something cheap, it costs paging both the follow list and the list's
+    /// members again, which is the most expensive read pair this app makes.
+    /// It also records which entries have already been sent, so discarding
+    /// it as reconstructible would re-fire every applied write.
+    pub(crate) fn sync_plan_file(&self) -> PathBuf {
+        self.state_dir.join("sync_plan.json")
+    }
+
     /// Path to the cached result of `GET /2/users/me` (#11): the signed-in
     /// user's own id and screen name, under `cache_dir`. Immutable for a
     /// given account, so caching it (like #9 caches screen-name → id) avoids
@@ -533,6 +560,52 @@ mod tests {
         assert_ne!(
             paths.timeline_file("2244994945"),
             paths.home_timeline_file("2244994945")
+        );
+    }
+
+    #[test]
+    fn list_timeline_file_is_under_the_cache_dir_named_by_list_id() {
+        let paths = Paths::from_vars(vars(&[("HOME", "/home/alice")])).unwrap();
+        assert_eq!(
+            paths.list_timeline_file("2091351590695588200"),
+            PathBuf::from("/home/alice/.cache/twigpui/list-timeline-2091351590695588200.json")
+        );
+    }
+
+    #[test]
+    fn list_timeline_file_collides_with_neither_timeline_file() {
+        // #161: list ids and user ids are both bare digits, so the same
+        // number can name a list and a user at once. All three files hold
+        // different content.
+        let paths = Paths::from_vars(vars(&[("HOME", "/home/alice")])).unwrap();
+        assert_ne!(
+            paths.list_timeline_file("2244994945"),
+            paths.timeline_file("2244994945")
+        );
+        assert_ne!(
+            paths.list_timeline_file("2244994945"),
+            paths.home_timeline_file("2244994945")
+        );
+    }
+
+    #[test]
+    fn list_timeline_files_for_different_lists_are_different_files() {
+        // #164 switches between lists; sharing one file would make every
+        // switch overwrite the timeline the previous list had cached.
+        let paths = Paths::from_vars(vars(&[("HOME", "/home/alice")])).unwrap();
+        assert_ne!(
+            paths.list_timeline_file("111"),
+            paths.list_timeline_file("222")
+        );
+    }
+
+    #[test]
+    fn sync_plan_file_is_under_the_state_dir() {
+        // #163: not the cache dir. Losing it costs both full reads again.
+        let paths = Paths::from_vars(vars(&[("HOME", "/home/alice")])).unwrap();
+        assert_eq!(
+            paths.sync_plan_file(),
+            PathBuf::from("/home/alice/.local/state/twigpui/sync_plan.json")
         );
     }
 

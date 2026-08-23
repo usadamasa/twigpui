@@ -290,6 +290,43 @@ pub(crate) struct TweetIdRequest<'a> {
     pub tweet_id: &'a str,
 }
 
+/// The request body `POST /2/lists/:id/members` (#163) takes — the id of
+/// the account being added; the list's own id travels in the URL. Shaped
+/// like [`TweetIdRequest`] and separate for the same reason that one is
+/// shared: a different field name is a different body.
+///
+/// **Spec-derived, unverified.** #163 was built without spending a request
+/// on `/2/lists/:id/members`, so this field name comes from docs.x.com, not
+/// from a 200. `x-api-endpoints` is explicit that the two disagree often
+/// enough to plan for.
+#[derive(Debug, Serialize)]
+pub(crate) struct UserIdRequest<'a> {
+    pub user_id: &'a str,
+}
+
+/// One page of users, as `GET /2/users/:id/following` and
+/// `GET /2/lists/:id/members` return one (#163): the accounts themselves
+/// plus the cursor for the next page.
+///
+/// `data` is `#[serde(default)]` because both endpoints omit it entirely on
+/// an empty page rather than sending `[]` — an account that follows nobody,
+/// or a list with no members, which is exactly the state a first sync
+/// starts from.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub(crate) struct UserPageResponse {
+    #[serde(default)]
+    pub data: Vec<User>,
+    #[serde(default)]
+    pub meta: Meta,
+}
+
+impl UserPageResponse {
+    /// The cursor for the page after this one, or `None` at the end.
+    pub(crate) fn next_token(&self) -> Option<&str> {
+        self.meta.next_token.as_deref()
+    }
+}
+
 /// Pagination info returned alongside `data`. Only `next_token` matters to
 /// this crate — it's the cursor `x_api::client::home_timeline_url` sends back
 /// as `pagination_token` to fetch the next (older) page, driving #11's "Load
@@ -1380,6 +1417,55 @@ mod tests {
             serde_json::to_string(&request).unwrap(),
             r#"{"text":"hello","quote_tweet_id":"1700000000000000001"}"#
         );
+    }
+
+    #[test]
+    fn serializes_the_list_member_request_body() {
+        // #163: the whole body `XClient::add_list_member` sends.
+        let request = UserIdRequest {
+            user_id: "2244994945",
+        };
+        assert_eq!(
+            serde_json::to_string(&request).unwrap(),
+            r#"{"user_id":"2244994945"}"#
+        );
+    }
+
+    #[test]
+    fn parses_a_page_of_users_with_its_cursor() {
+        let body = r#"{
+            "data": [
+                {"id": "1", "name": "Alice", "username": "alice"},
+                {"id": "2", "name": "Bob", "username": "bob"}
+            ],
+            "meta": {"next_token": "cursor-abc"}
+        }"#;
+        let page: UserPageResponse = serde_json::from_str(body).unwrap();
+        assert_eq!(
+            page.data.iter().map(|u| u.id.as_str()).collect::<Vec<_>>(),
+            ["1", "2"]
+        );
+        assert_eq!(page.next_token(), Some("cursor-abc"));
+    }
+
+    #[test]
+    fn parses_the_last_page_of_users() {
+        // No `next_token` is how both endpoints say "that was the end".
+        let page: UserPageResponse =
+            serde_json::from_str(r#"{"data": [{"id": "1", "name": "A", "username": "a"}]}"#)
+                .unwrap();
+        assert_eq!(page.next_token(), None);
+    }
+
+    #[test]
+    fn parses_an_empty_page_of_users() {
+        // #163: an account following nobody, or a list with no members,
+        // omits `data` rather than sending `[]`. Parsing that as an error
+        // would fail the very first sync.
+        let page: UserPageResponse =
+            serde_json::from_str(r#"{"meta": {"result_count": 0}}"#).unwrap();
+        assert!(page.data.is_empty());
+        assert_eq!(page.next_token(), None);
     }
 
     #[test]
