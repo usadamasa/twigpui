@@ -3549,6 +3549,43 @@ mod tests {
         );
     }
 
+    /// #164: the same window with a client *does* offer it, laid out to
+    /// the right of the picker and inside the toolbar.
+    ///
+    /// The one place the button is ever drawn is a signed-in live window,
+    /// which no test can build — so this hands a fixture window a client
+    /// (a token string; `XClient::new` sends nothing) and redraws. Without
+    /// it the button's first render is the user's first launch, which is
+    /// how "the button is missing" got reported.
+    #[gpui::test]
+    fn a_signed_in_window_offers_the_list_fetch_beside_the_picker(cx: &mut gpui::TestAppContext) {
+        let (mut visual, timeline) = drawn(cx, fixture_with_lists(&["1"], &[("9101", "Rust")]));
+        cx.update(|cx| {
+            timeline.update(cx, |view, cx| {
+                view.client = Some(crate::x_api::XClient::new("token".to_string()));
+                cx.notify();
+            });
+        });
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let button = visual
+            .debug_bounds("load-lists")
+            .expect("a window with a client and a known user offers the fetch");
+        let last_segment = visual
+            .debug_bounds("tab-list-9101")
+            .expect("the fixture list is a segment");
+        assert!(
+            button.left() >= last_segment.right(),
+            "the button sits after the picker: {last_segment:?} then {button:?}"
+        );
+        assert!(
+            button.size.width > gpui::px(0.0) && button.size.height > gpui::px(0.0),
+            "the button has a size: {button:?}"
+        );
+    }
+
     /// #164, the issue's second completion criterion: switching between
     /// timelines that are already cached sends nothing.
     ///
