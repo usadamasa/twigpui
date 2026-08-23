@@ -218,6 +218,22 @@ pub(crate) enum Endpoint {
     /// shared bucket would carry state from a source that is not even
     /// being fetched.
     ListTimeline,
+    /// `GET /2/users/:id/following` (#163) — one page of the accounts this
+    /// app follows, read to diff against a list's members. Its own bucket
+    /// like every other endpoint: a full sync pages through this until the
+    /// cursor runs out, so it is the one most likely to hit a limit, and
+    /// borrowing another's tracked window would hide that.
+    Following,
+    /// `GET /2/lists/:id/members` (#163) — the other side of that diff.
+    ListMembers,
+    /// `POST /2/lists/:id/members` (#163) — add one account to the list.
+    /// Tracked apart from `RemoveListMember` for the reason
+    /// `CreateRepost`/`DeleteRepost` are: X limits create and delete
+    /// separately.
+    AddListMember,
+    /// `DELETE /2/lists/:id/members/:user_id` (#163) — remove one account.
+    /// See `AddListMember`.
+    RemoveListMember,
     /// `GET /2/tweets?ids=` (#12) — the parent-chain walk behind "Show
     /// thread". Tracked independently: reusing e.g. `Timeline`'s bucket
     /// would corrupt the tracked state for both, since X limits each
@@ -258,12 +274,16 @@ impl Endpoint {
     /// failure #18 exists to prevent. `CreatePost` was missing here until
     /// #50; the test below now fails to compile rather than silently pass if
     /// a new variant is left out again.
-    pub(crate) const ALL: [Self; 12] = [
+    pub(crate) const ALL: [Self; 16] = [
         Self::UserLookup,
         Self::Timeline,
         Self::Me,
         Self::HomeTimeline,
         Self::ListTimeline,
+        Self::Following,
+        Self::ListMembers,
+        Self::AddListMember,
+        Self::RemoveListMember,
         Self::TweetById,
         Self::CreatePost,
         Self::CreateRepost,
@@ -283,6 +303,10 @@ impl Endpoint {
             Self::Me => "me",
             Self::HomeTimeline => "home_timeline",
             Self::ListTimeline => "list_timeline",
+            Self::Following => "following",
+            Self::ListMembers => "list_members",
+            Self::AddListMember => "add_list_member",
+            Self::RemoveListMember => "remove_list_member",
             Self::TweetById => "tweet_by_id",
             Self::CreatePost => "create_post",
             Self::CreateRepost => "create_repost",
@@ -783,6 +807,10 @@ mod tests {
             Endpoint::Me,
             Endpoint::HomeTimeline,
             Endpoint::ListTimeline,
+            Endpoint::Following,
+            Endpoint::ListMembers,
+            Endpoint::AddListMember,
+            Endpoint::RemoveListMember,
             Endpoint::TweetById,
             Endpoint::CreatePost,
             Endpoint::CreateRepost,
@@ -798,6 +826,10 @@ mod tests {
                 | Endpoint::Me
                 | Endpoint::HomeTimeline
                 | Endpoint::ListTimeline
+                | Endpoint::Following
+                | Endpoint::ListMembers
+                | Endpoint::AddListMember
+                | Endpoint::RemoveListMember
                 | Endpoint::TweetById
                 | Endpoint::CreatePost
                 | Endpoint::CreateRepost

@@ -4,7 +4,8 @@ use anyhow::{Context as _, Result, bail};
 use ureq::Agent;
 
 use super::model::{
-    ApiProblem, Draft, TimelineItem, TimelineResponse, TweetIdRequest, User, UserLookupResponse,
+    ApiProblem, Draft, TimelineItem, TimelineResponse, TweetIdRequest, User, UserIdRequest,
+    UserLookupResponse, UserPageResponse,
 };
 use crate::paths::Paths;
 use crate::rate_limit::{self, Endpoint, RateLimitState};
@@ -306,6 +307,41 @@ impl XClient {
         Ok((status, body, state))
     }
 
+    /// One raw HTTP POST for the one endpoint whose body is a single
+    /// `user_id` — `POST /2/lists/:id/members` (#163). A sibling of
+    /// [`Self::send_tweet_id_once`] for the reason that one is a sibling of
+    /// [`Self::send_post_once`]: what wants sharing is the retry and
+    /// rate-limit logic, and that already lives in
+    /// [`Self::send_with_retry`], which all four go through.
+    fn send_user_id_once(&self, url: &str, user_id: &str) -> Result<(u16, String, RateLimitState)> {
+        let mut response = self
+            .agent
+            .post(url)
+            .header("Authorization", format!("Bearer {}", self.bearer_token))
+            .send_json(UserIdRequest { user_id })
+            .with_context(|| format!("request to {url} failed"))?;
+
+        let header = |name: &str| -> Option<String> {
+            response
+                .headers()
+                .get(name)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string)
+        };
+        let state = rate_limit::parse_headers(
+            header("x-rate-limit-limit").as_deref(),
+            header("x-rate-limit-remaining").as_deref(),
+            header("x-rate-limit-reset").as_deref(),
+        );
+
+        let status = response.status().as_u16();
+        let body = response
+            .body_mut()
+            .read_to_string()
+            .context("could not read the response body")?;
+        Ok((status, body, state))
+    }
+
     /// Resolve a screen name to the numeric user id the timeline endpoint needs.
     pub(crate) fn user_id_by_username(
         &self,
@@ -421,6 +457,83 @@ impl XClient {
             serde_json::from_str(&body).context("could not parse the list timeline response")?;
         let next_token = response.next_token().map(str::to_string);
         Ok((response.into_items(), next_token))
+    }
+
+    /// Fetch one page of the accounts this app follows (#163), with the
+    /// cursor for the next. `user_id` is the signed-in account's own id
+    /// (`/me`); `pagination_token` is the previous page's cursor, or `None`
+    /// for the first page.
+    ///
+    /// One page, not all of them: the caller loops, so a failure part-way
+    /// is visible to whoever decides what a partial read means. `sync`
+    /// treats it as fatal — see [`crate::sync`]'s doc for why a partial
+    /// follow list must never reach the diff.
+    ///
+    /// Requires `follows.read`, which #163 added to `SCOPES`; a session
+    /// authorized before it gets a 403 here.
+    pub(crate) fn following(
+        &self,
+        paths: &Paths,
+        user_id: &str,
+        pagination_token: Option<&str>,
+        now: i64,
+    ) -> Result<(Vec<User>, Option<String>)> {
+        let url = following_url(user_id, pagination_token);
+        let body = self.get(paths, Endpoint::Following, &url, now)?;
+        parse_user_page(&body, "following")
+    }
+
+    /// Fetch one page of a list's members (#163) — the other side of the
+    /// diff [`Self::following`] feeds. Same shape, same one-page-at-a-time
+    /// contract, same reasoning.
+    pub(crate) fn list_members(
+        &self,
+        paths: &Paths,
+        list_id: &str,
+        pagination_token: Option<&str>,
+        now: i64,
+    ) -> Result<(Vec<User>, Option<String>)> {
+        let url = list_members_url(list_id, pagination_token);
+        let body = self.get(paths, Endpoint::ListMembers, &url, now)?;
+        parse_user_page(&body, "list members")
+    }
+
+    /// `POST /2/lists/:id/members` (#163) — add `member_user_id` to the
+    /// list. Requires `list.write`.
+    ///
+    /// Returns nothing on success: `sync` records progress from whether
+    /// this returned `Ok`, not from anything in the response. **Whether a
+    /// second call for an account already in the list succeeds or errors is
+    /// unmeasured**, which is why the plan file marks each entry as it
+    /// lands rather than relying on a retry being harmless.
+    pub(crate) fn add_list_member(
+        &self,
+        paths: &Paths,
+        list_id: &str,
+        member_user_id: &str,
+        now: i64,
+    ) -> Result<()> {
+        let url = list_members_write_url(list_id);
+        Self::send_with_retry(paths, Endpoint::AddListMember, now, || {
+            self.send_user_id_once(&url, member_user_id)
+        })?;
+        Ok(())
+    }
+
+    /// `DELETE /2/lists/:id/members/:user_id` (#163) — remove an account
+    /// from the list. Requires `list.write`. The acted-on id is a path
+    /// segment here rather than a body field, mirroring
+    /// [`delete_repost_url`].
+    pub(crate) fn remove_list_member(
+        &self,
+        paths: &Paths,
+        list_id: &str,
+        member_user_id: &str,
+        now: i64,
+    ) -> Result<()> {
+        let url = remove_list_member_url(list_id, member_user_id);
+        self.delete(paths, Endpoint::RemoveListMember, &url, now)?;
+        Ok(())
     }
 
     /// `GET /2/tweets?ids=` (#12). `ids` is whatever the caller already
@@ -710,6 +823,71 @@ fn tweets_by_id_url(ids: &str) -> String {
     )
 }
 
+/// The page size #163's two paged reads request.
+///
+/// **Spec-derived.** docs.x.com gives both `/2/users/:id/following` and
+/// `/2/lists/:id/members` a `max_results` of 1..=100; nothing here has been
+/// measured. The maximum is the right end of that range to sit on because
+/// reads bill per returned resource (`x-api-budget`), not per request: a
+/// smaller page buys nothing and spends more of the endpoint's rate limit
+/// to read the same accounts.
+const USER_PAGE_SIZE: u32 = 100;
+
+/// The `user.fields` both paged reads request. Only what the dry-run's
+/// report needs to name an account — asking for avatars or metrics here
+/// would be fields nothing prints.
+const SYNC_USER_FIELDS: &str = "&user.fields=name,username";
+
+/// `GET /2/users/:id/following` (#163) — one page of the accounts this app
+/// follows.
+fn following_url(user_id: &str, pagination_token: Option<&str>) -> String {
+    let base = format!(
+        "{API_BASE}/users/{user_id}/following\
+         ?max_results={USER_PAGE_SIZE}\
+         {SYNC_USER_FIELDS}"
+    );
+    match pagination_token {
+        Some(token) => format!("{base}&pagination_token={token}"),
+        None => base,
+    }
+}
+
+/// `GET /2/lists/:id/members` (#163) — one page of a list's members.
+fn list_members_url(list_id: &str, pagination_token: Option<&str>) -> String {
+    let base = format!(
+        "{API_BASE}/lists/{list_id}/members\
+         ?max_results={USER_PAGE_SIZE}\
+         {SYNC_USER_FIELDS}"
+    );
+    match pagination_token {
+        Some(token) => format!("{base}&pagination_token={token}"),
+        None => base,
+    }
+}
+
+/// `POST /2/lists/:id/members` (#163) — the added account's id travels in
+/// the JSON body ([`UserIdRequest`]), not the URL.
+fn list_members_write_url(list_id: &str) -> String {
+    format!("{API_BASE}/lists/{list_id}/members")
+}
+
+/// `DELETE /2/lists/:id/members/:user_id` (#163) — here the acted-on id is
+/// a path segment, mirroring [`delete_repost_url`].
+fn remove_list_member_url(list_id: &str, member_user_id: &str) -> String {
+    format!("{API_BASE}/lists/{list_id}/members/{member_user_id}")
+}
+
+/// Parse one page of users from either of #163's paged reads. `what` names
+/// which one, so a parse failure says whether the follow list or the member
+/// list was unreadable — the two are read in the same loop and the error
+/// would otherwise be indistinguishable.
+fn parse_user_page(body: &str, what: &str) -> Result<(Vec<User>, Option<String>)> {
+    let response: UserPageResponse = serde_json::from_str(body)
+        .with_context(|| format!("could not parse the {what} response"))?;
+    let next_token = response.next_token().map(str::to_string);
+    Ok((response.data, next_token))
+}
+
 /// `POST /2/tweets` (#14) — no query string, unlike every `GET` above.
 fn create_post_url() -> String {
     format!("{API_BASE}/tweets")
@@ -955,6 +1133,76 @@ mod tests {
         // the field list is long enough that an accidental paste from
         // `home_timeline_url` would not stand out in review.
         assert!(!list_timeline_url("2091351590695588200", 20, None).contains("since_id"));
+    }
+
+    #[test]
+    fn builds_the_following_url() {
+        assert_eq!(
+            following_url("2244994945", None),
+            "https://api.x.com/2/users/2244994945/following?max_results=100&user.fields=name,username"
+        );
+    }
+
+    #[test]
+    fn following_url_appends_the_pagination_token() {
+        // #163 pages this until the cursor runs out; a dropped token would
+        // re-read page one forever and never finish the diff.
+        assert_eq!(
+            following_url("2244994945", Some("cursor-abc")),
+            "https://api.x.com/2/users/2244994945/following?max_results=100&user.fields=name,username&pagination_token=cursor-abc"
+        );
+    }
+
+    #[test]
+    fn builds_the_list_members_url() {
+        assert_eq!(
+            list_members_url("2091351590695588200", None),
+            "https://api.x.com/2/lists/2091351590695588200/members?max_results=100&user.fields=name,username"
+        );
+    }
+
+    #[test]
+    fn list_members_url_appends_the_pagination_token() {
+        assert_eq!(
+            list_members_url("2091351590695588200", Some("cursor-abc")),
+            "https://api.x.com/2/lists/2091351590695588200/members?max_results=100&user.fields=name,username&pagination_token=cursor-abc"
+        );
+    }
+
+    #[test]
+    fn the_read_and_write_list_member_urls_differ_by_more_than_the_method() {
+        // Adding posts to the collection; removing names the member in the
+        // path. Sending a DELETE to the collection URL would remove nothing
+        // and still be billed.
+        assert_eq!(
+            list_members_write_url("2091351590695588200"),
+            "https://api.x.com/2/lists/2091351590695588200/members"
+        );
+        assert_eq!(
+            remove_list_member_url("2091351590695588200", "2244994945"),
+            "https://api.x.com/2/lists/2091351590695588200/members/2244994945"
+        );
+    }
+
+    #[test]
+    fn parses_a_user_page_and_its_cursor() {
+        let (users, next) = parse_user_page(
+            r#"{"data":[{"id":"1","name":"A","username":"a"}],"meta":{"next_token":"c"}}"#,
+            "following",
+        )
+        .unwrap();
+        assert_eq!(users.len(), 1);
+        assert_eq!(next.as_deref(), Some("c"));
+    }
+
+    #[test]
+    fn a_user_page_parse_failure_names_which_read_it_was() {
+        // Both reads go through the same loop; without this the error says
+        // only that some page was unreadable.
+        let error = parse_user_page("not json", "list members")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("list members"), "{error}");
     }
 
     #[test]

@@ -126,6 +126,36 @@ each time.
 
 `.env` is gitignored. Do not commit credentials.
 
+### `--sync-list` — mirror your follows into the list (#163)
+
+A List only shows what is in it, so #161's window is only as good as the
+list's membership. `--sync-list` diffs the accounts you follow against the
+list's members and mirrors one onto the other.
+
+```sh
+cargo run -- --sync-list            # dry run: read both sides, write a plan, print it
+cargo run -- --sync-list --apply    # send the additions
+cargo run -- --sync-list --apply --prune   # …and the removals
+```
+
+**A dry run is not free.** Both reads are billed per account returned, so
+one against a few thousand follows costs dollars, not cents. Check the
+prices in the developer console before the first `--apply` — #162 is open
+because this app's own usage numbers count requests, not resources.
+
+Never put this on a timer. The plan is written to
+`$XDG_STATE_HOME/twigpui/sync_plan.json` and each entry is marked as it
+lands, so an interrupted `--apply` resumes from the file without paying to
+read either side again. `--apply` with no plan on file is an error: the dry
+run is what produces the plan.
+
+Removals need `--prune`. A list can hold accounts you added by hand, and
+whether a sync may delete those is deliberately left to you.
+
+Both sides need scopes this app did not request before #163
+(`follows.read`, `list.write`), so an existing session is refused before it
+spends anything — launch twigpui and click "Re-authorize" once.
+
 ## Signing in with X (OAuth 2.0 Authorization Code + PKCE)
 
 Everything this app does — the home timeline, posting, replying, liking,

@@ -100,6 +100,17 @@ impl Paths {
         self.cache_dir.join(format!("list-timeline-{list_id}.json"))
     }
 
+    /// Path to #163's sync plan, under `state_dir`.
+    ///
+    /// State rather than cache: losing it does not cost a re-fetch of
+    /// something cheap, it costs paging both the follow list and the list's
+    /// members again, which is the most expensive read pair this app makes.
+    /// It also records which entries have already been sent, so discarding
+    /// it as reconstructible would re-fire every applied write.
+    pub(crate) fn sync_plan_file(&self) -> PathBuf {
+        self.state_dir.join("sync_plan.json")
+    }
+
     /// Path to the cached result of `GET /2/users/me` (#11): the signed-in
     /// user's own id and screen name, under `cache_dir`. Immutable for a
     /// given account, so caching it (like #9 caches screen-name → id) avoids
@@ -441,6 +452,16 @@ mod tests {
         assert_ne!(
             paths.list_timeline_file("111"),
             paths.list_timeline_file("222")
+        );
+    }
+
+    #[test]
+    fn sync_plan_file_is_under_the_state_dir() {
+        // #163: not the cache dir. Losing it costs both full reads again.
+        let paths = Paths::from_vars(vars(&[("HOME", "/home/alice")])).unwrap();
+        assert_eq!(
+            paths.sync_plan_file(),
+            PathBuf::from("/home/alice/.local/state/twigpui/sync_plan.json")
         );
     }
 

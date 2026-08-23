@@ -22,7 +22,8 @@ use sha2::{Digest as _, Sha256};
 /// `list.write` is **not** requested. Creating and populating a List is #163;
 /// asking for write access the app cannot yet use would be a permission
 /// granted for nothing.
-const SCOPES: &str = "tweet.read users.read tweet.write like.write list.read offline.access";
+const SCOPES: &str = "tweet.read users.read tweet.write like.write list.read list.write follows.read \
+     offline.access";
 
 /// `https://x.com/i/oauth2/authorize` per the issue's confirmed design.
 const AUTHORIZE_URL: &str = "https://x.com/i/oauth2/authorize";
@@ -215,7 +216,8 @@ mod tests {
             url,
             "https://x.com/i/oauth2/authorize?response_type=code&client_id=client-123\
              &redirect_uri=http%3A%2F%2F127.0.0.1%3A8733%2Fcallback\
-             &scope=tweet.read%20users.read%20tweet.write%20like.write%20list.read%20offline.access\
+             &scope=tweet.read%20users.read%20tweet.write%20like.write%20list.read%20list.write\
+             %20follows.read%20offline.access\
              &state=state-abc\
              &code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM\
              &code_challenge_method=S256"
@@ -233,6 +235,20 @@ mod tests {
     }
 
     #[test]
+    fn scopes_include_what_163s_list_sync_needs() {
+        // #163 mirrors the accounts this app follows into a List, which
+        // takes one scope per side: reading `GET /2/users/:id/following`
+        // needs `follows.read`, and adding or removing a member needs
+        // `list.write`. `list.read` (#161) covers only the reads.
+        for required in ["follows.read", "list.write"] {
+            assert!(
+                SCOPES.split_whitespace().any(|scope| scope == required),
+                "SCOPES must request {required}"
+            );
+        }
+    }
+
+    #[test]
     fn scopes_include_what_161s_list_timeline_needs() {
         // #161: `GET /2/lists/:id/tweets` requires `list.read`. Split rather
         // than substring-matched for the same reason as the checks around it.
@@ -243,14 +259,18 @@ mod tests {
     }
 
     #[test]
-    fn scopes_leave_out_write_access_nothing_uses_yet() {
-        // Creating a List is #163. Until something calls it, requesting
-        // `list.write` would ask the user to grant what the app cannot use —
-        // the same reason #7 left `tweet.write` and `like.write` out.
-        assert!(
-            !SCOPES.split_whitespace().any(|scope| scope == "list.write"),
-            "SCOPES must not request list.write until #163 needs it"
-        );
+    fn scopes_leave_out_access_nothing_uses_yet() {
+        // The rule this pins is #7's: never ask for what the app cannot
+        // use. `list.write` and `follows.read` left this list when #163
+        // gave them a caller; these three still have none, so requesting
+        // them would put capabilities on the consent screen that no code
+        // reaches.
+        for unused in ["bookmark.read", "like.read", "mute.read"] {
+            assert!(
+                !SCOPES.split_whitespace().any(|scope| scope == unused),
+                "SCOPES must not request {unused} until something needs it"
+            );
+        }
     }
 
     #[test]

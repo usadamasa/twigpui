@@ -50,8 +50,16 @@ src/oauth/mod.rs	300
 src/oauth/pkce.rs	150
 src/oauth/tokens.rs	200
 src/paths.rs	300
-src/rate_limit.rs	350
+# rate_limit.rs 350 -> 400: four `Endpoint` variants for #163's sync,
+# each with the doc explaining why it needs its own bucket.
+src/rate_limit.rs	400
 src/repost.rs	150
+# sync/ is new in #163, split the way `cache` is: mod.rs holds the pure
+# diff, the plan file and the report (where the tests are), run.rs holds
+# the paged reads, the apply loop and the CLI entry point (where the
+# spending is).
+src/sync/mod.rs	250
+src/sync/run.rs	300
 src/theme.rs	350
 src/thread.rs	100
 src/toggle.rs	200
@@ -65,6 +73,12 @@ src/ui/render.rs	1050
 src/usage.rs	350
 # x_api/client.rs 750 -> 800: `list_timeline` and `list_timeline_url`,
 # carrying the doc comment that explains why neither takes a `since_id`.
-src/x_api/client.rs	800
+# x_api/client.rs 800 -> 1000: #163's four endpoints, their URL builders,
+# the shared user-page parser, and the POST body sender for the one write
+# whose body is a `user_id`. The bulk is doc comments marking which parts
+# are spec-derived and unverified — this PR spent no requests.
+src/x_api/client.rs	1000
 src/x_api/mod.rs	50
-src/x_api/model.rs	750
+# x_api/model.rs 750 -> 800: `UserIdRequest` and `UserPageResponse` for
+# #163's reads and writes.
+src/x_api/model.rs	800
