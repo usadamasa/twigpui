@@ -37,6 +37,7 @@ use reload_policy::{
     preserved_scroll_target, reload_failure_outcome, reload_gate, reload_outcome_label,
     reload_start_state,
 };
+use render::Addressable as _;
 use render::{
     AVATAR_SIZE, MAX_RENDERED_MEDIA, MEDIA_CELL_HEIGHT, author_link, avatar_placeholder, byline,
     compose_error_message, format_timestamp, header_title, like_row, link_row, media_badge,
@@ -735,7 +736,7 @@ impl TimelineView {
         };
 
         let mut cell = div()
-            .id(SharedString::from(format!("media-{}", media.url)))
+            .addressable(format!("media-{}", media.url))
             .flex()
             .flex_col()
             .gap_1()
@@ -808,7 +809,7 @@ impl TimelineView {
                 .gap_3()
                 .child(
                     div()
-                        .id(SharedString::from(format!("delete-confirm-{}", item.id)))
+                        .addressable(format!("delete-confirm-{}", item.id))
                         .text_color(rgb(theme.danger))
                         .child("Delete permanently")
                         .on_click(cx.listener(move |this, _event, _window, cx| {
@@ -817,7 +818,7 @@ impl TimelineView {
                 )
                 .child(
                     div()
-                        .id(SharedString::from(format!("delete-cancel-{}", item.id)))
+                        .addressable(format!("delete-cancel-{}", item.id))
                         .text_color(rgb(theme.text_muted))
                         .child("Cancel")
                         .on_click(cx.listener(|this, _event, _window, cx| {
@@ -828,7 +829,7 @@ impl TimelineView {
             let ask_id = item.id.clone();
             div().child(
                 div()
-                    .id(SharedString::from(format!("delete-{}", item.id)))
+                    .addressable(format!("delete-{}", item.id))
                     .text_color(rgb(theme.text_muted))
                     .child("Delete")
                     .on_click(cx.listener(move |this, _event, _window, cx| {
@@ -921,7 +922,7 @@ impl TimelineView {
             .child(quote_card(&target.quoted, theme, None))
             .child(
                 div()
-                    .id("compose-remove-quote")
+                    .addressable("compose-remove-quote")
                     .text_color(rgb(theme.accent))
                     .child("Remove quote")
                     .on_click(cx.listener(|this, _event, _window, cx| {
@@ -956,7 +957,7 @@ impl TimelineView {
             .child(quote_card(&target.replying_to, theme, None))
             .child(
                 div()
-                    .id("compose-remove-reply")
+                    .addressable("compose-remove-reply")
                     .text_color(rgb(theme.accent))
                     .child("Remove reply")
                     .on_click(cx.listener(|this, _event, _window, cx| {
@@ -1038,7 +1039,7 @@ impl TimelineView {
                         )
                         .child(
                             div()
-                                .id("compose-submit")
+                                .addressable("compose-submit")
                                 .px_2()
                                 .py_1()
                                 .rounded(theme::RADIUS_CONTROL)
@@ -1188,7 +1189,7 @@ impl TimelineView {
 
         match action {
             PrimaryAction::Reload => div()
-                .id("primary-action")
+                .addressable("primary-action")
                 .p_1()
                 .rounded(theme::RADIUS_CONTROL)
                 .child(
@@ -1204,7 +1205,7 @@ impl TimelineView {
                 .on_click(on_click)
                 .into_any_element(),
             PrimaryAction::SignIn => div()
-                .id("primary-action")
+                .addressable("primary-action")
                 .px_2()
                 .py_1()
                 .rounded(theme::RADIUS_CONTROL)
@@ -1269,6 +1270,7 @@ impl TimelineView {
             .text_size(theme::TEXT_META)
             .child(
                 div()
+                    .addressable("status-usage")
                     .text_color(rgb(usage_color(usage_status, theme)))
                     .child(usage_text),
             )
@@ -1286,7 +1288,18 @@ impl TimelineView {
             // render touching, as "11 reqList sync". Raising the gap to
             // `gap_8` changes nothing, so the spacing has to come from
             // somewhere that demonstrably works here.
-            .child(div().ml(theme::ROW_PAD_X).child(self.sync_segment(cx)))
+            //
+            // #184: the margin is now under a test. Both segments are
+            // named, so a window test can read their laid-out bounds back
+            // and require that they do not touch — which is the whole
+            // defect, and which nothing but a screenshot could catch when
+            // this comment was written.
+            .child(
+                div()
+                    .addressable("status-sync")
+                    .ml(theme::ROW_PAD_X)
+                    .child(self.sync_segment(cx)),
+            )
             .when_some(kept, |bar, kept| {
                 bar.child(
                     div()
@@ -1564,7 +1577,7 @@ impl TimelineView {
         // `overflow_y_scroll` lives on StatefulInteractiveElement, so the
         // element needs an id before it can scroll.
         let content = div()
-            .id("timeline")
+            .addressable("timeline")
             .flex()
             .flex_col()
             .flex_1()
@@ -1635,7 +1648,7 @@ impl TimelineView {
 /// via `cache::splice`, never merged ahead like a normal reload.
 fn load_older_row(theme: Theme, cx: &mut Context<'_, TimelineView>) -> impl IntoElement {
     div()
-        .id("load-older")
+        .addressable("load-older")
         .px_4()
         .py_3()
         .text_color(rgb(theme.accent))
@@ -3264,8 +3277,9 @@ mod tests {
     /// The gap this closes is a real one: the bar and its `cmd-shift-r`
     /// binding could not be exercised by hand from a session with no way
     /// to click a desktop window, so until #146 the whole click path was
-    /// unverified. `dispatch_action` is the sanctioned equivalent — it
-    /// goes through the same `on_action` registration a keystroke does.
+    /// unverified. `dispatch_action` covers it from `on_action` down — it
+    /// goes through the same registration a keystroke does. The step above
+    /// that, whether a coordinate lands on the bar, is #184's test below.
     #[gpui::test]
     fn showing_new_posts_moves_them_onto_the_timeline(cx: &mut gpui::TestAppContext) {
         use gpui::AppContext as _;
@@ -3288,6 +3302,125 @@ mod tests {
                 );
             });
         });
+    }
+
+    /// #184: the same reveal, reached by a click on the bar itself.
+    ///
+    /// This is the layer above #183. The test above dispatches the action
+    /// directly, which leaves one step unverified: whether a mouse at some
+    /// coordinate lands on the bar at all. Here nothing is dispatched — the
+    /// bar's own bounds are looked up from the frame that was just drawn,
+    /// a click is simulated at their centre, and gpui's hit test is what
+    /// has to find `on_click`. The assertions are deliberately identical
+    /// to the dispatch test's, so a pass means the two paths agree.
+    ///
+    /// The coordinate is never written down. `render::Addressable` gives
+    /// the bar one name, `debug_bounds` reads back where that name was
+    /// actually laid out, and the click follows — so moving the bar in
+    /// `render.rs` moves the click with it.
+    #[gpui::test]
+    fn clicking_the_new_posts_bar_moves_them_onto_the_timeline(cx: &mut gpui::TestAppContext) {
+        let (window, timeline) = fixture_window(cx, fixture_with(&["2", "1"], &["4", "3"]));
+
+        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let bar = visual
+            .debug_bounds("new-posts")
+            .expect("the bar has to be laid out before a click can reach it");
+        visual.simulate_click(bar.center(), gpui::Modifiers::none());
+
+        cx.update(|cx| {
+            timeline.update(cx, |view, _cx| {
+                assert_eq!(shown_ids(view), ["4", "3", "2", "1"]);
+                assert!(
+                    view.pending.is_none(),
+                    "the buffer must be emptied, or the bar keeps offering posts already shown"
+                );
+            });
+        });
+    }
+
+    /// #184: what makes the test above mean anything.
+    ///
+    /// A simulated click that reached `on_click` no matter where it
+    /// landed would pass the previous test while proving nothing about
+    /// the hit test. This clicks the middle of the timeline instead —
+    /// below the bar and clear of every row, since a fixture's two posts
+    /// sit at the top — and requires the buffer to still be waiting.
+    /// Together the pair says the coordinate is what decides, which is
+    /// the step #183's `dispatch_action` skips.
+    ///
+    /// The miss is addressed the same way the hit is, rather than by
+    /// offsetting the bar's centre by some number of pixels: a literal
+    /// offset is a coordinate written down, and it would start landing on
+    /// the bar again the moment the window or the bar changed height.
+    #[gpui::test]
+    fn clicking_the_timeline_below_the_bar_reveals_nothing(cx: &mut gpui::TestAppContext) {
+        let (window, timeline) = fixture_window(cx, fixture_with(&["2", "1"], &["4", "3"]));
+
+        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let body = visual
+            .debug_bounds("timeline")
+            .expect("the timeline has to be laid out before a click can land in it");
+        visual.simulate_click(body.center(), gpui::Modifiers::none());
+
+        cx.update(|cx| {
+            timeline.update(cx, |view, _cx| {
+                assert_eq!(shown_ids(view), ["2", "1"]);
+                assert_eq!(
+                    view.pending.as_ref().map(|pending| pending.count),
+                    Some(2),
+                    "a click outside the bar must leave the offer standing"
+                );
+            });
+        });
+    }
+
+    /// #182, retroactively: the status bar's two segments do not touch.
+    ///
+    /// This is the test #182 was merged without. `Total: 11 req` and
+    /// `List sync: …` rendered as `11 reqList sync` — the row's `gap_3`
+    /// does not separate two bare text spans, and raising it to `gap_8`
+    /// changed nothing, so the fix was an explicit margin. A screenshot
+    /// was the only way to see either the defect or the fix.
+    ///
+    /// It was not the only way. Layout runs under the test platform;
+    /// what `TestWindow::draw` skips is turning a `Scene` into pixels.
+    /// So the laid-out bounds are real, and a spacing this test can read
+    /// is a spacing an assertion can hold (#184). Deliberately `>`, not a
+    /// specific gap: the defect was the two boxes meeting, and pinning
+    /// the exact margin would make every deliberate spacing change a test
+    /// failure.
+    #[gpui::test]
+    fn the_status_bars_segments_keep_apart(cx: &mut gpui::TestAppContext) {
+        let (window, _timeline) = fixture_window(cx, fixture_with(&["2", "1"], &[]));
+
+        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let usage = visual
+            .debug_bounds("status-usage")
+            .expect("the request count is always shown");
+        let sync = visual
+            .debug_bounds("status-sync")
+            .expect("the sync segment is always shown");
+
+        assert!(
+            sync.left() > usage.right(),
+            "the two segments run together, which reads as `11 reqList sync` \
+             on screen: usage ends at {:?}, sync starts at {:?}",
+            usage.right(),
+            sync.left()
+        );
     }
 
     /// #21: pressing it again changes nothing.

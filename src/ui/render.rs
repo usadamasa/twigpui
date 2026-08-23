@@ -12,6 +12,43 @@
 
 use super::*;
 
+/// Gives one element a single name that both gpui and a test can use.
+///
+/// This is *test* addressability, not accessibility. gpui 0.2.2 ships no
+/// accessibility tree at all — no AccessKit, no roles, no way to ask a
+/// window where the button called X is — so nothing here reaches a screen
+/// reader, and calling it an ARIA equivalent would overstate it by a long
+/// way.
+///
+/// What the crate does have is `debug_selector`, which records where an
+/// element was actually laid out under a name a test can look up
+/// ([`gpui::VisualTestContext::debug_bounds`]), and which compiles to
+/// nothing outside `cargo test`. Every interactive element in this module
+/// already carries a unique `.id(..)`; without this trait, naming one for
+/// a test means writing that string a second time, and two names for one
+/// element drift apart the first time either is edited. `addressable`
+/// writes it once.
+///
+/// The point of having the bounds at all is #184: a test can click their
+/// centre, which puts gpui's hit test — the one step `dispatch_action`
+/// skips — under assertion, without a coordinate written down anywhere.
+pub(super) trait Addressable: InteractiveElement + Sized {
+    /// Names this element for gpui's interactivity and for a test lookup.
+    fn addressable(self, name: impl Into<SharedString>) -> gpui::Stateful<Self> {
+        let name = name.into();
+        // Selector first: it returns `Self`, while `id` consumes into
+        // `Stateful`. Both write the same `Interactivity`, so the order
+        // changes nothing else.
+        self.debug_selector({
+            let name = name.clone();
+            move || name.to_string()
+        })
+        .id(gpui::ElementId::Name(name))
+    }
+}
+
+impl<E: InteractiveElement> Addressable for E {}
+
 /// An outlined pill in the header that starts the sign-in flow.
 ///
 /// #31 (upgrade away from the app-only bearer token) and #14 (the session
@@ -25,7 +62,7 @@ pub(super) fn sign_in_pill(
     cx: &mut Context<'_, TimelineView>,
 ) -> impl IntoElement {
     div()
-        .id(id)
+        .addressable(id)
         .px_2()
         .py_1()
         .rounded(theme::RADIUS_CONTROL)
@@ -112,7 +149,7 @@ pub(super) fn new_posts_bar(
     cx: &mut Context<'_, TimelineView>,
 ) -> impl IntoElement {
     div()
-        .id("new-posts")
+        .addressable("new-posts")
         .px_4()
         .py_2()
         .bg(rgb(theme.bg_header))
@@ -223,7 +260,7 @@ pub(super) fn thread_toggle_row(
     cx: &mut Context<'_, TimelineView>,
 ) -> impl IntoElement {
     div()
-        .id(SharedString::from(format!("show-thread-{reply_post_id}")))
+        .addressable(format!("show-thread-{reply_post_id}"))
         .text_color(rgb(theme.accent))
         .child(label.to_string())
         .on_click(cx.listener(move |this, _event, _window, cx| {
@@ -426,7 +463,7 @@ pub(super) fn repost_row(
     };
 
     let toggle = div()
-        .id(SharedString::from(format!("repost-{row_id}")))
+        .addressable(format!("repost-{row_id}"))
         .text_color(rgb(color))
         .child(label)
         .when(state.can_toggle(), |element| {
@@ -486,7 +523,7 @@ pub(super) fn like_row(
     };
 
     let toggle = div()
-        .id(SharedString::from(format!("like-{row_id}")))
+        .addressable(format!("like-{row_id}"))
         .text_color(rgb(color))
         .child(label)
         .when(state.can_toggle(), |element| {
@@ -558,7 +595,7 @@ pub(super) fn author_link(
 
     match profile_url(&item.author_username) {
         Some(url) => name
-            .id(SharedString::from(format!("profile-{}", item.id)))
+            .addressable(format!("profile-{}", item.id))
             .text_color(rgb(theme.accent))
             .on_click(cx.listener(move |this, _event, _window, cx| {
                 this.open_in_browser(url.clone(), cx);
@@ -580,7 +617,7 @@ pub(super) fn open_post_link(
     // the row displays, and x.com would only redirect there anyway.
     let url = post_permalink(&item.author_username, action_post_id(item));
     div()
-        .id(SharedString::from(format!("open-{}", item.id)))
+        .addressable(format!("open-{}", item.id))
         .text_color(rgb(theme.text_muted))
         .child("Open in X")
         .on_click(cx.listener(move |this, _event, _window, cx| {
@@ -609,7 +646,7 @@ pub(super) fn link_row(
         let url = link.url.clone();
         row = row.child(
             div()
-                .id(SharedString::from(format!("link-{url}")))
+                .addressable(format!("link-{url}"))
                 .text_color(rgb(theme.accent))
                 .child(link.label.clone())
                 .on_click(cx.listener(move |this, _event, _window, cx| {
@@ -644,7 +681,7 @@ pub(super) fn reply_row(
     };
 
     div()
-        .id(SharedString::from(format!("reply-{}", item.id)))
+        .addressable(format!("reply-{}", item.id))
         .text_color(rgb(theme.text_muted))
         .child("Reply")
         .on_click(cx.listener(move |this, _event, _window, cx| {
@@ -740,7 +777,7 @@ pub(super) fn quote_row(
     };
 
     div()
-        .id(SharedString::from(format!("quote-{}", item.id)))
+        .addressable(format!("quote-{}", item.id))
         .text_color(rgb(theme.text_muted))
         .child("Quote")
         .on_click(cx.listener(move |this, _event, _window, cx| {

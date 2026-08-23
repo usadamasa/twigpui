@@ -145,7 +145,13 @@ src/ui/auto_refresh.rs	400
 src/ui/list_sync.rs	650
 # ui/render.rs 1050 -> 1100: #21's `new_posts_bar`, the one element in the
 # banner column that is a button rather than a report.
-src/ui/render.rs	1100
+#
+# 1100 -> 1150: #184's `Addressable`. Four implementation lines — a trait
+# with one defaulted method and a blanket impl — carrying the doc comment
+# that says why gpui's `.id(..)` and `debug_selector` have to be the same
+# string. It is what lets a test click an element by name instead of by a
+# coordinate, and it is line-neutral at every call site it replaces.
+src/ui/render.rs	1150
 # New in #137, which asked whether to split `impl TimelineView` and where.
 # This is its option (b): every method holding a `cx.spawn`. Large, and
 # deliberately so — the seam is "this is where the money goes", and a

@@ -74,9 +74,13 @@ cargo test
   ときは `x-api-endpoints` スキルに従う。
 - **テストはネットワークを叩かない**: パースとエラー変換をフィクスチャ JSON で検証する。
   テストが課金を発生させないことを保ちつづける。
-- **見た目は手元で見る**: gpui はテストプラットフォームでレイアウトを走らせないので、
-  寸法も折り返しもコードから assert できない。`cargo run -- --fixture` で課金なしの
-  決定的な画面を出して撮る。手順は `fixture-visual-check` スキルに従う。
+- **寸法は assert できる。色と字面は撮って見る**: テストプラットフォームでも
+  レイアウトは走る (#184 で実測)。要素に `render::Addressable` で名前を付ければ
+  `debug_bounds` が実際の bounds を返すので、間隔・位置・重なりはテストで押さえられる。
+  `VisualTestContext::simulate_click` は hit test も通るため、クリックの経路も書ける。
+  一方で色・フォント・字の詰まり方は `Scene` から先の話で、テストからは見えない。
+  そちらは `cargo run -- --fixture` で課金なしの決定的な画面を出して撮る。
+  手順は `fixture-visual-check` スキルに従う。
 - **dev と本番は別インストール**: debug ビルド (`cargo run`) は `twigpui-dev` の
   XDG ディレクトリと callback port 8734、release ビルドは `twigpui` と 8733 を使う
   (`src/profile.rs`)。ディレクトリ名・ポート・ウィンドウタイトルを足したり変えたり
