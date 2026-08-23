@@ -106,5 +106,10 @@
       "author_name": "Fresh Arrival",
       "author_username": "freshly"
     }
+  ],
+  "lists": [
+    { "id": "9100000000000000001", "name": "Following mirror" },
+    { "id": "9100000000000000002", "name": "Rust" },
+    { "id": "9100000000000000003", "name": "" }
   ]
 }
