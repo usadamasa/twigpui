@@ -63,6 +63,11 @@ cargo test
 - **ファイルサイズは CI が落とす**: `scripts/code-metrics.sh --check` が
   `metrics-baseline.tsv` の天井と突き合わせる。新規ファイルは先に登録しないと落ちる。
   天井の上げ下げは `code-metrics-ratchet` スキルに従う。
+- **カバレッジは報告のみ、閾値は無い**: `scripts/coverage.sh` が実装だけの
+  カバレッジを出す (テストは同じファイルの `#[cfg(test)]` にあるので、素の
+  `cargo llvm-cov` の数字は 25 ポイント以上ふくらむ)。CI の Coverage ジョブは
+  必須チェックではない。穴の読み方と、埋める価値のある穴の選び方は
+  `coverage-gaps` スキルに従う。**数字を上げるためのテストは書かない。**
 - **課金に直結する API**: X API はプリペイド残高からの従量課金。呼び出しを足す・
   取得件数 (`max_results`) を変える・頻度を変える・キャッシュを触るときは
   `x-api-budget` スキルに従う。

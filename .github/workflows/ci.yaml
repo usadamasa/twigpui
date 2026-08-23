@@ -48,6 +48,73 @@ jobs:
       - name: Run tests
         run: cargo test --locked --all-targets
 
+  # Report-only, and deliberately absent from `ci-status-check`'s `needs`:
+  # it cannot block a merge. `metrics-baseline.tsv` explains the rule — a
+  # check that fails from day one gets disabled instead of fixed — and a
+  # coverage floor has a second problem the file-size ratchet does not.
+  # This app's untestable surface is real and documented (#115: menus, and
+  # everything past the `Scene`), so a PR that adds rendering code lowers
+  # the percentage through no fault of its own. The numbers come first; a
+  # ratchet can follow once there are some, exactly as #48 was phased.
+  coverage:
+    name: Coverage
+    runs-on: macos-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c  # stable
+        with:
+          components: llvm-tools-preview
+
+      # No `rust-cache` here, on purpose. An instrumented build uses its own
+      # target directory (2.4 GB locally), and this repository's Actions
+      # cache already sits at 9 GB against GitHub's 10 GB limit — caching
+      # this would evict the Test and Lint caches and make *those* jobs
+      # slower to speed up a report. A cold instrumented build is ~1m40s
+      # locally; the runner is the slower machine but this job blocks
+      # nothing.
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@6cd13508893c0e7eab5f273c2575d3859bd7229a  # v2.86.6
+        with:
+          tool: cargo-llvm-cov
+
+      - name: Report coverage
+        run: bash scripts/coverage.sh >> "$GITHUB_STEP_SUMMARY"
+
+      # The measurement above is reused rather than re-run: `coverage.sh`
+      # leaves the profile in place and `COVERAGE_REUSE` skips straight to
+      # the report, so the uncovered list costs no second build.
+      - name: List uncovered functions
+        env:
+          COVERAGE_REUSE: "1"
+        run: |
+          {
+            printf '\n<details><summary>Uncovered functions</summary>\n\n```\n'
+            bash scripts/coverage.sh --gaps
+            printf '```\n\n</details>\n'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # lcov as well as the json the script reads, so that pointing this at
+      # Codecov or anything else later needs no change here. Both come from
+      # the profile already on disk.
+      - name: Export lcov
+        env:
+          COVERAGE_REUSE: "1"
+        run: cargo llvm-cov report --lcov --output-path tmp/coverage/lcov.info
+
+      - name: Upload coverage data
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: coverage
+          path: |
+            tmp/coverage/lcov.info
+            tmp/coverage/llvm-cov.json
+          retention-days: 14
+
   lint:
     name: Lint
     runs-on: macos-latest
