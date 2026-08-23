@@ -18,6 +18,7 @@ use crate::fixture::Fixture;
 use crate::image_cache;
 use crate::like;
 use crate::log;
+mod auto_refresh;
 mod reload_policy;
 mod render;
 
@@ -27,6 +28,7 @@ mod render;
 // `pub(crate)` merely to be reachable from the file next door. Widening
 // them would mean "anything in the crate may touch this", which is the
 // opposite of what splitting the file was for.
+use auto_refresh::{Pending, pending_after_poll, pending_label};
 use reload_policy::{
     CooldownTick, at_the_post_cap, cooldown_label, cooldown_tick, newly_arrived, offers_load_older,
     preserved_scroll_target, reload_failure_outcome, reload_gate, reload_outcome_label,
@@ -35,16 +37,17 @@ use reload_policy::{
 use render::{
     AVATAR_SIZE, MAX_RENDERED_MEDIA, MEDIA_CELL_HEIGHT, author_link, avatar_placeholder, byline,
     compose_error_message, format_timestamp, header_title, like_row, link_row, media_badge,
-    media_columns, notice, offers_delete, offers_like, offers_quote, offers_reauthorize,
-    offers_reply, offers_repost, open_post_link, quote_card, quote_row, reload_notice_banner,
-    render_thread_chain, reply_banner_label, reply_row, reply_target_label, repost_banner_label,
-    repost_row, session_notice_banner, sign_in_pill, tab_bar, tab_label, thread_action_label,
-    thread_toggle_row, usage_color, usage_label, with_count,
+    media_columns, new_posts_bar, notice, offers_delete, offers_like, offers_quote,
+    offers_reauthorize, offers_reply, offers_repost, open_post_link, quote_card, quote_row,
+    reload_notice_banner, render_thread_chain, reply_banner_label, reply_row, reply_target_label,
+    repost_banner_label, repost_row, session_notice_banner, sign_in_pill, tab_bar, tab_label,
+    thread_action_label, thread_toggle_row, usage_color, usage_label, with_count,
 };
 use render::{RowCounts, row_counts};
 
 use crate::menu::{
-    BlurComposer, CloseWindow, FocusComposer, KEY_CONTEXT, Minimize, Reload, ScrollToTop, ShowAbout,
+    BlurComposer, CloseWindow, FocusComposer, KEY_CONTEXT, Minimize, Reload, ScrollToTop,
+    ShowAbout, ShowNewPosts,
 };
 use crate::oauth;
 use crate::paths::Paths;
@@ -377,6 +380,33 @@ pub(crate) struct TimelineView {
     /// there is never more than one of them working the same plan file,
     /// and the last one retires with the window.
     auto_sync: Option<Task<()>>,
+    /// Holds the auto-refresh loop alive (#21) — the timer that polls the
+    /// timeline for new posts while the window is open. Its own slot
+    /// rather than `fetch`'s, deliberately: assigning `fetch` from here
+    /// would cancel whatever reload the reader had just started, and the
+    /// two are not alternatives. Same cancel-on-drop contract as
+    /// `auto_sync`, and never spawned at all when `config.auto_refresh` is
+    /// off — see [`Self::start_auto_refresh`], which is what makes #21's
+    /// "switch it off and the app sends nothing" a guarantee rather than a
+    /// tendency.
+    auto_refresh: Option<Task<()>>,
+    /// What the most recent poll fetched, held back from the screen until
+    /// the reader asks for it (#21) — see [`Pending`] and
+    /// [`pending_after_poll`].
+    ///
+    /// The whole reason auto-refresh does not simply replace `state`: a
+    /// fetch nobody asked for must not move the text under a reader's
+    /// eyes. `keep_the_reader_in_place` compensates the scroll for a
+    /// reload they pressed, which is a different situation — they are
+    /// expecting the list to change. Here nothing changes until the pill
+    /// is pressed.
+    ///
+    /// `None` whenever there is nothing waiting: no poll has landed, the
+    /// last one brought nothing new, or something has since replaced the
+    /// timeline from a fresher source — see [`Self::clear_pending`] for
+    /// which paths do that and why a stale buffer is not merely useless
+    /// but wrong.
+    pending: Option<Pending>,
     /// Every post id this app has reposted, per the local record (#15) —
     /// refreshed from disk whenever the visible timeline changes (see
     /// [`Self::refresh_reposted_ids`]). The default source for
@@ -524,6 +554,8 @@ impl TimelineView {
             usage_totals: usage::Totals::default(),
             usage_refresh: None,
             auto_sync: None,
+            auto_refresh: None,
+            pending: None,
             reposted_ids: HashSet::new(),
             reposted_ids_refresh: None,
             repost_overrides: HashMap::new(),
@@ -583,6 +615,27 @@ impl TimelineView {
         self.home_user_id = Some(fixture.signed_in_as.id);
         self.home_username = Some(fixture.signed_in_as.username);
         self.state = TimelineState::Loaded(fixture.items);
+        // #21: built the same way a real poll's buffer is, from the same
+        // pure function — the fixture supplies the posts, not the count,
+        // so the bar cannot say something a poll could not. `pending`
+        // holds the whole list it would display, which is the fixture's
+        // unseen posts followed by the ones already on screen.
+        if !fixture.pending.is_empty() {
+            let displayed: Vec<&str> = match &self.state {
+                TimelineState::Loaded(items) => items.iter().map(|item| item.id.as_str()).collect(),
+                _ => Vec::new(),
+            };
+            let combined: Vec<TimelineItem> = fixture
+                .pending
+                .iter()
+                .cloned()
+                .chain(match &self.state {
+                    TimelineState::Loaded(items) => items.clone(),
+                    _ => Vec::new(),
+                })
+                .collect();
+            self.pending = pending_after_poll(&displayed, combined);
+        }
         // Avatars and attached images still download, from `pbs.twimg.com`
         // rather than the API — no quota, no credits (see `avatar`). A
         // fixture whose URLs are unreachable renders the same frames it
@@ -669,6 +722,14 @@ impl TimelineView {
                             // Same reasoning as `SingleUser` above.
                             None => this.reload(ReloadTrigger::Polling, cx),
                         }
+                        // #21: after the `cached` match, never before it.
+                        // The miss arm calls `reload`, which sets
+                        // `last_reload_at` — the anchor the first poll is
+                        // measured from. Started first, the loop would
+                        // anchor on the window opening instead and buy a
+                        // poll an interval after a fetch that had only
+                        // just landed.
+                        this.start_auto_refresh(cx);
                     }
                     Err(error) => {
                         this.state = TimelineState::Failed(format!("{error:#}").into());
@@ -788,6 +849,11 @@ impl TimelineView {
                         this.reload_notice = Some(ReloadNotice::Outcome(outcome.into()));
                         // Same reasoning as the single-user branch above.
                         this.cooldown_ticker = None;
+                        // #21: this fetch is strictly fresher than
+                        // whatever a poll buffered, and it has already put
+                        // the new posts on screen — so the pill would be
+                        // offering posts that are visible behind it.
+                        this.clear_pending();
                     }
                     Err(error) => this.apply_reload_failure(&error, cx),
                 }
@@ -992,6 +1058,10 @@ impl TimelineView {
                         this.reload_notice = None;
                         // Same reasoning as `reload`'s success branches above.
                         this.cooldown_ticker = None;
+                        // #21: a buffer fetched before this page was
+                        // appended does not contain it, so applying one
+                        // afterwards would silently undo the click.
+                        this.clear_pending();
                     }
                     Err(error) => this.apply_reload_failure(&error, cx),
                 }
@@ -1647,6 +1717,11 @@ impl TimelineView {
                     Ok(remaining) => {
                         this.delete_failures.remove(&post_id);
                         this.state = TimelineState::Loaded(remaining);
+                        // #21: a buffer fetched before the delete still
+                        // holds the deleted post. Applying one afterwards
+                        // would put it back on screen — the exact failure
+                        // #72 rewrites the cache file to prevent.
+                        this.clear_pending();
                     }
                     Err(error) => {
                         this.delete_failures
@@ -1887,6 +1962,15 @@ impl TimelineView {
                     // without this the sync would stay off until the app
                     // was restarted.
                     this.start_auto_sync(cx);
+                    // #21: the other place auto-refresh can start, for the
+                    // same reason — until this point there was no client
+                    // for a poll to fetch with. Started before the reload
+                    // below, whose own `last_reload_at` is then what the
+                    // first poll anchors on.
+                    this.start_auto_refresh(cx);
+                    // #21: a session change is a fresher source than
+                    // anything a poll left buffered — see `clear_pending`.
+                    this.clear_pending();
                     // #57: confirms what the user just did — must not wait
                     // out #10's interval, which exists to suppress polling,
                     // not to gate a direct response to a user action.
@@ -2804,6 +2888,12 @@ impl Render for TimelineView {
                     cx,
                 ));
             }))
+            .on_action(cx.listener(|this, _: &ShowNewPosts, _window, cx| {
+                // #21: the bar's click handler, reached by keyboard. Free
+                // — it shows a fetch the timer already paid for, and does
+                // nothing at all when there is none.
+                this.apply_pending(cx);
+            }))
             .on_action(cx.listener(|this, _: &ScrollToTop, _window, cx| {
                 // #22: purely local — no request, no gate, nothing to
                 // report. `scroll_to_top_of_item(0)` rather than a pixel
@@ -2841,6 +2931,14 @@ impl Render for TimelineView {
             .when_some(self.reload_notice.clone(), |column, notice| {
                 column.child(reload_notice_banner(&notice, theme, oauth::unix_now()))
             })
+            // #21: what auto-refresh fetched and is holding back. Beside
+            // the banners rather than inside `body` for the same reason
+            // they are — see `new_posts_bar` — except that this one is the
+            // offer itself, not a report about one.
+            .when_some(
+                self.pending.as_ref().map(|pending| pending.count),
+                |column, count| column.child(new_posts_bar(count, theme, cx)),
+            )
             // #70: a link that failed to open. Same banner treatment as the
             // two above, for the same reason: a click that appears to do
             // nothing is the outcome worth ruling out, and the timeline
@@ -4217,6 +4315,9 @@ mod tests {
             // background loop is not part of what they are checking.
             auto_sync_list: false,
             sync_interval_seconds: 21_600,
+            // Off for the same reason (#21).
+            auto_refresh: false,
+            auto_refresh_interval_seconds: 300,
         }
     }
 
@@ -4250,6 +4351,9 @@ mod tests {
             // background loop is not part of what they are checking.
             auto_sync_list: false,
             sync_interval_seconds: 21_600,
+            // Off for the same reason (#21).
+            auto_refresh: false,
+            auto_refresh_interval_seconds: 300,
         };
 
         cx.update(gpui_component::init);

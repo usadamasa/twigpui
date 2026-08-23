@@ -293,6 +293,8 @@ mod tests {
             list_id: None,
             auto_sync_list: false,
             sync_interval_seconds: 21_600,
+            auto_refresh: false,
+            auto_refresh_interval_seconds: 300,
         }
     }
 

@@ -90,5 +90,21 @@
       "author_name": "",
       "author_username": ""
     }
+  ],
+  "pending": [
+    {
+      "id": "9000000000000000101",
+      "text": "A post auto-refresh fetched while nobody was looking. It is not in the timeline below, and pressing the bar is what puts it there (#21).",
+      "created_at": "2026-08-22T09:55:00.000Z",
+      "author_name": "Fresh Arrival",
+      "author_username": "freshly"
+    },
+    {
+      "id": "9000000000000000102",
+      "text": "The second of them, so the bar has to say \"2 new posts\" rather than the singular (#21).",
+      "created_at": "2026-08-22T09:50:00.000Z",
+      "author_name": "Fresh Arrival",
+      "author_username": "freshly"
+    }
   ]
 }

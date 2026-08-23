@@ -92,6 +92,37 @@ pub(super) fn reload_notice_banner(
         .child(message)
 }
 
+/// The "N new posts" bar auto-refresh offers (#21).
+///
+/// A bar between the header and the timeline rather than a row inside it,
+/// which is the difference between an offer and an interruption. Inside
+/// the scrolling list it would sit at the very top — out of sight for
+/// anyone scrolled down, which is precisely the reader auto-refresh exists
+/// for. Here it stays put, next to the two banners above it, and the
+/// timeline underneath does not move at all until it is pressed.
+///
+/// Painted in `accent` on the header's own background, unlike its two
+/// neighbours: `session_notice_banner` and `reload_notice_banner` report
+/// something that happened, and this is the one strip in the column that
+/// is a button. The upward arrow says which direction pressing it goes,
+/// since it also takes the reader back to the top.
+pub(super) fn new_posts_bar(
+    count: usize,
+    theme: Theme,
+    cx: &mut Context<'_, TimelineView>,
+) -> impl IntoElement {
+    div()
+        .id("new-posts")
+        .px_4()
+        .py_2()
+        .bg(rgb(theme.bg_header))
+        .border_b_1()
+        .border_color(rgb(theme.border))
+        .text_color(rgb(theme.accent))
+        .child(format!("↑ {}", pending_label(count)))
+        .on_click(cx.listener(|this, _event, _window, cx| this.apply_pending(cx)))
+}
+
 /// `@name`, or nothing at all when the author was missing from the expansion —
 /// a bare `@` would read as a broken row.
 pub(super) fn byline(author_username: &str) -> String {

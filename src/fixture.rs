@@ -45,6 +45,19 @@ pub(crate) struct Fixture {
     pub signed_in_as: FixtureUser,
     /// Newest first, as everywhere else in this crate.
     pub items: Vec<TimelineItem>,
+    /// Posts a poll has fetched but not yet shown (#21), newest first —
+    /// what the "N new posts" bar is offering.
+    ///
+    /// Real [`TimelineItem`]s rather than a bare count, for this module's
+    /// own rule: a fixture describes a timeline, never a widget. So the
+    /// bar counts these the way it counts a real poll's, and pressing it
+    /// prepends exactly these rows — the interaction is checkable, not
+    /// only its resting state.
+    ///
+    /// Empty (and absent from a fixture file) means no bar, which is every
+    /// fixture written before this field existed.
+    #[serde(default)]
+    pub pending: Vec<TimelineItem>,
 }
 
 /// Read and parse a fixture file.
@@ -107,6 +120,10 @@ mod tests {
         assert!(fixture.items[0].media.is_empty());
         assert!(fixture.items[0].quoted.is_none());
         assert!(fixture.items[0].author_avatar_url.is_none());
+        // #21's field is `#[serde(default)]` for the same reason: every
+        // fixture written before it existed must keep loading, and "no
+        // pending posts" is the right reading of its absence.
+        assert!(fixture.pending.is_empty());
 
         std::fs::remove_file(&path).unwrap();
     }
@@ -164,6 +181,22 @@ mod tests {
                 .any(|item| item.author_username == fixture.signed_in_as.username),
             "one of one's own posts, the only row offering Delete (#72)"
         );
+        assert!(
+            fixture.pending.len() > 1,
+            "posts waiting behind the new-posts bar, more than one so the \
+             plural wording is what gets drawn (#21)"
+        );
+        // The bar counts new arrivals against what is displayed, so a
+        // pending post that is already in `items` would be counted and
+        // then reveal nothing — a fixture that quietly stops showing what
+        // it was written to show.
+        for pending in &fixture.pending {
+            assert!(
+                !fixture.items.iter().any(|item| item.id == pending.id),
+                "pending post {} is already in the timeline (#21)",
+                pending.id
+            );
+        }
     }
 
     #[test]
