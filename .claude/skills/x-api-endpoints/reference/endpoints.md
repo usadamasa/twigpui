@@ -30,6 +30,13 @@ URL の組み立ては `src/x_api/client.rs` の各 builder が正本。
 | `CreateLike` | `POST /2/users/{id}/likes` | + `like.write` | 未計測 |
 | `DeleteLike` | `DELETE /2/users/{id}/likes/{tweet_id}` | + `like.write` | 未計測 |
 | `DeletePost` | `DELETE /2/tweets/{id}` | + `tweet.write` | 未計測 |
+| `OwnedLists` | `GET /2/users/{id}/owned_lists` | `tweet.read` `users.read` `list.read` | **15** |
+
+`OwnedLists` は 2026-08-24 にアプリのボタンから実測 (#164、2 リクエスト)。
+`max_results=100` で 13 本が 1 ページで返り、`data[]` の各要素は `id` と `name` だけ
+(`list.fields` 無しで `name` が付く — spec の既定フィールドどおり)。`next_token` 無し。
+上限 15 は他の読み取りより 1 桁小さいので、リフレッシュを連打すると先に枯れる。
+Lists read の resource 課金は Developer Console で未確認。
 
 書き込み系は実アカウントを変更するため意図的に計測していない。
 必要になったら投稿内容とクリーンアップをユーザーに確認してから撃つ。

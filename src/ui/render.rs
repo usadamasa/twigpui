@@ -811,6 +811,23 @@ pub(super) fn header_title(home_username: Option<&str>) -> String {
     }
 }
 
+/// [`header_title`] as the toolbar draws it (#95).
+///
+/// Carries its own left margin rather than relying on the toolbar row's
+/// `gap`: that gap leaves the title flush against whatever precedes it —
+/// the picker's trough, or #164's fetch button, which the first live
+/// window showed as `Load lists (1 request)@usadamasa`. #182 found the
+/// same thing in the status bar and fixed it the same way. Named so the
+/// window tests can measure the space.
+pub(super) fn header_title_element(home_username: Option<&str>, theme: Theme) -> impl IntoElement {
+    div()
+        .addressable("header-title")
+        .ml(theme::ROW_PAD_X)
+        .text_size(theme::TEXT_META)
+        .text_color(rgb(theme.text_tertiary))
+        .child(header_title(home_username))
+}
+
 /// The trough of the toolbar's timeline switcher (#95), shaped like a
 /// macOS segmented control: one track that [`tab_segment`]s sit in, the
 /// selected one lifted out of it in the window's own background color.
