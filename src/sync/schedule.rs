@@ -32,7 +32,10 @@ pub(crate) struct Situation {
     pub last_diff_at: Option<i64>,
     /// `config.sync_interval_seconds`.
     pub interval_seconds: u32,
-    /// Outstanding entries in the plan on file, both actions together.
+    /// Entries in the plan on file the loop may still send — [`sendable`],
+    /// not every unapplied entry. Removals #176 holds are left out; counted,
+    /// they would pin [`next_step`] on `Apply` draining a plan it never
+    /// finishes.
     pub pending: usize,
     /// When the tracked rate-limit window for a write endpoint reopens,
     /// from the [`crate::rate_limit::RateLimited`] that refused the last
@@ -96,7 +99,17 @@ pub(crate) enum Outcome {
     /// have it walk away from a plan a full diff was paid for.
     Idle { until: i64, pending: usize },
     /// Both sides were read and a fresh plan written.
-    Diffed { adds: usize, removals: usize },
+    ///
+    /// `held` is #176's verdict on the removals: `true` means they are
+    /// more of the list's `members_total` than `sync_prune_limit_percent`
+    /// allows, so the background sync will drain the additions and leave
+    /// the removals in the plan file for `--sync-list --apply --prune`.
+    Diffed {
+        adds: usize,
+        removals: usize,
+        members_total: usize,
+        held: bool,
+    },
     /// A batch of the plan's writes went out.
     Applied { sent: usize, remaining: usize },
     /// A write was refused by the tracked rate-limit window before it was
@@ -162,7 +175,26 @@ pub(crate) fn settle(outcome: Option<&Outcome>, now: i64, interval_seconds: u32)
 /// come back however many times it was dismissed.
 pub(crate) fn notice(outcome: &Outcome) -> Option<String> {
     match outcome {
-        Outcome::Diffed { adds, removals } if *adds > 0 || *removals > 0 => {
+        // Shown once per diff, not once per apply tick: the loop
+        // re-reaches a held plan on every batch of additions it drains,
+        // and a banner that came back with each would be the rate-limit
+        // problem below all over again.
+        Outcome::Diffed {
+            adds,
+            removals,
+            members_total,
+            held: true,
+        } => Some(format!(
+            "List sync: {adds} to add; {removals} of {members_total} members would be removed, \
+             which is over the background limit, so they are held. Run \
+             `twigpui --sync-list --apply --prune` to confirm them."
+        )),
+        Outcome::Diffed {
+            adds,
+            removals,
+            held: false,
+            ..
+        } if *adds > 0 || *removals > 0 => {
             Some(format!("List sync: {adds} to add, {removals} to remove."))
         }
         Outcome::Applied { sent, remaining: 0 } if *sent > 0 => {
@@ -256,6 +288,58 @@ pub(crate) fn next_batch(
     batch
 }
 
+/// Whether the background sync may send `plan`'s removals (#176).
+///
+/// The cap is a share of the list: removals go out when they would delete
+/// at most `limit_percent` of the `members_total` the plan was diffed
+/// against. It is for the failure `read_all`'s all-or-nothing rule cannot
+/// see — a follow read that comes back short *with a 200* (an outage, a
+/// scope quietly dropped, a regression upstream of `plan`) reads as a mass
+/// unfollow, and with pruning unconditional that is a mass deletion.
+///
+/// Over the cap, *every* removal is held rather than the first N sent: the
+/// suspicion is about the read, and a bad read's first N are no better
+/// than its last. Held removals stay in the plan file — they were paid
+/// for — where `--sync-list --apply --prune` sends them under a person's
+/// eye. The CLI has no cap: its dry-run report shows the same numbers, and
+/// typing `--prune` after reading them is the confirmation.
+///
+/// Measured on what is still pending, not on the plan as diffed, so a plan
+/// the CLI has already pruned most of is not still held for the part that
+/// landed. A `members_total` of 0 with removals pending holds them: that is
+/// a plan file from before this cap (`#[serde(default)]`), and the next
+/// diff replaces it.
+///
+/// `limit_percent` is `config.sync_prune_limit_percent`, 0..=100. 100
+/// allows emptying the list; 0 makes the background sync additive only.
+pub(crate) fn prune_allowed(plan: &super::Plan, limit_percent: u8) -> bool {
+    let removals = plan.pending_count(super::Action::Remove);
+    if removals == 0 {
+        return true;
+    }
+    // Cross-multiplied rather than divided, so 1 of 15 at 10% (1.5
+    // allowed) is over the line rather than rounded onto it.
+    removals.saturating_mul(100)
+        <= plan
+            .members_total
+            .saturating_mul(usize::from(limit_percent))
+}
+
+/// How many of `plan`'s entries the background sync may still send —
+/// [`Situation::pending`]'s value (#176).
+///
+/// Additions always count. Removals count only while `prune` (the
+/// [`prune_allowed`] verdict) says they may go; held ones are not
+/// outstanding work for the loop, because the loop will never do them.
+pub(crate) fn sendable(plan: &super::Plan, prune: bool) -> usize {
+    let adds = plan.pending_count(super::Action::Add);
+    if prune {
+        adds.saturating_add(plan.pending_count(super::Action::Remove))
+    } else {
+        adds
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -271,6 +355,7 @@ mod tests {
         Plan {
             list_id: "7".to_string(),
             created_at: 0,
+            members_total: 0,
             entries: adds
                 .iter()
                 .map(|id| entry(id, Action::Add))
@@ -538,6 +623,8 @@ mod tests {
             Some(&Outcome::Diffed {
                 adds: 3,
                 removals: 1,
+                members_total: 100,
+                held: false,
             }),
             1_000,
             21_600,
@@ -580,7 +667,9 @@ mod tests {
         assert_eq!(
             notice(&Outcome::Diffed {
                 adds: 0,
-                removals: 0
+                removals: 0,
+                members_total: 100,
+                held: false,
             }),
             None
         );
@@ -591,6 +680,8 @@ mod tests {
         let text = notice(&Outcome::Diffed {
             adds: 3,
             removals: 1,
+            members_total: 100,
+            held: false,
         })
         .unwrap();
         assert!(text.contains("3 to add"), "{text}");
@@ -730,5 +821,106 @@ mod tests {
             next_step(&situation, i64::MAX.saturating_sub(1)),
             Step::Wait { until: i64::MAX }
         );
+    }
+
+    // --- #176: the prune cap ---
+
+    /// A plan whose list had `members` accounts when it was diffed.
+    fn plan_against(members: usize, adds: &[&str], removals: &[&str]) -> Plan {
+        Plan {
+            members_total: members,
+            ..plan_of(adds, removals)
+        }
+    }
+
+    const TEN: [&str; 10] = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10"];
+    const ELEVEN: [&str; 11] = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11"];
+
+    #[test]
+    fn removals_within_the_limit_are_allowed() {
+        // 10 of 100 is exactly 10%: at the limit, not over it.
+        assert!(prune_allowed(&plan_against(100, &[], &TEN), 10));
+    }
+
+    #[test]
+    fn one_removal_over_the_limit_holds_them_all() {
+        // Held, not trimmed to fit: a plan that wants to remove more than
+        // the cap allows is a plan whose follow read is suspect as a
+        // whole, and sending the first ten of a bad diff is still sending
+        // a bad diff.
+        assert!(!prune_allowed(&plan_against(100, &[], &ELEVEN), 10));
+    }
+
+    #[test]
+    fn a_plan_with_no_removals_has_nothing_to_hold() {
+        assert!(prune_allowed(&plan_against(0, &["1"], &[]), 10));
+    }
+
+    #[test]
+    fn a_plan_that_does_not_know_the_list_size_holds_every_removal() {
+        // A plan file written before #176 carries no `members_total` and
+        // reads as 0. Anything divided by an unknown total is over the
+        // limit; the next diff at the interval replaces the file.
+        assert!(!prune_allowed(&plan_against(0, &[], &["1"]), 10));
+    }
+
+    #[test]
+    fn a_limit_of_one_hundred_percent_turns_the_cap_off() {
+        // Emptying the list is within a 100% limit by definition.
+        assert!(prune_allowed(&plan_against(3, &[], &["1", "2", "3"]), 100));
+    }
+
+    #[test]
+    fn a_limit_of_zero_never_prunes_in_the_background() {
+        assert!(!prune_allowed(&plan_against(1_000, &[], &["1"]), 0));
+    }
+
+    #[test]
+    fn already_applied_removals_do_not_count_against_the_limit() {
+        // What is measured is what would be sent now. A plan the CLI has
+        // already pruned most of is not still over the cap for the part
+        // that landed.
+        let mut plan = plan_against(100, &[], &ELEVEN);
+        plan.mark_applied("11", Action::Remove);
+        assert!(prune_allowed(&plan, 10));
+    }
+
+    #[test]
+    fn sendable_counts_removals_only_when_they_may_be_sent() {
+        let plan = plan_against(100, &["a", "b"], &["1", "2", "3"]);
+        assert_eq!(sendable(&plan, true), 5);
+        assert_eq!(sendable(&plan, false), 2);
+    }
+
+    #[test]
+    fn sendable_skips_what_already_landed() {
+        let mut plan = plan_against(100, &["a"], &["1"]);
+        plan.mark_applied("a", Action::Add);
+        assert_eq!(sendable(&plan, true), 1);
+    }
+
+    #[test]
+    fn a_diff_whose_removals_are_held_says_so_and_names_the_way_through() {
+        let text = notice(&Outcome::Diffed {
+            adds: 2,
+            removals: 30,
+            members_total: 100,
+            held: true,
+        })
+        .unwrap();
+        assert!(text.contains("30 of 100"), "{text}");
+        assert!(text.contains("--prune"), "{text}");
+    }
+
+    #[test]
+    fn a_diff_whose_removals_will_be_sent_reads_as_before() {
+        let text = notice(&Outcome::Diffed {
+            adds: 2,
+            removals: 3,
+            members_total: 100,
+            held: false,
+        })
+        .unwrap();
+        assert_eq!(text, "List sync: 2 to add, 3 to remove.");
     }
 }

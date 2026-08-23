@@ -80,6 +80,17 @@ pub(crate) struct Config {
     /// costs a page of posts, this one paces a pair of full reads that cost
     /// one billed resource per followed account.
     pub sync_interval_seconds: u32,
+    /// The most of the list's membership the background sync may remove
+    /// in one plan, in percent (#176).
+    ///
+    /// A follow read that comes back short with a 200 reads as a mass
+    /// unfollow, and the background sync prunes without asking. Over this
+    /// share the removals are held in the plan file for
+    /// `--sync-list --apply --prune` to confirm — see
+    /// `sync::schedule::prune_allowed`. 0..=100: `100` turns the cap off,
+    /// `0` makes the background sync additive only. The CLI is never
+    /// capped.
+    pub sync_prune_limit_percent: u8,
     /// Whether the window polls its timeline for new posts while it runs
     /// (#21).
     ///
@@ -127,6 +138,15 @@ const DEFAULT_SYNC_INTERVAL_SECONDS: u32 = 21_600;
 /// minutes is far below any cadence this feature has a use for and still
 /// two orders of magnitude away from that.
 const MIN_SYNC_INTERVAL_SECONDS: u32 = 900;
+
+/// 10%: the background sync may delete a tenth of the list per plan (#176).
+///
+/// Conservative on purpose. A real mass unfollow is rare and has the CLI to
+/// fall back on; a follow read that comes back short is the failure nobody
+/// sees until the list is empty. Small lists feel it more — 1 of 15 is over
+/// the line — and that is accepted rather than patched with an absolute
+/// floor: a false hold costs one CLI command, a false pass costs the list.
+const DEFAULT_SYNC_PRUNE_LIMIT_PERCENT: u8 = 10;
 
 /// 5 minutes between auto-refresh polls (#21).
 ///
@@ -188,6 +208,11 @@ struct FileSettings {
     /// Non-secret, same reasoning as `request_price`.
     #[serde(default)]
     sync_interval_seconds: Option<u32>,
+    /// Non-secret, same reasoning as `request_price`. `u32` rather than
+    /// `u8` so a `300` in the file is refused by `resolve` with the key
+    /// named, not by serde with a type error.
+    #[serde(default)]
+    sync_prune_limit_percent: Option<u32>,
     /// Non-secret, same reasoning as `request_price`. Like `auto_sync_list`
     /// above, this is the key that matters for a `.app` launched from
     /// Finder, where no shell variable is visible (#40) — and it is the one
@@ -352,6 +377,8 @@ impl Config {
 
         let auto_sync_list = resolve_auto_sync_list(&var, file.auto_sync_list)?;
         let sync_interval_seconds = resolve_sync_interval(&var, file.sync_interval_seconds)?;
+        let sync_prune_limit_percent =
+            resolve_sync_prune_limit(&var, file.sync_prune_limit_percent)?;
 
         let auto_refresh = resolve_auto_refresh(&var, file.auto_refresh)?;
         // Takes `min_fetch_interval_seconds` because the floor it enforces
@@ -374,6 +401,7 @@ impl Config {
             daily_request_budget,
             auto_sync_list,
             sync_interval_seconds,
+            sync_prune_limit_percent,
             auto_refresh,
             auto_refresh_interval_seconds,
         })
@@ -482,6 +510,39 @@ fn resolve_sync_interval(
         );
     }
     Ok(seconds)
+}
+
+/// Resolve `sync_prune_limit_percent` (#176): env > file >
+/// [`DEFAULT_SYNC_PRUNE_LIMIT_PERCENT`], refusing anything over 100.
+///
+/// A ceiling rather than a clamp: `150` is not "off", it is a number that
+/// was meant to be something else, and reading it as 100 would turn the
+/// cap off for the one person who was trying to set it.
+fn resolve_sync_prune_limit(
+    var: impl Fn(&str) -> Option<String>,
+    file_value: Option<u32>,
+) -> Result<u8> {
+    let (percent, source) = match var("X_SYNC_PRUNE_LIMIT_PERCENT")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    {
+        Some(raw) => (
+            raw.parse::<u32>()
+                .with_context(|| format!("X_SYNC_PRUNE_LIMIT_PERCENT is not a number: {raw:?}"))?,
+            "X_SYNC_PRUNE_LIMIT_PERCENT",
+        ),
+        None => match file_value {
+            Some(percent) => (percent, "sync_prune_limit_percent in config.toml"),
+            None => return Ok(DEFAULT_SYNC_PRUNE_LIMIT_PERCENT),
+        },
+    };
+
+    u8::try_from(percent)
+        .ok()
+        .filter(|percent| *percent <= 100)
+        .with_context(|| {
+            format!("{source} must be at most 100 (a share of the list, in percent), got {percent}")
+        })
 }
 
 /// Resolve `auto_refresh` (#21): env > file > on.
@@ -1607,6 +1668,88 @@ mod tests {
             vars(&[
                 ("X_OAUTH_CLIENT_ID", "client-123"),
                 ("X_SYNC_INTERVAL_SECONDS", "soon"),
+            ]),
+            FileSettings::default(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("is not a number"), "{error}");
+    }
+
+    // --- #176: sync_prune_limit_percent (env > file > 10, at most 100) ---
+
+    #[test]
+    fn the_prune_limit_defaults_to_ten_percent() {
+        let config = Config::resolve(
+            vars(&[("X_OAUTH_CLIENT_ID", "client-123")]),
+            FileSettings::default(),
+        )
+        .unwrap();
+        assert_eq!(config.sync_prune_limit_percent, 10);
+    }
+
+    #[test]
+    fn resolve_reads_the_prune_limit_from_the_file_when_env_is_unset() {
+        let file = FileSettings {
+            sync_prune_limit_percent: Some(25),
+            ..FileSettings::default()
+        };
+        let config = Config::resolve(vars(&[("X_OAUTH_CLIENT_ID", "client-123")]), file).unwrap();
+        assert_eq!(config.sync_prune_limit_percent, 25);
+    }
+
+    #[test]
+    fn resolve_prefers_the_env_prune_limit_over_the_file() {
+        let file = FileSettings {
+            sync_prune_limit_percent: Some(25),
+            ..FileSettings::default()
+        };
+        let config = Config::resolve(
+            vars(&[
+                ("X_OAUTH_CLIENT_ID", "client-123"),
+                ("X_SYNC_PRUNE_LIMIT_PERCENT", "100"),
+            ]),
+            file,
+        )
+        .unwrap();
+        assert_eq!(config.sync_prune_limit_percent, 100);
+    }
+
+    #[test]
+    fn resolve_rejects_a_prune_limit_over_one_hundred_percent() {
+        let error = Config::resolve(
+            vars(&[
+                ("X_OAUTH_CLIENT_ID", "client-123"),
+                ("X_SYNC_PRUNE_LIMIT_PERCENT", "150"),
+            ]),
+            FileSettings::default(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("at most 100"), "{error}");
+    }
+
+    #[test]
+    fn a_rejected_prune_limit_names_the_file_key_when_that_is_where_it_came_from() {
+        let file = FileSettings {
+            sync_prune_limit_percent: Some(101),
+            ..FileSettings::default()
+        };
+        let error = Config::resolve(vars(&[("X_OAUTH_CLIENT_ID", "client-123")]), file)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("sync_prune_limit_percent in config.toml"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn resolve_rejects_a_non_numeric_prune_limit() {
+        let error = Config::resolve(
+            vars(&[
+                ("X_OAUTH_CLIENT_ID", "client-123"),
+                ("X_SYNC_PRUNE_LIMIT_PERCENT", "half"),
             ]),
             FileSettings::default(),
         )

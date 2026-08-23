@@ -19,6 +19,18 @@
 //! and that refusal is what [`Outcome::RateLimited`] carries back — but so
 //! that no single tick holds the background executor for the length of a
 //! two-thousand-account catch-up.
+//!
+//! # What a tick is allowed to delete
+//!
+//! Pruning here is unconditional in the sense that nobody is asked — but
+//! it is capped (#176). A plan whose removals are more of the list than
+//! `config.sync_prune_limit_percent` allows has its additions drained and
+//! its removals left in the plan file, unsent, for `--sync-list --apply
+//! --prune` to confirm. [`schedule::prune_allowed`] is the verdict and
+//! carries the reasoning; the rule this module adds is that a held plan
+//! is *not* finished work: [`schedule::sendable`] is what `pending` means
+//! here, so a plan with nothing sendable left lets the next diff come due
+//! instead of pinning the loop on it.
 
 use anyhow::Result;
 
@@ -68,14 +80,17 @@ pub(crate) struct Pacing {
 
 /// Run one tick.
 ///
-/// Pruning is unconditional here, unlike `--sync-list`, where it stays
-/// behind `--prune`. See this module's parent for why the two paths differ.
+/// Pruning is not opt-in here, unlike `--sync-list`, where it stays behind
+/// `--prune` — see this module's parent for why the two paths differ — but
+/// it is capped at `prune_limit_percent` of the list (#176); see the
+/// module docs.
 pub(crate) fn tick(
     paths: &Paths,
     client: &XClient,
     user_id: &str,
     list_id: &str,
     pacing: Pacing,
+    prune_limit_percent: u8,
     now: i64,
 ) -> Result<Outcome> {
     let plan_path = paths.sync_plan_file();
@@ -85,9 +100,15 @@ pub(crate) fn tick(
     // dropped rather than applied: `run.rs` refuses in the same situation,
     // and a loop has nobody to refuse to.
     let plan = load_plan(&plan_path)?.filter(|plan| plan.list_id == list_id);
+    // Decided here, on the plan as it is now, rather than once at the diff:
+    // the limit is configuration and can change between the two, and a
+    // plan file from before the cap has never been judged at all.
+    let prune = plan
+        .as_ref()
+        .is_none_or(|plan| schedule::prune_allowed(plan, prune_limit_percent));
     let pending = plan
         .as_ref()
-        .map_or(0, |plan| plan.entries.iter().filter(|e| !e.applied).count());
+        .map_or(0, |plan| schedule::sendable(plan, prune));
 
     let situation = schedule::Situation {
         last_diff_at: schedule::last_diff_for(pacing.forced, load_state(&state_path).last_diff_at),
@@ -103,12 +124,12 @@ pub(crate) fn tick(
         // [`schedule::is_finished`], which is the one caller that has to
         // tell those apart.
         schedule::Step::Wait { until } => Ok(Outcome::Idle { until, pending }),
-        schedule::Step::Diff => diff(paths, client, user_id, list_id, now),
+        schedule::Step::Diff => diff(paths, client, user_id, list_id, prune_limit_percent, now),
         // `pending > 0` is what produced this step, so the plan is `Some`.
         // Listed rather than unwrapped so a later change to the precedence
         // cannot turn this into a panic.
         schedule::Step::Apply => match plan {
-            Some(plan) => apply(paths, client, plan, now),
+            Some(plan) => apply(paths, client, plan, prune, now),
             None => Ok(Outcome::Idle {
                 until: now,
                 pending: 0,
@@ -125,11 +146,17 @@ pub(crate) fn tick(
 /// read them again immediately; and a diff that fails every time — a
 /// revoked scope, an endpoint that has started 400ing — would otherwise be
 /// retried by every wake-up of the loop forever.
+///
+/// The prune verdict is taken here too, for the outcome only — so the
+/// window hears about a held plan once, when it is made, rather than on
+/// every batch of additions drained out of it. What is *enforced* is the
+/// verdict [`tick`] takes at apply time.
 fn diff(
     paths: &Paths,
     client: &XClient,
     user_id: &str,
     list_id: &str,
+    prune_limit_percent: u8,
     now: i64,
 ) -> Result<Outcome> {
     save_state(
@@ -142,8 +169,22 @@ fn diff(
     let plan = super::run::plan_sync(paths, client, user_id, list_id, now)?;
     let adds = plan.pending_count(Action::Add);
     let removals = plan.pending_count(Action::Remove);
+    let held = !schedule::prune_allowed(&plan, prune_limit_percent);
     save_plan(&paths.sync_plan_file(), &plan)?;
-    Ok(Outcome::Diffed { adds, removals })
+    if held {
+        crate::log::warn(&format!(
+            "list sync: holding {removals} removal(s) against a list of {} members — over \
+             sync_prune_limit_percent ({prune_limit_percent}%). They stay in the plan file; \
+             confirm them with --sync-list --apply --prune",
+            plan.members_total
+        ));
+    }
+    Ok(Outcome::Diffed {
+        adds,
+        removals,
+        members_total: plan.members_total,
+        held,
+    })
 }
 
 /// Send up to [`BATCH`] of the plan's outstanding writes.
@@ -152,13 +193,31 @@ fn diff(
 /// an error: nothing was spent, the plan on disk records everything that
 /// did land, and the only thing the loop has to do about it is wait. Every
 /// other failure propagates.
-fn apply(paths: &Paths, client: &XClient, mut plan: super::Plan, now: i64) -> Result<Outcome> {
-    let result = super::run::apply_some(paths, client, &mut plan, true, now, BATCH);
-    let remaining = plan.entries.iter().filter(|entry| !entry.applied).count();
+///
+/// `prune` is [`tick`]'s verdict from [`schedule::prune_allowed`]. With it
+/// false the batch is additions only, and `remaining` counts what may still
+/// be sent rather than every unapplied entry — the same reading of
+/// "outstanding" as `pending`, so the completion notice fires when the
+/// additions are drained even though held removals stay behind.
+fn apply(
+    paths: &Paths,
+    client: &XClient,
+    mut plan: super::Plan,
+    prune: bool,
+    now: i64,
+) -> Result<Outcome> {
+    let result = super::run::apply_some(paths, client, &mut plan, prune, now, BATCH);
+    let remaining = schedule::sendable(&plan, prune);
 
-    if remaining == 0 {
+    if plan.is_complete() {
         // Nothing left to resume from. Leaving it behind would make the
         // next tick read it as outstanding work and skip the diff.
+        //
+        // `is_complete`, not `remaining == 0`: a plan drained of its
+        // additions with removals held is *not* removed. Those removals
+        // were paid for, and the file is what `--sync-list --apply --prune`
+        // sends without reading both sides again. The next diff replaces
+        // it either way.
         let _ = std::fs::remove_file(paths.sync_plan_file());
     }
 
