@@ -543,9 +543,6 @@ fn user_lookup_url(username: &str) -> String {
     format!("{API_BASE}/users/by/username/{username}")
 }
 
-/// `GET /2/users/me` (#11) — resolves the signed-in user's own id and screen
-/// name. Only meaningful with an OAuth user-context credential; an app-only
-/// bearer token gets a 401 here just like the home timeline itself.
 /// The author fields every endpoint asks for (#92) — both timeline URLs
 /// and the single-post lookup. One edit, not three.
 const USER_FIELDS: &str = "&user.fields=name,profile_image_url,username";
@@ -563,6 +560,9 @@ const TIMELINE_FIELDS: &str = "&tweet.fields=created_at,entities,public_metrics,
      &media.fields=alt_text,height,preview_image_url,type,url,width\
      &user.fields=name,profile_image_url,username";
 
+/// `GET /2/users/me` (#11) — resolves the signed-in user's own id and screen
+/// name. Only meaningful with an OAuth user-context credential; an app-only
+/// bearer token gets a 401 here just like the home timeline itself.
 fn me_url() -> String {
     format!("{API_BASE}/users/me")
 }
