@@ -327,6 +327,40 @@ impl UserPageResponse {
     }
 }
 
+/// One List as `GET /2/users/:id/owned_lists` returns it (#164): what the
+/// picker needs to name a segment and nothing more. `Serialize` too,
+/// because the cache and a fixture both write these back out.
+///
+/// `name` defaults rather than being required: the spec lists it among the
+/// default fields, but `x-api-endpoints` is a record of the spec and the
+/// API disagreeing, and a picker that fails to parse over one nameless
+/// list would take every other list down with it. The renderer falls back
+/// to the id (`ui::list_picker::segment_label`).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub(crate) struct ListSummary {
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+}
+
+/// The whole response of `GET /2/users/:id/owned_lists` (#164). `data`
+/// is absent, not empty, for an account that owns no lists — the same
+/// shape [`TimelineResponse`] already tolerates.
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct ListPageResponse {
+    #[serde(default)]
+    pub data: Vec<ListSummary>,
+    #[serde(default)]
+    pub meta: Meta,
+}
+
+impl ListPageResponse {
+    /// The cursor for the page after this one, or `None` at the end.
+    pub(crate) fn next_token(&self) -> Option<&str> {
+        self.meta.next_token.as_deref()
+    }
+}
+
 /// Pagination info returned alongside `data`. Only `next_token` matters to
 /// this crate — it's the cursor `x_api::client::home_timeline_url` sends back
 /// as `pagination_token` to fetch the next (older) page, driving #11's "Load

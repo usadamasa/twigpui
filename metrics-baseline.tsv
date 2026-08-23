@@ -66,7 +66,10 @@ src/oauth/tokens.rs	200
 # paths.rs 300 -> 350: #169 threads a `Profile` through the three base
 # directories, adds the `for_profile` seam the tests need to name one, and
 # documents why the component is not a constant any more.
-src/paths.rs	350
+# paths.rs 350 -> 400: #164 adds two files — the owned-lists cache and the
+# picker's selection — each with the cache-or-state reasoning its doc
+# carries. Three lines over, but the rule is the rule.
+src/paths.rs	400
 # profile.rs 100 -> 150: #169 grew past the three names it started with —
 # the dev List default and the sync seed, each carrying the reason it is
 # not simply configuration.
@@ -143,6 +146,12 @@ src/ui/auto_refresh.rs	400
 # `auto_refresh.rs` above — pure functions with their tests, then an
 # `impl TimelineView` block.
 src/ui/list_sync.rs	650
+# New in #164, for the same reason `list_sync.rs` was: `ui/mod.rs` sat one
+# line under its ceiling, so the picker — the saved selection, the segment
+# list, the switch, and the one paid fetch that names the segments — went
+# into its own file in the same shape. `primary_source` moved out of `ui`
+# with it, which is what paid for the two fields the picker needed there.
+src/ui/list_picker.rs	450
 # ui/render.rs 1050 -> 1100: #21's `new_posts_bar`, the one element in the
 # banner column that is a button rather than a report.
 #
@@ -178,8 +187,11 @@ src/usage.rs	350
 # was bought is that a value can no longer reach a URL unescaped and a
 # separator can no longer be misplaced — neither of which the old shape
 # let the compiler check.
-src/x_api/client.rs	1050
+# x_api/client.rs 1050 -> 1100: #164's `owned_lists` — method, URL builder
+# and parse helper in the same three-part shape as #163's paged reads.
+src/x_api/client.rs	1100
 src/x_api/mod.rs	50
 # x_api/model.rs 750 -> 800: `UserIdRequest` and `UserPageResponse` for
 # #163's reads and writes.
-src/x_api/model.rs	800
+# x_api/model.rs 800 -> 850: `ListSummary` and `ListPageResponse` for #164.
+src/x_api/model.rs	850

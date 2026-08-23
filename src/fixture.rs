@@ -24,7 +24,7 @@ use std::path::Path;
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::x_api::TimelineItem;
+use crate::x_api::{ListSummary, TimelineItem};
 
 /// Who the fixture says is signed in.
 ///
@@ -58,6 +58,15 @@ pub(crate) struct Fixture {
     /// fixture written before this field existed.
     #[serde(default)]
     pub pending: Vec<TimelineItem>,
+    /// The lists the toolbar's picker names (#164), as the owned-lists
+    /// cache would hold them. Real [`ListSummary`]s for this module's
+    /// rule again: the fixture describes what the account owns, and the
+    /// segments are drawn from that the way they are drawn from a fetch.
+    ///
+    /// Empty (and absent) means a picker with only Home in it, which is
+    /// every fixture written before this field existed.
+    #[serde(default)]
+    pub lists: Vec<ListSummary>,
 }
 
 /// Read and parse a fixture file.
@@ -185,6 +194,11 @@ mod tests {
             fixture.pending.len() > 1,
             "posts waiting behind the new-posts bar, more than one so the \
              plural wording is what gets drawn (#21)"
+        );
+        assert!(
+            fixture.lists.len() > 1,
+            "lists for the picker, more than one so the trough has \
+             unselected segments beside Home (#164)"
         );
         // The bar counts new arrivals against what is displayed, so a
         // pending post that is already in `items` would be counted and

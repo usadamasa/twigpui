@@ -811,65 +811,45 @@ pub(super) fn header_title(home_username: Option<&str>) -> String {
     }
 }
 
-/// What the toolbar's segment calls the timeline being shown (#161).
+/// The trough of the toolbar's timeline switcher (#95), shaped like a
+/// macOS segmented control: one track that [`tab_segment`]s sit in, the
+/// selected one lifted out of it in the window's own background color.
 ///
-/// The list's own name is deliberately not fetched: `GET /2/lists/:id`
-/// is another billed endpoint, and a label is not worth a request on every
-/// start. #164 is where a list gains a name, because a switcher has to
-/// name the things it switches between — one segment does not.
-pub(super) fn tab_label(source: &cache::TimelineSource) -> &'static str {
-    match source {
-        cache::TimelineSource::Home => "Home",
-        cache::TimelineSource::List(_) => "List",
-    }
-}
-
-/// The toolbar's timeline switcher (#95), shaped like a macOS segmented
-/// control: one trough with the selected segment lifted out of it in the
-/// window's own background color.
-///
-/// #63 is what will fill it. Today `header` hands it a single entry, which
-/// is honest — Home is the only timeline this app can fetch — and the
-/// point of building the frame now is that adding the second one is a
-/// change to that array rather than to the toolbar's layout.
-///
-/// Segments carry no click handler yet for the same reason: with one
-/// timeline there is nothing to switch to, and a control that responds to
-/// a click by doing nothing is worse than one that plainly does not.
-pub(super) fn tab_bar(tabs: &[(&str, bool)], theme: Theme) -> AnyElement {
-    let mut trough = div()
+/// Split from the segments (they used to be one function taking a slice
+/// of labels) because #164's segments carry a click each, and a click
+/// handler needs the view's `cx` — which is `ui::list_picker`'s to hold,
+/// not this file's. What stays here is only how the control looks.
+pub(super) fn tab_trough(theme: Theme) -> Div {
+    div()
         .flex()
         .items_center()
         .p(px(2.0))
         .rounded(theme::RADIUS_CONTROL)
         .bg(rgb(theme.control_trough))
-        .text_size(theme::TEXT_META);
+        .text_size(theme::TEXT_META)
+}
 
-    for (label, selected) in tabs {
-        trough = trough.child(
-            div()
-                .px_2()
-                .py_0p5()
-                .rounded(px(4.0))
-                .when(*selected, |segment| {
-                    // Lifted out of the track rather than merely tinted:
-                    // without the shadow the segment reads as a bordered
-                    // chip beside plain text, which is a different control
-                    // entirely.
-                    segment
-                        .bg(rgb(theme.bg))
-                        .shadow_sm()
-                        .text_color(rgb(theme.text))
-                        .font_weight(FontWeight::MEDIUM)
-                })
-                .when(!*selected, |segment| {
-                    segment.text_color(rgb(theme.text_muted))
-                })
-                .child((*label).to_string()),
-        );
-    }
-
-    trough.into_any_element()
+/// One segment of the switcher — see [`tab_trough`].
+pub(super) fn tab_segment(label: &str, selected: bool, theme: Theme) -> Div {
+    div()
+        .px_2()
+        .py_0p5()
+        .rounded(px(4.0))
+        .when(selected, |segment| {
+            // Lifted out of the track rather than merely tinted:
+            // without the shadow the segment reads as a bordered
+            // chip beside plain text, which is a different control
+            // entirely.
+            segment
+                .bg(rgb(theme.bg))
+                .shadow_sm()
+                .text_color(rgb(theme.text))
+                .font_weight(FontWeight::MEDIUM)
+        })
+        .when(!selected, |segment| {
+            segment.text_color(rgb(theme.text_muted))
+        })
+        .child(label.to_string())
 }
 
 /// How many attached images one row will render (#65). X allows up to four

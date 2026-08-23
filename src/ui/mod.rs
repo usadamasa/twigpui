@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use gpui::{
-    AnyElement, Context, Entity, FocusHandle, Focusable as _, FontWeight, ScrollHandle,
+    AnyElement, Context, Div, Entity, FocusHandle, Focusable as _, FontWeight, ScrollHandle,
     SharedString, Subscription, Task, Window, div, img, prelude::*, px, rgb, svg,
 };
 use gpui_component::input::{Input, InputEvent, InputState};
@@ -19,6 +19,7 @@ use crate::image_cache;
 use crate::like;
 use crate::log;
 mod auto_refresh;
+mod list_picker;
 mod list_sync;
 mod reload_policy;
 mod render;
@@ -44,8 +45,8 @@ use render::{
     media_columns, new_posts_bar, notice, offers_delete, offers_like, offers_quote,
     offers_reauthorize, offers_reply, offers_repost, open_post_link, quote_card, quote_row,
     reload_notice_banner, render_thread_chain, reply_banner_label, reply_row, reply_target_label,
-    repost_banner_label, repost_row, session_notice_banner, sign_in_pill, tab_bar, tab_label,
-    thread_action_label, thread_toggle_row, usage_color, usage_label, with_count,
+    repost_banner_label, repost_row, session_notice_banner, sign_in_pill, thread_action_label,
+    thread_toggle_row, usage_color, usage_label, with_count,
 };
 use render::{RowCounts, row_counts};
 
@@ -268,17 +269,25 @@ pub(crate) struct TimelineView {
     /// The signed-in user's own screen name (also from `/me`), shown in the
     /// header — see [`header_title`].
     home_username: Option<String>,
-    /// Which timeline fills the window (#161) — resolved once in
-    /// [`Self::new`] from `config.list_id` and never reassigned. Switching
-    /// between lists at runtime is #164; until then the source is a
-    /// startup decision, which is why this is a plain field rather than
-    /// something the header can drive.
+    /// Which timeline fills the window (#161): decided in [`Self::new`]
+    /// by [`list_picker::initial_source`], reassigned only by
+    /// [`Self::switch_source`] (#164), which also resets everything below
+    /// that belongs to one source rather than to the window.
     ///
     /// Read by every path that touches the timeline: [`Self::start`],
     /// [`Self::reload`], [`Self::load_older`] and [`Self::confirm_delete`]
     /// all take it so the cache file they read, the endpoint they spend a
     /// request on, and the file a delete rewrites are the same source.
     source: cache::TimelineSource,
+    /// The lists the picker can name (#164), from its cache or its last
+    /// fetch. Empty until the fetch button has been pressed once.
+    owned_lists: Vec<crate::x_api::ListSummary>,
+    /// The in-flight fetch of `owned_lists`, if any; `fetch`'s
+    /// cancel-on-drop contract, and what stops a second click.
+    lists_fetch: Option<Task<()>>,
+    /// Where a switch is remembered ([`Paths::selection_file`]), or `None`
+    /// for a fixture window — see [`list_picker::saved_selection_for`].
+    selection_file: Option<PathBuf>,
     /// `meta.next_token` from the most recent home-timeline response, if
     /// any (#11). Drives whether the "Load older" button appears — see
     /// [`offers_load_older`]. `None` whenever there is nothing further back
@@ -539,8 +548,13 @@ impl TimelineView {
         });
         let compose_input_subscription = cx.subscribe(&compose_input, Self::on_compose_input_event);
 
-        // #161: a startup decision, taken before `config` is moved below.
-        let source = primary_source(config.list_id.as_deref());
+        // #161/#164: taken before `config` is moved below.
+        let source = list_picker::initial_source(
+            list_picker::saved_selection_for(&startup, &paths),
+            config.list_id.as_deref(),
+        );
+        let owned_lists = list_picker::cached_lists_or_empty(&paths);
+        let selection_file = matches!(startup, Startup::Live).then(|| paths.selection_file());
 
         let mut this = Self {
             config,
@@ -556,6 +570,9 @@ impl TimelineView {
             home_user_id: None,
             home_username: None,
             source,
+            owned_lists,
+            lists_fetch: None,
+            selection_file,
             next_page_token: None,
             threads: HashMap::new(),
             thread_fetches: HashMap::new(),
@@ -635,6 +652,7 @@ impl TimelineView {
         ));
         self.home_user_id = Some(fixture.signed_in_as.id);
         self.home_username = Some(fixture.signed_in_as.username);
+        self.owned_lists = fixture.lists;
         self.state = TimelineState::Loaded(fixture.items);
         // #21: built the same way a real poll's buffer is, from the same
         // pure function — the fixture supplies the posts, not the count,
@@ -1126,11 +1144,9 @@ impl TimelineView {
             .bg(rgb(theme.bg_header))
             .border_b_1()
             .border_color(rgb(theme.border))
-            // #95's frame for #63's timeline switcher, now carrying what
-            // #161 actually reads. Still one segment: a list replaces the
-            // home timeline rather than sitting beside it, so there is
-            // nothing to switch *to* until #164 offers a second list.
-            .child(tab_bar(&[(tab_label(&self.source), true)], theme))
+            // #95's frame, #164's segments: Home and every owned list.
+            .child(self.list_picker(cx))
+            .children(self.lists_control(cx))
             .child(
                 div()
                     .text_size(theme::TEXT_META)
@@ -1782,21 +1798,6 @@ impl Render for TimelineView {
     }
 }
 
-/// Which timeline the window reads (#161), from `config.list_id`.
-///
-/// A configured list id is a request to read that list *instead of* the
-/// home timeline, not alongside it: #157 left the home timeline returning
-/// none of the followed authors' posts for this account, so there is no
-/// fallback worth keeping and nothing to show beside it. Blank and
-/// malformed values never reach here — `Config::resolve` turns the first
-/// into `None` and rejects the second at startup.
-fn primary_source(list_id: Option<&str>) -> cache::TimelineSource {
-    match list_id {
-        Some(list_id) => cache::TimelineSource::List(list_id.to_string()),
-        None => cache::TimelineSource::Home,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::reload_policy::{
@@ -1804,7 +1805,7 @@ mod tests {
     };
     use super::render::{
         avatar_initial, is_own_post, like_action_label, post_permalink, profile_url,
-        repost_action_label, tab_label,
+        repost_action_label,
     };
     use super::{
         ComposeStatus, Cooldown, CooldownTick, Fixture, PostLink, PostMedia, PostMetrics,
@@ -1813,9 +1814,9 @@ mod tests {
         at_the_post_cap, byline, compose_error_message, cooldown_label, cooldown_tick,
         format_timestamp, header_title, media_badge, media_columns, offers_delete, offers_like,
         offers_load_older, offers_quote, offers_reauthorize, offers_reply, offers_repost,
-        primary_source, rate_limit, reload_failure_outcome, reload_gate, reload_start_state,
-        reply_banner_label, reply_target_label, repost_banner_label, row_counts,
-        thread_action_label, usage, usage_color, usage_label,
+        rate_limit, reload_failure_outcome, reload_gate, reload_start_state, reply_banner_label,
+        reply_target_label, repost_banner_label, row_counts, thread_action_label, usage,
+        usage_color, usage_label,
     };
 
     fn item_with(id: &str, author_username: &str, reposted_by: Option<&str>) -> TimelineItem {
@@ -2433,32 +2434,6 @@ mod tests {
         // answers there is no account to name, and the app's own name is
         // what a macOS toolbar carries in its place.
         assert_eq!(header_title(None), "twigpui");
-    }
-
-    // --- #161: which timeline the window reads ---
-
-    #[test]
-    fn no_configured_list_reads_the_home_timeline() {
-        assert_eq!(primary_source(None), crate::cache::TimelineSource::Home);
-    }
-
-    #[test]
-    fn a_configured_list_replaces_the_home_timeline() {
-        // Replaces, not supplements: #157 left nothing in the home
-        // timeline worth falling back to.
-        assert_eq!(
-            primary_source(Some("2091351590695588200")),
-            crate::cache::TimelineSource::List("2091351590695588200".to_string())
-        );
-    }
-
-    #[test]
-    fn the_tab_bar_names_the_timeline_being_read() {
-        assert_eq!(tab_label(&crate::cache::TimelineSource::Home), "Home");
-        assert_eq!(
-            tab_label(&crate::cache::TimelineSource::List("111".to_string())),
-            "List"
-        );
     }
 
     #[test]
@@ -3181,6 +3156,21 @@ mod tests {
         gpui::WindowHandle<gpui_component::Root>,
         gpui::Entity<super::TimelineView>,
     ) {
+        window_with(cx, smoke_paths(), Startup::Fixture(Box::new(fixture)))
+    }
+
+    /// A window started `startup` against `paths`, and the view inside it —
+    /// what [`fixture_window`] is, minus the two things a live window
+    /// wants to choose (#164's `a_switch_is_remembered_on_disk_at_once`
+    /// starts live under its own directory so nothing else writes there).
+    fn window_with(
+        cx: &mut gpui::TestAppContext,
+        paths: crate::paths::Paths,
+        startup: Startup,
+    ) -> (
+        gpui::WindowHandle<gpui_component::Root>,
+        gpui::Entity<super::TimelineView>,
+    ) {
         use gpui::AppContext as _;
 
         cx.update(gpui_component::init);
@@ -3190,15 +3180,8 @@ mod tests {
         let window = {
             let slot = slot.clone();
             cx.add_window(move |window, cx| {
-                let timeline = cx.new(|cx| {
-                    super::TimelineView::new(
-                        smoke_config(),
-                        smoke_paths(),
-                        Startup::Fixture(Box::new(fixture)),
-                        window,
-                        cx,
-                    )
-                });
+                let timeline = cx
+                    .new(|cx| super::TimelineView::new(smoke_config(), paths, startup, window, cx));
                 *slot.borrow_mut() = Some(timeline.clone());
                 gpui_component::Root::new(timeline, window, cx)
             })
@@ -3224,6 +3207,7 @@ mod tests {
                 .iter()
                 .map(|id| item_with(id, "someone", None))
                 .collect(),
+            lists: Vec::new(),
         }
     }
 
@@ -3480,6 +3464,282 @@ mod tests {
                     view.last_reload_at.is_none(),
                     "showing a buffered fetch must not count as one"
                 );
+            });
+        });
+    }
+
+    // --- #164: the toolbar's list picker ---
+
+    /// A fixture whose picker has `lists` to name, on top of `shown`.
+    fn fixture_with_lists(shown: &[&str], lists: &[(&str, &str)]) -> Fixture {
+        let mut fixture = fixture_with(shown, &[]);
+        fixture.lists = lists
+            .iter()
+            .map(|(id, name)| crate::x_api::ListSummary {
+                id: (*id).to_string(),
+                name: (*name).to_string(),
+            })
+            .collect();
+        fixture
+    }
+
+    /// Write `ids` as `list_id`'s cached timeline in the smoke directory,
+    /// so a switch to it has something to render without a client.
+    fn cache_list(list_id: &str, ids: &[&str]) {
+        let paths = smoke_paths();
+        paths.ensure_dirs().unwrap();
+        let items: Vec<TimelineItem> = ids
+            .iter()
+            .map(|id| item_with(id, "someone", None))
+            .collect();
+        crate::cache::save_primary_timeline(
+            &paths,
+            &crate::cache::TimelineSource::List(list_id.to_string()),
+            "5685672",
+            &items,
+            0,
+        )
+        .unwrap();
+    }
+
+    /// A drawn window and its visual context, for the click tests below.
+    fn drawn(
+        cx: &mut gpui::TestAppContext,
+        fixture: Fixture,
+    ) -> (gpui::VisualTestContext, gpui::Entity<super::TimelineView>) {
+        let (window, timeline) = fixture_window(cx, fixture);
+        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        (visual, timeline)
+    }
+
+    /// #164: every segment is laid out, Home first, and none of them
+    /// overlap — the same claim `the_status_bars_segments_keep_apart`
+    /// makes about the status bar, for the reason it gives.
+    #[gpui::test]
+    fn the_picker_lays_out_home_and_every_list_left_to_right(cx: &mut gpui::TestAppContext) {
+        let (mut visual, _timeline) = drawn(
+            cx,
+            fixture_with_lists(&["1"], &[("9101", "Following mirror"), ("9102", "Rust")]),
+        );
+
+        let home = visual
+            .debug_bounds("tab-home")
+            .expect("Home is always a segment");
+        let first = visual
+            .debug_bounds("tab-list-9101")
+            .expect("the first fixture list is a segment");
+        let second = visual
+            .debug_bounds("tab-list-9102")
+            .expect("the second fixture list is a segment");
+        assert!(first.left() >= home.right(), "{home:?} then {first:?}");
+        assert!(second.left() >= first.right(), "{first:?} then {second:?}");
+    }
+
+    /// #164: a fixture window has no client, so it must not offer the one
+    /// button in the toolbar that spends a request.
+    #[gpui::test]
+    fn a_fixture_window_offers_no_list_fetch(cx: &mut gpui::TestAppContext) {
+        let (mut visual, _timeline) = drawn(cx, fixture_with_lists(&["1"], &[("9101", "Rust")]));
+        assert!(
+            visual.debug_bounds("load-lists").is_none(),
+            "a window with no client must not offer to fetch lists"
+        );
+    }
+
+    /// #164, the issue's second completion criterion: switching between
+    /// timelines that are already cached sends nothing.
+    ///
+    /// Two lists, both cached ahead of time; the window is clicked from
+    /// one to the other and back, and after each click it shows exactly
+    /// the cached rows. There is still no client and `last_reload_at` has
+    /// not moved, so nothing went out and nothing was attempted — the
+    /// same evidence `showing_new_posts_sends_nothing` relies on.
+    #[gpui::test]
+    fn switching_between_cached_sources_sends_nothing(cx: &mut gpui::TestAppContext) {
+        cache_list("9111", &["12", "11"]);
+        cache_list("9112", &["22", "21"]);
+        let (mut visual, timeline) = drawn(
+            cx,
+            fixture_with_lists(&["1"], &[("9111", "first"), ("9112", "second")]),
+        );
+
+        for (segment, expected) in [
+            ("tab-list-9111", ["12", "11"]),
+            ("tab-list-9112", ["22", "21"]),
+            ("tab-list-9111", ["12", "11"]),
+        ] {
+            let bounds = visual
+                .debug_bounds(segment)
+                .expect("the segment has to be laid out before a click can reach it");
+            visual.simulate_click(bounds.center(), gpui::Modifiers::none());
+            cx.run_until_parked();
+
+            cx.update(|cx| {
+                timeline.update(cx, |view, _cx| {
+                    assert_eq!(shown_ids(view), expected, "after clicking {segment}");
+                    assert!(view.client.is_none());
+                    assert!(
+                        view.last_reload_at.is_none(),
+                        "a switch to a cached list must not count as a fetch"
+                    );
+                });
+            });
+            // Redraw so the next lookup sees the segment lifted where it
+            // now is, not where the previous frame put it.
+            visual.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+        }
+    }
+
+    /// #164: the click lands on the segment, and the switch resets what
+    /// belonged to the previous source — here, the poll buffer, which
+    /// would otherwise offer the old list's posts over the new one.
+    #[gpui::test]
+    fn clicking_a_segment_switches_the_source_and_drops_the_old_buffer(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cache_list("9121", &["32", "31"]);
+        let mut fixture = fixture_with_lists(&["2", "1"], &[("9121", "Rust")]);
+        fixture.pending = vec![item_with("3", "someone", None)];
+        let (mut visual, timeline) = drawn(cx, fixture);
+
+        cx.update(|cx| {
+            timeline.update(cx, |view, _cx| {
+                assert_eq!(view.source, crate::cache::TimelineSource::Home);
+                assert!(view.pending.is_some(), "the fixture's buffer is waiting");
+            });
+        });
+
+        let segment = visual
+            .debug_bounds("tab-list-9121")
+            .expect("the segment has to be laid out before a click can reach it");
+        visual.simulate_click(segment.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+
+        cx.update(|cx| {
+            timeline.update(cx, |view, _cx| {
+                assert_eq!(
+                    view.source,
+                    crate::cache::TimelineSource::List("9121".to_string())
+                );
+                assert_eq!(shown_ids(view), ["32", "31"]);
+                assert!(
+                    view.pending.is_none(),
+                    "a buffer polled against Home must not be offered over a list"
+                );
+                assert!(view.next_page_token.is_none());
+            });
+        });
+    }
+
+    /// #164: the choice outlives the window — it is on disk the moment
+    /// the segment is clicked, not at some later save point that a crash
+    /// could skip.
+    ///
+    /// A *live* window, under its own directory: a fixture never writes
+    /// the file (the test after this one), and the smoke directory is
+    /// shared with every other window test, so a file asserted on there
+    /// would be raced by whichever test clicked last.
+    #[gpui::test]
+    fn a_switch_is_remembered_on_disk_at_once(cx: &mut gpui::TestAppContext) {
+        let home = std::env::temp_dir().join("twigpui-smoke-live-switch");
+        let _ = std::fs::remove_dir_all(&home);
+        let home_str = home.display().to_string();
+        let paths =
+            crate::paths::Paths::from_vars(move |key| (key == "HOME").then(|| home_str.clone()))
+                .unwrap();
+        paths.ensure_dirs().unwrap();
+        crate::cache::save_owned_lists(
+            &paths,
+            &[crate::x_api::ListSummary {
+                id: "9131".to_string(),
+                name: "Rust".to_string(),
+            }],
+            0,
+        )
+        .unwrap();
+
+        // No token under this HOME, so startup settles at
+        // `NotAuthenticated` with no client — past the startup gate, and
+        // still unable to spend anything on the cache miss that follows.
+        let (window, timeline) = window_with(cx, paths.clone(), Startup::Live);
+        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        cx.update(|cx| {
+            timeline.update(cx, |view, _cx| {
+                assert!(matches!(view.state, TimelineState::NotAuthenticated));
+                assert!(view.client.is_none());
+            });
+        });
+
+        let segment = visual
+            .debug_bounds("tab-list-9131")
+            .expect("the segment has to be laid out before a click can reach it");
+        visual.simulate_click(segment.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+
+        let remembered = super::list_picker::load_selection(&paths.selection_file());
+        assert_eq!(
+            remembered.selected,
+            Some(super::list_picker::Selection::List {
+                id: "9131".to_string()
+            })
+        );
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
+    /// #164: a fixture's segments name lists that do not exist, so a click
+    /// on one must leave no file behind — or the next live launch would
+    /// open on a list it cannot read and pay for the reload that finds
+    /// out.
+    #[gpui::test]
+    fn a_fixture_switch_leaves_no_selection_behind(cx: &mut gpui::TestAppContext) {
+        cache_list("9151", &["51"]);
+        let selection_file = smoke_paths().selection_file();
+        let _ = std::fs::remove_file(&selection_file);
+        let (mut visual, timeline) = drawn(cx, fixture_with_lists(&["1"], &[("9151", "Rust")]));
+
+        let segment = visual
+            .debug_bounds("tab-list-9151")
+            .expect("the segment has to be laid out before a click can reach it");
+        visual.simulate_click(segment.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+
+        cx.update(|cx| {
+            timeline.update(cx, |view, _cx| {
+                assert_eq!(shown_ids(view), ["51"], "the switch itself still happens");
+            });
+        });
+        assert!(
+            !selection_file.exists(),
+            "a fixture window wrote {}",
+            selection_file.display()
+        );
+    }
+
+    /// #164: clicking the segment that is already lifted is a no-op — the
+    /// timeline is identical afterwards, not merely still loaded.
+    #[gpui::test]
+    fn clicking_the_showing_segment_changes_nothing(cx: &mut gpui::TestAppContext) {
+        let (mut visual, timeline) =
+            drawn(cx, fixture_with_lists(&["2", "1"], &[("9141", "Rust")]));
+
+        let home = visual
+            .debug_bounds("tab-home")
+            .expect("Home is always a segment");
+        visual.simulate_click(home.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+
+        cx.update(|cx| {
+            timeline.update(cx, |view, _cx| {
+                assert_eq!(view.source, crate::cache::TimelineSource::Home);
+                assert_eq!(shown_ids(view), ["2", "1"]);
             });
         });
     }

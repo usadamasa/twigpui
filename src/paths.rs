@@ -164,6 +164,25 @@ impl Paths {
         self.cache_dir.join("me.json")
     }
 
+    /// Path to the cached result of `GET /2/users/:id/owned_lists` (#164):
+    /// the lists the picker offers, under `cache_dir`. Cache rather than
+    /// state for the usual reason — losing it costs one request, which is
+    /// what the picker's own refresh spends anyway.
+    pub(crate) fn owned_lists_file(&self) -> PathBuf {
+        self.cache_dir.join("owned-lists.json")
+    }
+
+    /// Path to the picker's persisted choice (#164): which timeline the
+    /// window opens on, under `state_dir`.
+    ///
+    /// State, not cache, though losing it is cheap: nothing on the network
+    /// can give it back, and `cache_dir` is the directory people are told
+    /// to clear when a cached shape goes stale — a preference should not
+    /// go with it.
+    pub(crate) fn selection_file(&self) -> PathBuf {
+        self.state_dir.join("selection.json")
+    }
+
     /// Path to a cached parent chain for one reply post, under `cache_dir`
     /// (#12). Keyed by the *reply's own* id — the post "Show thread" was
     /// clicked from — so re-opening the same reply renders the already-
@@ -460,7 +479,9 @@ mod tests {
         let user = "2244994945";
         let reply = "1800000000000000003";
         let list = "2091351590695588200";
-        let pairs: [(PathBuf, PathBuf); 17] = [
+        let pairs: [(PathBuf, PathBuf); 19] = [
+            (release.owned_lists_file(), dev.owned_lists_file()),
+            (release.selection_file(), dev.selection_file()),
             (release.settings_file(), dev.settings_file()),
             (release.oauth_token_file(), dev.oauth_token_file()),
             (release.user_ids_file(), dev.user_ids_file()),
@@ -644,6 +665,28 @@ mod tests {
         // launch pay for both full reads.
         let paths = Paths::from_vars(vars(&[("HOME", "/home/alice")])).unwrap();
         assert_ne!(paths.sync_state_file(), paths.sync_plan_file());
+    }
+
+    #[test]
+    fn owned_lists_file_is_under_the_cache_dir() {
+        // #164: a re-fetch is one cheap request, so it is cache, not state.
+        let paths = release_paths(vars(&[("HOME", "/home/alice")])).unwrap();
+        assert_eq!(
+            paths.owned_lists_file(),
+            PathBuf::from("/home/alice/.cache/twigpui/owned-lists.json")
+        );
+    }
+
+    #[test]
+    fn selection_file_is_under_the_state_dir() {
+        // #164: which list the window shows is nothing the network can
+        // give back, so it sits with the other state rather than in the
+        // directory the module docs tell people to delete by hand.
+        let paths = release_paths(vars(&[("HOME", "/home/alice")])).unwrap();
+        assert_eq!(
+            paths.selection_file(),
+            PathBuf::from("/home/alice/.local/state/twigpui/selection.json")
+        );
     }
 
     #[test]
