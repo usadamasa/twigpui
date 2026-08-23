@@ -291,6 +291,8 @@ mod tests {
             request_price: None,
             daily_request_budget: None,
             list_id: None,
+            auto_sync_list: false,
+            sync_interval_seconds: 21_600,
         }
     }
 

@@ -143,6 +143,19 @@ impl Paths {
         self.state_dir.join("sync_plan.json")
     }
 
+    /// Path to the background sync's clock, under `state_dir`: when the
+    /// last diff was attempted.
+    ///
+    /// A separate file from [`Self::sync_plan_file`] rather than a field in
+    /// the plan, because the plan is deleted the moment it is fully
+    /// applied — which is exactly when the clock still has six hours left
+    /// to run. State for the same reason the plan is: losing it makes the
+    /// next launch pay for both full reads immediately instead of waiting
+    /// out the interval.
+    pub(crate) fn sync_state_file(&self) -> PathBuf {
+        self.state_dir.join("sync_state.json")
+    }
+
     /// Path to the cached result of `GET /2/users/me` (#11): the signed-in
     /// user's own id and screen name, under `cache_dir`. Immutable for a
     /// given account, so caching it (like #9 caches screen-name → id) avoids
@@ -613,6 +626,24 @@ mod tests {
             paths.sync_plan_file(),
             PathBuf::from("/home/alice/.local/state/twigpui/sync_plan.json")
         );
+    }
+
+    #[test]
+    fn sync_state_file_is_under_the_state_dir() {
+        let paths = release_paths(vars(&[("HOME", "/home/alice")])).unwrap();
+        assert_eq!(
+            paths.sync_state_file(),
+            PathBuf::from("/home/alice/.local/state/twigpui/sync_state.json")
+        );
+    }
+
+    #[test]
+    fn the_sync_clock_is_not_the_same_file_as_the_plan() {
+        // The plan is deleted the moment it is fully applied. Sharing a
+        // file would take the interval clock with it and make the next
+        // launch pay for both full reads.
+        let paths = Paths::from_vars(vars(&[("HOME", "/home/alice")])).unwrap();
+        assert_ne!(paths.sync_state_file(), paths.sync_plan_file());
     }
 
     #[test]

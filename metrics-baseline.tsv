@@ -38,7 +38,11 @@ src/cache/timeline.rs	250
 src/compose.rs	350
 # config.rs 400 -> 450: `list_id` plus `resolve_list_id`, which validates
 # the value because it lands in a URL path segment.
-src/config.rs	450
+# 450 -> 550: `auto_sync_list` and `sync_interval_seconds` for the
+# background list sync, each with a resolver. Most of the added lines are
+# the two constants' docs, which carry the cost figures behind the default
+# interval and the floor.
+src/config.rs	550
 src/fixture.rs	100
 src/image_cache.rs	150
 src/like.rs	150
@@ -67,10 +71,21 @@ src/repost.rs	150
 # diff, the plan file and the report (where the tests are), run.rs holds
 # the paged reads, the apply loop and the CLI entry point (where the
 # spending is).
-src/sync/mod.rs	250
+# mod.rs 250 -> 350: `SyncState` and its file pair, plus the module doc
+# rewritten where the background sync overrode #163's "no polling" and
+# "removals are opt-in" rules.
+src/sync/mod.rs	350
 # sync/run.rs 300 -> 350: #169's `seed_users`, the fixed-screen-name stand-in
 # a development sync reads instead of the whole follow graph.
-src/sync/run.rs	350
+# 350 -> 400: `apply_some`, the bounded batch the background sync drains a
+# plan with. `apply` is now a call to it with no bound, which is what keeps
+# the CLI's behavior identical.
+src/sync/run.rs	400
+# schedule.rs and auto.rs are the background sync, split on the same line
+# mod.rs and run.rs are: schedule.rs decides what a tick should do and
+# carries every test, auto.rs performs it and makes the requests.
+src/sync/schedule.rs	250
+src/sync/auto.rs	200
 src/theme.rs	350
 src/thread.rs	100
 src/toggle.rs	200
@@ -78,7 +93,13 @@ src/toggle.rs	200
 # `reload`, `load_older` and `confirm_delete`, and `primary_source`. #137 is
 # already open on whether to split `impl TimelineView`; this raise does not
 # settle it, and the file is now 16 lines past where #137 found it.
-src/ui/mod.rs	2750
+# 2750 -> 2900: `start_auto_sync` and the `auto_sync` task field. The loop
+# body is thin — it asks `sync::tick` what happened and `sync::settle` when
+# to come back — but the doc explaining why it reuses `start`'s credential
+# instead of resolving its own is most of the addition, and it is the part
+# nobody can reconstruct from the code. #137 is still open on splitting
+# `impl TimelineView`; this raise does not settle it.
+src/ui/mod.rs	2900
 src/ui/reload_policy.rs	300
 src/ui/render.rs	1050
 src/usage.rs	350

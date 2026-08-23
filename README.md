@@ -124,8 +124,51 @@ each time.
 | `X_THEME` | no | `light` | Color theme: `light`, `dark`, or `system` (follows the OS appearance) — also `theme` in `config.toml` (#19) |
 | `X_REQUEST_PRICE` | no | unset | Price per API request, in whatever unit you have in mind — also `request_price` in `config.toml` (#18, see [Usage tracking](.claude/skills/x-api-budget/reference/app-behavior.md#usage-tracking)) |
 | `X_DAILY_REQUEST_BUDGET` | no | unset | Daily request-count budget that colors the header's usage line as it's approached — also `daily_request_budget` in `config.toml` (#18) |
+| `X_AUTO_SYNC_LIST` | no | `true` | Keep `X_LIST_ID`'s membership mirroring your follows while the app runs — also `auto_sync_list` in `config.toml`. **Spends on a timer**; see below |
+| `X_SYNC_INTERVAL_SECONDS` | no | `21600` (6h) | How long the background sync waits between diffs. Values under `900` are rejected — also `sync_interval_seconds` in `config.toml` |
 
 `.env` is gitignored. Do not commit credentials.
+
+### The background list sync
+
+With `X_LIST_ID` set, the window keeps that list's membership mirroring the
+accounts you follow, for as long as it is open. Accounts you follow are
+added; accounts you no longer follow are removed. It is on by default and
+turned off with `X_AUTO_SYNC_LIST=false`.
+
+**It removes accounts you added to the list by hand.** The list *is* the
+mirror — that is the whole contract. If you want a list you curate
+yourself, either turn the sync off or point `X_LIST_ID` at a different
+list.
+
+**It spends money on a timer.** Every diff reads your whole follow list and
+the whole list membership, and both are billed per account returned. At
+four diffs a day that is roughly $2 per thousand follows if X's documented
+24-hour deduplication covers these reads, and roughly $8 if it does not —
+`x-api-budget` has that rule measured for Posts only. This is why the
+interval defaults to six hours and refuses anything under fifteen minutes.
+
+The writes are spread out rather than sent in a burst: a list that is
+thousands of accounts behind is caught up a small batch at a time, and a
+rate limit pauses the catch-up rather than failing it. Progress is written
+to `$XDG_STATE_HOME/twigpui/sync_plan.json` after every single change, so
+quitting mid-catch-up costs nothing — the next launch picks up exactly
+where it stopped. `$XDG_STATE_HOME/twigpui/sync_state.json` holds when the
+last diff ran, which is what stops a relaunch from paying for both reads
+again.
+
+It needs the same scopes `--sync-list` does. A session that predates them
+is skipped with a line in the log rather than an error on screen — click
+"Re-authorize" once and the sync starts without a restart.
+
+The interval is counted from the last diff, not from launch, and that count
+is kept on disk. Restarting the app does not trigger a sync: if the last one
+ran an hour ago, the next is still five hours out.
+
+A debug build syncs too, and none of the costs above apply to it (#169): it
+mirrors the fixed seed screen names into the development list rather than
+reading your follow graph, against its own `twigpui-dev` state directory. The
+figures in this section are what a `--release` build spends.
 
 ### `--sync-list` — mirror your follows into the list (#163)
 
@@ -150,14 +193,18 @@ one against a few thousand follows costs dollars, not cents. Check the
 prices in the developer console before the first `--apply` — #162 is open
 because this app's own usage numbers count requests, not resources.
 
-Never put this on a timer. The plan is written to
-`$XDG_STATE_HOME/twigpui/sync_plan.json` and each entry is marked as it
-lands, so an interrupted `--apply` resumes from the file without paying to
-read either side again. `--apply` with no plan on file is an error: the dry
-run is what produces the plan.
+The plan is written to `$XDG_STATE_HOME/twigpui/sync_plan.json` and each
+entry is marked as it lands, so an interrupted `--apply` resumes from the
+file without paying to read either side again. `--apply` with no plan on
+file is an error: the dry run is what produces the plan.
 
-Removals need `--prune`. A list can hold accounts you added by hand, and
-whether a sync may delete those is deliberately left to you.
+Removals need `--prune` **here**. On the CLI a list may hold accounts you
+added by hand and deleting them stays your call; the background sync above
+prunes unconditionally, because a mirror that only grows is not a mirror.
+
+Both read the same plan file, so a dry run's plan is what the background
+sync drains next — including its removals. If you want to look at a diff
+without any of it being applied, turn the sync off first.
 
 Both sides need scopes this app did not request before #163
 (`follows.read`, `list.write`), so an existing session is refused before it
@@ -307,6 +354,8 @@ oauth_client_id = "…"
 theme = "light"
 request_price = 0.02
 daily_request_budget = 500
+auto_sync_list = true
+sync_interval_seconds = 21600
 ```
 
 A missing file is fine — it just means there are no file-level settings.
