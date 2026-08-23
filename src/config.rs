@@ -23,10 +23,14 @@ pub(crate) struct Config {
     pub target_username: String,
     /// Posts requested per fetch. The X API accepts 5..=100.
     pub max_results: u32,
-    /// Floor on how often a fetch may run, in seconds (#10). Not enforced by
-    /// this crate's own reload path yet — #21's auto-refresh is what
-    /// consumes it — but it's plumbed through here now so both the manual
-    /// reload cooldown and #21 read the same setting.
+    /// Floor on how often a fetch may run, in seconds (#10).
+    ///
+    /// Read by two things that both had to agree about it, which is why it
+    /// was plumbed through before either existed: `ui::reload_policy::reload_gate`
+    /// refuses a `Polling` reload inside this window, and #21's
+    /// `auto_refresh_interval_seconds` is validated never to fall below it
+    /// — a cadence under this floor would be a timer every tick of which
+    /// is refused before it sends anything.
     pub min_fetch_interval_seconds: u32,
     /// Color theme (#19): `light`, `dark`, or `system` (follows the OS
     /// appearance). Defaults to `light`; an unrecognized value falls back to
@@ -76,6 +80,22 @@ pub(crate) struct Config {
     /// costs a page of posts, this one paces a pair of full reads that cost
     /// one billed resource per followed account.
     pub sync_interval_seconds: u32,
+    /// Whether the window polls its timeline for new posts while it runs
+    /// (#21).
+    ///
+    /// On by default. Off means the app sends nothing it was not clicked
+    /// into sending — #21's completion condition names that outcome
+    /// specifically, so it is a hard guarantee rather than a tendency: see
+    /// `TimelineView::start_auto_refresh`, which returns before spawning
+    /// anything at all when this is false.
+    pub auto_refresh: bool,
+    /// How long auto-refresh waits between polls, in seconds (#21).
+    ///
+    /// Distinct from `min_fetch_interval_seconds` the way
+    /// `sync_interval_seconds` is: that one is a *floor* under any fetch,
+    /// this one is the cadence a poll actually runs at, and it is validated
+    /// never to fall below the floor — see [`resolve_auto_refresh_interval`].
+    pub auto_refresh_interval_seconds: u32,
 }
 
 const DEFAULT_USERNAME: &str = "XDevelopers";
@@ -107,6 +127,22 @@ const DEFAULT_SYNC_INTERVAL_SECONDS: u32 = 21_600;
 /// minutes is far below any cadence this feature has a use for and still
 /// two orders of magnitude away from that.
 const MIN_SYNC_INTERVAL_SECONDS: u32 = 900;
+
+/// 5 minutes between auto-refresh polls (#21).
+///
+/// Chosen from what a poll actually bills rather than from how fresh a
+/// timeline could theoretically be. A poll re-reads the head page —
+/// `GET /2/lists/:id/tweets` takes no `since_id`, so there is no cheaper
+/// request to send — and reads bill per returned resource, deduplicated
+/// within a UTC day. So in steady state a day's polling costs the posts
+/// that were genuinely new that day, which is what reading them costs
+/// however they arrive; the only repeated charge is the head page once
+/// after each UTC midnight, bounded by `max_results`.
+///
+/// That makes the interval a responsiveness knob rather than a spending
+/// one, and five minutes is the point where a timeline feels live without
+/// the window sending a request every time someone glances at it.
+const DEFAULT_AUTO_REFRESH_INTERVAL_SECONDS: u32 = 300;
 
 /// The file-level settings loaded from `config.toml`.
 ///
@@ -152,6 +188,15 @@ struct FileSettings {
     /// Non-secret, same reasoning as `request_price`.
     #[serde(default)]
     sync_interval_seconds: Option<u32>,
+    /// Non-secret, same reasoning as `request_price`. Like `auto_sync_list`
+    /// above, this is the key that matters for a `.app` launched from
+    /// Finder, where no shell variable is visible (#40) — and it is the one
+    /// switch that makes the window stop sending anything on its own.
+    #[serde(default)]
+    auto_refresh: Option<bool>,
+    /// Non-secret, same reasoning as `request_price`.
+    #[serde(default)]
+    auto_refresh_interval_seconds: Option<u32>,
     /// Raw `list_id` value (#161). Non-secret — a list id is visible in the
     /// list's own URL on x.com — so it belongs in `config.toml` like every
     /// key above. Validated by [`Config::resolve`] rather than here, so the
@@ -296,37 +341,7 @@ impl Config {
             );
         }
 
-        // env > config.toml > default, same layering as everything else
-        // above. Unlike the numeric settings, an unrecognized value here
-        // must not `bail!` — a typo'd theme is cosmetic, not a reason to
-        // block startup (#19) — so it falls back to the default and warns
-        // via eprintln!, the project's established pattern for
-        // non-fatal notices (see main.rs).
-        // env > config.toml > default, same layering as everything else
-        // above. Unlike the numeric settings, an unrecognized value here
-        // must not `bail!` — a typo'd theme is cosmetic, not a reason to
-        // block startup (#19) — so it falls back to the default and warns
-        // via eprintln!, the project's established pattern for
-        // non-fatal notices (see main.rs).
-        let theme = var("X_THEME")
-            .map(|t| t.trim().to_string())
-            .filter(|t| !t.is_empty())
-            .or_else(|| {
-                file.theme
-                    .map(|t| t.trim().to_string())
-                    .filter(|t| !t.is_empty())
-            })
-            .and_then(|raw| {
-                ThemeMode::parse(&raw).or_else(|| {
-                    eprintln!(
-                        "warning: unrecognized theme {raw:?} (expected light, dark, or \
-                         system); using {} instead",
-                        ThemeMode::default()
-                    );
-                    None
-                })
-            })
-            .unwrap_or_default();
+        let theme = resolve_theme(&var, file.theme);
 
         let log_level = resolve_log_level(&var, file.log_level);
 
@@ -337,6 +352,15 @@ impl Config {
 
         let auto_sync_list = resolve_auto_sync_list(&var, file.auto_sync_list)?;
         let sync_interval_seconds = resolve_sync_interval(&var, file.sync_interval_seconds)?;
+
+        let auto_refresh = resolve_auto_refresh(&var, file.auto_refresh)?;
+        // Takes `min_fetch_interval_seconds` because the floor it enforces
+        // is that one — see [`resolve_auto_refresh_interval`].
+        let auto_refresh_interval_seconds = resolve_auto_refresh_interval(
+            &var,
+            file.auto_refresh_interval_seconds,
+            min_fetch_interval_seconds,
+        )?;
 
         Ok(Self {
             oauth_client_id,
@@ -350,6 +374,8 @@ impl Config {
             daily_request_budget,
             auto_sync_list,
             sync_interval_seconds,
+            auto_refresh,
+            auto_refresh_interval_seconds,
         })
     }
 }
@@ -458,6 +484,77 @@ fn resolve_sync_interval(
     Ok(seconds)
 }
 
+/// Resolve `auto_refresh` (#21): env > file > on.
+///
+/// Rejects an unrecognized value rather than falling back, for
+/// [`resolve_auto_sync_list`]'s exact reason: this is the switch someone
+/// reaches for to stop the app spending on a timer, and reading
+/// `X_AUTO_REFRESH=flase` as the default would leave the timer running for
+/// the one person who asked for it to stop.
+fn resolve_auto_refresh(
+    var: impl Fn(&str) -> Option<String>,
+    file_value: Option<bool>,
+) -> Result<bool> {
+    let Some(raw) = var("X_AUTO_REFRESH")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(file_value.unwrap_or(true));
+    };
+    match raw.to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" | "on" => Ok(true),
+        "false" | "0" | "no" | "off" => Ok(false),
+        _ => bail!("X_AUTO_REFRESH must be true or false, got {raw:?}"),
+    }
+}
+
+/// Resolve `auto_refresh_interval_seconds` (#21): env > file >
+/// [`DEFAULT_AUTO_REFRESH_INTERVAL_SECONDS`], refusing anything below
+/// `min_fetch_interval_seconds`.
+///
+/// The floor is not about money — [`DEFAULT_AUTO_REFRESH_INTERVAL_SECONDS`]
+/// explains why a poll is nearly free — but about the loop working at all.
+/// Every poll goes through `ui::reload_policy::reload_gate` as
+/// `ReloadTrigger::Polling`, which refuses a fetch within
+/// `min_fetch_interval_seconds` of the last one. Set the cadence below that
+/// floor and every single tick is refused before it sends anything: the
+/// window would be running a timer that can never do its job, and nothing
+/// on screen would say so. Rejecting it at startup is the only place that
+/// mismatch is visible.
+///
+/// Equal to the floor is accepted — a poll scheduled exactly when the gate
+/// reopens is the tightest cadence that still works.
+fn resolve_auto_refresh_interval(
+    var: &impl Fn(&str) -> Option<String>,
+    file_value: Option<u32>,
+    min_fetch_interval_seconds: u32,
+) -> Result<u32> {
+    let (seconds, source) = match var("X_AUTO_REFRESH_INTERVAL_SECONDS")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    {
+        Some(raw) => (
+            raw.parse::<u32>().with_context(|| {
+                format!("X_AUTO_REFRESH_INTERVAL_SECONDS is not a number: {raw:?}")
+            })?,
+            "X_AUTO_REFRESH_INTERVAL_SECONDS",
+        ),
+        None => match file_value {
+            Some(seconds) => (seconds, "auto_refresh_interval_seconds in config.toml"),
+            None => return Ok(DEFAULT_AUTO_REFRESH_INTERVAL_SECONDS),
+        },
+    };
+
+    if seconds < min_fetch_interval_seconds {
+        bail!(
+            "{source} must be at least {min_fetch_interval_seconds} seconds — the value of \
+             min_fetch_interval_seconds — got {seconds}. A poll scheduled inside that floor is \
+             refused before it sends anything, so auto-refresh would never actually run."
+        );
+    }
+    Ok(seconds)
+}
+
 /// Resolve `request_price` (#18): env > file > unset, the same precedence
 /// every other setting in [`Config::resolve`] uses — split out from there
 /// only to keep that function under clippy's line-count lint, not because
@@ -469,6 +566,39 @@ fn resolve_sync_interval(
 /// default. Still validated when present, from either source: a negative
 /// or non-finite price would silently corrupt every estimated amount
 /// downstream.
+/// Resolve `theme` (#19): env > file > default.
+///
+/// Unlike the numeric settings, an unrecognized value here must not
+/// `bail!` — a typo'd theme is cosmetic, not a reason to block startup —
+/// so it falls back to the default and warns via `eprintln!`, the
+/// project's established pattern for non-fatal notices (see `main.rs`).
+/// [`resolve_log_level`] below does the same thing for the same reason.
+///
+/// A free function rather than inline in [`Config::resolve_for_profile`]
+/// only to keep that one under clippy's line-count lint, like every other
+/// `resolve_*` here.
+fn resolve_theme(var: &impl Fn(&str) -> Option<String>, file_value: Option<String>) -> ThemeMode {
+    var("X_THEME")
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+        .or_else(|| {
+            file_value
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty())
+        })
+        .and_then(|raw| {
+            ThemeMode::parse(&raw).or_else(|| {
+                eprintln!(
+                    "warning: unrecognized theme {raw:?} (expected light, dark, or \
+                     system); using {} instead",
+                    ThemeMode::default()
+                );
+                None
+            })
+        })
+        .unwrap_or_default()
+}
+
 /// Resolve the log level (#49): `TWIGPUI_LOG` wins over `config.toml`'s
 /// `log_level`, and an unrecognized value warns and falls back to the
 /// default rather than blocking startup — the same shape as `theme` (#19),
@@ -1477,6 +1607,179 @@ mod tests {
             vars(&[
                 ("X_OAUTH_CLIENT_ID", "client-123"),
                 ("X_SYNC_INTERVAL_SECONDS", "soon"),
+            ]),
+            FileSettings::default(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("is not a number"), "{error}");
+    }
+
+    // --- #21: auto-refresh ---
+
+    #[test]
+    fn auto_refresh_is_on_by_default() {
+        let config = Config::resolve(
+            vars(&[("X_OAUTH_CLIENT_ID", "client-123")]),
+            FileSettings::default(),
+        )
+        .unwrap();
+
+        assert!(config.auto_refresh);
+        assert_eq!(
+            config.auto_refresh_interval_seconds,
+            super::DEFAULT_AUTO_REFRESH_INTERVAL_SECONDS
+        );
+    }
+
+    #[test]
+    fn auto_refresh_can_be_switched_off_from_the_environment() {
+        let config = Config::resolve(
+            vars(&[
+                ("X_OAUTH_CLIENT_ID", "client-123"),
+                ("X_AUTO_REFRESH", "off"),
+            ]),
+            FileSettings::default(),
+        )
+        .unwrap();
+
+        assert!(!config.auto_refresh);
+    }
+
+    #[test]
+    fn auto_refresh_can_be_switched_off_from_the_file() {
+        let config = Config::resolve(
+            vars(&[("X_OAUTH_CLIENT_ID", "client-123")]),
+            FileSettings {
+                auto_refresh: Some(false),
+                ..FileSettings::default()
+            },
+        )
+        .unwrap();
+
+        assert!(!config.auto_refresh);
+    }
+
+    #[test]
+    fn the_environment_wins_over_the_file_for_auto_refresh() {
+        let config = Config::resolve(
+            vars(&[
+                ("X_OAUTH_CLIENT_ID", "client-123"),
+                ("X_AUTO_REFRESH", "true"),
+            ]),
+            FileSettings {
+                auto_refresh: Some(false),
+                ..FileSettings::default()
+            },
+        )
+        .unwrap();
+
+        assert!(config.auto_refresh);
+    }
+
+    // Same reasoning as `X_AUTO_SYNC_LIST`: a typo read as the default
+    // would leave a paid timer running for someone switching it off.
+    #[test]
+    fn rejects_an_unrecognized_auto_refresh_value() {
+        let error = Config::resolve(
+            vars(&[
+                ("X_OAUTH_CLIENT_ID", "client-123"),
+                ("X_AUTO_REFRESH", "flase"),
+            ]),
+            FileSettings::default(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("X_AUTO_REFRESH"), "{error}");
+    }
+
+    #[test]
+    fn reads_the_auto_refresh_interval_from_the_environment() {
+        let config = Config::resolve(
+            vars(&[
+                ("X_OAUTH_CLIENT_ID", "client-123"),
+                ("X_AUTO_REFRESH_INTERVAL_SECONDS", "900"),
+            ]),
+            FileSettings::default(),
+        )
+        .unwrap();
+
+        assert_eq!(config.auto_refresh_interval_seconds, 900);
+    }
+
+    #[test]
+    fn reads_the_auto_refresh_interval_from_the_file_when_env_is_unset() {
+        let config = Config::resolve(
+            vars(&[("X_OAUTH_CLIENT_ID", "client-123")]),
+            FileSettings {
+                auto_refresh_interval_seconds: Some(600),
+                ..FileSettings::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(config.auto_refresh_interval_seconds, 600);
+    }
+
+    // The interval this loop is paced by cannot be shorter than the one
+    // `reload_gate` refuses inside — every tick would be blocked before it
+    // sent anything, and auto-refresh would silently never happen.
+    #[test]
+    fn rejects_an_auto_refresh_interval_below_the_fetch_interval() {
+        let error = Config::resolve(
+            vars(&[
+                ("X_OAUTH_CLIENT_ID", "client-123"),
+                ("X_MIN_FETCH_INTERVAL_SECONDS", "120"),
+                ("X_AUTO_REFRESH_INTERVAL_SECONDS", "60"),
+            ]),
+            FileSettings::default(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("X_AUTO_REFRESH_INTERVAL_SECONDS"), "{error}");
+        assert!(error.contains("120"), "{error}");
+    }
+
+    #[test]
+    fn accepts_an_auto_refresh_interval_equal_to_the_fetch_interval() {
+        let config = Config::resolve(
+            vars(&[
+                ("X_OAUTH_CLIENT_ID", "client-123"),
+                ("X_MIN_FETCH_INTERVAL_SECONDS", "120"),
+                ("X_AUTO_REFRESH_INTERVAL_SECONDS", "120"),
+            ]),
+            FileSettings::default(),
+        )
+        .unwrap();
+
+        assert_eq!(config.auto_refresh_interval_seconds, 120);
+    }
+
+    // The floor names the file key when that is where the value came
+    // from, mirroring `resolve_sync_interval`'s two-source message.
+    #[test]
+    fn the_auto_refresh_interval_floor_names_the_file_key() {
+        let error = Config::resolve(
+            vars(&[("X_OAUTH_CLIENT_ID", "client-123")]),
+            FileSettings {
+                auto_refresh_interval_seconds: Some(10),
+                ..FileSettings::default()
+            },
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("auto_refresh_interval_seconds in config.toml"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn rejects_a_non_numeric_auto_refresh_interval() {
+        let error = Config::resolve(
+            vars(&[
+                ("X_OAUTH_CLIENT_ID", "client-123"),
+                ("X_AUTO_REFRESH_INTERVAL_SECONDS", "often"),
             ]),
             FileSettings::default(),
         )

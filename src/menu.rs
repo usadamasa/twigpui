@@ -34,6 +34,12 @@ gpui::actions!(
         /// Jump the timeline back to the newest post (#22), bound to
         /// `cmd-up`. Purely local — it spends nothing.
         ScrollToTop,
+        /// Show the posts auto-refresh has already fetched (#21), bound to
+        /// `cmd-shift-r`. The pair to [`Reload`] and its deliberate
+        /// opposite where money is concerned: `cmd-r` buys a fetch,
+        /// `cmd-shift-r` reveals one that has already been bought and
+        /// paid for. Spends nothing.
+        ShowNewPosts,
     ]
 );
 
@@ -153,6 +159,22 @@ const SCROLL_TO_TOP: Shortcut = Shortcut {
     menu_label: Some("Back to Top"),
 };
 
+/// Show what auto-refresh already fetched (#21).
+///
+/// `cmd-shift-r` because it is `cmd-r`'s pair and the pairing is the point:
+/// the two do the same thing to the screen and opposite things to the
+/// balance. Reload buys a fetch; this one reveals a fetch the timer already
+/// bought, so a reader who sees the count has a way to take it that never
+/// spends. Whether it is offered at all is the bar's business, not this
+/// binding's — with nothing pending the action is a no-op.
+const SHOW_NEW_POSTS: Shortcut = Shortcut {
+    keystroke: "cmd-shift-r",
+    context: Some(KEY_CONTEXT),
+    bind: |keystroke, context| gpui::KeyBinding::new(keystroke, ShowNewPosts, context),
+    item: |label| gpui::MenuItem::action(label, ShowNewPosts),
+    menu_label: Some("Show New Posts"),
+};
+
 /// Every binding, in the order [`init`] registers them (#99).
 ///
 /// [`init`] registers exactly this list, [`shortcuts`] filters it to what
@@ -170,7 +192,7 @@ const SCROLL_TO_TOP: Shortcut = Shortcut {
 /// `CLOSE_WINDOW` and `SCROLL_TO_TOP` sat here unbound after #109 and #22
 /// added them everywhere except this list. `every_menu_item_has_a_binding`
 /// is the test that now catches it.
-const ALL_SHORTCUTS: [&Shortcut; 7] = [
+const ALL_SHORTCUTS: [&Shortcut; 8] = [
     &RELOAD,
     &FOCUS_COMPOSER,
     &BLUR_COMPOSER,
@@ -178,6 +200,7 @@ const ALL_SHORTCUTS: [&Shortcut; 7] = [
     &MINIMIZE,
     &CLOSE_WINDOW,
     &SCROLL_TO_TOP,
+    &SHOW_NEW_POSTS,
 ];
 
 /// Register #58's key bindings. Called once at startup, next to
@@ -237,10 +260,14 @@ pub(crate) fn menus() -> Vec<gpui::Menu> {
         },
         gpui::Menu {
             name: "View".into(),
-            items: [RELOAD.menu_item(), SCROLL_TO_TOP.menu_item()]
-                .into_iter()
-                .flatten()
-                .collect(),
+            items: [
+                RELOAD.menu_item(),
+                SHOW_NEW_POSTS.menu_item(),
+                SCROLL_TO_TOP.menu_item(),
+            ]
+            .into_iter()
+            .flatten()
+            .collect(),
         },
         // The name is load-bearing (#109): gpui's macOS platform hands a
         // menu to AppKit's `setWindowsMenu_` only when it is called

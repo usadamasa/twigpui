@@ -126,8 +126,34 @@ each time.
 | `X_DAILY_REQUEST_BUDGET` | no | unset | Daily request-count budget that colors the header's usage line as it's approached — also `daily_request_budget` in `config.toml` (#18) |
 | `X_AUTO_SYNC_LIST` | no | `true` | Keep `X_LIST_ID`'s membership mirroring your follows while the app runs — also `auto_sync_list` in `config.toml`. **Spends on a timer**; see below |
 | `X_SYNC_INTERVAL_SECONDS` | no | `21600` (6h) | How long the background sync waits between diffs. Values under `900` are rejected — also `sync_interval_seconds` in `config.toml` |
+| `X_AUTO_REFRESH` | no | `true` | Poll the timeline for new posts while the window is open — also `auto_refresh` in `config.toml` (#21). `false` and the app sends nothing you did not click |
+| `X_AUTO_REFRESH_INTERVAL_SECONDS` | no | `300` (5m) | How long auto-refresh waits between polls. Values below `X_MIN_FETCH_INTERVAL_SECONDS` are rejected — also `auto_refresh_interval_seconds` in `config.toml` |
 
 `.env` is gitignored. Do not commit credentials.
+
+### Auto-refresh
+
+The window polls its timeline every five minutes and, when a poll brings
+posts you have not seen, offers them as an **"↑ N new posts"** bar between
+the toolbar and the list. Nothing moves until you press it — not the list,
+not your scroll position. Pressing it (or `⌘⇧R`, or View → Show New Posts)
+shows them and jumps to the top.
+
+That is the deliberate half of the design. A fetch you did not ask for must
+not slide the text you are reading down the screen, so a poll never touches
+what is displayed; it only fills a buffer the bar offers.
+
+**The cost is smaller than a five-minute timer sounds.** Reads are billed
+per post returned and deduplicated within a UTC day, so a day of polling
+bills the posts that were genuinely new that day — which is what reading
+them costs however they arrive. The one repeated charge is the first head
+page after each UTC midnight, bounded by `X_MAX_RESULTS`.
+
+`⌘R` and `⌘⇧R` are deliberate opposites where money is concerned: `⌘R`
+buys a fetch, `⌘⇧R` reveals one the timer already paid for.
+
+Turn it off with `X_AUTO_REFRESH=false`. There is no timer left running
+behind that switch — the loop is never started at all.
 
 ### The background list sync
 
@@ -356,6 +382,8 @@ request_price = 0.02
 daily_request_budget = 500
 auto_sync_list = true
 sync_interval_seconds = 21600
+auto_refresh = true
+auto_refresh_interval_seconds = 300
 ```
 
 A missing file is fine — it just means there are no file-level settings.
@@ -391,6 +419,7 @@ typo'd theme is cosmetic, not worth blocking the app over — it falls back to
 | Key | Action |
 | --- | --- |
 | `⌘R` | Reload |
+| `⌘⇧R` | Show the posts auto-refresh already fetched (spends nothing) |
 | `⌘N` | Focus the composer |
 | `esc` | Leave the composer (the draft is kept) |
 | `⌘↑` | Back to the newest post |
