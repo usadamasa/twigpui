@@ -4,8 +4,8 @@ use anyhow::{Context as _, Result, bail};
 use ureq::Agent;
 
 use super::model::{
-    ApiProblem, Draft, TimelineItem, TimelineResponse, TweetIdRequest, User, UserIdRequest,
-    UserLookupResponse, UserPageResponse,
+    ApiProblem, Draft, ListPageResponse, ListSummary, TimelineItem, TimelineResponse,
+    TweetIdRequest, User, UserIdRequest, UserLookupResponse, UserPageResponse,
 };
 use crate::paths::Paths;
 use crate::rate_limit::{self, Endpoint, RateLimitState};
@@ -499,6 +499,29 @@ impl XClient {
         parse_user_page(&body, "list members")
     }
 
+    /// Fetch one page of the lists `user_id` owns (#164) — what the
+    /// toolbar's picker names its segments after. Requires `list.read`.
+    ///
+    /// One page, and the caller is expected to stop there: the picker is
+    /// a row of segments, and an account owning more than the spec's
+    /// 100-per-page has outgrown a row of segments long before it has
+    /// outgrown one request. The cursor is returned anyway so that
+    /// decision is the caller's to log, not this method's to hide.
+    ///
+    /// Bills per returned list (`x-api-budget`): 1 request plus as many
+    /// Lists-read resources as the account owns.
+    pub(crate) fn owned_lists(
+        &self,
+        paths: &Paths,
+        user_id: &str,
+        pagination_token: Option<&str>,
+        now: i64,
+    ) -> Result<(Vec<ListSummary>, Option<String>)> {
+        let url = owned_lists_url(user_id, pagination_token);
+        let body = self.get(paths, Endpoint::OwnedLists, &url, now)?;
+        parse_list_page(&body)
+    }
+
     /// `POST /2/lists/:id/members` (#163) — add `member_user_id` to the
     /// list. Requires `list.write`.
     ///
@@ -888,6 +911,24 @@ fn list_members_url(list_id: &str, pagination_token: Option<&str>) -> String {
         .build()
 }
 
+/// `GET /2/users/:id/owned_lists` (#164) — one page of the lists the
+/// account owns.
+///
+/// **Spec-derived**, like [`USER_PAGE_SIZE`]: docs.x.com gives this read a
+/// `max_results` of 1..=100 defaulting to 100, and nothing here has been
+/// measured beyond the first live fetch through the picker. No
+/// `list.fields`: `id` and `name` are the default fields and all the
+/// picker draws.
+fn owned_lists_url(user_id: &str, pagination_token: Option<&str>) -> String {
+    Url::api(API_BASE)
+        .segment("users")
+        .segment(user_id)
+        .segment("owned_lists")
+        .number("max_results", USER_PAGE_SIZE)
+        .maybe("pagination_token", pagination_token)
+        .build()
+}
+
 /// `POST /2/lists/:id/members` (#163) — the added account's id travels in
 /// the JSON body ([`UserIdRequest`]), not the URL.
 fn list_members_write_url(list_id: &str) -> String {
@@ -916,6 +957,14 @@ fn remove_list_member_url(list_id: &str, member_user_id: &str) -> String {
 fn parse_user_page(body: &str, what: &str) -> Result<(Vec<User>, Option<String>)> {
     let response: UserPageResponse = serde_json::from_str(body)
         .with_context(|| format!("could not parse the {what} response"))?;
+    let next_token = response.next_token().map(str::to_string);
+    Ok((response.data, next_token))
+}
+
+/// Parse one page of lists from `GET /2/users/:id/owned_lists` (#164).
+fn parse_list_page(body: &str) -> Result<(Vec<ListSummary>, Option<String>)> {
+    let response: ListPageResponse =
+        serde_json::from_str(body).context("could not parse the owned lists response")?;
     let next_token = response.next_token().map(str::to_string);
     Ok((response.data, next_token))
 }
@@ -1348,6 +1397,51 @@ mod tests {
         .unwrap();
         assert_eq!(users.len(), 1);
         assert_eq!(next.as_deref(), Some("c"));
+    }
+
+    #[test]
+    fn the_owned_lists_url_reads_one_full_page_of_the_users_own_lists() {
+        // #164: the picker names what it switches between, so it needs
+        // every list the account owns in one read. 100 is the spec's
+        // ceiling; reads bill per returned list, not per request, so a
+        // smaller page would only cost a second request.
+        let url = owned_lists_url("5685672", None);
+        assert_eq!(
+            path_of(&url),
+            "https://api.x.com/2/users/5685672/owned_lists"
+        );
+        assert_eq!(query_of(&url), vec![("max_results", "100")]);
+        assert_eq!(
+            added(&url, &owned_lists_url("5685672", Some("c"))),
+            vec![("pagination_token", "c")]
+        );
+    }
+
+    #[test]
+    fn parses_an_owned_lists_page_and_its_cursor() {
+        let (lists, next) = parse_list_page(
+            r#"{"data":[{"id":"2091351590695588200","name":"following mirror"},{"id":"7","name":"rust"}],"meta":{"result_count":2,"next_token":"c"}}"#,
+        )
+        .unwrap();
+        assert_eq!(lists.len(), 2);
+        assert_eq!(lists[0].id, "2091351590695588200");
+        assert_eq!(lists[0].name, "following mirror");
+        assert_eq!(next.as_deref(), Some("c"));
+    }
+
+    #[test]
+    fn an_owned_lists_page_with_no_data_is_empty_not_an_error() {
+        // An account that owns no lists gets `meta.result_count: 0` and no
+        // `data` key at all — the same shape `TimelineResponse` tolerates.
+        let (lists, next) = parse_list_page(r#"{"meta":{"result_count":0}}"#).unwrap();
+        assert!(lists.is_empty());
+        assert!(next.is_none());
+    }
+
+    #[test]
+    fn an_owned_lists_parse_failure_names_the_read() {
+        let error = parse_list_page("not json").unwrap_err().to_string();
+        assert!(error.contains("owned lists"), "{error}");
     }
 
     #[test]

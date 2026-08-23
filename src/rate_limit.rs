@@ -262,6 +262,13 @@ pub(crate) enum Endpoint {
     /// bucket for the reason every write endpoint has one: X limits each
     /// separately, and #18 has to count this as spend like any other.
     DeletePost,
+    /// `GET /2/users/:id/owned_lists` (#164) — the lists the signed-in
+    /// account owns, read once to name the picker's segments and then
+    /// cached until the picker is asked again. Its own bucket like the
+    /// other list reads: X limits it on its own schedule, and a read that
+    /// happens once per explicit click has no business borrowing the
+    /// window the timeline's polling burns through.
+    OwnedLists,
 }
 
 impl Endpoint {
@@ -274,7 +281,7 @@ impl Endpoint {
     /// failure #18 exists to prevent. `CreatePost` was missing here until
     /// #50; the test below now fails to compile rather than silently pass if
     /// a new variant is left out again.
-    pub(crate) const ALL: [Self; 16] = [
+    pub(crate) const ALL: [Self; 17] = [
         Self::UserLookup,
         Self::Timeline,
         Self::Me,
@@ -291,6 +298,7 @@ impl Endpoint {
         Self::CreateLike,
         Self::DeleteLike,
         Self::DeletePost,
+        Self::OwnedLists,
     ];
 
     /// `pub(crate)` rather than private (unlike before #18): `usage.rs`
@@ -314,6 +322,7 @@ impl Endpoint {
             Self::CreateLike => "create_like",
             Self::DeleteLike => "delete_like",
             Self::DeletePost => "delete_post",
+            Self::OwnedLists => "owned_lists",
         }
     }
 }
@@ -818,6 +827,7 @@ mod tests {
             Endpoint::CreateLike,
             Endpoint::DeleteLike,
             Endpoint::DeletePost,
+            Endpoint::OwnedLists,
         ];
         for endpoint in every {
             match endpoint {
@@ -836,7 +846,8 @@ mod tests {
                 | Endpoint::DeleteRepost
                 | Endpoint::CreateLike
                 | Endpoint::DeleteLike
-                | Endpoint::DeletePost => {}
+                | Endpoint::DeletePost
+                | Endpoint::OwnedLists => {}
             }
             assert!(
                 Endpoint::ALL.contains(&endpoint),
