@@ -58,9 +58,9 @@ mod auto;
 mod run;
 mod schedule;
 
-pub(crate) use auto::tick;
+pub(crate) use auto::{Pacing, tick};
 pub(crate) use run::{Request, run_cli};
-pub(crate) use schedule::{notice, settle};
+pub(crate) use schedule::{Outcome, is_finished, notice, settle};
 
 /// Which side of the diff an entry came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

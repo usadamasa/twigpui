@@ -167,6 +167,23 @@ mirror — that is the whole contract. If you want a list you curate
 yourself, either turn the sync off or point `X_LIST_ID` at a different
 list.
 
+**The status bar says what it is doing** (#174). "List sync: up to date"
+is the steady state; "List sync: 1100 to go" is a catch-up working
+through its plan; "List sync: no list configured" and "List sync:
+re-authorize to enable" name the gate a stopped sync is stopped at.
+Before this the feature was invisible from the window, and a catch-up
+that had hours left looked exactly like nothing happening.
+
+**Clicking it starts a sync**, in any state where one can start. It asks
+first, because the reads it buys are the most expensive click in this
+app. A sync started this way ignores the interval — that is the point of
+the button — but not the rate limit, and not an outstanding plan: if a
+catch-up is already part way through, pressing it resumes that plan
+rather than paying to diff both sides again.
+
+With `X_AUTO_SYNC_LIST=false` the timer never runs and the button is the
+only way a sync happens. That run stops once there is nothing left to do.
+
 **It spends money on a timer.** Every diff reads your whole follow list and
 the whole list membership, and both are billed per account returned. At
 four diffs a day that is roughly $2 per thousand follows if X's documented

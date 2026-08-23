@@ -19,6 +19,7 @@ use crate::image_cache;
 use crate::like;
 use crate::log;
 mod auto_refresh;
+mod list_sync;
 mod reload_policy;
 mod render;
 
@@ -29,6 +30,7 @@ mod render;
 // them would mean "anything in the crate may touch this", which is the
 // opposite of what splitting the file was for.
 use auto_refresh::{Pending, pending_after_poll, pending_label};
+use list_sync::{SyncOff, SyncStatus, SyncTrigger};
 use reload_policy::{
     CooldownTick, at_the_post_cap, cooldown_label, cooldown_tick, newly_arrived, offers_load_older,
     preserved_scroll_target, reload_failure_outcome, reload_gate, reload_outcome_label,
@@ -380,6 +382,18 @@ pub(crate) struct TimelineView {
     /// there is never more than one of them working the same plan file,
     /// and the last one retires with the window.
     auto_sync: Option<Task<()>>,
+    /// What the list sync is doing, for the status bar to report (#174).
+    ///
+    /// Written by the loop after every tick and by the gates before it
+    /// starts; read only by [`Self::status_bar`]. Until #174 the whole
+    /// feature was invisible from the window: a stopped sync, a sync
+    /// eleven hundred writes behind, and a sync with nothing to do all
+    /// looked exactly alike, which is to say like nothing at all.
+    sync_status: SyncStatus,
+    /// Whether the status bar is asking to confirm a manual sync (#174) —
+    /// the two-step behind the most expensive click in this window, in
+    /// the shape `pending_delete` uses. See `list_sync`'s module doc.
+    pending_sync: bool,
     /// Holds the auto-refresh loop alive (#21) — the timer that polls the
     /// timeline for new posts while the window is open. Its own slot
     /// rather than `fetch`'s, deliberately: assigning `fetch` from here
@@ -554,6 +568,11 @@ impl TimelineView {
             usage_totals: usage::Totals::default(),
             usage_refresh: None,
             auto_sync: None,
+            // #174: the truthful starting point. Nothing is signed in
+            // yet, which is one of the gates, and saying so beats an
+            // "idle" that has never run.
+            sync_status: SyncStatus::Off(SyncOff::NotSignedIn),
+            pending_sync: false,
             auto_refresh: None,
             pending: None,
             reposted_ids: HashSet::new(),
@@ -711,7 +730,7 @@ impl TimelineView {
                         // After `client` and `oauth_scope`, which it gates
                         // on and borrows from; before the fetch below,
                         // which it does not depend on either way.
-                        this.start_auto_sync(cx);
+                        this.start_sync(SyncTrigger::Scheduled, cx);
                         match cached {
                             Some((me, items)) => {
                                 this.home_user_id = Some(me.id);
@@ -1127,137 +1146,6 @@ impl TimelineView {
             });
         });
         self.thread_fetches.insert(fetch_key, task);
-    }
-
-    /// Start the background list sync: keep `config.list_id`'s membership
-    /// mirroring the accounts this app follows, for as long as the window
-    /// is open.
-    ///
-    /// Three gates, all silent-but-logged rather than raised on screen —
-    /// none of them is something the reader did, and a banner on every one
-    /// of them would be an error message about a feature they may not have
-    /// asked for:
-    ///
-    /// - `auto_sync_list` off,
-    /// - no `list_id`, so there is nothing to mirror into,
-    /// - a session predating the scopes the sync needs, which
-    ///   [`sync::missing_scope`] catches before a single billed read.
-    ///
-    /// Reuses the credential [`Self::start`] already resolved rather than
-    /// resolving its own. `oauth::resolve_credential` rotates the refresh
-    /// token and writes it back, so two of them racing could leave the
-    /// stored session dead — a much worse outcome than the access token in
-    /// hand going stale over a very long run, which is what every other
-    /// fetch path in this file already lives with.
-    fn start_auto_sync(&mut self, cx: &mut Context<'_, Self>) {
-        /// Longest one `timer` call waits, so the loop re-reads the clock
-        /// (and notices a machine that slept) rather than trusting a
-        /// deadline computed hours ago.
-        const MAX_SLEEP_SECONDS: i64 = 60;
-        /// Shortest gap between ticks. Only reached between consecutive
-        /// apply batches, where the answer is otherwise "immediately" —
-        /// enough to keep the loop cancellable mid-catch-up.
-        const MIN_SLEEP_SECONDS: i64 = 1;
-        /// How long to wait when the signed-in id has not landed yet.
-        /// Longer than `MIN_SLEEP_SECONDS` because there is nothing this
-        /// loop can do to hurry it along: a startup fetch that keeps
-        /// failing leaves `home_user_id` `None` indefinitely, and polling
-        /// it every second for the life of the window would be a spin
-        /// dressed up as patience.
-        const AWAITING_ID_SECONDS: i64 = 30;
-
-        if !self.config.auto_sync_list {
-            return;
-        }
-        let Some(list_id) = self.config.list_id.clone() else {
-            return;
-        };
-        if let Some(missing) = sync::missing_scope(self.oauth_scope.as_deref()) {
-            log::info(&format!(
-                "auto-sync of list {list_id} is off: this session does not carry {missing}. \
-                 Click \"Re-authorize\" once and it starts without a restart."
-            ));
-            return;
-        }
-        let Some(client) = self.client.clone() else {
-            return;
-        };
-
-        let paths = self.paths.clone();
-        let interval = self.config.sync_interval_seconds;
-        log::info(&format!(
-            "auto-sync of list {list_id} is on, every {interval}s"
-        ));
-
-        self.auto_sync = Some(cx.spawn(async move |this, cx| {
-            let mut blocked_until: Option<i64> = None;
-            loop {
-                // `Err` is the window being gone, which is the one reason
-                // this loop ever ends.
-                let Ok(user_id) = this.update(cx, |this, _| this.home_user_id.clone()) else {
-                    return;
-                };
-
-                let now = oauth::unix_now();
-                let sleep_until = match user_id {
-                    // The startup fetch has not resolved the signed-in id
-                    // yet. There is nothing to diff a follow list against
-                    // until it has.
-                    None => now.saturating_add(AWAITING_ID_SECONDS),
-                    Some(user_id) => {
-                        let outcome = {
-                            let (paths, client, list_id) =
-                                (paths.clone(), client.clone(), list_id.clone());
-                            cx.background_executor()
-                                .spawn(async move {
-                                    sync::tick(
-                                        &paths,
-                                        &client,
-                                        &user_id,
-                                        &list_id,
-                                        interval,
-                                        blocked_until,
-                                        now,
-                                    )
-                                })
-                                .await
-                        };
-                        let outcome = match outcome {
-                            Ok(outcome) => Some(outcome),
-                            Err(error) => {
-                                // `log::redact` runs on the way out — an
-                                // API error can quote a request URL.
-                                log::error(&format!("auto-sync failed: {error:#}"));
-                                None
-                            }
-                        };
-                        let settled = sync::settle(outcome.as_ref(), now, interval);
-                        blocked_until = settled.blocked_until;
-
-                        if let Some(text) = outcome.as_ref().and_then(sync::notice) {
-                            let _ = this.update(cx, |this, cx| {
-                                // Only into an empty slot: the reload
-                                // banner is the reader's, and a cooldown
-                                // countdown they are watching must not be
-                                // replaced by a background task's news.
-                                if this.reload_notice.is_none() {
-                                    this.reload_notice = Some(ReloadNotice::Outcome(text.into()));
-                                    cx.notify();
-                                }
-                            });
-                        }
-                        settled.wake_at
-                    }
-                };
-
-                let wait = sleep_until
-                    .saturating_sub(oauth::unix_now())
-                    .clamp(MIN_SLEEP_SECONDS, MAX_SLEEP_SECONDS);
-                cx.background_executor()
-                    .timer(Duration::from_secs(u64::try_from(wait).unwrap_or(1)))
-                    .await;
-            }
-        }));
     }
 
     /// Refresh the header's usage summary from disk (#18), independent of
@@ -1961,7 +1849,7 @@ impl TimelineView {
                     // the scope it was missing has just been granted, and
                     // without this the sync would stay off until the app
                     // was restarted.
-                    this.start_auto_sync(cx);
+                    this.start_sync(SyncTrigger::Scheduled, cx);
                     // #21: the other place auto-refresh can start, for the
                     // same reason — until this point there was no client
                     // for a poll to fetch with. Started before the reload
@@ -2446,7 +2334,7 @@ impl TimelineView {
     /// The kept-post count is only shown once a timeline has loaded. While
     /// signing in or fetching there is no number to give, and "0 / 200"
     /// would read as an empty cache rather than an unanswered question.
-    fn status_bar(&self) -> impl IntoElement {
+    fn status_bar(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let theme = self.theme;
 
         // #18: request counts are always shown; an estimated amount is
@@ -2479,6 +2367,12 @@ impl TimelineView {
                     .text_color(rgb(usage_color(usage_status, theme)))
                     .child(usage_text),
             )
+            // #174: what the list sync is doing, and — when it is
+            // something to press — the way to start one. Beside the
+            // request count rather than off in the toolbar because it is
+            // the same kind of fact: a running total about the app rather
+            // than about the timeline.
+            .child(self.sync_segment(cx))
             .when_some(kept, |bar, kept| {
                 bar.child(
                     div()
@@ -2957,7 +2851,7 @@ impl Render for TimelineView {
             .child(self.body(cx))
             // #95: the status bar, which is where the running request
             // count lives now that the header is a toolbar.
-            .child(self.status_bar())
+            .child(self.status_bar(cx))
     }
 }
 

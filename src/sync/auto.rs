@@ -36,12 +36,37 @@ use crate::x_api::XClient;
 /// in hours rather than days at one tick per wake-up.
 const BATCH: usize = 20;
 
-/// Run one tick.
+/// How the caller wants this tick paced — everything that is about *when*
+/// rather than *what*.
 ///
-/// `blocked_until` is the caller's memory of the last [`Outcome::RateLimited`]
-/// — held by the loop rather than re-read from the tracked window, because
-/// the loop is the only thing that needs it and threading it through keeps
-/// this function's decision reproducible from its arguments.
+/// A struct because the three arrived one at a time and the third took
+/// [`tick`] past clippy's argument count, but also because two of them are
+/// the loop's own memory rather than configuration, and grouping them says
+/// so.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Pacing {
+    /// `config.sync_interval_seconds`.
+    pub interval_seconds: u32,
+    /// The caller's memory of the last [`Outcome::RateLimited`] — held by
+    /// the loop rather than re-read from the tracked window, because the
+    /// loop is the only thing that needs it and threading it through keeps
+    /// [`tick`]'s decision reproducible from its arguments.
+    pub blocked_until: Option<i64>,
+    /// #174's manual start: drop the interval for this one tick.
+    ///
+    /// Done by handing [`schedule::next_step`] no last-diff time at all,
+    /// which is the value it already reads as "a diff has never run".
+    /// Nothing else about the decision changes, and that is the reason it
+    /// is done this way rather than with a shorter interval or a fourth
+    /// [`schedule::Step`]: the precedence still holds, so a live rate
+    /// limit still refuses the tick and an undrained plan is still
+    /// drained before both sides are re-read. Pressing the button while a
+    /// catch-up is outstanding therefore spends nothing on reads — it
+    /// resumes the plan already paid for.
+    pub forced: bool,
+}
+
+/// Run one tick.
 ///
 /// Pruning is unconditional here, unlike `--sync-list`, where it stays
 /// behind `--prune`. See this module's parent for why the two paths differ.
@@ -50,8 +75,7 @@ pub(crate) fn tick(
     client: &XClient,
     user_id: &str,
     list_id: &str,
-    interval_seconds: u32,
-    blocked_until: Option<i64>,
+    pacing: Pacing,
     now: i64,
 ) -> Result<Outcome> {
     let plan_path = paths.sync_plan_file();
@@ -66,21 +90,29 @@ pub(crate) fn tick(
         .map_or(0, |plan| plan.entries.iter().filter(|e| !e.applied).count());
 
     let situation = schedule::Situation {
-        last_diff_at: load_state(&state_path).last_diff_at,
-        interval_seconds,
+        last_diff_at: schedule::last_diff_for(pacing.forced, load_state(&state_path).last_diff_at),
+        interval_seconds: pacing.interval_seconds,
         pending,
-        blocked_until,
+        blocked_until: pacing.blocked_until,
     };
 
     match schedule::next_step(&situation, now) {
-        schedule::Step::Wait { until } => Ok(Outcome::Idle { until }),
+        // `pending` rides along (#174) precisely because this arm is
+        // reached both with a drained plan and with a rate-limited one
+        // that still owes hundreds of writes — see
+        // [`schedule::is_finished`], which is the one caller that has to
+        // tell those apart.
+        schedule::Step::Wait { until } => Ok(Outcome::Idle { until, pending }),
         schedule::Step::Diff => diff(paths, client, user_id, list_id, now),
         // `pending > 0` is what produced this step, so the plan is `Some`.
         // Listed rather than unwrapped so a later change to the precedence
         // cannot turn this into a panic.
         schedule::Step::Apply => match plan {
             Some(plan) => apply(paths, client, plan, now),
-            None => Ok(Outcome::Idle { until: now }),
+            None => Ok(Outcome::Idle {
+                until: now,
+                pending: 0,
+            }),
         },
     }
 }
