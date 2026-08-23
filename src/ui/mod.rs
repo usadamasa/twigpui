@@ -1270,6 +1270,7 @@ impl TimelineView {
             .text_size(theme::TEXT_META)
             .child(
                 div()
+                    .addressable("status-usage")
                     .text_color(rgb(usage_color(usage_status, theme)))
                     .child(usage_text),
             )
@@ -1287,7 +1288,18 @@ impl TimelineView {
             // render touching, as "11 reqList sync". Raising the gap to
             // `gap_8` changes nothing, so the spacing has to come from
             // somewhere that demonstrably works here.
-            .child(div().ml(theme::ROW_PAD_X).child(self.sync_segment(cx)))
+            //
+            // #184: the margin is now under a test. Both segments are
+            // named, so a window test can read their laid-out bounds back
+            // and require that they do not touch — which is the whole
+            // defect, and which nothing but a screenshot could catch when
+            // this comment was written.
+            .child(
+                div()
+                    .addressable("status-sync")
+                    .ml(theme::ROW_PAD_X)
+                    .child(self.sync_segment(cx)),
+            )
             .when_some(kept, |bar, kept| {
                 bar.child(
                     div()
@@ -3369,6 +3381,46 @@ mod tests {
                 );
             });
         });
+    }
+
+    /// #182, retroactively: the status bar's two segments do not touch.
+    ///
+    /// This is the test #182 was merged without. `Total: 11 req` and
+    /// `List sync: …` rendered as `11 reqList sync` — the row's `gap_3`
+    /// does not separate two bare text spans, and raising it to `gap_8`
+    /// changed nothing, so the fix was an explicit margin. A screenshot
+    /// was the only way to see either the defect or the fix.
+    ///
+    /// It was not the only way. Layout runs under the test platform;
+    /// what `TestWindow::draw` skips is turning a `Scene` into pixels.
+    /// So the laid-out bounds are real, and a spacing this test can read
+    /// is a spacing an assertion can hold (#184). Deliberately `>`, not a
+    /// specific gap: the defect was the two boxes meeting, and pinning
+    /// the exact margin would make every deliberate spacing change a test
+    /// failure.
+    #[gpui::test]
+    fn the_status_bars_segments_keep_apart(cx: &mut gpui::TestAppContext) {
+        let (window, _timeline) = fixture_window(cx, fixture_with(&["2", "1"], &[]));
+
+        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let usage = visual
+            .debug_bounds("status-usage")
+            .expect("the request count is always shown");
+        let sync = visual
+            .debug_bounds("status-sync")
+            .expect("the sync segment is always shown");
+
+        assert!(
+            sync.left() > usage.right(),
+            "the two segments run together, which reads as `11 reqList sync` \
+             on screen: usage ends at {:?}, sync starts at {:?}",
+            usage.right(),
+            sync.left()
+        );
     }
 
     /// #21: pressing it again changes nothing.
