@@ -67,13 +67,54 @@ pub(super) fn plan_sync(
     list_id: &str,
     now: i64,
 ) -> Result<Plan> {
-    let following = read_all("follow list", |cursor| {
-        client.following(paths, user_id, cursor, now)
-    })?;
+    let following = match paths.profile().sync_seed_usernames() {
+        None => read_all("follow list", |cursor| {
+            client.following(paths, user_id, cursor, now)
+        })?,
+        Some(usernames) => seed_users(paths, client, usernames, now)?,
+    };
     let members = read_all("list members", |cursor| {
         client.list_members(paths, list_id, cursor, now)
     })?;
     Ok(plan(list_id, now, &following, &members))
+}
+
+/// Stand in for the follow-graph read with a fixed set of screen names
+/// (#169) — what a development build syncs from, so working on #163 does
+/// not bill a dry run for every account the signed-in user follows.
+///
+/// Resolved through the same cached lookup `cache::reload` uses, so this
+/// costs one billed request per name on the first run of the month and
+/// nothing afterwards. Only `id` and `username` reach [`super::plan`], so
+/// `name` carries the screen name rather than a second lookup's worth of
+/// display name.
+///
+/// Not unit-tested, for the reason [`read_all`] isn't.
+fn seed_users(paths: &Paths, client: &XClient, usernames: &[&str], now: i64) -> Result<Vec<User>> {
+    usernames
+        .iter()
+        .map(|username| {
+            // Same shape as `cache::reload`'s own lookup: cache first, and
+            // persist whatever the API had to be asked for.
+            let id = if let Some(id) = cache::cached_user_id(paths, username, now)? {
+                id
+            } else {
+                let id = client
+                    .user_id_by_username(paths, username, now)
+                    .with_context(|| {
+                        format!("could not resolve the development sync seed @{username}")
+                    })?;
+                cache::save_user_id(paths, username, &id, now)?;
+                id
+            };
+            Ok(User {
+                id,
+                name: (*username).to_string(),
+                username: (*username).to_string(),
+                profile_image_url: None,
+            })
+        })
+        .collect()
 }
 
 /// Apply `plan`'s outstanding entries, marking and persisting each one as

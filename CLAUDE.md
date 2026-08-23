@@ -77,5 +77,16 @@ cargo test
 - **見た目は手元で見る**: gpui はテストプラットフォームでレイアウトを走らせないので、
   寸法も折り返しもコードから assert できない。`cargo run -- --fixture` で課金なしの
   決定的な画面を出して撮る。手順は `fixture-visual-check` スキルに従う。
+- **dev と本番は別インストール**: debug ビルド (`cargo run`) は `twigpui-dev` の
+  XDG ディレクトリと callback port 8734、release ビルドは `twigpui` と 8733 を使う
+  (`src/profile.rs`)。ディレクトリ名・ポート・ウィンドウタイトルを足したり変えたり
+  するときは、両プロファイルで衝突しないことをテストで押さえる。
+  切り替えは `debug_assertions` のみで、フラグも環境変数も無い。
+  課金する既定値をプロファイルで分けるときも `src/profile.rs` に置く
+  (list_id の既定と `--sync-list` の同期元がそう)。本番のデータを触る操作は
+  `cargo run --release` か `.app` から実行する。`.app` の組み立ては
+  `app-bundle` スキルに従う。
 - **`.env` は編集不可**: パーミッション設定により Claude セッションからは `.env` を
   読み書きできない。認証情報が要るときは環境変数を export してもらう。
+  `.env` は cwd で効くのでプロファイルを跨ぐ。dev 専用の設定は
+  `~/.config/twigpui-dev/config.toml` に置く。
