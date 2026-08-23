@@ -1,7 +1,7 @@
 # Writing: posting, replying, quoting, reposting, liking, deleting
 
 Everything this app can send back to X. For what it costs per action,
-see [API budget](api-budget.md).
+see [API budget](../.claude/skills/x-api-budget/reference/app-behavior.md).
 
 ## Posting
 

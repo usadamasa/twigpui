@@ -1,16 +1,20 @@
-# API budget: cost, rate limits, usage tracking, cache
+# twigpui の課金まわりの挙動 — リクエスト数・レートリミット・消費集計・キャッシュ
 
-X API billing is prepaid and metered, so every request is money.
-This file is the reference the `x-api-budget` skill points at.
+`../SKILL.md` が判断の規範、`pricing.md` が X 側の課金仕様 (単価・出典・実測)。
+このファイルは **twigpui が何をしているか**。
 
-## API cost
+以下は英語のまま。#4 以来のドキュメントを畳んだもので、書き直す理由がない。
 
-The X API bills per request against prepaid credits. A cold reload spends two
-requests: one id lookup (`/users/by/username/:username` for the single-user
-view, `/users/me` for the home timeline — #11) and one timeline fetch, plus
-one more request per "Load older" click, plus **up to five** more per
-"Show thread" click on a reply (#12 — one `GET /2/tweets?ids=` request per
-parent level, capped as described above). Fetching happens only on an
+## Requests per action
+
+Reads are billed per resource returned (see `pricing.md`), but the request
+count still governs rate limits and the actions that really are per-request.
+
+A cold reload sends two: one id lookup
+(`/users/by/username/:username` for the single-user view, `/users/me` for the
+home timeline — #11) and one timeline fetch, plus one more per "Load older"
+click, plus **up to five** more per "Show thread" click on a reply (#12 — one
+`GET /2/tweets?ids=` request per parent level). Fetching happens only on an
 explicit action — there is no polling or auto-refresh, and since #9,
 **opening the app spends nothing at all**: startup renders straight from the
 local cache below whenever one exists, with no request in the loop.
@@ -19,9 +23,10 @@ Reposting spends one request; un-reposting spends one more. Liking and
 unliking (#68) cost the same, one request each, and so does deleting a post
 (#72).
 
-`--fetch-post` (#42) spends exactly one request per run, however many post
-ids are given — they all ride in a single `GET /2/tweets?ids=` request's
-comma-separated `ids=` parameter, never one request per id.
+`--fetch-post` (#42) sends exactly one request per run, however many post ids
+are given — they all ride in a single `GET /2/tweets?ids=` request's
+comma-separated `ids=` parameter, never one request per id. The billing,
+though, still follows the number of posts that come back.
 
 When credits run out the API answers `429` with a `UsageCapExceeded` problem
 body; the app surfaces that text directly in the window.
@@ -70,11 +75,17 @@ once its window resets. twigpui tells them apart and treats each accordingly:
 
 ## Usage tracking
 
-The X API bills per request against prepaid credits (see "API cost" above),
-but until now there was no way to see what had actually been spent short of
-hitting `429`. twigpui now counts every request it actually sends and
-persists the counts, so the running total is visible both in the window and
-from the command line.
+**What this section describes does not match how X actually bills.** It
+counts requests; reads are billed per resource (`pricing.md`), so the numbers
+below understate reads by one to two orders of magnitude. #162 tracks the fix.
+Until then, treat the counts as "how many times the app called out", not "what
+this cost".
+
+Two ways to see the real figure: the Developer Console's Usage / Billing
+breakdown, or `GET /2/usage/tweets` — both described in `pricing.md`.
+
+twigpui counts every request it actually sends and persists the counts, so a
+running total is visible both in the window and from the command line.
 
 **What's counted.** Every actual HTTP send counted from `x_api::client`'s one
 central `get` method — including retries: a request retried after a network
@@ -162,7 +173,7 @@ budget), or `"exceeded"`; it's always `"ok"` when no budget is configured.
 ## Local cache
 
 To avoid re-paying for the same content, twigpui keeps a small JSON cache
-under `$XDG_CACHE_HOME/twigpui/` (see the [file locations table](../README.md#file-locations-xdg-base-directory)):
+under `$XDG_CACHE_HOME/twigpui/` (see the [file locations table](../../../../README.md#file-locations-xdg-base-directory)):
 
 | File | Holds | TTL |
 | --- | --- | --- |

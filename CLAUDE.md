@@ -63,9 +63,9 @@ cargo test
 - **ファイルサイズは CI が落とす**: `scripts/code-metrics.sh --check` が
   `metrics-baseline.tsv` の天井と突き合わせる。新規ファイルは先に登録しないと落ちる。
   天井の上げ下げは `code-metrics-ratchet` スキルに従う。
-- **課金に直結する API**: X API はプリペイド残高からの従量課金で、リクエストを 1 本足すことが
-  そのままお金になる。リロード 1 回で 2 リクエスト、「Load older」1 クリックでさらに 1。
-  呼び出しを足す・頻度を変える・キャッシュを触るときは `x-api-budget` スキルに従う。
+- **課金に直結する API**: X API はプリペイド残高からの従量課金。呼び出しを足す・
+  取得件数 (`max_results`) を変える・頻度を変える・キャッシュを触るときは
+  `x-api-budget` スキルに従う。
 - **公開 spec に従うと壊れる**: X API は post 語彙と tweet 語彙が並存していて、
   リクエストで使った綴りがレスポンスの綴りを決める。docs.x.com の `openapi.json` は
   post 語彙しか宣言していないが、このアプリは tweet 語彙 (`tweet.fields`,
