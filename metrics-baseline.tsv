@@ -123,7 +123,12 @@ src/toggle.rs	200
 # bar's segment, which is a net loss of about a hundred lines. Lowered
 # rather than left with the headroom, so the next time this file grows
 # there is something to notice it against.
-src/ui/mod.rs	2900
+# 2900 -> 1800: #137's answer. Every method holding a `cx.spawn` moved to
+# `ui/tasks.rs` below — twenty of them, about eleven hundred lines. This
+# is the ceiling the file has not had since #126, and it is set to the
+# measurement rather than to the old number so the next raise has to be
+# argued from here.
+src/ui/mod.rs	1800
 src/ui/reload_policy.rs	300
 # New in #21. Holds the whole of auto-refresh: the pure tick/pending
 # decisions with their tests, and an `impl TimelineView` block for the
@@ -141,6 +146,14 @@ src/ui/list_sync.rs	650
 # ui/render.rs 1050 -> 1100: #21's `new_posts_bar`, the one element in the
 # banner column that is a button rather than a report.
 src/ui/render.rs	1100
+# New in #137, which asked whether to split `impl TimelineView` and where.
+# This is its option (b): every method holding a `cx.spawn`. Large, and
+# deliberately so — the seam is "this is where the money goes", and a
+# spending method left behind in `ui` would make that sentence false.
+# Nothing here is unit tested (every branch is a request or a file a
+# request's result is written to), which is why `ui/mod.rs`'s test module
+# did not move and the test count did not change.
+src/ui/tasks.rs	1200
 src/usage.rs	350
 # x_api/client.rs 750 -> 800: `list_timeline` and `list_timeline_url`,
 # carrying the doc comment that explains why neither takes a `since_id`.
