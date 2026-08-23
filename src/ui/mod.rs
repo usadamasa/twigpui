@@ -557,10 +557,17 @@ impl TimelineView {
     /// worth checking.
     fn show_fixture(&mut self, fixture: Fixture, cx: &mut Context<'_, Self>) {
         self.signed_in_with_oauth = true;
+        // Every scope the app requests, so no affordance is withheld for
+        // want of one. `list.read` (#161) belongs here even though a
+        // fixture never fetches: `offers_reauthorize` reads the scope, not
+        // the network, so leaving it out put a "Re-authorize" button on
+        // every list-mode fixture — a permanent fixture of a screen meant
+        // for comparing layouts.
         self.oauth_scope = Some(format!(
-            "{} {}",
+            "{} {} {}",
             oauth::tokens::TWEET_WRITE_SCOPE,
-            oauth::tokens::LIKE_WRITE_SCOPE
+            oauth::tokens::LIKE_WRITE_SCOPE,
+            oauth::tokens::LIST_READ_SCOPE
         ));
         self.home_user_id = Some(fixture.signed_in_as.id);
         self.home_username = Some(fixture.signed_in_as.username);
