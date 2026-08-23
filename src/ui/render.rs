@@ -12,6 +12,43 @@
 
 use super::*;
 
+/// Gives one element a single name that both gpui and a test can use.
+///
+/// This is *test* addressability, not accessibility. gpui 0.2.2 ships no
+/// accessibility tree at all — no AccessKit, no roles, no way to ask a
+/// window where the button called X is — so nothing here reaches a screen
+/// reader, and calling it an ARIA equivalent would overstate it by a long
+/// way.
+///
+/// What the crate does have is `debug_selector`, which records where an
+/// element was actually laid out under a name a test can look up
+/// ([`gpui::VisualTestContext::debug_bounds`]), and which compiles to
+/// nothing outside `cargo test`. Every interactive element in this module
+/// already carries a unique `.id(..)`; without this trait, naming one for
+/// a test means writing that string a second time, and two names for one
+/// element drift apart the first time either is edited. `addressable`
+/// writes it once.
+///
+/// The point of having the bounds at all is #184: a test can click their
+/// centre, which puts gpui's hit test — the one step `dispatch_action`
+/// skips — under assertion, without a coordinate written down anywhere.
+pub(super) trait Addressable: InteractiveElement + Sized {
+    /// Names this element for gpui's interactivity and for a test lookup.
+    fn addressable(self, name: impl Into<SharedString>) -> gpui::Stateful<Self> {
+        let name = name.into();
+        // Selector first: it returns `Self`, while `id` consumes into
+        // `Stateful`. Both write the same `Interactivity`, so the order
+        // changes nothing else.
+        self.debug_selector({
+            let name = name.clone();
+            move || name.to_string()
+        })
+        .id(gpui::ElementId::Name(name))
+    }
+}
+
+impl<E: InteractiveElement> Addressable for E {}
+
 /// An outlined pill in the header that starts the sign-in flow.
 ///
 /// #31 (upgrade away from the app-only bearer token) and #14 (the session
@@ -112,7 +149,7 @@ pub(super) fn new_posts_bar(
     cx: &mut Context<'_, TimelineView>,
 ) -> impl IntoElement {
     div()
-        .id("new-posts")
+        .addressable("new-posts")
         .px_4()
         .py_2()
         .bg(rgb(theme.bg_header))

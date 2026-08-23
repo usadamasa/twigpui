@@ -37,6 +37,7 @@ use reload_policy::{
     preserved_scroll_target, reload_failure_outcome, reload_gate, reload_outcome_label,
     reload_start_state,
 };
+use render::Addressable as _;
 use render::{
     AVATAR_SIZE, MAX_RENDERED_MEDIA, MEDIA_CELL_HEIGHT, author_link, avatar_placeholder, byline,
     compose_error_message, format_timestamp, header_title, like_row, link_row, media_badge,
@@ -1564,7 +1565,7 @@ impl TimelineView {
         // `overflow_y_scroll` lives on StatefulInteractiveElement, so the
         // element needs an id before it can scroll.
         let content = div()
-            .id("timeline")
+            .addressable("timeline")
             .flex()
             .flex_col()
             .flex_1()
@@ -3264,8 +3265,9 @@ mod tests {
     /// The gap this closes is a real one: the bar and its `cmd-shift-r`
     /// binding could not be exercised by hand from a session with no way
     /// to click a desktop window, so until #146 the whole click path was
-    /// unverified. `dispatch_action` is the sanctioned equivalent — it
-    /// goes through the same `on_action` registration a keystroke does.
+    /// unverified. `dispatch_action` covers it from `on_action` down — it
+    /// goes through the same registration a keystroke does. The step above
+    /// that, whether a coordinate lands on the bar, is #184's test below.
     #[gpui::test]
     fn showing_new_posts_moves_them_onto_the_timeline(cx: &mut gpui::TestAppContext) {
         use gpui::AppContext as _;
@@ -3285,6 +3287,85 @@ mod tests {
                 assert!(
                     view.pending.is_none(),
                     "the buffer must be emptied, or the bar keeps offering posts already shown"
+                );
+            });
+        });
+    }
+
+    /// #184: the same reveal, reached by a click on the bar itself.
+    ///
+    /// This is the layer above #183. The test above dispatches the action
+    /// directly, which leaves one step unverified: whether a mouse at some
+    /// coordinate lands on the bar at all. Here nothing is dispatched — the
+    /// bar's own bounds are looked up from the frame that was just drawn,
+    /// a click is simulated at their centre, and gpui's hit test is what
+    /// has to find `on_click`. The assertions are deliberately identical
+    /// to the dispatch test's, so a pass means the two paths agree.
+    ///
+    /// The coordinate is never written down. `render::Addressable` gives
+    /// the bar one name, `debug_bounds` reads back where that name was
+    /// actually laid out, and the click follows — so moving the bar in
+    /// `render.rs` moves the click with it.
+    #[gpui::test]
+    fn clicking_the_new_posts_bar_moves_them_onto_the_timeline(cx: &mut gpui::TestAppContext) {
+        let (window, timeline) = fixture_window(cx, fixture_with(&["2", "1"], &["4", "3"]));
+
+        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let bar = visual
+            .debug_bounds("new-posts")
+            .expect("the bar has to be laid out before a click can reach it");
+        visual.simulate_click(bar.center(), gpui::Modifiers::none());
+
+        cx.update(|cx| {
+            timeline.update(cx, |view, _cx| {
+                assert_eq!(shown_ids(view), ["4", "3", "2", "1"]);
+                assert!(
+                    view.pending.is_none(),
+                    "the buffer must be emptied, or the bar keeps offering posts already shown"
+                );
+            });
+        });
+    }
+
+    /// #184: what makes the test above mean anything.
+    ///
+    /// A simulated click that reached `on_click` no matter where it
+    /// landed would pass the previous test while proving nothing about
+    /// the hit test. This clicks the middle of the timeline instead —
+    /// below the bar and clear of every row, since a fixture's two posts
+    /// sit at the top — and requires the buffer to still be waiting.
+    /// Together the pair says the coordinate is what decides, which is
+    /// the step #183's `dispatch_action` skips.
+    ///
+    /// The miss is addressed the same way the hit is, rather than by
+    /// offsetting the bar's centre by some number of pixels: a literal
+    /// offset is a coordinate written down, and it would start landing on
+    /// the bar again the moment the window or the bar changed height.
+    #[gpui::test]
+    fn clicking_the_timeline_below_the_bar_reveals_nothing(cx: &mut gpui::TestAppContext) {
+        let (window, timeline) = fixture_window(cx, fixture_with(&["2", "1"], &["4", "3"]));
+
+        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let body = visual
+            .debug_bounds("timeline")
+            .expect("the timeline has to be laid out before a click can land in it");
+        visual.simulate_click(body.center(), gpui::Modifiers::none());
+
+        cx.update(|cx| {
+            timeline.update(cx, |view, _cx| {
+                assert_eq!(shown_ids(view), ["2", "1"]);
+                assert_eq!(
+                    view.pending.as_ref().map(|pending| pending.count),
+                    Some(2),
+                    "a click outside the bar must leave the offer standing"
                 );
             });
         });
