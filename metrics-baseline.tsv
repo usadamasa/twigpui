@@ -43,14 +43,22 @@ src/fixture.rs	100
 src/image_cache.rs	150
 src/like.rs	150
 src/log.rs	350
-src/main.rs	600
+# main.rs 600 -> 650: #169's window title is read off `Paths` rather than
+# hardcoded, plus the `profile` module declaration.
+src/main.rs	650
 src/menu.rs	350
 src/oauth/callback.rs	350
 src/oauth/mod.rs	300
 src/oauth/pkce.rs	150
 src/oauth/tokens.rs	200
-src/paths.rs	300
-src/profile.rs	100
+# paths.rs 300 -> 350: #169 threads a `Profile` through the three base
+# directories, adds the `for_profile` seam the tests need to name one, and
+# documents why the component is not a constant any more.
+src/paths.rs	350
+# profile.rs 100 -> 150: #169 grew past the three names it started with —
+# the dev List default and the sync seed, each carrying the reason it is
+# not simply configuration.
+src/profile.rs	150
 # rate_limit.rs 350 -> 400: four `Endpoint` variants for #163's sync,
 # each with the doc explaining why it needs its own bucket.
 src/rate_limit.rs	400
@@ -60,7 +68,9 @@ src/repost.rs	150
 # the paged reads, the apply loop and the CLI entry point (where the
 # spending is).
 src/sync/mod.rs	250
-src/sync/run.rs	300
+# sync/run.rs 300 -> 350: #169's `seed_users`, the fixed-screen-name stand-in
+# a development sync reads instead of the whole follow graph.
+src/sync/run.rs	350
 src/theme.rs	350
 src/thread.rs	100
 src/toggle.rs	200

@@ -4,6 +4,7 @@ use std::path::Path;
 
 use crate::log;
 use crate::paths::Paths;
+use crate::profile::Profile;
 use crate::theme::ThemeMode;
 
 /// Runtime configuration, resolved with environment variable > `config.toml`
@@ -158,7 +159,23 @@ impl Config {
     ///
     /// Split out from [`Config::from_env`] so the rules below can be tested
     /// without `set_var`, which is `unsafe` and races the other test threads.
+    ///
+    /// Resolves against the profile this binary was compiled as, which is
+    /// what every caller outside the tests wants. The tests that care about
+    /// a specific profile's defaults (#169) use
+    /// [`Config::resolve_for_profile`] instead.
     fn resolve(var: impl Fn(&str) -> Option<String>, file: FileSettings) -> Result<Self> {
+        Self::resolve_for_profile(var, file, Profile::current())
+    }
+
+    /// [`Config::resolve`] against an arbitrary profile (#169), mirroring
+    /// the seam [`Paths::for_profile`] uses for the same reason: a default
+    /// that differs per profile can only be pinned by naming one.
+    fn resolve_for_profile(
+        var: impl Fn(&str) -> Option<String>,
+        file: FileSettings,
+        profile: Profile,
+    ) -> Result<Self> {
         // #33 removed the app-only bearer token. Someone upgrading still has
         // the key in their file, and ignoring it would leave them believing
         // they are configured when nothing reads it — so say what happened
@@ -266,7 +283,7 @@ impl Config {
 
         let log_level = resolve_log_level(&var, file.log_level);
 
-        let list_id = resolve_list_id(&var, file.list_id)?;
+        let list_id = resolve_list_id(&var, file.list_id, profile)?;
 
         let request_price = resolve_request_price(&var, file.request_price)?;
         let daily_request_budget = resolve_daily_request_budget(&var, file.daily_request_budget)?;
@@ -285,10 +302,15 @@ impl Config {
     }
 }
 
-/// Resolve `list_id` (#161): env > file > unset, the same layering as
-/// everything else, with a blank value on either side treated as unset —
-/// an `X_LIST_ID=` left behind in a shell should mean "no list", not a
-/// request to `/2/lists//tweets`.
+/// Resolve `list_id` (#161): env > file > the profile's own default (#169),
+/// the same layering as everything else, with a blank value on either side
+/// treated as unset — an `X_LIST_ID=` left behind in a shell should mean
+/// "fall through", not a request to `/2/lists//tweets`.
+///
+/// The profile default is where a development build picks up its throwaway
+/// list without anything being configured; the release profile has none, so
+/// there it still resolves to "no list, read the home timeline". See
+/// [`Profile::default_list_id`].
 ///
 /// A non-empty value that is not all ASCII digits is a startup failure
 /// rather than a warn-and-ignore (unlike `theme` and `log_level`): those
@@ -300,6 +322,7 @@ impl Config {
 fn resolve_list_id(
     var: impl Fn(&str) -> Option<String>,
     file_value: Option<String>,
+    profile: Profile,
 ) -> Result<Option<String>> {
     let (raw, source) = match var("X_LIST_ID")
         .map(|value| value.trim().to_string())
@@ -311,7 +334,10 @@ fn resolve_list_id(
             .filter(|value| !value.is_empty())
         {
             Some(value) => (value, "list_id in config.toml"),
-            None => return Ok(None),
+            // Not run through the digit check below: it is a literal in
+            // this crate, pinned by `profile.rs`'s own tests, not
+            // something a user typed.
+            None => return Ok(profile.default_list_id().map(str::to_string)),
         },
     };
 
@@ -407,6 +433,7 @@ fn resolve_daily_request_budget(
 #[cfg(test)]
 mod tests {
     use super::{Config, DEFAULT_MAX_RESULTS, DEFAULT_USERNAME, FileSettings};
+    use crate::profile::Profile;
     use crate::theme::ThemeMode;
 
     /// Build a lookup over a fixed `(key, value)` table.
@@ -1068,13 +1095,45 @@ mod tests {
     fn no_list_id_is_configured_by_default() {
         // Absent means "show the home timeline", which is what every launch
         // did before #161. Nothing about that path changes until a list id
-        // is set on purpose.
-        let config = Config::resolve(
+        // is set on purpose. Named against the release profile because #169
+        // gives the development one a default, and this is the assertion
+        // about the build people install.
+        let config = Config::resolve_for_profile(
             vars(&[("X_OAUTH_CLIENT_ID", "client-123")]),
             FileSettings::default(),
+            Profile::Release,
         )
         .unwrap();
         assert_eq!(config.list_id, None);
+    }
+
+    #[test]
+    fn the_dev_profile_defaults_to_its_own_list() {
+        // #169: a development build reads the throwaway list without
+        // anything configured, so `--sync-list` cannot rewrite the real
+        // one just because an export was forgotten.
+        let config = Config::resolve_for_profile(
+            vars(&[("X_OAUTH_CLIENT_ID", "client-123")]),
+            FileSettings::default(),
+            Profile::Dev,
+        )
+        .unwrap();
+        assert_eq!(
+            config.list_id.as_deref(),
+            Profile::Dev.default_list_id(),
+            "the dev default must survive config resolution"
+        );
+    }
+
+    #[test]
+    fn a_configured_list_id_still_wins_over_the_dev_default() {
+        let config = Config::resolve_for_profile(
+            vars(&[("X_OAUTH_CLIENT_ID", "client-123"), ("X_LIST_ID", "111")]),
+            FileSettings::default(),
+            Profile::Dev,
+        )
+        .unwrap();
+        assert_eq!(config.list_id.as_deref(), Some("111"));
     }
 
     #[test]
@@ -1120,9 +1179,10 @@ mod tests {
     fn a_blank_list_id_is_the_same_as_not_setting_one() {
         // Otherwise an empty `X_LIST_ID=` left over in a shell would build
         // `/2/lists//tweets` and spend a request on a 404.
-        let config = Config::resolve(
+        let config = Config::resolve_for_profile(
             vars(&[("X_OAUTH_CLIENT_ID", "client-123"), ("X_LIST_ID", "   ")]),
             FileSettings::default(),
+            Profile::Release,
         )
         .unwrap();
         assert_eq!(config.list_id, None);

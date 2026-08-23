@@ -118,7 +118,7 @@ each time.
 | `X_OAUTH_CLIENT_ID` | **yes** | — | OAuth 2.0 client id for "Sign in with X" — non-secret, may also live in `config.toml` as `oauth_client_id` |
 | `X_TARGET_USERNAME` | no | `XDevelopers` | Screen name `--fetch-only` fetches, without a leading `@` |
 | `X_MAX_RESULTS` | no | `20` | Posts per fetch, 5–100 |
-| `X_LIST_ID` | no | unset | Numeric id of an X List to show in the window **instead of** the home timeline — also `list_id` in `config.toml` (#161) |
+| `X_LIST_ID` | no | unset (a development build defaults to its own list, #169) | Numeric id of an X List to show in the window **instead of** the home timeline — also `list_id` in `config.toml` (#161) |
 | `X_MIN_FETCH_INTERVAL_SECONDS` | no | `60` | Floor on how often a fetch may run, in seconds (#10) |
 | `X_THEME` | no | `light` | Color theme: `light`, `dark`, or `system` (follows the OS appearance) — also `theme` in `config.toml` (#19) |
 | `X_REQUEST_PRICE` | no | unset | Price per API request, in whatever unit you have in mind — also `request_price` in `config.toml` (#18, see [Usage tracking](.claude/skills/x-api-budget/reference/app-behavior.md#usage-tracking)) |
@@ -133,10 +133,16 @@ list's membership. `--sync-list` diffs the accounts you follow against the
 list's members and mirrors one onto the other.
 
 ```sh
-cargo run -- --sync-list            # dry run: read both sides, write a plan, print it
-cargo run -- --sync-list --apply    # send the additions
-cargo run -- --sync-list --apply --prune   # …and the removals
+cargo run --release -- --sync-list          # dry run: read both sides, write a plan, print it
+cargo run --release -- --sync-list --apply  # send the additions
+cargo run --release -- --sync-list --apply --prune   # …and the removals
 ```
+
+**`--release` is load-bearing here** (#169). A debug build is the
+development profile: it syncs *its* list from four fixed X accounts, not
+your list from your follows. Dropping `--release` does not fail — it
+quietly syncs the wrong pair, which is exactly what the development profile
+is for. See [Development builds](#development-builds).
 
 **A dry run is not free.** Both reads are billed per account returned, so
 one against a few thousand follows costs dollars, not cents. Check the
@@ -250,6 +256,17 @@ its window title (#169):
 | Bundle | `dist/twigpui.app` | `dist/twigpui-dev.app` |
 | Bundle id | `com.github.usadamasa.twigpui` | `com.github.usadamasa.twigpui.dev` |
 | Icon | `assets/AppIcon.png` | the same artwork, desaturated |
+| Default `list_id` | none — the home timeline | a throwaway list, in `profile.rs` |
+| `--sync-list` source | everyone you follow | four fixed X accounts |
+
+The last two rows are what keep the parts of this app that cost money from
+being expensive to work on. A development `--sync-list` that read the real
+follow graph would bill a dry run for every account on it (#163), and one
+that defaulted to the real List could rewrite it over a forgotten export —
+so the development build carries its own list id and its own four-account
+source, both in `src/profile.rs`. `X_LIST_ID` and `list_id` still override
+the default; there is no override for the sync source, because a
+development build spending the real read cost is the thing being prevented.
 
 Which one you get is decided at compile time by `debug_assertions`, with no
 flag and no environment variable. That is deliberate: the failure this

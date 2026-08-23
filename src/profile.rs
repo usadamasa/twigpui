@@ -19,6 +19,23 @@
 //! `.app` when what you want is a development build that behaves like an
 //! installed one.
 
+/// The List a development build reads and syncs (#169). A throwaway list
+/// on the same account, so working on #161's timeline or #163's sync never
+/// touches the List being read for real.
+const DEV_LIST_ID: &str = "2091351590695588200";
+
+/// The accounts a development `--sync-list` mirrors, instead of everyone
+/// the signed-in user follows (#169).
+///
+/// Reading the whole follow graph is billed per account returned, so a
+/// dry run against a few thousand follows costs dollars — far too much to
+/// spend while working on the sync itself. These four stand in for it:
+/// X's own accounts, which are stable enough that a hardcoded screen name
+/// will not quietly start resolving to somebody else, and few enough that
+/// the read side of a development sync is four cached lookups a month
+/// rather than a paginated crawl.
+const DEV_SYNC_SEED: &[&str] = &["X", "XDevelopers", "Support", "Safety"];
+
 /// Which installation this binary is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Profile {
@@ -72,11 +89,40 @@ impl Profile {
             Self::Dev => "twigpui (dev)",
         }
     }
+
+    /// The List this profile falls back to when neither `X_LIST_ID` nor
+    /// `list_id` in `config.toml` names one (#161, #169).
+    ///
+    /// A default only for the development build. The release build has no
+    /// business guessing which List someone meant, and falling back to a
+    /// hardcoded one would read somebody else's list on an unconfigured
+    /// install; a development build defaulting to the throwaway list is
+    /// what keeps `--sync-list` from being one forgotten export away from
+    /// rewriting the real one.
+    pub(crate) fn default_list_id(self) -> Option<&'static str> {
+        match self {
+            Self::Release => None,
+            Self::Dev => Some(DEV_LIST_ID),
+        }
+    }
+
+    /// The accounts `--sync-list` mirrors into the List, or `None` to
+    /// mirror everyone the signed-in user follows (#163, #169).
+    ///
+    /// `Some` only for the development build — see [`DEV_SYNC_SEED`] for
+    /// why the real follow graph is the wrong thing to read while working
+    /// on the sync.
+    pub(crate) fn sync_seed_usernames(self) -> Option<&'static [&'static str]> {
+        match self {
+            Self::Release => None,
+            Self::Dev => Some(DEV_SYNC_SEED),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::Profile;
+    use super::{DEV_LIST_ID, DEV_SYNC_SEED, Profile};
 
     #[test]
     fn the_two_profiles_never_share_a_directory() {
@@ -118,6 +164,49 @@ mod tests {
     fn the_dev_profile_matches_what_the_developer_portal_is_registered_with() {
         assert_eq!(Profile::Dev.dir_component(), "twigpui-dev");
         assert_eq!(Profile::Dev.loopback_port(), 8734);
+    }
+
+    #[test]
+    fn only_the_dev_profile_defaults_to_a_list() {
+        // A release build with nothing configured must read the home
+        // timeline, not somebody else's list.
+        assert_eq!(Profile::Release.default_list_id(), None);
+        assert_eq!(Profile::Dev.default_list_id(), Some(DEV_LIST_ID));
+    }
+
+    #[test]
+    fn only_the_dev_profile_syncs_from_a_fixed_seed() {
+        // `None` is what makes a release sync read the real follow graph;
+        // flipping these would either bill a development dry run for
+        // thousands of accounts or mirror four X accounts over the real
+        // list.
+        assert_eq!(Profile::Release.sync_seed_usernames(), None);
+        assert_eq!(Profile::Dev.sync_seed_usernames(), Some(DEV_SYNC_SEED));
+    }
+
+    #[test]
+    fn the_dev_seed_is_small_enough_to_read_without_paging() {
+        // One page is 100 accounts. A seed that outgrew it would silently
+        // reintroduce the paginated read this exists to avoid.
+        assert!(
+            !DEV_SYNC_SEED.is_empty() && DEV_SYNC_SEED.len() <= 100,
+            "{DEV_SYNC_SEED:?}"
+        );
+    }
+
+    #[test]
+    fn the_dev_seed_holds_bare_screen_names() {
+        // Resolved through `user_id_by_username`, which takes the name
+        // without the `@` and without a URL around it.
+        for username in DEV_SYNC_SEED {
+            assert!(
+                !username.is_empty()
+                    && username
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '_'),
+                "{username:?}"
+            );
+        }
     }
 
     /// Pins the mapping itself, not just that the two profiles differ: were

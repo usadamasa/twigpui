@@ -446,7 +446,8 @@ mod tests {
 
         let user = "2244994945";
         let reply = "1800000000000000003";
-        let pairs: [(PathBuf, PathBuf); 15] = [
+        let list = "2091351590695588200";
+        let pairs: [(PathBuf, PathBuf); 17] = [
             (release.settings_file(), dev.settings_file()),
             (release.oauth_token_file(), dev.oauth_token_file()),
             (release.user_ids_file(), dev.user_ids_file()),
@@ -455,6 +456,11 @@ mod tests {
                 release.home_timeline_file(user),
                 dev.home_timeline_file(user),
             ),
+            (
+                release.list_timeline_file(list),
+                dev.list_timeline_file(list),
+            ),
+            (release.sync_plan_file(), dev.sync_plan_file()),
             (release.me_file(), dev.me_file()),
             (release.thread_file(reply), dev.thread_file(reply)),
             (release.rate_limit_file(), dev.rate_limit_file()),
@@ -565,7 +571,7 @@ mod tests {
 
     #[test]
     fn list_timeline_file_is_under_the_cache_dir_named_by_list_id() {
-        let paths = Paths::from_vars(vars(&[("HOME", "/home/alice")])).unwrap();
+        let paths = release_paths(vars(&[("HOME", "/home/alice")])).unwrap();
         assert_eq!(
             paths.list_timeline_file("2091351590695588200"),
             PathBuf::from("/home/alice/.cache/twigpui/list-timeline-2091351590695588200.json")
@@ -602,7 +608,7 @@ mod tests {
     #[test]
     fn sync_plan_file_is_under_the_state_dir() {
         // #163: not the cache dir. Losing it costs both full reads again.
-        let paths = Paths::from_vars(vars(&[("HOME", "/home/alice")])).unwrap();
+        let paths = release_paths(vars(&[("HOME", "/home/alice")])).unwrap();
         assert_eq!(
             paths.sync_plan_file(),
             PathBuf::from("/home/alice/.local/state/twigpui/sync_plan.json")
