@@ -151,7 +151,8 @@ pub(super) fn initial_source(
 /// for a live window, none for a fixture. A fixture is the same screen
 /// every time by definition (`fixture-visual-check`), and a state file
 /// left behind by the last live run must not be able to change which
-/// segment it draws lifted.
+/// segment it draws lifted. The write side is gated the same way, by
+/// `TimelineView::selection_file` being `None`.
 pub(super) fn saved_selection_for(startup: &Startup, paths: &Paths) -> Option<Selection> {
     match startup {
         Startup::Live => load_selection(&paths.selection_file()).selected,
@@ -337,13 +338,18 @@ impl TimelineView {
         self.thread_fetches.clear();
         self.list_scroll.scroll_to_top_of_item(0);
 
-        let remembered = SelectionState {
-            selected: Some(Selection::of(&self.source)),
-        };
-        if let Err(error) = save_selection(&self.paths.selection_file(), &remembered) {
-            log::warn(&format!(
-                "could not remember the selected timeline: {error:#}"
-            ));
+        // Gated the same way the read side is: a fixture's segments name
+        // lists that do not exist, and remembering one would send the
+        // next live launch to reload a 404.
+        if let Some(selection_file) = &self.selection_file {
+            let remembered = SelectionState {
+                selected: Some(Selection::of(&self.source)),
+            };
+            if let Err(error) = save_selection(selection_file, &remembered) {
+                log::warn(&format!(
+                    "could not remember the selected timeline: {error:#}"
+                ));
+            }
         }
 
         let cached = self.home_user_id.as_deref().and_then(|user_id| {

@@ -285,6 +285,9 @@ pub(crate) struct TimelineView {
     /// The in-flight fetch of `owned_lists`, if any; `fetch`'s
     /// cancel-on-drop contract, and what stops a second click.
     lists_fetch: Option<Task<()>>,
+    /// Where a switch is remembered ([`Paths::selection_file`]), or `None`
+    /// for a fixture window — see [`list_picker::saved_selection_for`].
+    selection_file: Option<PathBuf>,
     /// `meta.next_token` from the most recent home-timeline response, if
     /// any (#11). Drives whether the "Load older" button appears — see
     /// [`offers_load_older`]. `None` whenever there is nothing further back
@@ -551,6 +554,7 @@ impl TimelineView {
             config.list_id.as_deref(),
         );
         let owned_lists = list_picker::cached_lists_or_empty(&paths);
+        let selection_file = matches!(startup, Startup::Live).then(|| paths.selection_file());
 
         let mut this = Self {
             config,
@@ -568,6 +572,7 @@ impl TimelineView {
             source,
             owned_lists,
             lists_fetch: None,
+            selection_file,
             next_page_token: None,
             threads: HashMap::new(),
             thread_fetches: HashMap::new(),
@@ -3151,6 +3156,21 @@ mod tests {
         gpui::WindowHandle<gpui_component::Root>,
         gpui::Entity<super::TimelineView>,
     ) {
+        window_with(cx, smoke_paths(), Startup::Fixture(Box::new(fixture)))
+    }
+
+    /// A window started `startup` against `paths`, and the view inside it —
+    /// what [`fixture_window`] is, minus the two things a live window
+    /// wants to choose (#164's `a_switch_is_remembered_on_disk_at_once`
+    /// starts live under its own directory so nothing else writes there).
+    fn window_with(
+        cx: &mut gpui::TestAppContext,
+        paths: crate::paths::Paths,
+        startup: Startup,
+    ) -> (
+        gpui::WindowHandle<gpui_component::Root>,
+        gpui::Entity<super::TimelineView>,
+    ) {
         use gpui::AppContext as _;
 
         cx.update(gpui_component::init);
@@ -3160,15 +3180,8 @@ mod tests {
         let window = {
             let slot = slot.clone();
             cx.add_window(move |window, cx| {
-                let timeline = cx.new(|cx| {
-                    super::TimelineView::new(
-                        smoke_config(),
-                        smoke_paths(),
-                        Startup::Fixture(Box::new(fixture)),
-                        window,
-                        cx,
-                    )
-                });
+                let timeline = cx
+                    .new(|cx| super::TimelineView::new(smoke_config(), paths, startup, window, cx));
                 *slot.borrow_mut() = Some(timeline.clone());
                 gpui_component::Root::new(timeline, window, cx)
             })
@@ -3626,10 +3639,44 @@ mod tests {
     /// #164: the choice outlives the window — it is on disk the moment
     /// the segment is clicked, not at some later save point that a crash
     /// could skip.
+    ///
+    /// A *live* window, under its own directory: a fixture never writes
+    /// the file (the test after this one), and the smoke directory is
+    /// shared with every other window test, so a file asserted on there
+    /// would be raced by whichever test clicked last.
     #[gpui::test]
     fn a_switch_is_remembered_on_disk_at_once(cx: &mut gpui::TestAppContext) {
-        cache_list("9131", &["41"]);
-        let (mut visual, _timeline) = drawn(cx, fixture_with_lists(&["1"], &[("9131", "Rust")]));
+        let home = std::env::temp_dir().join("twigpui-smoke-live-switch");
+        let _ = std::fs::remove_dir_all(&home);
+        let home_str = home.display().to_string();
+        let paths =
+            crate::paths::Paths::from_vars(move |key| (key == "HOME").then(|| home_str.clone()))
+                .unwrap();
+        paths.ensure_dirs().unwrap();
+        crate::cache::save_owned_lists(
+            &paths,
+            &[crate::x_api::ListSummary {
+                id: "9131".to_string(),
+                name: "Rust".to_string(),
+            }],
+            0,
+        )
+        .unwrap();
+
+        // No token under this HOME, so startup settles at
+        // `NotAuthenticated` with no client — past the startup gate, and
+        // still unable to spend anything on the cache miss that follows.
+        let (window, timeline) = window_with(cx, paths.clone(), Startup::Live);
+        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        cx.update(|cx| {
+            timeline.update(cx, |view, _cx| {
+                assert!(matches!(view.state, TimelineState::NotAuthenticated));
+                assert!(view.client.is_none());
+            });
+        });
 
         let segment = visual
             .debug_bounds("tab-list-9131")
@@ -3637,12 +3684,42 @@ mod tests {
         visual.simulate_click(segment.center(), gpui::Modifiers::none());
         cx.run_until_parked();
 
-        let remembered = super::list_picker::load_selection(&smoke_paths().selection_file());
+        let remembered = super::list_picker::load_selection(&paths.selection_file());
         assert_eq!(
             remembered.selected,
             Some(super::list_picker::Selection::List {
                 id: "9131".to_string()
             })
+        );
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
+    /// #164: a fixture's segments name lists that do not exist, so a click
+    /// on one must leave no file behind — or the next live launch would
+    /// open on a list it cannot read and pay for the reload that finds
+    /// out.
+    #[gpui::test]
+    fn a_fixture_switch_leaves_no_selection_behind(cx: &mut gpui::TestAppContext) {
+        cache_list("9151", &["51"]);
+        let selection_file = smoke_paths().selection_file();
+        let _ = std::fs::remove_file(&selection_file);
+        let (mut visual, timeline) = drawn(cx, fixture_with_lists(&["1"], &[("9151", "Rust")]));
+
+        let segment = visual
+            .debug_bounds("tab-list-9151")
+            .expect("the segment has to be laid out before a click can reach it");
+        visual.simulate_click(segment.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+
+        cx.update(|cx| {
+            timeline.update(cx, |view, _cx| {
+                assert_eq!(shown_ids(view), ["51"], "the switch itself still happens");
+            });
+        });
+        assert!(
+            !selection_file.exists(),
+            "a fixture window wrote {}",
+            selection_file.display()
         );
     }
 
