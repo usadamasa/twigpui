@@ -192,14 +192,27 @@ four diffs a day that is roughly $2 per thousand follows if X's documented
 `x-api-budget` has that rule measured for Posts only. This is why the
 interval defaults to six hours and refuses anything under fifteen minutes.
 
-The writes are spread out rather than sent in a burst: a list that is
-thousands of accounts behind is caught up a small batch at a time, and a
-rate limit pauses the catch-up rather than failing it. Progress is written
-to `$XDG_STATE_HOME/twigpui/sync_plan.json` after every single change, so
-quitting mid-catch-up costs nothing — the next launch picks up exactly
-where it stopped. `$XDG_STATE_HOME/twigpui/sync_state.json` holds when the
-last diff ran, which is what stops a relaunch from paying for both reads
-again.
+The writes are spread out rather than sent in a burst: two a minute, so a
+list that is thousands of accounts behind is caught up over hours rather
+than minutes. That pace is deliberate. X refuses list additions with a cap
+its `x-rate-limit-*` headers do not describe (#193, #197): a burst of
+roughly a hundred in twenty minutes tripped it, and it then refused every
+write for more than a day. A refusal pauses the catch-up rather than
+failing it, and each refusal in a row waits longer than the last — 15
+minutes, then 30, an hour, two, four, and six hours from then on — so a
+cap that stays down costs a handful of rejected writes a day, not one
+every quarter hour. The status bar says "rate limited" for the first
+refusal and "refused N× in a row" in red from the second, because twenty
+hours of a countdown that keeps restarting looks like waiting, and it is
+not. The log has one line per refusal with the 429's headers and body.
+
+Progress is written to `$XDG_STATE_HOME/twigpui/sync_plan.json` after
+every single change, so quitting mid-catch-up costs nothing — the next
+launch picks up exactly where it stopped.
+`$XDG_STATE_HOME/twigpui/sync_state.json` holds when the last diff ran,
+which is what stops a relaunch from paying for both reads again, and the
+backoff — until when writes are paused and how many refusals in a row —
+so a relaunch does not send into the cap either.
 
 It needs the same scopes `--sync-list` does. A session that predates them
 is skipped with a line in the log rather than an error on screen — click
@@ -249,6 +262,12 @@ prunes unconditionally, because a mirror that only grows is not a mirror.
 Both read the same plan file, so a dry run's plan is what the background
 sync drains next — including its removals. If you want to look at a diff
 without any of it being applied, turn the sync off first.
+
+They share the backoff too. `--apply` while the background sync is backing
+off from a refusal (#197) says so on stderr and **sends anyway** — one
+deliberate batch is the cheapest way to find out whether the cap has
+lifted — and what comes back is recorded for the background sync as well:
+a write that lands ends its streak, a refusal lengthens it.
 
 Both sides need scopes this app did not request before #163
 (`follows.read`, `list.write`), so an existing session is refused before it

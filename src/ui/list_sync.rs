@@ -68,9 +68,15 @@ pub(super) enum SyncStatus {
     /// is the steady state and anything else is a catch-up that has been
     /// paced or blocked.
     Idle { until: i64, pending: usize },
-    /// A write was refused by the tracked rate-limit window. Nothing was
-    /// spent, and `pending` is still owed.
-    RateLimited { until: i64, pending: usize },
+    /// Writes are being refused and the loop is backing off until `until`.
+    /// `pending` is still owed; `refusals` is how many times in a row the
+    /// cap has said no (#197) — one is a pause, several is a catch-up that
+    /// has not moved in hours, and the label and color say so.
+    RateLimited {
+        until: i64,
+        pending: usize,
+        refusals: u32,
+    },
     /// The last tick failed outright — a revoked scope, a deleted list, a
     /// plan file that will not parse. The loop has already given itself a
     /// full interval to try again; this is here so the window does not
@@ -134,12 +140,25 @@ pub(super) fn sync_status_label(status: &SyncStatus, now: i64) -> String {
         SyncStatus::Working => "List sync: working…".to_string(),
         SyncStatus::Idle { pending: 0, .. } => "List sync: up to date".to_string(),
         SyncStatus::Idle { pending, .. } => format!("List sync: {pending} to go"),
-        SyncStatus::RateLimited { until, pending } => {
+        SyncStatus::RateLimited {
+            until,
+            pending,
+            refusals,
+        } => {
             // `saturating_sub` and a floor of zero for `cooldown_label`'s
             // reason: `until` comes from an API header and `now` from the
             // clock, so neither is this code's to trust.
             let remaining = until.saturating_sub(now).max(0);
-            format!("List sync: rate limited, {pending} to go — {remaining}s")
+            if *refusals >= STUCK_AFTER_REFUSALS {
+                // #197: twenty hours of "rate limited — 900s" looked like
+                // waiting. A streak is not waiting; it is not moving.
+                format!(
+                    "List sync: refused {refusals}× in a row, {pending} to go — retry in \
+                     {remaining}s"
+                )
+            } else {
+                format!("List sync: rate limited, {pending} to go — {remaining}s")
+            }
         }
         SyncStatus::Failed => "List sync: last attempt failed".to_string(),
     }
@@ -158,15 +177,27 @@ pub(super) fn sync_confirm_label() -> &'static str {
     "Reads your whole follow list and the whole list, billed per account. Sync anyway?"
 }
 
+/// How many consecutive refusals before the status bar stops calling it a
+/// rate limit and starts calling it stuck (#197). Two: one refusal is the
+/// cap doing its job and the loop waiting the floor out; a second, after
+/// that wait, is the cap not lifting on the schedule anyone assumed.
+const STUCK_AFTER_REFUSALS: u32 = 2;
+
 /// What the status bar's sync segment should be colored with (#174).
 ///
-/// `danger` only for the two states that are genuinely wrong — a failed
-/// tick, and a gate that needs someone to do something. A rate limit is
-/// not one of them: the loop is handling it, and the count beside it is
-/// still true.
+/// `danger` only for the states that are genuinely wrong — a failed tick,
+/// a gate that needs someone to do something, and a catch-up that has been
+/// refused [`STUCK_AFTER_REFUSALS`] times in a row (#197). A single rate
+/// limit is not one of them: the loop is handling it, and the count
+/// beside it is still true.
 pub(super) fn sync_status_color(status: &SyncStatus, theme: Theme) -> u32 {
     match status {
-        SyncStatus::Failed | SyncStatus::Off(SyncOff::MissingScope) => theme.danger,
+        SyncStatus::Failed
+        | SyncStatus::Off(SyncOff::MissingScope)
+        | SyncStatus::RateLimited {
+            refusals: STUCK_AFTER_REFUSALS..,
+            ..
+        } => theme.danger,
         SyncStatus::Ready | SyncStatus::Idle { pending: 1.., .. } => theme.accent,
         SyncStatus::Off(_)
         | SyncStatus::AwaitingAccount
@@ -178,62 +209,47 @@ pub(super) fn sync_status_color(status: &SyncStatus, theme: Theme) -> u32 {
 
 /// Which [`SyncStatus`] one finished tick leaves behind (#174).
 ///
-/// `None` is a tick that failed, which is [`sync::settle`]'s `None` and
-/// means the same thing here: the loop is still alive and has given itself
-/// a full interval, but the window must stop reporting the last success as
-/// current.
+/// Read off the [`sync::Tick`] alone — the outcome and the state it left
+/// on disk — so the window keeps no memory of its own. It used to keep
+/// two (the deadline and the count), and handing them from tick to tick
+/// is where #198 dropped the deadline: the status flipped between "rate
+/// limited" and "N to go" every minute while the loop sent every two.
+///
+/// A tick that failed is [`SyncStatus::Failed`]: the loop is still alive
+/// and has given itself a full interval, but the window must stop
+/// reporting the last success as current.
 ///
 /// [`sync::Outcome::Diffed`] comes straight back to drain what it found
-/// (`settle` sets `wake_at` to now), so it maps to [`SyncStatus::Working`]
-/// rather than an idle state the next tick would overwrite in the same
-/// second.
+/// (`wake_at` is now), so it maps to [`SyncStatus::Working`] rather than
+/// an idle state the next tick would overwrite in the same second.
 ///
-/// `owed` is what the plan was known to owe going in, and it exists for
-/// exactly one arm: [`sync::Outcome::RateLimited`] carries a deadline and
-/// nothing else, because a refusal spends nothing and marks nothing
-/// applied — so what the plan owed before the tick is what it owes after.
-/// Threading it through the loop is cheaper and more honest than reading
-/// the plan file again to recover a number that did not change.
-pub(super) fn status_after(
-    outcome: Option<&sync::Outcome>,
-    wake_at: i64,
-    owed: usize,
-) -> SyncStatus {
-    match outcome {
-        None => SyncStatus::Failed,
-        Some(sync::Outcome::Idle { pending, .. }) => SyncStatus::Idle {
-            until: wake_at,
+/// An idle tick while the state is blocked with work outstanding is a
+/// catch-up waiting out a refusal, and reads as
+/// [`SyncStatus::RateLimited`] — the same thing the refusing tick said,
+/// for as long as it holds, rather than "N to go" as if the loop were
+/// about to send.
+pub(super) fn status_of(tick: &sync::Tick, now: i64) -> SyncStatus {
+    let refused = |pending: usize| SyncStatus::RateLimited {
+        until: tick.state.blocked_until.unwrap_or(tick.wake_at),
+        pending,
+        refusals: tick.state.refusals,
+    };
+    match &tick.outcome {
+        Err(_) => SyncStatus::Failed,
+        Ok(sync::Outcome::Diffed { .. }) => SyncStatus::Working,
+        Ok(sync::Outcome::RateLimited { remaining, .. }) => refused(*remaining),
+        Ok(sync::Outcome::Idle { pending, .. }) if *pending > 0 && tick.state.is_blocked(now) => {
+            refused(*pending)
+        }
+        Ok(
+            sync::Outcome::Idle { pending, .. }
+            | sync::Outcome::Applied {
+                remaining: pending, ..
+            },
+        ) => SyncStatus::Idle {
+            until: tick.wake_at,
             pending: *pending,
         },
-        Some(sync::Outcome::RateLimited { until }) => SyncStatus::RateLimited {
-            until: *until,
-            pending: owed,
-        },
-        Some(sync::Outcome::Applied { remaining, .. }) => SyncStatus::Idle {
-            until: wake_at,
-            pending: *remaining,
-        },
-        Some(sync::Outcome::Diffed { .. }) => SyncStatus::Working,
-    }
-}
-
-/// What [`status_after`] should be handed as `owed` next time round —
-/// how much the plan is known to owe after this status.
-///
-/// A function rather than the loop reaching into the enum, so the one
-/// place that has to keep the count alive across a rate limit is the same
-/// place that decides what the count means.
-pub(super) fn owed_by(status: &SyncStatus) -> usize {
-    match status {
-        SyncStatus::Idle { pending, .. } | SyncStatus::RateLimited { pending, .. } => *pending,
-        // Nothing here knows a count. `Working` is a diff that has just
-        // written a plan whose size it was not told; the tick that drains
-        // it reports the real figure a moment later.
-        SyncStatus::Working
-        | SyncStatus::Off(_)
-        | SyncStatus::Ready
-        | SyncStatus::AwaitingAccount
-        | SyncStatus::Failed => 0,
     }
 }
 
@@ -364,11 +380,10 @@ impl TimelineView {
         cx.notify();
 
         self.auto_sync = Some(cx.spawn(async move |this, cx| {
-            let mut blocked_until: Option<i64> = None;
-            // What the plan is known to owe, carried across ticks because
-            // a rate-limited one reports a deadline and no count — see
-            // [`status_after`].
-            let mut owed: usize = 0;
+            // Deliberately nothing else is remembered here: the deadline
+            // and the count live in the state file the tick returns, and
+            // keeping copies is how #198 happened.
+            //
             // Consumed by the first tick. `last_diff_at: None` is what
             // `next_step` reads as "a diff has never run", which is
             // exactly the decision a manual start wants — and it leaves
@@ -405,10 +420,10 @@ impl TimelineView {
                         });
                         let pacing = sync::Pacing {
                             interval_seconds: interval,
-                            blocked_until,
                             forced,
                         };
-                        let outcome = {
+                        // The tick logs its own outcome, failure included.
+                        let tick = {
                             let (paths, client, list_id) =
                                 (paths.clone(), client.clone(), list_id.clone());
                             cx.background_executor()
@@ -425,22 +440,15 @@ impl TimelineView {
                                 })
                                 .await
                         };
-                        forced = false;
-                        let outcome = match outcome {
-                            Ok(outcome) => Some(outcome),
-                            Err(error) => {
-                                // `log::redact` runs on the way out — an
-                                // API error can quote a request URL.
-                                log::error(&format!("list sync failed: {error:#}"));
-                                None
-                            }
-                        };
-                        let settled = sync::settle(outcome.as_ref(), now, interval);
-                        blocked_until = settled.blocked_until;
-                        let status = status_after(outcome.as_ref(), settled.wake_at, owed);
-                        owed = owed_by(&status);
-
-                        let notice = outcome.as_ref().and_then(sync::notice);
+                        // Spent by the tick that acted on it, not by one
+                        // that only waited out a refusal — otherwise a
+                        // press during a backoff would be consumed by
+                        // the wait and the interval would apply after
+                        // all.
+                        forced = forced && matches!(tick.outcome, Ok(sync::Outcome::Idle { .. }));
+                        let status = status_of(&tick, now);
+                        let outcome = tick.outcome.as_ref().ok();
+                        let notice = outcome.and_then(sync::notice);
                         let _ = this.update(cx, |this, cx| {
                             this.apply_tick(status, notice, cx);
                         });
@@ -451,12 +459,12 @@ impl TimelineView {
                         // owed*, so a catch-up paused by a rate limit
                         // keeps waiting rather than walking away from a
                         // plan a paid diff produced.
-                        if !scheduled && sync::is_finished(outcome.as_ref()) {
+                        if !scheduled && sync::is_finished(outcome) {
                             let _ =
                                 this.update(cx, |this, cx| this.show_sync(SyncStatus::Ready, cx));
                             return;
                         }
-                        settled.wake_at
+                        tick.wake_at
                     }
                 };
 
@@ -661,7 +669,8 @@ mod tests {
             sync_status_label(
                 &SyncStatus::RateLimited {
                     until: 1_060,
-                    pending: 40
+                    pending: 40,
+                    refusals: 1,
                 },
                 1_000
             ),
@@ -675,10 +684,40 @@ mod tests {
             &SyncStatus::RateLimited {
                 until: 900,
                 pending: 40,
+                refusals: 1,
             },
             1_000,
         );
         assert!(label.ends_with("0s"), "never a negative countdown: {label}");
+    }
+
+    // #197: "rate limited — 900s" for twenty hours read as waiting. A
+    // streak is the cap not lifting, and the label has to say so.
+    #[test]
+    fn a_repeated_refusal_says_how_many_times_and_reads_as_stuck() {
+        let stuck = SyncStatus::RateLimited {
+            until: 8_200,
+            pending: 2_157,
+            refusals: 3,
+        };
+        assert_eq!(
+            sync_status_label(&stuck, 1_000),
+            "List sync: refused 3× in a row, 2157 to go — retry in 7200s"
+        );
+        let theme = Theme::light();
+        assert_eq!(sync_status_color(&stuck, theme), theme.danger);
+    }
+
+    #[test]
+    fn a_single_refusal_is_a_pause_not_a_problem() {
+        let paused = SyncStatus::RateLimited {
+            until: 1_900,
+            pending: 2_157,
+            refusals: 1,
+        };
+        let theme = Theme::light();
+        assert_ne!(sync_status_color(&paused, theme), theme.danger);
+        assert!(!sync_status_label(&paused, 1_000).contains("refused"));
     }
 
     #[test]
@@ -703,6 +742,12 @@ mod tests {
             SyncStatus::RateLimited {
                 until: 0,
                 pending: 7,
+                refusals: 1,
+            },
+            SyncStatus::RateLimited {
+                until: 0,
+                pending: 7,
+                refusals: 4,
             },
             SyncStatus::Failed,
         ] {
@@ -746,7 +791,8 @@ mod tests {
     fn a_rate_limited_sync_is_still_offered() {
         assert!(offers_sync(&SyncStatus::RateLimited {
             until: 0,
-            pending: 7
+            pending: 7,
+            refusals: 1,
         }));
     }
 
@@ -755,43 +801,51 @@ mod tests {
         assert!(offers_sync(&SyncStatus::Failed));
     }
 
-    #[test]
-    fn a_failed_tick_stops_the_window_reporting_the_last_success() {
-        assert_eq!(status_after(None, 9_000, 0), SyncStatus::Failed);
+    /// A tick as the loop sees it. `state` defaults to calm; tests set the
+    /// fields the status is about.
+    fn tick(outcome: Result<sync::Outcome, anyhow::Error>, wake_at: i64) -> sync::Tick {
+        sync::Tick {
+            outcome,
+            state: sync::SyncState::default(),
+            wake_at,
+        }
     }
 
-    // Both come straight back to work (`settle` sets `wake_at` to now), so
-    // an idle status here would be overwritten in the same second.
+    #[test]
+    fn a_failed_tick_stops_the_window_reporting_the_last_success() {
+        let failed = tick(Err(anyhow::anyhow!("403 Forbidden")), 9_000);
+        assert_eq!(status_of(&failed, 1_000), SyncStatus::Failed);
+    }
+
+    // A diff comes straight back to work (`wake_at` is now), so an idle
+    // status here would be overwritten in the same second.
     #[test]
     fn a_diff_leaves_the_status_working_because_the_drain_is_next() {
-        assert_eq!(
-            status_after(
-                Some(&sync::Outcome::Diffed {
-                    adds: 3,
-                    removals: 1,
-                    members_total: 100,
-                    held: false,
-                }),
-                1_000,
-                0
-            ),
-            SyncStatus::Working
+        let diffed = tick(
+            Ok(sync::Outcome::Diffed {
+                adds: 3,
+                removals: 1,
+                members_total: 100,
+                held: false,
+            }),
+            1_000,
         );
+        assert_eq!(status_of(&diffed, 1_000), SyncStatus::Working);
     }
 
     #[test]
     fn a_batch_with_more_to_send_reports_what_is_left() {
+        let applied = tick(
+            Ok(sync::Outcome::Applied {
+                sent: 2,
+                remaining: 340,
+            }),
+            1_060,
+        );
         assert_eq!(
-            status_after(
-                Some(&sync::Outcome::Applied {
-                    sent: 20,
-                    remaining: 340
-                }),
-                1_000,
-                0
-            ),
+            status_of(&applied, 1_000),
             SyncStatus::Idle {
-                until: 1_000,
+                until: 1_060,
                 pending: 340
             }
         );
@@ -800,15 +854,15 @@ mod tests {
     // The one moment "working" would be wrong: a catch-up stopping.
     #[test]
     fn the_last_batch_of_a_catch_up_reports_it_is_done() {
+        let applied = tick(
+            Ok(sync::Outcome::Applied {
+                sent: 2,
+                remaining: 0,
+            }),
+            1_000,
+        );
         assert_eq!(
-            status_after(
-                Some(&sync::Outcome::Applied {
-                    sent: 20,
-                    remaining: 0
-                }),
-                1_000,
-                0
-            ),
+            status_of(&applied, 1_000),
             SyncStatus::Idle {
                 until: 1_000,
                 pending: 0
@@ -818,20 +872,115 @@ mod tests {
 
     #[test]
     fn an_idle_tick_carries_its_pending_count_into_the_status() {
+        let idle = tick(
+            Ok(sync::Outcome::Idle {
+                until: 9_000,
+                pending: 12,
+            }),
+            9_000,
+        );
         assert_eq!(
-            status_after(
-                Some(&sync::Outcome::Idle {
-                    until: 9_000,
-                    pending: 12
-                }),
-                9_000,
-                0
-            ),
+            status_of(&idle, 1_000),
             SyncStatus::Idle {
                 until: 9_000,
                 pending: 12
             }
         );
+    }
+
+    // The refusing tick's status comes from the state it left behind —
+    // the deadline the backoff chose, the streak — not from the outcome's
+    // own first guess at a retry time.
+    #[test]
+    fn a_refusal_reports_the_deadline_and_streak_from_the_state() {
+        let mut refused = tick(
+            Ok(sync::Outcome::RateLimited {
+                until: 1_900,
+                opaque: true,
+                sent: 0,
+                remaining: 2_157,
+            }),
+            4_600,
+        );
+        refused.state = sync::SyncState {
+            last_diff_at: Some(500),
+            blocked_until: Some(4_600),
+            refusals: 3,
+        };
+        assert_eq!(
+            status_of(&refused, 1_000),
+            SyncStatus::RateLimited {
+                until: 4_600,
+                pending: 2_157,
+                refusals: 3,
+            }
+        );
+    }
+
+    // #198's visible symptom: the status flipped between "rate limited"
+    // and "N to go" every minute, because the idle wake-ups in between
+    // did not know a refusal was being waited out.
+    #[test]
+    fn an_idle_wake_up_during_a_refusal_still_reads_as_rate_limited() {
+        let mut idle = tick(
+            Ok(sync::Outcome::Idle {
+                until: 4_600,
+                pending: 2_157,
+            }),
+            4_600,
+        );
+        idle.state = sync::SyncState {
+            last_diff_at: Some(500),
+            blocked_until: Some(4_600),
+            refusals: 2,
+        };
+        assert_eq!(
+            status_of(&idle, 1_060),
+            SyncStatus::RateLimited {
+                until: 4_600,
+                pending: 2_157,
+                refusals: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn an_idle_wake_up_after_the_deadline_passed_is_plain_idle() {
+        // The block has elapsed; the next tick will send. Nothing to
+        // count down.
+        let mut idle = tick(
+            Ok(sync::Outcome::Idle {
+                until: 9_000,
+                pending: 12,
+            }),
+            9_000,
+        );
+        idle.state.blocked_until = Some(900);
+        assert_eq!(
+            status_of(&idle, 1_000),
+            SyncStatus::Idle {
+                until: 9_000,
+                pending: 12
+            }
+        );
+    }
+
+    #[test]
+    fn an_idle_wake_up_with_nothing_owed_is_never_rate_limited() {
+        // A failed tick leaves `blocked_until` set with a plan that may be
+        // empty. That is a wait, not a refused catch-up.
+        let mut idle = tick(
+            Ok(sync::Outcome::Idle {
+                until: 22_600,
+                pending: 0,
+            }),
+            22_600,
+        );
+        idle.state.blocked_until = Some(22_600);
+        assert!(matches!(
+            status_of(&idle, 1_000),
+            SyncStatus::Idle { pending: 0, .. }
+        ));
     }
 
     #[test]

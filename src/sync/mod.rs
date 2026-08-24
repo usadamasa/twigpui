@@ -47,7 +47,11 @@
 //! (2026-08-23), and the reason was kept rather than dropped: the diff runs
 //! on a long, configurable interval whose last *attempt* is persisted in
 //! [`SyncState`], so relaunching the app does not buy the same answer
-//! again. [`schedule`] holds the decision and [`auto::tick`] performs it.
+//! again. [`schedule`] holds the decision, [`auto::tick`] performs it, and
+//! [`state::settle`] is the one thing that moves the memory on afterwards
+//! — the deadline after a refusal included, which is what keeps a
+//! catch-up from sending into a cap every two minutes (#198) and from
+//! sending into it at the same fifteen-minute pace for a day (#197).
 
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
@@ -57,10 +61,12 @@ use crate::x_api::model::User;
 mod auto;
 mod run;
 mod schedule;
+mod state;
 
-pub(crate) use auto::{Pacing, tick};
+pub(crate) use auto::{Pacing, Tick, tick};
 pub(crate) use run::{Request, run_cli};
-pub(crate) use schedule::{Outcome, is_finished, notice, settle};
+pub(crate) use schedule::{Outcome, is_finished, notice};
+pub(crate) use state::{SyncState, load_state, save_state};
 
 /// Which side of the diff an entry came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -261,42 +267,6 @@ pub(crate) fn load_plan(path: &std::path::Path) -> Result<Option<Plan>> {
 /// Write `plan` to `path`.
 pub(crate) fn save_plan(path: &std::path::Path, plan: &Plan) -> Result<()> {
     let json = serde_json::to_string_pretty(plan).context("could not serialize the sync plan")?;
-    std::fs::write(path, json).with_context(|| format!("could not write {}", path.display()))
-}
-
-/// The background sync's clock, as written to
-/// [`crate::paths::Paths::sync_state_file`].
-///
-/// One field, and a struct anyway: it is written by a loop that spends
-/// money on a timer, and the next thing anyone wants recorded here (the
-/// last outcome, a consecutive-failure count) should not have to change
-/// the file's shape to get in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub(crate) struct SyncState {
-    /// When the last diff was *attempted*. See [`run::auto_tick`] for why
-    /// a failed attempt still moves this.
-    #[serde(default)]
-    pub last_diff_at: Option<i64>,
-}
-
-/// Read the sync clock back from `path`.
-///
-/// Unlike [`load_plan`], a corrupt file is `Ok(default)` rather than an
-/// error. The two failures are not symmetric: an unreadable *plan* would
-/// send an apply back to paying for both full reads, whereas an unreadable
-/// *clock* costs exactly one diff that was going to happen within the
-/// interval anyway. Failing the whole loop over it would be the more
-/// expensive answer, because the loop is the feature.
-pub(crate) fn load_state(path: &std::path::Path) -> SyncState {
-    let Ok(contents) = std::fs::read_to_string(path) else {
-        return SyncState::default();
-    };
-    serde_json::from_str(&contents).unwrap_or_default()
-}
-
-/// Write the sync clock to `path`.
-pub(crate) fn save_state(path: &std::path::Path, state: &SyncState) -> Result<()> {
-    let json = serde_json::to_string_pretty(state).context("could not serialize the sync state")?;
     std::fs::write(path, json).with_context(|| format!("could not write {}", path.display()))
 }
 
@@ -542,43 +512,6 @@ mod tests {
             std::env::temp_dir().join(format!("twigpui-no-plan-{}.json", std::process::id()));
         let _ = std::fs::remove_file(&path);
         assert_eq!(load_plan(&path).unwrap(), None);
-    }
-
-    #[test]
-    fn the_sync_clock_survives_a_round_trip_through_the_file() {
-        let dir = std::env::temp_dir().join(format!("twigpui-sync-state-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("state.json");
-
-        let written = SyncState {
-            last_diff_at: Some(1_700_000_000),
-        };
-        save_state(&path, &written).unwrap();
-        assert_eq!(load_state(&path), written);
-
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn a_missing_clock_file_reads_as_never_synced() {
-        // Which makes the first launch diff immediately — the behavior the
-        // schedule wants from a fresh install.
-        let path =
-            std::env::temp_dir().join(format!("twigpui-no-state-{}.json", std::process::id()));
-        let _ = std::fs::remove_file(&path);
-        assert_eq!(load_state(&path).last_diff_at, None);
-    }
-
-    #[test]
-    fn a_corrupt_clock_file_reads_as_never_synced_rather_than_failing_the_loop() {
-        // The opposite of `load_plan`'s rule, on purpose: a bad clock costs
-        // one diff that was due within the interval anyway, whereas failing
-        // the loop over it would stop the feature outright.
-        let path =
-            std::env::temp_dir().join(format!("twigpui-bad-state-{}.json", std::process::id()));
-        std::fs::write(&path, "{ not json").unwrap();
-        assert_eq!(load_state(&path).last_diff_at, None);
-        std::fs::remove_file(&path).unwrap();
     }
 
     #[test]

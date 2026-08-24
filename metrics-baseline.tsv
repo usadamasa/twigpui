@@ -82,7 +82,10 @@ src/profile.rs	150
 # that stops a 429 from a limit X does not expose in its headers from being
 # retried against the wrong window's reset. Most of the added lines are the
 # doc carrying the measured `POST /2/lists/:id/members` behavior it fixes.
-src/rate_limit.rs	450
+# 450 -> 500: `rate_limited_until` became `Refusal`, a type that says which
+# limit a 429 came from, and `RateLimited` carries it as `opaque` — what
+# lets the sync back away from a cap the headers do not describe (#197).
+src/rate_limit.rs	500
 src/repost.rs	150
 # sync/ is new in #163, split the way `cache` is: mod.rs holds the pure
 # diff, the plan file and the report (where the tests are), run.rs holds
@@ -91,7 +94,9 @@ src/repost.rs	150
 # mod.rs 250 -> 350: `SyncState` and its file pair, plus the module doc
 # rewritten where the background sync overrode #163's "no polling" and
 # "removals are opt-in" rules.
-src/sync/mod.rs	350
+# 350 -> 300: `SyncState` moved out to state.rs (#197, #198), where the
+# pacing it now carries has the transition function next to it.
+src/sync/mod.rs	300
 # sync/run.rs 300 -> 350: #169's `seed_users`, the fixed-screen-name stand-in
 # a development sync reads instead of the whole follow graph.
 # 350 -> 400: `apply_some`, the bounded batch the background sync drains a
@@ -108,11 +113,23 @@ src/sync/run.rs	400
 # 300 -> 350: #176's `prune_allowed` and `sendable`. The verdict is one
 # comparison; the doc above it is the whole argument for holding every
 # removal rather than trimming to fit, and for never capping the CLI.
-src/sync/schedule.rs	350
+# 350 -> 400: `apply_outcome` (the client's error mapped to what the loop
+# remembers, in one testable place) and `blocked_for` (which block a
+# forced tick may step over, now that blocks persist — #198). `settle`
+# moved out to state.rs.
+src/sync/schedule.rs	400
 # auto.rs 200 -> 250: #176 threads the prune verdict through `tick`, `diff`
 # and `apply`, and the module doc gains the rule that a held plan is not
 # finished work — the deadlock `sendable` exists to prevent.
-src/sync/auto.rs	250
+# 250 -> 350: `tick` now owns the state file's whole round trip (load,
+# perform, settle, save) and returns a `Tick` the window reads its status
+# from, and `log_outcome` is #199's one line per tick. The loop in
+# `ui/list_sync.rs` shrank by what this grew.
+src/sync/auto.rs	350
+# state.rs is new in #197/#198: the sync's memory (`SyncState`) and the
+# one function that moves it (`settle`), with the backoff ladder. Pure,
+# and where the tests for pacing live.
+src/sync/state.rs	250
 src/theme.rs	350
 src/thread.rs	100
 src/toggle.rs	200
@@ -201,7 +218,10 @@ src/usage.rs	350
 # let the compiler check.
 # x_api/client.rs 1050 -> 1100: #164's `owned_lists` — method, URL builder
 # and parse helper in the same three-part shape as #163's paged reads.
-src/x_api/client.rs	1100
+# 1100 -> 1150: `log_429` (#199), the one WARN line that records a 429's
+# headers and body — the first `log::` call in this file, and the record
+# #197 had nothing of.
+src/x_api/client.rs	1150
 src/x_api/mod.rs	50
 # x_api/model.rs 750 -> 800: `UserIdRequest` and `UserPageResponse` for
 # #163's reads and writes.
