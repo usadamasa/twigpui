@@ -40,6 +40,11 @@ gpui::actions!(
         /// `cmd-shift-r` reveals one that has already been bought and
         /// paid for. Spends nothing.
         ShowNewPosts,
+        /// Flip whether a poll's new posts flow onto a reader at the top
+        /// by themselves (#22), bound to `cmd-shift-f`. Purely
+        /// presentational — polling itself is `auto_refresh`'s switch, so
+        /// this spends nothing either way.
+        ToggleFollowNewPosts,
     ]
 );
 
@@ -175,6 +180,20 @@ const SHOW_NEW_POSTS: Shortcut = Shortcut {
     menu_label: Some("Show New Posts"),
 };
 
+/// Flip stick-to-top follow (#22).
+///
+/// The label is a statement, not a state — macOS gets no checkmark from
+/// this menu API, so the flip reports which way it went through the same
+/// banner a finished reload uses. Spends nothing either way: whether the
+/// app polls at all is `auto_refresh`'s switch, not this one.
+const TOGGLE_FOLLOW_NEW_POSTS: Shortcut = Shortcut {
+    keystroke: "cmd-shift-f",
+    context: Some(KEY_CONTEXT),
+    bind: |keystroke, context| gpui::KeyBinding::new(keystroke, ToggleFollowNewPosts, context),
+    item: |label| gpui::MenuItem::action(label, ToggleFollowNewPosts),
+    menu_label: Some("Follow New Posts"),
+};
+
 /// Every binding, in the order [`init`] registers them (#99).
 ///
 /// [`init`] registers exactly this list, [`shortcuts`] filters it to what
@@ -192,7 +211,7 @@ const SHOW_NEW_POSTS: Shortcut = Shortcut {
 /// `CLOSE_WINDOW` and `SCROLL_TO_TOP` sat here unbound after #109 and #22
 /// added them everywhere except this list. `every_menu_item_has_a_binding`
 /// is the test that now catches it.
-const ALL_SHORTCUTS: [&Shortcut; 8] = [
+const ALL_SHORTCUTS: [&Shortcut; 9] = [
     &RELOAD,
     &FOCUS_COMPOSER,
     &BLUR_COMPOSER,
@@ -201,6 +220,7 @@ const ALL_SHORTCUTS: [&Shortcut; 8] = [
     &CLOSE_WINDOW,
     &SCROLL_TO_TOP,
     &SHOW_NEW_POSTS,
+    &TOGGLE_FOLLOW_NEW_POSTS,
 ];
 
 /// Register #58's key bindings. Called once at startup, next to
@@ -263,6 +283,7 @@ pub(crate) fn menus() -> Vec<gpui::Menu> {
             items: [
                 RELOAD.menu_item(),
                 SHOW_NEW_POSTS.menu_item(),
+                TOGGLE_FOLLOW_NEW_POSTS.menu_item(),
                 SCROLL_TO_TOP.menu_item(),
             ]
             .into_iter()

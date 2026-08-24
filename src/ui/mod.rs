@@ -52,7 +52,7 @@ use render::{RowCounts, row_counts};
 
 use crate::menu::{
     BlurComposer, CloseWindow, FocusComposer, KEY_CONTEXT, Minimize, Reload, ScrollToTop,
-    ShowAbout, ShowNewPosts,
+    ShowAbout, ShowNewPosts, ToggleFollowNewPosts,
 };
 use crate::oauth;
 use crate::paths::Paths;
@@ -1776,6 +1776,20 @@ impl Render for TimelineView {
                 // — it shows a fetch the timer already paid for, and does
                 // nothing at all when there is none.
                 this.apply_pending(cx);
+            }))
+            .on_action(cx.listener(|this, _: &ToggleFollowNewPosts, _window, cx| {
+                // #22: the menu bar cannot draw a checkmark, so the flip
+                // reports which way it went through the banner a finished
+                // reload uses — `Outcome`, because it is the variant that
+                // is not a failure.
+                this.follow_new_posts = !this.follow_new_posts;
+                let outcome = if this.follow_new_posts {
+                    "Following new posts."
+                } else {
+                    "Not following — new posts will wait behind the pill."
+                };
+                this.reload_notice = Some(ReloadNotice::Outcome(outcome.into()));
+                cx.notify();
             }))
             .on_action(cx.listener(|this, _: &ScrollToTop, _window, cx| {
                 // #22: purely local — no request, no gate, nothing to
@@ -3521,6 +3535,37 @@ mod tests {
                     "a reader mid-timeline must not have the screen replaced under them"
                 );
                 assert_eq!(view.pending.as_ref().map(|pending| pending.count), Some(2));
+            });
+        });
+    }
+
+    /// #22: the View menu's toggle flips follow and says which way it
+    /// now points — the menu bar cannot show a checkmark, so the banner
+    /// is the only place the new state is visible.
+    #[gpui::test]
+    fn toggling_follow_flips_the_switch_and_reports_itself(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext as _;
+
+        let (window, timeline) = fixture_window(cx, fixture_with(&["2", "1"], &[]));
+
+        cx.update_window(window.into(), |_, window, cx| {
+            let _ = window.draw(cx);
+            window.dispatch_action(Box::new(crate::menu::ToggleFollowNewPosts), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+
+        cx.update(|cx| {
+            timeline.update(cx, |view, _cx| {
+                assert!(
+                    view.follow_new_posts,
+                    "the test config starts with follow off, so one toggle turns it on"
+                );
+                assert!(
+                    matches!(view.reload_notice, Some(ReloadNotice::Outcome(_))),
+                    "the flip must say which way it went, got {:?}",
+                    view.reload_notice
+                );
             });
         });
     }
