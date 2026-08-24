@@ -3528,6 +3528,37 @@ mod tests {
         });
     }
 
+    /// #22: following onto a screen with nothing on it — an empty List,
+    /// a fresh install — arrives at the top without arming a glide. There
+    /// is no row to keep in place, so the compensation would name an
+    /// index past the end of the list; gpui retains an unresolvable
+    /// anchor and retries it every prepaint, so a later "Load older"
+    /// growing the list past that index would jump the viewport under
+    /// the reader for no visible reason.
+    #[gpui::test]
+    fn following_onto_an_empty_timeline_snaps_without_a_glide(cx: &mut gpui::TestAppContext) {
+        let (_window, timeline) = fixture_window(cx, fixture_with(&[], &[]));
+
+        cx.update(|cx| {
+            timeline.update(cx, |view, cx| {
+                view.follow = super::FollowMode::Follow;
+                let pending = pending_after_poll(
+                    &[],
+                    ["2", "1"].map(|id| item_with(id, "someone", None)).to_vec(),
+                )
+                .expect("two posts arrived");
+                view.present_poll(pending, cx);
+
+                assert_eq!(shown_ids(view), ["2", "1"]);
+                assert!(view.pending.is_none());
+                assert!(
+                    view.glide.is_none(),
+                    "with no row to keep in place there is nothing to glide from"
+                );
+            });
+        });
+    }
+
     /// #22: the switch off means every poll waits behind the pill,
     /// whatever the scroll position.
     #[gpui::test]

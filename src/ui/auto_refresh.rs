@@ -450,10 +450,24 @@ impl TimelineView {
         // A buffer parked by an earlier poll is staler than this one and
         // measured against a timeline that is about to be replaced.
         self.clear_pending();
+        let nothing_was_kept = count == pending.items.len();
         self.state = TimelineState::Loaded(pending.items);
-        self.list_scroll.scroll_to_top_of_item(count);
+        if nothing_was_kept {
+            // Every row is new — an empty List filling for the first
+            // time, or a head page with no overlap. There is no row to
+            // keep in place, so the compensation below would name an
+            // index past the end of the list; gpui *retains* an
+            // unresolvable anchor and retries it at every prepaint, and
+            // a later "Load older" growing the list past that index
+            // would jump the viewport under the reader. Land at the top
+            // instead, with no glide: gliding is revealing rows above
+            // the one being read, and there is no such row.
+            self.list_scroll.scroll_to_top_of_item(0);
+        } else {
+            self.list_scroll.scroll_to_top_of_item(count);
+            self.start_glide(cx);
+        }
         self.refresh_images(cx);
-        self.start_glide(cx);
         cx.notify();
     }
 
