@@ -127,6 +127,7 @@ each time.
 | `X_AUTO_SYNC_LIST` | no | `true` | Keep `X_LIST_ID`'s membership mirroring your follows while the app runs — also `auto_sync_list` in `config.toml`. **Spends on a timer**; see below |
 | `X_SYNC_INTERVAL_SECONDS` | no | `21600` (6h) | How long the background sync waits between diffs. Values under `900` are rejected — also `sync_interval_seconds` in `config.toml` |
 | `X_SYNC_PRUNE_LIMIT_PERCENT` | no | `10` | The most of the list's membership the background sync may remove per diff, in percent. Over it, the removals are held for `--sync-list --apply --prune` to confirm; `100` turns the cap off — also `sync_prune_limit_percent` in `config.toml` (#176) |
+| `X_SYNC_WRITES_PER_MINUTE` | no | `2` | How many list writes the background sync sends per minute during a catch-up (#197). `1`–`20`; the ceiling is X's documented write window (300 per 15 min) spread evenly. Raise it only after a run at the default has shown no refusals — also `sync_writes_per_minute` in `config.toml` |
 | `X_AUTO_REFRESH` | no | `true` | Poll the timeline for new posts while the window is open — also `auto_refresh` in `config.toml` (#21). `false` and the app sends nothing you did not click |
 | `X_AUTO_REFRESH_INTERVAL_SECONDS` | no | `300` (5m) | How long auto-refresh waits between polls. Values below `X_MIN_FETCH_INTERVAL_SECONDS` are rejected — also `auto_refresh_interval_seconds` in `config.toml` |
 
@@ -192,9 +193,10 @@ four diffs a day that is roughly $2 per thousand follows if X's documented
 `x-api-budget` has that rule measured for Posts only. This is why the
 interval defaults to six hours and refuses anything under fifteen minutes.
 
-The writes are spread out rather than sent in a burst: two a minute, so a
-list that is thousands of accounts behind is caught up over hours rather
-than minutes. That pace is deliberate. X refuses list additions with a cap
+The writes are spread out rather than sent in a burst: two a minute by
+default (`sync_writes_per_minute`), so a list that is thousands of
+accounts behind is caught up over hours rather than minutes. That default
+is deliberate. X refuses list additions with a cap
 its `x-rate-limit-*` headers do not describe (#193, #197): a burst of
 roughly a hundred in twenty minutes tripped it, and it then refused every
 write for more than a day. A refusal pauses the catch-up rather than
@@ -420,6 +422,7 @@ daily_request_budget = 500
 auto_sync_list = true
 sync_interval_seconds = 21600
 sync_prune_limit_percent = 10
+sync_writes_per_minute = 2
 auto_refresh = true
 auto_refresh_interval_seconds = 300
 ```

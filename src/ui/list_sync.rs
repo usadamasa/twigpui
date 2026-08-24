@@ -373,6 +373,7 @@ impl TimelineView {
         let paths = self.paths.clone();
         let interval = self.config.sync_interval_seconds;
         let prune_limit = self.config.sync_prune_limit_percent;
+        let writes_per_minute = self.config.sync_writes_per_minute;
         log::info(&format!(
             "list sync started for {list_id} ({trigger:?}), interval {interval}s"
         ));
@@ -420,6 +421,7 @@ impl TimelineView {
                         });
                         let pacing = sync::Pacing {
                             interval_seconds: interval,
+                            writes_per_minute,
                             forced,
                         };
                         // The tick logs its own outcome, failure included.

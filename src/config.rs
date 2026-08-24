@@ -91,6 +91,17 @@ pub(crate) struct Config {
     /// `0` makes the background sync additive only. The CLI is never
     /// capped.
     pub sync_prune_limit_percent: u8,
+    /// How many writes one background-sync tick may send, at one tick a
+    /// minute — the catch-up's sustained pace (#197).
+    ///
+    /// The default is deliberately slow: the cap that locked #197 out for
+    /// 24 hours followed roughly seven writes a minute, and its size is
+    /// still unmeasured. This knob exists for the measurement's other
+    /// direction — run at the default for a while, see no refusal, raise
+    /// it and watch the log. A refusal is not an accident either way:
+    /// `sync::state`'s backoff ladder absorbs it and the log records what
+    /// the cap said. 1..=[`MAX_SYNC_WRITES_PER_MINUTE`].
+    pub sync_writes_per_minute: u8,
     /// Whether the window polls its timeline for new posts while it runs
     /// (#21).
     ///
@@ -147,6 +158,23 @@ const MIN_SYNC_INTERVAL_SECONDS: u32 = 900;
 /// the line — and that is accepted rather than patched with an absolute
 /// floor: a false hold costs one CLI command, a false pass costs the list.
 const DEFAULT_SYNC_PRUNE_LIMIT_PERCENT: u8 = 10;
+
+/// 2 writes a minute: the background sync's default catch-up pace (#197).
+///
+/// Chosen from the one measurement there is — a hidden cap on
+/// `POST /2/lists/:id/members` engaged after roughly seven writes a minute
+/// and stayed down for 24 hours — to be the pace that does not trip it,
+/// not the fastest pace it allows. Raising it is what
+/// `sync_writes_per_minute` is for, once a run at this default has shown
+/// no refusals.
+const DEFAULT_SYNC_WRITES_PER_MINUTE: u8 = 2;
+
+/// The most `sync_writes_per_minute` accepts: 20/min is X's *documented*
+/// write window (300 per 15 minutes) spread evenly. Above it the tracked
+/// rate-limit window would start refusing sends anyway, so a larger value
+/// only buys refusals — `25` typed where `2` was meant should be an error
+/// with the key named, not a burst.
+const MAX_SYNC_WRITES_PER_MINUTE: u8 = 20;
 
 /// 5 minutes between auto-refresh polls (#21).
 ///
@@ -213,6 +241,10 @@ struct FileSettings {
     /// named, not by serde with a type error.
     #[serde(default)]
     sync_prune_limit_percent: Option<u32>,
+    /// Non-secret, same reasoning as `request_price`. `u32` for
+    /// `sync_prune_limit_percent`'s reason.
+    #[serde(default)]
+    sync_writes_per_minute: Option<u32>,
     /// Non-secret, same reasoning as `request_price`. Like `auto_sync_list`
     /// above, this is the key that matters for a `.app` launched from
     /// Finder, where no shell variable is visible (#40) — and it is the one
@@ -379,6 +411,8 @@ impl Config {
         let sync_interval_seconds = resolve_sync_interval(&var, file.sync_interval_seconds)?;
         let sync_prune_limit_percent =
             resolve_sync_prune_limit(&var, file.sync_prune_limit_percent)?;
+        let sync_writes_per_minute =
+            resolve_sync_writes_per_minute(&var, file.sync_writes_per_minute)?;
 
         let auto_refresh = resolve_auto_refresh(&var, file.auto_refresh)?;
         // Takes `min_fetch_interval_seconds` because the floor it enforces
@@ -402,6 +436,7 @@ impl Config {
             auto_sync_list,
             sync_interval_seconds,
             sync_prune_limit_percent,
+            sync_writes_per_minute,
             auto_refresh,
             auto_refresh_interval_seconds,
         })
@@ -542,6 +577,45 @@ fn resolve_sync_prune_limit(
         .filter(|percent| *percent <= 100)
         .with_context(|| {
             format!("{source} must be at most 100 (a share of the list, in percent), got {percent}")
+        })
+}
+
+/// Resolve `sync_writes_per_minute` (#197): env > file >
+/// [`DEFAULT_SYNC_WRITES_PER_MINUTE`], refusing 0 and anything over
+/// [`MAX_SYNC_WRITES_PER_MINUTE`].
+///
+/// 0 is refused rather than read as "off" — `auto_sync_list` is the switch
+/// for that, and a pace of zero would be a sync that claims to run while
+/// never draining its plan. The ceiling is a ceiling for
+/// [`MAX_SYNC_WRITES_PER_MINUTE`]'s reason: beyond it only the refusals
+/// get faster.
+fn resolve_sync_writes_per_minute(
+    var: impl Fn(&str) -> Option<String>,
+    file_value: Option<u32>,
+) -> Result<u8> {
+    let (writes, source) = match var("X_SYNC_WRITES_PER_MINUTE")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    {
+        Some(raw) => (
+            raw.parse::<u32>()
+                .with_context(|| format!("X_SYNC_WRITES_PER_MINUTE is not a number: {raw:?}"))?,
+            "X_SYNC_WRITES_PER_MINUTE",
+        ),
+        None => match file_value {
+            Some(writes) => (writes, "sync_writes_per_minute in config.toml"),
+            None => return Ok(DEFAULT_SYNC_WRITES_PER_MINUTE),
+        },
+    };
+
+    u8::try_from(writes)
+        .ok()
+        .filter(|writes| (1..=MAX_SYNC_WRITES_PER_MINUTE).contains(writes))
+        .with_context(|| {
+            format!(
+                "{source} must be between 1 and {MAX_SYNC_WRITES_PER_MINUTE} (X's documented \
+                 write window is 300 per 15 minutes), got {writes}"
+            )
         })
 }
 
@@ -1668,6 +1742,123 @@ mod tests {
             vars(&[
                 ("X_OAUTH_CLIENT_ID", "client-123"),
                 ("X_SYNC_INTERVAL_SECONDS", "soon"),
+            ]),
+            FileSettings::default(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("is not a number"), "{error}");
+    }
+
+    // --- #197: sync_writes_per_minute (env > file > 2, 1..=20) ---
+
+    #[test]
+    fn the_write_pace_defaults_to_two_a_minute() {
+        // The measured basis: a hidden cap engaged at roughly seven writes
+        // a minute and stayed down for 24 hours. The default is the pace
+        // that does not trip it, not the fastest allowed.
+        let config = Config::resolve(
+            vars(&[("X_OAUTH_CLIENT_ID", "client-123")]),
+            FileSettings::default(),
+        )
+        .unwrap();
+        assert_eq!(config.sync_writes_per_minute, 2);
+    }
+
+    #[test]
+    fn resolve_reads_the_write_pace_from_the_file_when_env_is_unset() {
+        let file = FileSettings {
+            sync_writes_per_minute: Some(5),
+            ..FileSettings::default()
+        };
+        let config = Config::resolve(vars(&[("X_OAUTH_CLIENT_ID", "client-123")]), file).unwrap();
+        assert_eq!(config.sync_writes_per_minute, 5);
+    }
+
+    #[test]
+    fn resolve_prefers_the_env_write_pace_over_the_file() {
+        let file = FileSettings {
+            sync_writes_per_minute: Some(5),
+            ..FileSettings::default()
+        };
+        let config = Config::resolve(
+            vars(&[
+                ("X_OAUTH_CLIENT_ID", "client-123"),
+                ("X_SYNC_WRITES_PER_MINUTE", "10"),
+            ]),
+            file,
+        )
+        .unwrap();
+        assert_eq!(config.sync_writes_per_minute, 10);
+    }
+
+    #[test]
+    fn resolve_rejects_a_write_pace_of_zero() {
+        // 0 is not "off" — `auto_sync_list` is. A pace of zero would be a
+        // sync that claims to run while never draining its plan.
+        let error = Config::resolve(
+            vars(&[
+                ("X_OAUTH_CLIENT_ID", "client-123"),
+                ("X_SYNC_WRITES_PER_MINUTE", "0"),
+            ]),
+            FileSettings::default(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("between 1 and 20"), "{error}");
+    }
+
+    #[test]
+    fn resolve_rejects_a_write_pace_past_the_documented_window() {
+        // 20/min is 300 per 15 minutes spread evenly — X's documented
+        // window. Above it the tracked window refuses sends anyway, so a
+        // larger value only buys refusals.
+        let error = Config::resolve(
+            vars(&[
+                ("X_OAUTH_CLIENT_ID", "client-123"),
+                ("X_SYNC_WRITES_PER_MINUTE", "21"),
+            ]),
+            FileSettings::default(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("between 1 and 20"), "{error}");
+    }
+
+    #[test]
+    fn the_documented_window_pace_itself_is_accepted() {
+        let config = Config::resolve(
+            vars(&[
+                ("X_OAUTH_CLIENT_ID", "client-123"),
+                ("X_SYNC_WRITES_PER_MINUTE", "20"),
+            ]),
+            FileSettings::default(),
+        )
+        .unwrap();
+        assert_eq!(config.sync_writes_per_minute, 20);
+    }
+
+    #[test]
+    fn a_rejected_write_pace_names_the_file_key_when_that_is_where_it_came_from() {
+        let file = FileSettings {
+            sync_writes_per_minute: Some(120),
+            ..FileSettings::default()
+        };
+        let error = Config::resolve(vars(&[("X_OAUTH_CLIENT_ID", "client-123")]), file)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("sync_writes_per_minute in config.toml"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn resolve_rejects_a_non_numeric_write_pace() {
+        let error = Config::resolve(
+            vars(&[
+                ("X_OAUTH_CLIENT_ID", "client-123"),
+                ("X_SYNC_WRITES_PER_MINUTE", "fast"),
             ]),
             FileSettings::default(),
         )
