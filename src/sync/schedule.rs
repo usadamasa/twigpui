@@ -230,6 +230,32 @@ pub(crate) fn last_diff_for(forced: bool, recorded: Option<i64>) -> Option<i64> 
     if forced { None } else { recorded }
 }
 
+/// What [`Situation::blocked_until`] should be for this tick, given
+/// whether the caller forced it (#174) and what the block is for.
+///
+/// The block became persistent in #198, which gave a forced tick two
+/// kinds to meet. A failed tick's block (`refusals == 0`) is the interval
+/// [`super::state::settle`] hands a revoked scope or a deleted list so the
+/// loop does not retry it every minute — and the status bar offers
+/// "Failed" as something to press precisely so a person who has fixed the
+/// cause can retry now. Forcing steps over that one. A refusal's block
+/// (`refusals > 0`) is the ladder backing away from a cap that has said
+/// no, and pressing the button is not evidence it has lifted: forcing
+/// waits that one out like any other tick, which is what keeps the button
+/// from being a way to spend around it.
+///
+/// A block from an exhausted window (which leaves `refusals` alone) is
+/// stepped over too, and costs nothing: `rate_limit::decision` refuses
+/// the send before it goes out, and the tick comes back `RateLimited`
+/// with the same deadline.
+pub(crate) fn blocked_for(forced: bool, state: &super::SyncState) -> Option<i64> {
+    if forced && state.refusals == 0 {
+        None
+    } else {
+        state.blocked_until
+    }
+}
+
 /// Whether a run that was asked for one pass has nothing left to do
 /// (#174).
 ///
@@ -598,12 +624,58 @@ mod tests {
     // button from being a way to spend around them.
     #[test]
     fn forcing_does_not_get_past_a_live_rate_limit() {
-        let situation = Situation {
-            last_diff_at: last_diff_for(true, Some(1_000)),
+        let refused = crate::sync::SyncState {
+            last_diff_at: Some(1_000),
             blocked_until: Some(5_000),
+            refusals: 1,
+        };
+        let situation = Situation {
+            last_diff_at: last_diff_for(true, refused.last_diff_at),
+            blocked_until: blocked_for(true, &refused),
             ..idle()
         };
         assert_eq!(next_step(&situation, 1_100), Step::Wait { until: 5_000 });
+    }
+
+    // The block a failed tick earns is the one thing forcing may step
+    // over: "Failed" is offered as something to press so that a fixed
+    // cause can be retried now, not after the interval a relaunch would
+    // otherwise honour (#198 made the block persistent).
+    #[test]
+    fn forcing_steps_over_the_interval_a_failed_tick_earned() {
+        let failed = crate::sync::SyncState {
+            last_diff_at: Some(1_000),
+            blocked_until: Some(22_600),
+            refusals: 0,
+        };
+        assert_eq!(blocked_for(true, &failed), None);
+        let situation = Situation {
+            last_diff_at: last_diff_for(true, failed.last_diff_at),
+            blocked_until: blocked_for(true, &failed),
+            ..idle()
+        };
+        assert_eq!(next_step(&situation, 1_100), Step::Diff);
+    }
+
+    #[test]
+    fn an_unforced_tick_honours_every_block() {
+        let failed = crate::sync::SyncState {
+            last_diff_at: Some(1_000),
+            blocked_until: Some(22_600),
+            refusals: 0,
+        };
+        assert_eq!(blocked_for(false, &failed), Some(22_600));
+    }
+
+    #[test]
+    fn forcing_never_steps_over_a_refusal_streak() {
+        // Pressing the button is not evidence the cap has lifted.
+        let refused = crate::sync::SyncState {
+            last_diff_at: Some(1_000),
+            blocked_until: Some(22_600),
+            refusals: 4,
+        };
+        assert_eq!(blocked_for(true, &refused), Some(22_600));
     }
 
     #[test]

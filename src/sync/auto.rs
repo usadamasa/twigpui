@@ -61,17 +61,24 @@ const BATCH: usize = 2;
 pub(crate) struct Pacing {
     /// `config.sync_interval_seconds`.
     pub interval_seconds: u32,
-    /// #174's manual start: drop the interval for this one tick.
+    /// #174's manual start: drop the interval for this one tick, and the
+    /// block a failed tick earned.
     ///
-    /// Done by handing [`schedule::next_step`] no last-diff time at all,
-    /// which is the value it already reads as "a diff has never run".
-    /// Nothing else about the decision changes, and that is the reason it
-    /// is done this way rather than with a shorter interval or a fourth
-    /// [`schedule::Step`]: the precedence still holds, so a live rate
-    /// limit still refuses the tick and an undrained plan is still
-    /// drained before both sides are re-read. Pressing the button while a
-    /// catch-up is outstanding therefore spends nothing on reads — it
-    /// resumes the plan already paid for.
+    /// Done by handing [`schedule::next_step`] no last-diff time at all
+    /// ([`schedule::last_diff_for`]), which is the value it already reads
+    /// as "a diff has never run", and no block unless it is a refusal's
+    /// ([`schedule::blocked_for`]). Nothing else about the decision
+    /// changes, and that is the reason it is done this way rather than
+    /// with a shorter interval or a fourth [`schedule::Step`]: the
+    /// precedence still holds, so a refusal's backoff still refuses the
+    /// tick and an undrained plan is still drained before both sides are
+    /// re-read. Pressing the button while a catch-up is outstanding
+    /// therefore spends nothing on reads — it resumes the plan already
+    /// paid for.
+    ///
+    /// The caller keeps it set across a tick that only waited, so a press
+    /// during a backoff is honoured when the backoff ends rather than
+    /// consumed by it.
     pub forced: bool,
 }
 
@@ -168,7 +175,7 @@ fn perform(
         last_diff_at: schedule::last_diff_for(pacing.forced, state.last_diff_at),
         interval_seconds: pacing.interval_seconds,
         pending,
-        blocked_until: state.blocked_until,
+        blocked_until: schedule::blocked_for(pacing.forced, state),
     };
 
     match schedule::next_step(&situation, now) {

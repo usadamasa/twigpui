@@ -113,7 +113,11 @@ src/sync/run.rs	400
 # 300 -> 350: #176's `prune_allowed` and `sendable`. The verdict is one
 # comparison; the doc above it is the whole argument for holding every
 # removal rather than trimming to fit, and for never capping the CLI.
-src/sync/schedule.rs	350
+# 350 -> 400: `apply_outcome` (the client's error mapped to what the loop
+# remembers, in one testable place) and `blocked_for` (which block a
+# forced tick may step over, now that blocks persist — #198). `settle`
+# moved out to state.rs.
+src/sync/schedule.rs	400
 # auto.rs 200 -> 250: #176 threads the prune verdict through `tick`, `diff`
 # and `apply`, and the module doc gains the rule that a held plan is not
 # finished work — the deadlock `sendable` exists to prevent.

@@ -440,7 +440,12 @@ impl TimelineView {
                                 })
                                 .await
                         };
-                        forced = false;
+                        // Spent by the tick that acted on it, not by one
+                        // that only waited out a refusal — otherwise a
+                        // press during a backoff would be consumed by
+                        // the wait and the interval would apply after
+                        // all.
+                        forced = forced && matches!(tick.outcome, Ok(sync::Outcome::Idle { .. }));
                         let status = status_of(&tick, now);
                         let outcome = tick.outcome.as_ref().ok();
                         let notice = outcome.and_then(sync::notice);
