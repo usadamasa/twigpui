@@ -50,6 +50,25 @@ The consequence to keep in mind when reading or writing docs: **a
 not fail, it syncs the other pair. The list membership read is paginated
 and billed in both profiles — only the follow-graph side is stood in for.
 
+### The background sync reads the members side from a local mirror (#173)
+
+`GET /2/lists/:id/members` is the dearer side: the docs' pricing widget
+puts it at the Users rate ($0.010/resource) with no Owned Read discount,
+against $0.001 for `/2/users/:id/following` (`pricing.md`). After the
+first full read this app is the only writer of the list, so the scheduled
+diff takes the members side from `sync_members.json` and pays for the
+follow side only. The mirror is re-read from X when it is older than
+`sync_members_refresh_seconds` (7 days by default; `0` turns the mirror
+off), and every write the sync sends is recorded in it as it lands.
+
+Three things always read the list in full and leave a fresh mirror behind:
+the CLI dry run, a sync started from the status bar, and the first
+scheduled diff after the mirror is discarded. It is discarded whenever a
+mirror-derived plan looks wrong — removals over the prune cap, or a write
+X refuses — so a stale mirror costs one extra full read, never a retry
+loop. A full read that replaces a mirror logs how many accounts the two
+disagreed on; that line is the only place drift becomes visible.
+
 ## Rate limits
 
 X's per-endpoint rate limits and the prepaid usage cap above both surface as

@@ -54,6 +54,27 @@ Posts 単価。
 
 読み取りは**返ってきたオブジェクトの数**。書き込みはリクエスト数。
 
+## エンドポイントごとの課金種別 — docs のウィジェット由来 (未実測)
+
+料金ページの表は種別ごとで、どのエンドポイントがどの種別かは書いていない。
+各エンドポイントのページに埋め込まれた料金ウィジェット (cost estimator) の JS が
+slug → 種別のテーブルを持っていて、それを読んだのが下の表 (2026-08-24)。
+**ウィジェットの表示ロジックであって課金明細ではない。** 同期に関わる分だけ抜く。
+
+| slug | 種別 | Owned Read 割引 |
+| --- | --- | --- |
+| `get-following` (`/2/users/:id/following`) | User $0.010 | あり → $0.001 |
+| `get-list-members` (`/2/lists/:id/members`) | User $0.010 | **なし** |
+| `get-list-memberships` (`/2/users/:id/list_memberships`) | List $0.005 | あり |
+| `get-owned-lists` (`/2/users/:id/owned_lists`) | List $0.005 | あり |
+| `add-list-member` | List: Create $0.010 / request | — |
+| `remove-list-member` | List: Manage / request | — |
+
+割引の条件はウィジェットのコメントによると "when {id} matches the authenticated user
+who owns the developer app" で、`/2/users/{id}/...` 系だけが対象。`/2/lists/{id}/members`
+はパスに user id が無い。ウィジェットが静的に判定できないだけの可能性は残るので、
+list members が本当に $0.010 かは Developer Console の明細で確かめる (#173 のコメント参照)。
+
 ## 重複排除
 
 > All resources are deduplicated within a 24-hour UTC day window.
