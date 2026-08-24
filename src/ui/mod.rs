@@ -3146,6 +3146,12 @@ mod tests {
             // Off for the same reason (#21).
             auto_refresh: false,
             auto_refresh_interval_seconds: 300,
+            // Off so the tests that exercise the pill path stay on it —
+            // a test harness always finds the scroll at the top, and the
+            // on-by-default follow (#22) would empty `pending` before a
+            // test could look at it. The follow tests switch it on
+            // per-view instead.
+            follow_new_posts: false,
         }
     }
 
@@ -3950,6 +3956,8 @@ mod tests {
             // Off for the same reason (#21).
             auto_refresh: false,
             auto_refresh_interval_seconds: 300,
+            // Off for `smoke_config`'s reason (#22).
+            follow_new_posts: false,
         };
 
         cx.update(gpui_component::init);
