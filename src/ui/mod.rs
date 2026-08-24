@@ -1144,10 +1144,25 @@ impl TimelineView {
             .bg(rgb(theme.bg_header))
             .border_b_1()
             .border_color(rgb(theme.border))
-            // #95's frame, #164's segments: Home and every owned list.
-            .child(self.list_picker(cx))
-            .children(self.lists_control(cx))
-            .child(header_title_element(self.home_username.as_deref(), theme))
+            // #95's frame, #164's segments: Home and every owned list —
+            // wrapped so that a picker wider than the window shrinks and
+            // clips instead of pushing the right-hand controls (sign-in,
+            // reload) off the screen. `min_w(0)` is what allows a flex
+            // item to become narrower than its content wants; without it
+            // eleven tabs at 560px shoved "Sign in with X" out of the
+            // window while the body's text said to click it. Presenting
+            // the clipped tabs better (scroll, dropdown) is #192's job.
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .min_w(px(0.))
+                    .overflow_hidden()
+                    .child(self.list_picker(cx))
+                    .children(self.lists_control(cx))
+                    .child(header_title_element(self.home_username.as_deref(), theme)),
+            )
             .child(
                 div()
                     .flex()
@@ -1600,10 +1615,27 @@ impl TimelineView {
             .track_scroll(&self.list_scroll);
 
         match &self.state {
-            TimelineState::NotAuthenticated => content.child(notice(
-                "Not signed in. Click \"Sign in with X\" to continue.",
-                theme.text_muted,
-            )),
+            // The button itself, not a sentence pointing at the toolbar's
+            // copy: enough list tabs push that copy off the right edge
+            // (#192), and a signed-out window whose only advice names an
+            // invisible button cannot be recovered from the screen — the
+            // measured state of 2026-08-24, with a session X had refused
+            // to renew.
+            TimelineState::NotAuthenticated => content.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .items_start()
+                    .gap_2()
+                    .px_4()
+                    .py_3()
+                    .child(
+                        div()
+                            .text_color(rgb(theme.text_muted))
+                            .child("Not signed in."),
+                    )
+                    .child(sign_in_pill("sign-in-body", "Sign in with X", theme, cx)),
+            ),
             TimelineState::SigningIn => content.child(notice(
                 "Waiting for the browser to finish sign-in…",
                 theme.text_muted,
@@ -3545,6 +3577,70 @@ mod tests {
             "the title runs into the picker: picker ends at {:?}, title starts at {:?}",
             second.right(),
             title.left()
+        );
+    }
+
+    /// The measured failure (2026-08-24): a window with eleven list tabs
+    /// at 560px put the toolbar's "Sign in with X" past the right edge,
+    /// and the body's only advice was to click it. A session X had just
+    /// refused to renew was therefore unrecoverable from the screen. The
+    /// body is where the "Not signed in" sentence lives, so the button
+    /// lives there too — reachable no matter what the toolbar is doing.
+    #[gpui::test]
+    fn a_signed_out_window_offers_sign_in_in_the_body(cx: &mut gpui::TestAppContext) {
+        let (mut visual, timeline) = drawn(cx, fixture_with(&["1"], &[]));
+        cx.update(|cx| {
+            timeline.update(cx, |view, cx| {
+                view.state = TimelineState::NotAuthenticated;
+                cx.notify();
+            });
+        });
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let pill = visual
+            .debug_bounds("sign-in-body")
+            .expect("a signed-out body must carry its own sign-in button");
+        let viewport = visual.update(|window, _| window.viewport_size());
+        assert!(
+            pill.right() <= viewport.width && pill.left() >= gpui::Pixels::ZERO,
+            "the body's sign-in button is off-screen: {pill:?} in {viewport:?}"
+        );
+    }
+
+    /// The other half of the same failure: the toolbar is one flex row,
+    /// and enough tabs pushed everything to their right — the title, the
+    /// sign-in / reload control — out of the window instead of shrinking.
+    /// The tabs' own overflow presentation is #192's; what this pins is
+    /// only that the row's right-hand control never leaves the window,
+    /// however many lists the account owns.
+    #[gpui::test]
+    fn the_toolbar_action_stays_on_screen_under_a_dozen_tabs(cx: &mut gpui::TestAppContext) {
+        let lists: [(&str, &str); 12] = [
+            ("9101", "The Illustrated Compendium"),
+            ("9102", "Watercolour and gouache people"),
+            ("9103", "Neighbourhood announcements"),
+            ("9104", "International correspondents"),
+            ("9105", "Machine fabrication weekly"),
+            ("9106", "Dollhouse district news"),
+            ("9107", "Secondary creation circle"),
+            ("9108", "Drinking club coordination"),
+            ("9109", "Probe accounts for twigpui"),
+            ("9110", "Long-form essay writers"),
+            ("9111", "Camera gear enthusiasts"),
+            ("9112", "Weekend hiking companions"),
+        ];
+        let (mut visual, _timeline) = drawn(cx, fixture_with_lists(&["1"], &lists));
+
+        let action = visual
+            .debug_bounds("primary-action")
+            .expect("the toolbar always carries its action control");
+        let viewport = visual.update(|window, _| window.viewport_size());
+        assert!(
+            action.right() <= viewport.width,
+            "the toolbar's action control is pushed off-screen by the tabs: \
+             {action:?} in {viewport:?}"
         );
     }
 
