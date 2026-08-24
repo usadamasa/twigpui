@@ -89,6 +89,16 @@ impl TimelineView {
                 this.refresh_liked_ids(cx);
                 match result {
                     Ok(StartOutcome::NotAuthenticated { session_notice }) => {
+                        // Both lines exist because of 2026-08-24: a session
+                        // X refused to renew left "starting twigpui" as the
+                        // log's whole account of a window that could do
+                        // nothing. The banner said why on screen; the file
+                        // said nothing (#199's rule, applied to auth).
+                        match &session_notice {
+                            Some(notice) => log::warn(notice),
+                            None => log::info("no stored session"),
+                        }
+                        log::warn("not signed in — waiting for \"Sign in with X\"");
                         this.session_notice = session_notice.map(SharedString::from);
                         this.state = TimelineState::NotAuthenticated;
                         cx.notify();
@@ -98,6 +108,12 @@ impl TimelineView {
                         cached,
                         session_notice,
                     }) => {
+                        // A demotion that still resolved a credential (the
+                        // bearer fallback) is the quiet kind — worth a line
+                        // for the same reason as the arm above.
+                        if let Some(notice) = &session_notice {
+                            log::warn(notice);
+                        }
                         this.session_notice = session_notice.map(SharedString::from);
                         this.signed_in_with_oauth = true;
                         this.oauth_scope.clone_from(&credential.scope);
@@ -979,6 +995,10 @@ impl TimelineView {
         // nothing to check here any more.
         let client_id = self.config.oauth_client_id.clone();
 
+        // The flow's start was invisible: success logged "signed in with
+        // OAuth" and failure logged the error, but a click whose browser
+        // never came back left nothing at all.
+        log::info("sign-in started — opening the browser and waiting for its callback");
         self.state = TimelineState::SigningIn;
         let paths = self.paths.clone();
 

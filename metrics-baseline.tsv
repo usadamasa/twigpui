@@ -160,7 +160,12 @@ src/toggle.rs	200
 # is the ceiling the file has not had since #126, and it is set to the
 # measurement rather than to the old number so the next raise has to be
 # argued from here.
-src/ui/mod.rs	1800
+# 1800 -> 1850: the signed-out body carries its own "Sign in with X"
+# button, and the toolbar's left cluster is wrapped so a dozen tabs shrink
+# and clip instead of pushing the sign-in control off the window — the
+# 2026-08-24 lockout, where the screen's only advice named a button it
+# was not showing.
+src/ui/mod.rs	1850
 src/ui/reload_policy.rs	300
 # New in #21. Holds the whole of auto-refresh: the pure tick/pending
 # decisions with their tests, and an `impl TimelineView` block for the
