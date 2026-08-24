@@ -16,10 +16,12 @@
 //! by [`super::SyncState`], which persists across launches so relaunching
 //! the app does not buy the same answer again.
 //!
-//! An `Apply` is bounded by [`BATCH`] writes, and the loop waits
-//! `state::APPLY_PAUSE_SECONDS` between batches. Together they are the
-//! sustained write rate, and it is deliberately low — see
-//! [`super::state`] for the lock #197 measured and what it followed.
+//! An `Apply` is bounded by [`Pacing::writes_per_minute`] writes, and the
+//! loop waits `state::APPLY_PAUSE_SECONDS` between batches. Together they
+//! are the sustained write rate, and its default is deliberately low —
+//! see [`super::state`] for the lock #197 measured and what it followed,
+//! and `config::DEFAULT_SYNC_WRITES_PER_MINUTE` for the knob that raises
+//! it once a run has shown no refusals.
 //!
 //! # What a tick is allowed to delete
 //!
@@ -48,19 +50,17 @@ use super::{Action, SyncState, load_plan, load_state, save_plan, save_state, sch
 use crate::paths::Paths;
 use crate::x_api::XClient;
 
-/// Writes sent per `Apply` tick. With `state::APPLY_PAUSE_SECONDS` this
-/// is the sustained rate: two a minute. #197's lock followed roughly seven
-/// a minute; this is not known to be under the cap, only not to be the
-/// thing that trips it — the backoff in [`super::state`] is what handles
-/// the cap itself.
-const BATCH: usize = 2;
-
 /// How the caller wants this tick paced — everything that is about *when*
 /// rather than *what*, and that is not already in [`SyncState`].
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Pacing {
     /// `config.sync_interval_seconds`.
     pub interval_seconds: u32,
+    /// `config.sync_writes_per_minute` (#197): writes sent per `Apply`
+    /// tick, which with `state::APPLY_PAUSE_SECONDS` is the sustained
+    /// rate. The default's reasoning — and why raising it is a deliberate
+    /// act with a measurement behind it — lives on the config constant.
+    pub writes_per_minute: u8,
     /// #174's manual start: drop the interval for this one tick, and the
     /// block a failed tick earned.
     ///
@@ -198,7 +198,14 @@ fn perform(
         // Listed rather than unwrapped so a later change to the precedence
         // cannot turn this into a panic.
         schedule::Step::Apply => match plan {
-            Some(plan) => apply(paths, client, plan, prune, now),
+            Some(plan) => apply(
+                paths,
+                client,
+                plan,
+                prune,
+                now,
+                usize::from(pacing.writes_per_minute),
+            ),
             None => Ok(Outcome::Idle {
                 until: now,
                 pending: 0,
@@ -253,7 +260,8 @@ fn diff(
     })
 }
 
-/// Send up to [`BATCH`] of the plan's outstanding writes.
+/// Send up to `limit` ([`Pacing::writes_per_minute`]) of the plan's
+/// outstanding writes.
 ///
 /// `prune` is [`perform`]'s verdict from [`schedule::prune_allowed`]. With
 /// it false the batch is additions only, and `remaining` counts what may
@@ -266,8 +274,9 @@ fn apply(
     mut plan: super::Plan,
     prune: bool,
     now: i64,
+    limit: usize,
 ) -> Result<Outcome> {
-    let (sent, result) = super::run::apply_some(paths, client, &mut plan, prune, now, BATCH);
+    let (sent, result) = super::run::apply_some(paths, client, &mut plan, prune, now, limit);
     let remaining = schedule::sendable(&plan, prune);
 
     if plan.is_complete() {

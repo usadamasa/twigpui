@@ -52,7 +52,10 @@ src/compose.rs	350
 # under `min_fetch_interval_seconds` is a timer that can never fire.
 # 700 -> 750: #176's `sync_prune_limit_percent` with its resolver and the
 # default's doc, which carries why a tenth and why no absolute floor.
-src/config.rs	750
+# 750 -> 850: #197's `sync_writes_per_minute` — the field, two constants
+# whose docs carry the measured basis (the cap engaged at ~7/min and
+# recovered in 24h), the resolver, and its eight tests.
+src/config.rs	850
 src/fixture.rs	100
 src/image_cache.rs	150
 src/like.rs	150

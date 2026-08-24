@@ -39,12 +39,12 @@
 //!
 //! The lock in #197 followed roughly 100–140 additions in about eighteen
 //! minutes — seven a minute, sent in batches of twenty a second apart.
-//! [`APPLY_PAUSE_SECONDS`] with `auto::BATCH` holds the sustained rate to
-//! two a minute. Whether that is under the cap is unknown; what it is for
-//! is not to be the thing that trips it. These are constants rather than
-//! settings because nothing measured yet would tell anyone what to set
-//! them to. When #197's measurement identifies the cap, that is the time
-//! for a knob.
+//! [`APPLY_PAUSE_SECONDS`] with `sync_writes_per_minute` (default 2, a
+//! config knob since the cap's 24-hour recovery was measured) holds the
+//! sustained rate down. Whether the default is under the cap is unknown;
+//! what it is for is not to be the thing that trips it. Raising the knob
+//! after a clean run is the sanctioned way to probe the cap's size — the
+//! ladder absorbs the answer either way.
 
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
@@ -52,8 +52,10 @@ use serde::{Deserialize, Serialize};
 use super::schedule::Outcome;
 
 /// How long the loop waits between one batch of writes and the next when
-/// the plan still has more. With `auto::BATCH` this is the sustained write
-/// rate — see the module docs for where the figure comes from.
+/// the plan still has more. With `sync_writes_per_minute` this is the
+/// sustained write rate — see the module docs for where the figure comes
+/// from. The pause is the fixed half on purpose: one knob ("writes per
+/// minute") is legible in a way a batch-size-and-interval pair is not.
 pub(crate) const APPLY_PAUSE_SECONDS: i64 = 60;
 
 /// The most a single opaque refusal is backed away from: six hours. Long
