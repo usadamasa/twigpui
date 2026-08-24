@@ -432,6 +432,21 @@ pub(crate) struct TimelineView {
     /// which paths do that and why a stale buffer is not merely useless
     /// but wrong.
     pending: Option<Pending>,
+    /// Whether a poll that finds the reader at the top may flow its new
+    /// posts straight onto the screen (#22) — see
+    /// [`auto_refresh::follows`]. Seeded from `config.follow_new_posts`
+    /// and flipped at runtime by the View menu's toggle, which never
+    /// writes back to the file: the config is the standing preference,
+    /// this is today's.
+    follow_new_posts: bool,
+    /// Holds the glide alive (#22) — the frame timer walking the scroll
+    /// offset back to the top after a follow prepends posts above it. Its
+    /// own slot for `auto_refresh`'s reason: none of the other task slots
+    /// is something a glide should cancel. Dropped (cancelling the loop)
+    /// by every path that replaces the timeline or moves the scroll
+    /// itself; the loop also stops on its own the moment the offset is
+    /// not where it left it, which is the reader grabbing the wheel.
+    glide: Option<Task<()>>,
     /// Every post id this app has reposted, per the local record (#15) —
     /// refreshed from disk whenever the visible timeline changes (see
     /// [`Self::refresh_reposted_ids`]). The default source for
@@ -555,6 +570,8 @@ impl TimelineView {
         );
         let owned_lists = list_picker::cached_lists_or_empty(&paths);
         let selection_file = matches!(startup, Startup::Live).then(|| paths.selection_file());
+        // #22: taken before `config` is moved below, like `source`.
+        let follow_new_posts = config.follow_new_posts;
 
         let mut this = Self {
             config,
@@ -594,6 +611,8 @@ impl TimelineView {
             pending_sync: false,
             auto_refresh: None,
             pending: None,
+            follow_new_posts,
+            glide: None,
             reposted_ids: HashSet::new(),
             reposted_ids_refresh: None,
             repost_overrides: HashMap::new(),
@@ -1761,7 +1780,10 @@ impl Render for TimelineView {
             .on_action(cx.listener(|this, _: &ScrollToTop, _window, cx| {
                 // #22: purely local — no request, no gate, nothing to
                 // report. `scroll_to_top_of_item(0)` rather than a pixel
-                // offset so it lands on the newest row itself.
+                // offset so it lands on the newest row itself. A glide
+                // in flight is walking to the same place — the jump
+                // supersedes it.
+                this.glide = None;
                 this.list_scroll.scroll_to_top_of_item(0);
                 cx.notify();
             }))
@@ -1841,9 +1863,9 @@ mod tests {
         at_the_post_cap, byline, compose_error_message, cooldown_label, cooldown_tick,
         format_timestamp, media_badge, media_columns, offers_delete, offers_like,
         offers_load_older, offers_quote, offers_reauthorize, offers_reply, offers_repost,
-        rate_limit, reload_failure_outcome, reload_gate, reload_start_state, reply_banner_label,
-        reply_target_label, repost_banner_label, row_counts, thread_action_label, usage,
-        usage_color, usage_label,
+        pending_after_poll, rate_limit, reload_failure_outcome, reload_gate, reload_start_state,
+        reply_banner_label, reply_target_label, repost_banner_label, row_counts,
+        thread_action_label, usage, usage_color, usage_label,
     };
 
     fn item_with(id: &str, author_username: &str, reposted_by: Option<&str>) -> TimelineItem {
@@ -3400,6 +3422,105 @@ mod tests {
                     Some(2),
                     "a click outside the bar must leave the offer standing"
                 );
+            });
+        });
+    }
+
+    /// #22: a poll that finds the reader at the top flows straight on —
+    /// no pill, no press. An undrawn window reads as "at the top"
+    /// (`logical_scroll_top` answers `(0, 0px)` before any layout), which
+    /// is also what a freshly opened window is.
+    #[gpui::test]
+    fn a_poll_flows_onto_the_screen_when_the_reader_is_at_the_top(cx: &mut gpui::TestAppContext) {
+        let (_window, timeline) = fixture_window(cx, fixture_with(&["2", "1"], &[]));
+
+        cx.update(|cx| {
+            timeline.update(cx, |view, cx| {
+                view.follow_new_posts = true;
+                let pending = pending_after_poll(
+                    &["2", "1"],
+                    ["4", "3", "2", "1"]
+                        .map(|id| item_with(id, "someone", None))
+                        .to_vec(),
+                )
+                .expect("two posts arrived");
+                view.present_poll(pending, cx);
+
+                assert_eq!(shown_ids(view), ["4", "3", "2", "1"]);
+                assert!(
+                    view.pending.is_none(),
+                    "followed posts are on screen — a pill would offer them twice"
+                );
+                assert!(view.glide.is_some(), "the reveal is the glide's to make");
+            });
+        });
+    }
+
+    /// #22: the switch off means every poll waits behind the pill,
+    /// whatever the scroll position.
+    #[gpui::test]
+    fn a_poll_waits_behind_the_pill_when_follow_is_off(cx: &mut gpui::TestAppContext) {
+        let (_window, timeline) = fixture_window(cx, fixture_with(&["2", "1"], &[]));
+
+        cx.update(|cx| {
+            timeline.update(cx, |view, cx| {
+                view.follow_new_posts = false;
+                let pending = pending_after_poll(
+                    &["2", "1"],
+                    ["4", "3", "2", "1"]
+                        .map(|id| item_with(id, "someone", None))
+                        .to_vec(),
+                )
+                .expect("two posts arrived");
+                view.present_poll(pending, cx);
+
+                assert_eq!(shown_ids(view), ["2", "1"]);
+                assert_eq!(view.pending.as_ref().map(|pending| pending.count), Some(2));
+                assert!(view.glide.is_none(), "nothing moved, so nothing glides");
+            });
+        });
+    }
+
+    /// #22: a reader partway down keeps their place — follow yields to the
+    /// pill, which is `preserved_scroll_target`'s rule seen from above.
+    #[gpui::test]
+    fn a_poll_waits_behind_the_pill_when_the_reader_is_scrolled_down(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (window, timeline) = fixture_window(cx, fixture_with(&["2", "1"], &[]));
+
+        // A real frame, so `logical_scroll_top` has row bounds to answer
+        // from — an undrawn window cannot be anywhere but the top.
+        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        cx.update(|cx| {
+            timeline.update(cx, |view, cx| {
+                let first_row = view
+                    .list_scroll
+                    .bounds_for_item(0)
+                    .expect("the frame above laid the rows out");
+                view.list_scroll
+                    .set_offset(gpui::point(gpui::px(0.), -first_row.size.height));
+
+                view.follow_new_posts = true;
+                let pending = pending_after_poll(
+                    &["2", "1"],
+                    ["4", "3", "2", "1"]
+                        .map(|id| item_with(id, "someone", None))
+                        .to_vec(),
+                )
+                .expect("two posts arrived");
+                view.present_poll(pending, cx);
+
+                assert_eq!(
+                    shown_ids(view),
+                    ["2", "1"],
+                    "a reader mid-timeline must not have the screen replaced under them"
+                );
+                assert_eq!(view.pending.as_ref().map(|pending| pending.count), Some(2));
             });
         });
     }

@@ -13,6 +13,11 @@
 //! `impl` is pure, so the decisions that make auto-refresh either cheap or
 //! expensive are unit tested without gpui.
 //!
+//! #22 added the third way a poll's posts reach the screen: when the
+//! reader is already at the top, [`follows`] lets them skip the buffer and
+//! glide straight on — see [`TimelineView::follow`]. The buffer and the
+//! pill remain the path for everyone else.
+//!
 //! # Why this is not `since_id` polling
 //!
 //! #21 was written for the home timeline, where an incremental fetch is a
@@ -30,10 +35,11 @@
 //!
 //! So the design here spends its care somewhere else than on the request:
 //! on not disturbing the reader with what the request brought back. A poll
-//! never replaces what is on screen. It parks the merged timeline in a
-//! [`Pending`] buffer and the window offers it as a count the reader can
-//! press — #21's own wording, and the reason the scroll position is never
-//! moved by a fetch nobody asked for.
+//! never replaces what a reader is in the middle of. It parks the merged
+//! timeline in a [`Pending`] buffer and the window offers it as a count
+//! the reader can press — #21's own wording — unless the reader is sitting
+//! at the top with the follow switch on (#22), where "do not move what I
+//! am reading" and "show me the newest" are the same instruction.
 
 // `super::*` rather than a list, matching [`super::render`]: the `impl`
 // block below reaches most of what `ui` imports, and keeping the two child
@@ -159,6 +165,53 @@ pub(super) fn pending_label(count: usize) -> String {
         1 => "1 new post".to_string(),
         n => format!("{n} new posts"),
     }
+}
+
+/// How far from the exact top still reads as "at the top" (#22), in
+/// pixels. Not zero: a trackpad flick can leave the offset a hair short,
+/// and that reader believes they are at the top — a pill appearing over
+/// half a pixel would look like follow is broken.
+const AT_TOP_TOLERANCE_PX: f32 = 2.0;
+
+/// Whether the reader is at the top of the timeline (#22), from
+/// `ScrollHandle::logical_scroll_top`'s two-part answer: the index of the
+/// row under the top edge of the viewport, and how far into that row the
+/// edge sits.
+pub(super) fn at_top(top_item: usize, offset_in_item: gpui::Pixels) -> bool {
+    top_item == 0 && f32::from(offset_in_item).abs() <= AT_TOP_TOLERANCE_PX
+}
+
+/// Whether a poll's new posts should flow straight onto the screen rather
+/// than wait behind the pill (#22, #177).
+///
+/// All three or nothing. The switch is the reader's standing instruction;
+/// `loaded` keeps a `Failed`/`Loading` screen from being silently replaced
+/// by a poll nobody asked to see; and `at_top` is what separates "show me
+/// the newest" from "I am reading here" — the same line
+/// `preserved_scroll_target` draws from the other side.
+pub(super) fn follows(follow_new_posts: bool, loaded: bool, at_top: bool) -> bool {
+    follow_new_posts && loaded && at_top
+}
+
+/// Fraction of the remaining distance still left after one glide frame
+/// (#22). Multiplicative rather than a fixed speed, so a big batch starts
+/// fast and every glide lands softly — and the duration stays near a
+/// second whatever the distance, instead of scaling with it.
+const GLIDE_KEEP: f32 = 0.85;
+
+/// Close enough to the top to stop gliding and snap the last fraction of
+/// a pixel (#22) — multiplicative decay never reaches zero on its own.
+const GLIDE_DONE_PX: f32 = 1.0;
+
+/// How long one glide frame lasts (#22) — 16ms tracks a 60Hz display.
+pub(super) const GLIDE_FRAME_MS: u64 = 16;
+
+/// The next scroll offset of a glide toward the top, or `None` when the
+/// remaining distance is not worth a frame (#22). `y` is the scroll
+/// offset gpui keeps: 0 at the top, more negative the further down the
+/// reader is.
+pub(super) fn next_glide_y(y: f32) -> Option<f32> {
+    (y.abs() > GLIDE_DONE_PX).then(|| y * GLIDE_KEEP)
 }
 
 /// The half of auto-refresh that cannot be pure: the loop that spends
@@ -317,16 +370,131 @@ impl TimelineView {
             // Nothing new. Not even a notice — see this method's doc.
             return;
         };
-        self.pending = Some(pending);
-        // Images are not fetched ahead. `refresh_avatars`/`refresh_media`
-        // read `self.state` to decide what is missing, and both hold a
-        // single task slot that assigning cancels — pre-downloading the
-        // buffer's images would mean either teaching them to read from
-        // somewhere else or cancelling the visible timeline's own
-        // downloads on a timer. [`Self::apply_pending`] fetches them the
-        // moment the rows are actually on screen, which is the same path
-        // and the same brief placeholder a manual reload already has.
+        self.present_poll(pending, cx);
+    }
+
+    /// What a poll's new posts become on screen (#21, #22): a flow or an
+    /// offer. [`follows`] decides which — the reader at the top with the
+    /// switch on gets [`Self::follow`]; everyone else gets the pill, and
+    /// the doc on [`Self::apply_poll`] about a poll never taking the
+    /// screen still holds for them word for word.
+    ///
+    /// Images are not fetched ahead for the pill's buffer.
+    /// `refresh_avatars`/`refresh_media` read `self.state` to decide what
+    /// is missing, and both hold a single task slot that assigning cancels
+    /// — pre-downloading the buffer's images would mean either teaching
+    /// them to read from somewhere else or cancelling the visible
+    /// timeline's own downloads on a timer. [`Self::apply_pending`]
+    /// fetches them the moment the rows are actually on screen, which is
+    /// the same path and the same brief placeholder a manual reload
+    /// already has.
+    pub(super) fn present_poll(&mut self, pending: Pending, cx: &mut Context<'_, Self>) {
+        let (top_item, offset_in_item) = self.list_scroll.logical_scroll_top();
+        let loaded = matches!(self.state, TimelineState::Loaded(_));
+        if follows(
+            self.follow_new_posts,
+            loaded,
+            at_top(top_item, offset_in_item),
+        ) {
+            self.follow(pending, cx);
+        } else {
+            self.pending = Some(pending);
+            cx.notify();
+        }
+    }
+
+    /// Flow a poll's new posts onto a screen whose reader is at the top
+    /// (#22) — the third way the buffer empties, and the only one that
+    /// skips the buffer entirely.
+    ///
+    /// The replacement itself moves nothing: the row that was under the
+    /// viewport's top edge is index `count` in the new list, and parking
+    /// it back at the top makes the arrival invisible. What the reader
+    /// then sees is the glide — the new rows sliding down into view at a
+    /// pace the eye can follow, which is #177's "always flowing"
+    /// impression, made of posts a poll already paid for.
+    fn follow(&mut self, pending: Pending, cx: &mut Context<'_, Self>) {
+        let count = pending.count;
+        // A buffer parked by an earlier poll is staler than this one and
+        // measured against a timeline that is about to be replaced.
+        self.clear_pending();
+        self.state = TimelineState::Loaded(pending.items);
+        self.list_scroll.scroll_to_top_of_item(count);
+        self.refresh_images(cx);
+        self.start_glide(cx);
         cx.notify();
+    }
+
+    /// Walk the scroll offset back up to the top, one frame at a time
+    /// (#22).
+    ///
+    /// The distance it walks is not there yet when this is called:
+    /// [`Self::follow`]'s `scroll_to_top_of_item` lands at the next
+    /// prepaint. So the loop spends its first frames waiting for the
+    /// offset to move off zero, bounded — a compensation that never lands
+    /// (an empty list, a window that stopped drawing) degrades into the
+    /// snap the pill does, not a hang.
+    ///
+    /// Every step compares where the offset is against where the last
+    /// step left it. A difference is the reader on the wheel, and the
+    /// glide stops where they put it rather than fighting them for the
+    /// scrollbar — the same deference that made [`Self::apply_poll`]
+    /// buffer instead of replace.
+    fn start_glide(&mut self, cx: &mut Context<'_, Self>) {
+        /// How many frames to wait for the compensation to land before
+        /// concluding it never will.
+        const SETTLE_FRAMES: u8 = 10;
+        /// How far the offset may sit from where the glide left it before
+        /// that reads as the reader scrolling, in pixels.
+        const GRAB_PX: f32 = 1.0;
+
+        self.glide = Some(cx.spawn(async move |this, cx| {
+            let frame = Duration::from_millis(GLIDE_FRAME_MS);
+            for _ in 0..SETTLE_FRAMES {
+                cx.background_executor().timer(frame).await;
+                // `Err` is the window being gone — `start_auto_refresh`'s
+                // contract, here and below.
+                let Ok(settled) = this.update(cx, |this, _| {
+                    f32::from(this.list_scroll.offset().y).abs() > GLIDE_DONE_PX
+                }) else {
+                    return;
+                };
+                if settled {
+                    break;
+                }
+            }
+            let mut last_set: Option<f32> = None;
+            loop {
+                let Ok(done) = this.update(cx, |this, cx| {
+                    let offset = this.list_scroll.offset();
+                    let y = f32::from(offset.y);
+                    if let Some(expected) = last_set
+                        && (y - expected).abs() > GRAB_PX
+                    {
+                        return true;
+                    }
+                    match next_glide_y(y) {
+                        Some(next) => {
+                            this.list_scroll.set_offset(gpui::point(offset.x, px(next)));
+                            last_set = Some(next);
+                            cx.notify();
+                            false
+                        }
+                        None => {
+                            this.list_scroll.set_offset(gpui::point(offset.x, px(0.)));
+                            cx.notify();
+                            true
+                        }
+                    }
+                }) else {
+                    return;
+                };
+                if done {
+                    return;
+                }
+                cx.background_executor().timer(frame).await;
+            }
+        }));
     }
 
     /// Show what the last poll fetched (#21).
@@ -349,6 +517,9 @@ impl TimelineView {
         let Some(pending) = self.pending.take() else {
             return;
         };
+        // A glide still walking is aiming at offsets measured against the
+        // list this replaces (#22).
+        self.glide = None;
         self.state = TimelineState::Loaded(pending.items);
         self.list_scroll.scroll_to_top_of_item(0);
         self.refresh_images(cx);
@@ -367,8 +538,13 @@ impl TimelineView {
     /// The count would be wrong too: it was measured against a timeline
     /// that is no longer what is displayed, so the pill would be promising
     /// posts that are already visible.
+    ///
+    /// The glide is dropped for the same staleness (#22): its offsets were
+    /// measured against the rows being replaced, so letting it keep
+    /// walking would scroll the fresher list by a stale distance.
     pub(super) fn clear_pending(&mut self) {
         self.pending = None;
+        self.glide = None;
     }
 }
 
@@ -516,5 +692,69 @@ mod tests {
     #[test]
     fn several_new_posts_are() {
         assert_eq!(pending_label(6), "6 new posts");
+    }
+
+    // --- #22: stick-to-top follow ---
+
+    #[test]
+    fn the_reader_at_the_exact_top_is_at_the_top() {
+        assert!(at_top(0, px(0.)));
+    }
+
+    // The tolerance is for a trackpad that leaves the offset a hair off
+    // the top — that reader believes they are at the top, and a pill
+    // appearing because of half a pixel would look like follow is broken.
+    #[test]
+    fn a_hair_below_the_top_still_counts() {
+        assert!(at_top(0, px(-1.5)));
+    }
+
+    #[test]
+    fn a_reader_scrolled_into_the_first_row_is_not_at_the_top() {
+        assert!(!at_top(0, px(-40.)));
+    }
+
+    #[test]
+    fn a_reader_rows_down_is_not_at_the_top_whatever_the_pixel_says() {
+        assert!(!at_top(3, px(0.)));
+    }
+
+    // Follow needs all three: the switch on, a timeline to prepend to,
+    // and a reader whose position says "show me the newest". Any one
+    // missing falls back to the pill.
+    #[test]
+    fn follow_needs_the_switch_a_loaded_timeline_and_a_reader_at_the_top() {
+        assert!(follows(true, true, true));
+        assert!(!follows(false, true, true), "switched off means the pill");
+        assert!(!follows(true, false, true), "nothing loaded means the pill");
+        assert!(!follows(true, true, false), "scrolled down means the pill");
+    }
+
+    #[test]
+    fn a_glide_step_moves_toward_the_top_without_overshooting() {
+        let next = next_glide_y(-1_000.).expect("a screenful away is still gliding");
+        assert!(next > -1_000., "the step must move up, {next}");
+        assert!(next < 0., "the step must not overshoot the top, {next}");
+    }
+
+    #[test]
+    fn a_glide_within_a_pixel_of_the_top_is_finished() {
+        assert_eq!(next_glide_y(-0.5), None);
+        assert_eq!(next_glide_y(0.), None);
+    }
+
+    // Multiplicative decay never reaches zero by itself — the `None` below
+    // one pixel is what terminates it. This pins that the two together
+    // finish a screenful-sized glide in a bounded number of frames.
+    #[test]
+    fn a_glide_from_a_screenful_away_finishes_within_a_couple_of_seconds() {
+        let mut y = -3_000.0_f32;
+        for _ in 0..120 {
+            match next_glide_y(y) {
+                Some(next) => y = next,
+                None => return,
+            }
+        }
+        unreachable!("120 frames at 16ms is two seconds, and the glide was still going at {y}");
     }
 }
