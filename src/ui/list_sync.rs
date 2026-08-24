@@ -259,6 +259,21 @@ pub(super) enum SyncTrigger {
 ///
 /// An `impl` block in a child module, following [`super::auto_refresh`] —
 /// see this module's doc for why the whole feature lives in one file.
+/// Longest one `timer` call in [`TimelineView::start_sync`] waits, so the
+/// loop re-reads the clock (and notices a machine that slept) rather than
+/// trusting a deadline computed hours ago.
+const MAX_SLEEP_SECONDS: i64 = 60;
+/// Shortest gap between ticks. Only reached between consecutive apply
+/// batches, where the answer is otherwise "immediately" — enough to keep
+/// the loop cancellable mid-catch-up.
+const MIN_SLEEP_SECONDS: i64 = 1;
+/// How long to wait when the signed-in id has not landed yet. Longer than
+/// `MIN_SLEEP_SECONDS` because there is nothing the loop can do to hurry
+/// it along: a startup fetch that keeps failing leaves `home_user_id`
+/// `None` indefinitely, and polling it every second for the life of the
+/// window would be a spin dressed up as patience.
+const AWAITING_ID_SECONDS: i64 = 30;
+
 impl TimelineView {
     /// Which gate the sync is stopped at right now, or `None` when it
     /// could run (#174).
@@ -318,22 +333,6 @@ impl TimelineView {
     /// completion after the drop — which is why the manual path is gated
     /// on [`SyncStatus::Working`] and not on the task slot.
     pub(super) fn start_sync(&mut self, trigger: SyncTrigger, cx: &mut Context<'_, Self>) {
-        /// Longest one `timer` call waits, so the loop re-reads the clock
-        /// (and notices a machine that slept) rather than trusting a
-        /// deadline computed hours ago.
-        const MAX_SLEEP_SECONDS: i64 = 60;
-        /// Shortest gap between ticks. Only reached between consecutive
-        /// apply batches, where the answer is otherwise "immediately" —
-        /// enough to keep the loop cancellable mid-catch-up.
-        const MIN_SLEEP_SECONDS: i64 = 1;
-        /// How long to wait when the signed-in id has not landed yet.
-        /// Longer than `MIN_SLEEP_SECONDS` because there is nothing this
-        /// loop can do to hurry it along: a startup fetch that keeps
-        /// failing leaves `home_user_id` `None` indefinitely, and polling
-        /// it every second for the life of the window would be a spin
-        /// dressed up as patience.
-        const AWAITING_ID_SECONDS: i64 = 30;
-
         if let Some(off) = self.sync_gate() {
             self.sync_status = SyncStatus::Off(off);
             cx.notify();
@@ -357,6 +356,7 @@ impl TimelineView {
         let paths = self.paths.clone();
         let interval = self.config.sync_interval_seconds;
         let prune_limit = self.config.sync_prune_limit_percent;
+        let members_refresh = self.config.sync_members_refresh_seconds;
         log::info(&format!(
             "list sync started for {list_id} ({trigger:?}), interval {interval}s"
         ));
@@ -407,6 +407,7 @@ impl TimelineView {
                             interval_seconds: interval,
                             blocked_until,
                             forced,
+                            members_refresh_seconds: members_refresh,
                         };
                         let outcome = {
                             let (paths, client, list_id) =

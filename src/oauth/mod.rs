@@ -294,6 +294,7 @@ mod tests {
             auto_sync_list: false,
             sync_interval_seconds: 21_600,
             sync_prune_limit_percent: 10,
+            sync_members_refresh_seconds: 604_800,
             auto_refresh: false,
             auto_refresh_interval_seconds: 300,
         }

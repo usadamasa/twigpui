@@ -127,6 +127,7 @@ each time.
 | `X_AUTO_SYNC_LIST` | no | `true` | Keep `X_LIST_ID`'s membership mirroring your follows while the app runs — also `auto_sync_list` in `config.toml`. **Spends on a timer**; see below |
 | `X_SYNC_INTERVAL_SECONDS` | no | `21600` (6h) | How long the background sync waits between diffs. Values under `900` are rejected — also `sync_interval_seconds` in `config.toml` |
 | `X_SYNC_PRUNE_LIMIT_PERCENT` | no | `10` | The most of the list's membership the background sync may remove per diff, in percent. Over it, the removals are held for `--sync-list --apply --prune` to confirm; `100` turns the cap off — also `sync_prune_limit_percent` in `config.toml` (#176) |
+| `X_SYNC_MEMBERS_REFRESH_SECONDS` | no | `604800` (7d) | How old the local mirror of the list's membership may be before a scheduled diff re-reads the list from X. Between full reads only the follow side is read; `0` turns the mirror off — also `sync_members_refresh_seconds` in `config.toml` (#173) |
 | `X_AUTO_REFRESH` | no | `true` | Poll the timeline for new posts while the window is open — also `auto_refresh` in `config.toml` (#21). `false` and the app sends nothing you did not click |
 | `X_AUTO_REFRESH_INTERVAL_SECONDS` | no | `300` (5m) | How long auto-refresh waits between polls. Values below `X_MIN_FETCH_INTERVAL_SECONDS` are rejected — also `auto_refresh_interval_seconds` in `config.toml` |
 
@@ -185,12 +186,27 @@ rather than paying to diff both sides again.
 With `X_AUTO_SYNC_LIST=false` the timer never runs and the button is the
 only way a sync happens. That run stops once there is nothing left to do.
 
-**It spends money on a timer.** Every diff reads your whole follow list and
-the whole list membership, and both are billed per account returned. At
-four diffs a day that is roughly $2 per thousand follows if X's documented
-24-hour deduplication covers these reads, and roughly $8 if it does not —
-`x-api-budget` has that rule measured for Posts only. This is why the
-interval defaults to six hours and refuses anything under fifteen minutes.
+**It spends money on a timer.** Every diff reads your whole follow list,
+billed per account returned. At four diffs a day that is roughly $2 per
+thousand follows if X's documented 24-hour deduplication covers these
+reads, and roughly $8 if it does not — `x-api-budget` has that rule
+measured for Posts only. This is why the interval defaults to six hours
+and refuses anything under fifteen minutes.
+
+**The list membership is read from X once a week, not every diff** (#173).
+That read bills at the Users rate — ten times the follow side, by the
+docs — and after the first one this app is the only thing writing to the
+list, so a local mirror in `$XDG_STATE_HOME/twigpui/sync_members.json`
+stands in for it. Every write the sync sends is recorded in the mirror as
+it lands. `X_SYNC_MEMBERS_REFRESH_SECONDS` is how old the mirror may get
+before a scheduled diff pages the list again; `0` reads it every diff, as
+before. A sync started from the status bar, and a `--sync-list` dry run,
+always read the list in full and leave a fresh mirror behind — that is
+how you refresh it by hand. If something else edits the list in the
+meantime, the next full read says in the log how far the mirror had
+drifted, and a plan the mirror got wrong is thrown away rather than
+retried: a removal share over `X_SYNC_PRUNE_LIMIT_PERCENT`, or a write X
+refuses, both discard the mirror so the next diff reads the truth.
 
 The writes are spread out rather than sent in a burst: a list that is
 thousands of accounts behind is caught up a small batch at a time, and a
@@ -235,7 +251,9 @@ is for. See [Development builds](#development-builds).
 **A dry run is not free.** Both reads are billed per account returned, so
 one against a few thousand follows costs dollars, not cents. Check the
 prices in the developer console before the first `--apply` — #162 is open
-because this app's own usage numbers count requests, not resources.
+because this app's own usage numbers count requests, not resources. The
+dry run always reads the list in full, never from the local mirror the
+background sync keeps (#173), and refreshes that mirror on the way.
 
 The plan is written to `$XDG_STATE_HOME/twigpui/sync_plan.json` and each
 entry is marked as it lands, so an interrupted `--apply` resumes from the
@@ -401,6 +419,7 @@ daily_request_budget = 500
 auto_sync_list = true
 sync_interval_seconds = 21600
 sync_prune_limit_percent = 10
+sync_members_refresh_seconds = 604800
 auto_refresh = true
 auto_refresh_interval_seconds = 300
 ```

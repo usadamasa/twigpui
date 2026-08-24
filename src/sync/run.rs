@@ -9,7 +9,8 @@
 
 use anyhow::{Context as _, Result};
 
-use super::{Action, Plan, load_plan, plan, report, save_plan};
+use super::mirror::{self, Mirror};
+use super::{Action, MembersSource, Plan, load_plan, plan, report, save_plan};
 use crate::cache;
 use crate::config::Config;
 use crate::oauth;
@@ -53,11 +54,13 @@ fn read_all(
     anyhow::bail!("the {what} did not finish paging after {MAX_PAGES} pages — nothing was changed")
 }
 
-/// Read both sides in full and diff them (#163's dry-run).
+/// Read the follow side in full, take the members side from wherever
+/// [`members_side`] says, and diff them (#163's dry-run).
 ///
-/// Spends the whole read cost of a sync: every account on both sides is a
-/// billed resource. Nothing is written to X here — the result is a [`super::Plan`]
-/// for [`apply`] to consume.
+/// `mirror_max_age` is how old the local member mirror may be and still
+/// stand in for the read, or `None` to read the list in full regardless —
+/// the CLI and a manual sync. Nothing is written to X here — the result
+/// is a [`super::Plan`] for [`apply`] to consume.
 ///
 /// Not unit-tested, for the reason [`read_all`] isn't.
 pub(super) fn plan_sync(
@@ -66,6 +69,7 @@ pub(super) fn plan_sync(
     user_id: &str,
     list_id: &str,
     now: i64,
+    mirror_max_age: Option<u32>,
 ) -> Result<Plan> {
     let following = match paths.profile().sync_seed_usernames() {
         None => read_all("follow list", |cursor| {
@@ -73,10 +77,64 @@ pub(super) fn plan_sync(
         })?,
         Some(usernames) => seed_users(paths, client, usernames, now)?,
     };
+    let (members, source) = members_side(paths, client, list_id, now, mirror_max_age)?;
+    let mut plan = plan(list_id, now, &following, &members);
+    plan.members_source = source;
+    Ok(plan)
+}
+
+/// The members side of the diff: the local mirror when it is for this list
+/// and younger than `mirror_max_age`, a full paged read otherwise (#173).
+///
+/// A full read always leaves a fresh mirror behind, and says in the log
+/// how far the old one had drifted from it — the one place a mirror that
+/// was quietly wrong becomes visible. `None` for `mirror_max_age` is
+/// "read", not "ignore the mirror": the mirror is still refreshed, so a
+/// manual sync or a CLI dry-run is also how someone gets a new generation
+/// on demand.
+///
+/// Not unit-tested, for the reason [`read_all`] isn't; the rule for when
+/// a mirror may be used is [`Mirror::is_usable`], which is.
+fn members_side(
+    paths: &Paths,
+    client: &XClient,
+    list_id: &str,
+    now: i64,
+    mirror_max_age: Option<u32>,
+) -> Result<(Vec<User>, MembersSource)> {
+    let mirror_path = paths.sync_members_file();
+    let mirror = mirror::load_mirror(&mirror_path);
+
+    if let Some(mirror) = mirror.as_ref().filter(|mirror| {
+        mirror_max_age.is_some_and(|max_age| mirror.is_usable(list_id, now, max_age))
+    }) {
+        crate::log::info(&format!(
+            "list sync: members side taken from the local mirror ({} accounts, read {}s ago)",
+            mirror.members.len(),
+            mirror.age_seconds(now)
+        ));
+        return Ok((mirror.users(), MembersSource::Mirror));
+    }
+
     let members = read_all("list members", |cursor| {
         client.list_members(paths, list_id, cursor, now)
     })?;
-    Ok(plan(list_id, now, &following, &members))
+    if let Some(old) = mirror.as_ref().filter(|old| old.list_id == list_id) {
+        let drift = old.drift(&members);
+        let message = format!(
+            "list sync: the local member mirror ({}s old) was {drift} account(s) off from the \
+             list; replaced by a full read of {} accounts",
+            old.age_seconds(now),
+            members.len()
+        );
+        if drift > 0 {
+            crate::log::warn(&message);
+        } else {
+            crate::log::info(&message);
+        }
+    }
+    mirror::save_mirror(&mirror_path, &Mirror::from_read(list_id, now, &members))?;
+    Ok((members, MembersSource::Read))
 }
 
 /// Stand in for the follow-graph read with a fixed set of screen names
@@ -164,6 +222,14 @@ pub(super) fn apply_some(
     now: i64,
     limit: usize,
 ) -> Result<usize> {
+    // The mirror follows every write that lands, whichever side the plan
+    // was diffed from (#173): a full-read plan's writes change the list
+    // just the same, and the mirror is what the next scheduled diff will
+    // read instead of the list. Only a mirror of *this* list is touched.
+    let mirror_path = paths.sync_members_file();
+    let mut mirror =
+        mirror::load_mirror(&mirror_path).filter(|mirror| mirror.list_id == plan.list_id);
+
     let mut sent = 0usize;
     for (action, user_id) in super::schedule::next_batch(plan, prune, limit) {
         match action {
@@ -173,6 +239,16 @@ pub(super) fn apply_some(
         plan.mark_applied(&user_id, action);
         sent = sent.saturating_add(1);
         save_plan(&paths.sync_plan_file(), plan)?;
+        if let Some(mirror) = mirror.as_mut() {
+            let landed = plan
+                .entries
+                .iter()
+                .find(|entry| entry.user_id == user_id && entry.action == action);
+            if let Some(entry) = landed {
+                mirror.record(entry);
+                mirror::save_mirror(&mirror_path, mirror)?;
+            }
+        }
     }
     Ok(sent)
 }
@@ -282,7 +358,10 @@ fn run(
     let now = oauth::unix_now();
 
     if !request.apply {
-        let plan = plan_sync(paths, client, user_id, list_id, now)?;
+        // Always a full read: the dry-run is the one a person reads before
+        // typing `--apply`, and it doubles as the way to refresh the
+        // member mirror by hand (#173).
+        let plan = plan_sync(paths, client, user_id, list_id, now, None)?;
         save_plan(&plan_path, &plan)?;
         return Ok(format!(
             "{}\n\nnothing was changed. Re-run with --apply to send these.",

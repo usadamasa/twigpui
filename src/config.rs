@@ -91,6 +91,16 @@ pub(crate) struct Config {
     /// `0` makes the background sync additive only. The CLI is never
     /// capped.
     pub sync_prune_limit_percent: u8,
+    /// How old the local mirror of the list's membership may be before the
+    /// background sync re-reads it from X, in seconds (#173).
+    ///
+    /// Between full reads the diff takes the members side from the mirror
+    /// and pays for the follow side only — `GET /2/lists/:id/members`
+    /// bills per account at the Users rate, ten times the follow read.
+    /// `0` turns the mirror off, so every diff reads both sides in full as
+    /// it did before #173. A manual sync and the CLI's dry-run always read
+    /// in full, whatever this says, and refresh the mirror on the way.
+    pub sync_members_refresh_seconds: u32,
     /// Whether the window polls its timeline for new posts while it runs
     /// (#21).
     ///
@@ -147,6 +157,16 @@ const MIN_SYNC_INTERVAL_SECONDS: u32 = 900;
 /// the line — and that is accepted rather than patched with an absolute
 /// floor: a false hold costs one CLI command, a false pass costs the list.
 const DEFAULT_SYNC_PRUNE_LIMIT_PERCENT: u8 = 10;
+
+/// 7 days between full reads of the list's membership (#173).
+///
+/// Long, because this app is the only thing writing to the list and every
+/// write it sends is recorded in the mirror as it lands, so the mirror is
+/// wrong only when something else edits the list. A week bounds how long
+/// that goes unnoticed to roughly the cost of one full read a week, against
+/// four a day without the mirror. No floor: a short value only buys more
+/// full reads, which is the pre-#173 behavior, not a mistake with teeth.
+const DEFAULT_SYNC_MEMBERS_REFRESH_SECONDS: u32 = 604_800;
 
 /// 5 minutes between auto-refresh polls (#21).
 ///
@@ -213,6 +233,9 @@ struct FileSettings {
     /// named, not by serde with a type error.
     #[serde(default)]
     sync_prune_limit_percent: Option<u32>,
+    /// Non-secret, same reasoning as `request_price`.
+    #[serde(default)]
+    sync_members_refresh_seconds: Option<u32>,
     /// Non-secret, same reasoning as `request_price`. Like `auto_sync_list`
     /// above, this is the key that matters for a `.app` launched from
     /// Finder, where no shell variable is visible (#40) — and it is the one
@@ -379,6 +402,8 @@ impl Config {
         let sync_interval_seconds = resolve_sync_interval(&var, file.sync_interval_seconds)?;
         let sync_prune_limit_percent =
             resolve_sync_prune_limit(&var, file.sync_prune_limit_percent)?;
+        let sync_members_refresh_seconds =
+            resolve_sync_members_refresh(&var, file.sync_members_refresh_seconds)?;
 
         let auto_refresh = resolve_auto_refresh(&var, file.auto_refresh)?;
         // Takes `min_fetch_interval_seconds` because the floor it enforces
@@ -402,6 +427,7 @@ impl Config {
             auto_sync_list,
             sync_interval_seconds,
             sync_prune_limit_percent,
+            sync_members_refresh_seconds,
             auto_refresh,
             auto_refresh_interval_seconds,
         })
@@ -543,6 +569,24 @@ fn resolve_sync_prune_limit(
         .with_context(|| {
             format!("{source} must be at most 100 (a share of the list, in percent), got {percent}")
         })
+}
+
+/// Resolve `sync_members_refresh_seconds` (#173): env > file >
+/// [`DEFAULT_SYNC_MEMBERS_REFRESH_SECONDS`]. Any `u32` is accepted — see
+/// the default's doc for why there is no floor.
+fn resolve_sync_members_refresh(
+    var: impl Fn(&str) -> Option<String>,
+    file_value: Option<u32>,
+) -> Result<u32> {
+    match var("X_SYNC_MEMBERS_REFRESH_SECONDS")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    {
+        Some(raw) => raw
+            .parse::<u32>()
+            .with_context(|| format!("X_SYNC_MEMBERS_REFRESH_SECONDS is not a number: {raw:?}")),
+        None => Ok(file_value.unwrap_or(DEFAULT_SYNC_MEMBERS_REFRESH_SECONDS)),
+    }
 }
 
 /// Resolve `auto_refresh` (#21): env > file > on.
@@ -1750,6 +1794,60 @@ mod tests {
             vars(&[
                 ("X_OAUTH_CLIENT_ID", "client-123"),
                 ("X_SYNC_PRUNE_LIMIT_PERCENT", "half"),
+            ]),
+            FileSettings::default(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("is not a number"), "{error}");
+    }
+
+    // --- #173: the member mirror's refresh interval ---
+
+    #[test]
+    fn the_members_refresh_defaults_to_a_week() {
+        let config = Config::resolve(
+            vars(&[("X_OAUTH_CLIENT_ID", "client-123")]),
+            FileSettings::default(),
+        )
+        .unwrap();
+        assert_eq!(config.sync_members_refresh_seconds, 604_800);
+    }
+
+    #[test]
+    fn resolve_reads_the_members_refresh_from_the_file_when_env_is_unset() {
+        let file = FileSettings {
+            sync_members_refresh_seconds: Some(86_400),
+            ..FileSettings::default()
+        };
+        let config = Config::resolve(vars(&[("X_OAUTH_CLIENT_ID", "client-123")]), file).unwrap();
+        assert_eq!(config.sync_members_refresh_seconds, 86_400);
+    }
+
+    #[test]
+    fn resolve_prefers_the_env_members_refresh_over_the_file() {
+        let file = FileSettings {
+            sync_members_refresh_seconds: Some(86_400),
+            ..FileSettings::default()
+        };
+        let config = Config::resolve(
+            vars(&[
+                ("X_OAUTH_CLIENT_ID", "client-123"),
+                ("X_SYNC_MEMBERS_REFRESH_SECONDS", "0"),
+            ]),
+            file,
+        )
+        .unwrap();
+        // 0 is a value, not "unset": it is how the mirror is turned off.
+        assert_eq!(config.sync_members_refresh_seconds, 0);
+    }
+
+    #[test]
+    fn resolve_rejects_a_non_numeric_members_refresh() {
+        let error = Config::resolve(
+            vars(&[
+                ("X_OAUTH_CLIENT_ID", "client-123"),
+                ("X_SYNC_MEMBERS_REFRESH_SECONDS", "weekly"),
             ]),
             FileSettings::default(),
         )

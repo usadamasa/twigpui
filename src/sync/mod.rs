@@ -41,6 +41,13 @@
 //! from the file rather than paying to read both sides again, and each
 //! entry is marked as it lands so nothing is sent twice.
 //!
+//! The members side is the dearer of the two — the Users rate, ten times
+//! the follow side's Owned Read, by the docs — and after the first read
+//! this app is the only thing writing to the list. So the background sync
+//! keeps it in [`mirror`] and re-reads it from X only every
+//! `sync_members_refresh_seconds` (#173). The CLI and a manual sync always
+//! read it in full; they are how the mirror is refreshed by hand.
+//!
 //! # On a timer
 //!
 //! #163 ruled out automatic polling for that reason. That was overridden
@@ -55,6 +62,7 @@ use serde::{Deserialize, Serialize};
 use crate::x_api::model::User;
 
 mod auto;
+mod mirror;
 mod run;
 mod schedule;
 
@@ -101,7 +109,26 @@ pub(crate) struct Plan {
     /// removal" rather than as a list that was empty.
     #[serde(default)]
     pub members_total: usize,
+    /// Where the members side of this diff came from (#173). Decides what
+    /// a failed write means: a plan diffed against the local mirror is
+    /// cheap to throw away and re-derive from a full read, which is what
+    /// [`auto`] does when one of its writes is refused. `#[serde(default)]`
+    /// so a plan file from before the mirror reads as a full read, which
+    /// is what it was.
+    #[serde(default)]
+    pub members_source: MembersSource,
     pub entries: Vec<PlanEntry>,
+}
+
+/// How the members side of a [`Plan`] was obtained (#173).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub(crate) enum MembersSource {
+    /// `GET /2/lists/:id/members`, paged in full.
+    #[default]
+    Read,
+    /// The local mirror ([`mirror::Mirror`]), trusted because it was
+    /// younger than `sync_members_refresh_seconds`.
+    Mirror,
 }
 
 impl Plan {
@@ -181,6 +208,7 @@ pub(crate) fn plan(list_id: &str, now: i64, following: &[User], members: &[User]
         list_id: list_id.to_string(),
         created_at: now,
         members_total: members.len(),
+        members_source: MembersSource::Read,
         entries: adds.chain(removals).collect(),
     }
 }
@@ -519,6 +547,35 @@ mod tests {
         let plan: Plan = serde_json::from_str(json).unwrap();
         assert_eq!(plan.members_total, 0);
         assert_eq!(plan.pending_count(Action::Remove), 1);
+    }
+
+    // --- #173: where the members side came from ---
+
+    #[test]
+    fn a_plan_file_written_before_the_mirror_reads_as_a_full_read() {
+        // Which it was. The distinction only decides what a failed write
+        // costs to recover from, and a full-read plan is the expensive
+        // kind to lose.
+        let json = r#"{"list_id":"7","created_at":0,"entries":[]}"#;
+        let plan: Plan = serde_json::from_str(json).unwrap();
+        assert_eq!(plan.members_source, MembersSource::Read);
+    }
+
+    #[test]
+    fn the_members_source_survives_the_file() {
+        let dir = std::env::temp_dir().join(format!("twigpui-sync-src-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("plan.json");
+
+        let mut written = plan("7", 100, &[user("1", "alice")], &[]);
+        written.members_source = MembersSource::Mirror;
+        save_plan(&path, &written).unwrap();
+        assert_eq!(
+            load_plan(&path).unwrap().map(|plan| plan.members_source),
+            Some(MembersSource::Mirror)
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

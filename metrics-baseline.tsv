@@ -52,7 +52,9 @@ src/compose.rs	350
 # under `min_fetch_interval_seconds` is a timer that can never fire.
 # 700 -> 750: #176's `sync_prune_limit_percent` with its resolver and the
 # default's doc, which carries why a tenth and why no absolute floor.
-src/config.rs	750
+# 750 -> 800: #173's `sync_members_refresh_seconds` with its resolver and
+# the default's doc, which carries why a week and why no floor.
+src/config.rs	800
 src/fixture.rs	100
 src/image_cache.rs	150
 src/like.rs	150
@@ -112,7 +114,14 @@ src/sync/schedule.rs	350
 # auto.rs 200 -> 250: #176 threads the prune verdict through `tick`, `diff`
 # and `apply`, and the module doc gains the rule that a held plan is not
 # finished work — the deadlock `sendable` exists to prevent.
-src/sync/auto.rs	250
+# auto.rs 250 -> 300: #173 hands the mirror's refresh interval through
+# `Pacing` into `diff`, and adds the two places the mirror is discarded —
+# a held plan and a refused write — each with the reasoning it needs.
+src/sync/auto.rs	300
+# sync/mirror.rs is new in #173: the list's membership carried locally so
+# the background diff reads only the follow side. Pure like mod.rs — the
+# generation rule, the per-write update, the drift count and the file.
+src/sync/mirror.rs	200
 src/theme.rs	350
 src/thread.rs	100
 src/toggle.rs	200

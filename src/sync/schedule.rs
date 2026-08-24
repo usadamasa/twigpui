@@ -9,8 +9,9 @@
 /// What the loop should do right now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Step {
-    /// Read both sides in full and write a fresh plan. The expensive one:
-    /// every account on both sides is a billed resource.
+    /// Read the follow side in full — and the members side, unless the
+    /// local mirror is fresh enough (#173) — and write a fresh plan. The
+    /// expensive one: every account read is a billed resource.
     Diff,
     /// Send a batch of the plan's outstanding writes.
     Apply,
@@ -356,6 +357,7 @@ mod tests {
             list_id: "7".to_string(),
             created_at: 0,
             members_total: 0,
+            members_source: super::super::MembersSource::Read,
             entries: adds
                 .iter()
                 .map(|id| entry(id, Action::Add))

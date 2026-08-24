@@ -9,10 +9,12 @@
 //!
 //! # What a tick is allowed to cost
 //!
-//! A `Diff` is the expensive one: both sides read in full, one billed
-//! resource per account. It is paced by `config.sync_interval_seconds` and
-//! by [`super::SyncState`], which persists across launches so relaunching
-//! the app does not buy the same answer again.
+//! A `Diff` is the expensive one: the follow side read in full, one billed
+//! resource per account, and the members side too unless the local mirror
+//! is younger than `config.sync_members_refresh_seconds` (#173 — that read
+//! bills at ten times the rate). It is paced by `config.sync_interval_seconds`
+//! and by [`super::SyncState`], which persists across launches so
+//! relaunching the app does not buy the same answer again.
 //!
 //! An `Apply` is bounded by [`BATCH`] writes. Not because of the rate limit
 //! — the tracked window in `rate_limit` already refuses a send on its own,
@@ -35,7 +37,9 @@
 use anyhow::Result;
 
 use super::schedule::Outcome;
-use super::{Action, load_plan, load_state, save_plan, save_state, schedule};
+use super::{
+    Action, MembersSource, load_plan, load_state, mirror, save_plan, save_state, schedule,
+};
 use crate::paths::Paths;
 use crate::rate_limit::RateLimited;
 use crate::x_api::XClient;
@@ -76,6 +80,12 @@ pub(crate) struct Pacing {
     /// catch-up is outstanding therefore spends nothing on reads — it
     /// resumes the plan already paid for.
     pub forced: bool,
+    /// `config.sync_members_refresh_seconds` (#173): how old the local
+    /// member mirror may be before a scheduled diff re-reads the list in
+    /// full. Paced here rather than passed next to `prune_limit_percent`
+    /// because it is about *when* the expensive read happens, and because
+    /// `forced` overrides it — a manual start always reads in full.
+    pub members_refresh_seconds: u32,
 }
 
 /// Run one tick.
@@ -124,7 +134,15 @@ pub(crate) fn tick(
         // [`schedule::is_finished`], which is the one caller that has to
         // tell those apart.
         schedule::Step::Wait { until } => Ok(Outcome::Idle { until, pending }),
-        schedule::Step::Diff => diff(paths, client, user_id, list_id, prune_limit_percent, now),
+        schedule::Step::Diff => diff(
+            paths,
+            client,
+            user_id,
+            list_id,
+            pacing,
+            prune_limit_percent,
+            now,
+        ),
         // `pending > 0` is what produced this step, so the plan is `Some`.
         // Listed rather than unwrapped so a later change to the precedence
         // cannot turn this into a panic.
@@ -138,7 +156,12 @@ pub(crate) fn tick(
     }
 }
 
-/// Read both sides and write a fresh plan.
+/// Read the follow side (and the members side, unless the mirror is fresh
+/// enough to stand in for it — #173) and write a fresh plan.
+///
+/// A forced tick reads both sides in full whatever the mirror's age: the
+/// person who pressed the button was told that is what it costs, and it
+/// is also how the mirror gets a fresh generation on demand.
 ///
 /// The clock is stamped **before** the reads, and stays stamped whether or
 /// not they succeed. Both halves matter: a crash part way through has
@@ -156,6 +179,7 @@ fn diff(
     client: &XClient,
     user_id: &str,
     list_id: &str,
+    pacing: Pacing,
     prune_limit_percent: u8,
     now: i64,
 ) -> Result<Outcome> {
@@ -166,7 +190,12 @@ fn diff(
         },
     )?;
 
-    let plan = super::run::plan_sync(paths, client, user_id, list_id, now)?;
+    let mirror_max_age = if pacing.forced {
+        None
+    } else {
+        Some(pacing.members_refresh_seconds)
+    };
+    let plan = super::run::plan_sync(paths, client, user_id, list_id, now, mirror_max_age)?;
     let adds = plan.pending_count(Action::Add);
     let removals = plan.pending_count(Action::Remove);
     let held = !schedule::prune_allowed(&plan, prune_limit_percent);
@@ -178,6 +207,17 @@ fn diff(
              confirm them with --sync-list --apply --prune",
             plan.members_total
         ));
+        // The cap exists for a read that came back wrong. When the read
+        // was the mirror, the mirror is the suspect: drop it so the next
+        // diff pages the list itself and replaces this plan with one
+        // computed from the truth.
+        if plan.members_source == MembersSource::Mirror {
+            mirror::discard_mirror(&paths.sync_members_file())?;
+            crate::log::warn(
+                "list sync: the held removals came from the local member mirror; discarded \
+                 it so the next diff reads the list in full",
+            );
+        }
     }
     Ok(Outcome::Diffed {
         adds,
@@ -227,7 +267,26 @@ fn apply(
             Some(RateLimited {
                 reset_at: Some(reset_at),
             }) => Ok(Outcome::RateLimited { until: *reset_at }),
-            _ => Err(error),
+            Some(RateLimited { reset_at: None }) => Err(error),
+            None => {
+                // A refused write against a plan diffed from the mirror is
+                // the mirror's most likely failure showing: an addition of
+                // an account the list already holds, or a removal of one
+                // it no longer does. Both files go — the plan cost one
+                // follow read to derive, and keeping it would have the
+                // next tick retry the same write into the same refusal
+                // rather than let a full read replace it (#173).
+                if plan.members_source == MembersSource::Mirror {
+                    mirror::discard_mirror(&paths.sync_members_file())?;
+                    let _ = std::fs::remove_file(paths.sync_plan_file());
+                    crate::log::warn(
+                        "list sync: a write from a plan diffed against the local member \
+                         mirror was refused; discarded the mirror and the plan so the next \
+                         diff reads the list in full",
+                    );
+                }
+                Err(error)
+            }
         },
     }
 }

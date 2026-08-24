@@ -156,6 +156,19 @@ impl Paths {
         self.state_dir.join("sync_state.json")
     }
 
+    /// Path to the local mirror of the list's membership (#173), under
+    /// `state_dir`.
+    ///
+    /// State for the plan's reason, in the other direction: losing it does
+    /// not lose a record of anything sent, but it does send the next diff
+    /// back to paging the whole list at the Users rate — the read the
+    /// mirror exists to avoid. Its own file rather than a field of the
+    /// plan or the clock, because it outlives both: the plan is deleted
+    /// when it is drained, and the clock is rewritten every diff.
+    pub(crate) fn sync_members_file(&self) -> PathBuf {
+        self.state_dir.join("sync_members.json")
+    }
+
     /// Path to the cached result of `GET /2/users/me` (#11): the signed-in
     /// user's own id and screen name, under `cache_dir`. Immutable for a
     /// given account, so caching it (like #9 caches screen-name → id) avoids
@@ -479,8 +492,9 @@ mod tests {
         let user = "2244994945";
         let reply = "1800000000000000003";
         let list = "2091351590695588200";
-        let pairs: [(PathBuf, PathBuf); 19] = [
+        let pairs: [(PathBuf, PathBuf); 20] = [
             (release.owned_lists_file(), dev.owned_lists_file()),
+            (release.sync_members_file(), dev.sync_members_file()),
             (release.selection_file(), dev.selection_file()),
             (release.settings_file(), dev.settings_file()),
             (release.oauth_token_file(), dev.oauth_token_file()),
@@ -665,6 +679,21 @@ mod tests {
         // launch pay for both full reads.
         let paths = Paths::from_vars(vars(&[("HOME", "/home/alice")])).unwrap();
         assert_ne!(paths.sync_state_file(), paths.sync_plan_file());
+    }
+
+    #[test]
+    fn sync_members_file_is_under_the_state_dir_and_is_its_own_file() {
+        // #173: state, not cache — losing it costs a full read of the list
+        // at the Users rate. And neither the plan nor the clock: the plan
+        // is deleted when drained, the clock rewritten every diff, and the
+        // mirror has to outlive both.
+        let paths = release_paths(vars(&[("HOME", "/home/alice")])).unwrap();
+        assert_eq!(
+            paths.sync_members_file(),
+            PathBuf::from("/home/alice/.local/state/twigpui/sync_members.json")
+        );
+        assert_ne!(paths.sync_members_file(), paths.sync_plan_file());
+        assert_ne!(paths.sync_members_file(), paths.sync_state_file());
     }
 
     #[test]
