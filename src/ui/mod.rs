@@ -447,6 +447,12 @@ pub(crate) struct TimelineView {
     /// itself; the loop also stops on its own the moment the offset is
     /// not where it left it, which is the reader grabbing the wheel.
     glide: Option<Task<()>>,
+    /// Holds a fixture's simulated poll alive (#22): the delay between
+    /// the window opening and its held-back posts walking through
+    /// [`Self::present_poll`], so the follow can be watched by hand
+    /// without a paid request. `None` in every live window — see
+    /// [`Self::show_fixture`].
+    fixture_arrival: Option<Task<()>>,
     /// Every post id this app has reposted, per the local record (#15) —
     /// refreshed from disk whenever the visible timeline changes (see
     /// [`Self::refresh_reposted_ids`]). The default source for
@@ -613,6 +619,7 @@ impl TimelineView {
             pending: None,
             follow_new_posts,
             glide: None,
+            fixture_arrival: None,
             reposted_ids: HashSet::new(),
             reposted_ids_refresh: None,
             repost_overrides: HashMap::new(),
@@ -643,6 +650,12 @@ impl TimelineView {
         this.refresh_usage(cx);
         this
     }
+
+    /// How long a fixture holds its unseen posts back before simulating
+    /// the poll that would have brought them (#22). Long enough to get
+    /// the window on screen and the hands off the wheel; short enough
+    /// that watching it is not a chore.
+    const FIXTURE_ARRIVAL_SECONDS: u64 = 5;
 
     /// Render a fixture and nothing else (#146).
     ///
@@ -675,7 +688,7 @@ impl TimelineView {
         self.state = TimelineState::Loaded(fixture.items);
         // #21: built the same way a real poll's buffer is, from the same
         // pure function — the fixture supplies the posts, not the count,
-        // so the bar cannot say something a poll could not. `pending`
+        // so the bar cannot say something a poll could not. The buffer
         // holds the whole list it would display, which is the fixture's
         // unseen posts followed by the ones already on screen.
         if !fixture.pending.is_empty() {
@@ -692,7 +705,25 @@ impl TimelineView {
                     _ => Vec::new(),
                 })
                 .collect();
-            self.pending = pending_after_poll(&displayed, combined);
+            let waiting = pending_after_poll(&displayed, combined);
+            if self.follow_new_posts {
+                // #22: with follow on, what a fixture is asked to show is
+                // the arrival itself — so instead of pre-filling the pill,
+                // hold the posts back and walk them through the door a
+                // real poll uses. Launch, keep the hands off, and watch
+                // them flow in; scroll down first and the same delivery
+                // lands in the pill instead.
+                self.fixture_arrival = waiting.map(|waiting| {
+                    cx.spawn(async move |this, cx| {
+                        cx.background_executor()
+                            .timer(Duration::from_secs(Self::FIXTURE_ARRIVAL_SECONDS))
+                            .await;
+                        let _ = this.update(cx, |this, cx| this.present_poll(waiting, cx));
+                    })
+                });
+            } else {
+                self.pending = waiting;
+            }
         }
         // Avatars and attached images still download, from `pbs.twimg.com`
         // rather than the API — no quota, no credits (see `avatar`). A
@@ -3229,15 +3260,35 @@ mod tests {
         gpui::WindowHandle<gpui_component::Root>,
         gpui::Entity<super::TimelineView>,
     ) {
-        window_with(cx, smoke_paths(), Startup::Fixture(Box::new(fixture)))
+        window_with(cx, smoke_config(), smoke_paths(), Startup::Fixture(Box::new(fixture)))
     }
 
-    /// A window started `startup` against `paths`, and the view inside it —
-    /// what [`fixture_window`] is, minus the two things a live window
-    /// wants to choose (#164's `a_switch_is_remembered_on_disk_at_once`
-    /// starts live under its own directory so nothing else writes there).
+    /// [`fixture_window`] with stick-to-top follow switched on (#22) —
+    /// the one knob whose real default the follow tests need at
+    /// construction time, since `show_fixture` reads it to decide whether
+    /// the held-back posts wait behind the pill or arrive by themselves.
+    fn following_fixture_window(
+        cx: &mut gpui::TestAppContext,
+        fixture: Fixture,
+    ) -> (
+        gpui::WindowHandle<gpui_component::Root>,
+        gpui::Entity<super::TimelineView>,
+    ) {
+        let config = crate::config::Config {
+            follow_new_posts: true,
+            ..smoke_config()
+        };
+        window_with(cx, config, smoke_paths(), Startup::Fixture(Box::new(fixture)))
+    }
+
+    /// A window started `startup` against `config` and `paths`, and the
+    /// view inside it — what [`fixture_window`] is, minus the things a
+    /// caller wants to choose (#164's `a_switch_is_remembered_on_disk_at_once`
+    /// starts live under its own directory so nothing else writes there;
+    /// #22's follow tests start with the switch on).
     fn window_with(
         cx: &mut gpui::TestAppContext,
+        config: crate::config::Config,
         paths: crate::paths::Paths,
         startup: Startup,
     ) -> (
@@ -3253,8 +3304,8 @@ mod tests {
         let window = {
             let slot = slot.clone();
             cx.add_window(move |window, cx| {
-                let timeline = cx
-                    .new(|cx| super::TimelineView::new(smoke_config(), paths, startup, window, cx));
+                let timeline =
+                    cx.new(|cx| super::TimelineView::new(config, paths, startup, window, cx));
                 *slot.borrow_mut() = Some(timeline.clone());
                 gpui_component::Root::new(timeline, window, cx)
             })
@@ -3535,6 +3586,48 @@ mod tests {
                     "a reader mid-timeline must not have the screen replaced under them"
                 );
                 assert_eq!(view.pending.as_ref().map(|pending| pending.count), Some(2));
+            });
+        });
+    }
+
+    /// #22: with follow on, a fixture's held-back posts arrive by
+    /// themselves a few seconds in — the simulation of the poll that
+    /// would have brought them, so the flow can be watched by hand
+    /// (`cargo run -- --fixture fixtures/timeline.json`) without a paid
+    /// request.
+    #[gpui::test]
+    fn a_fixtures_waiting_posts_arrive_by_themselves_when_follow_is_on(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (_window, timeline) =
+            following_fixture_window(cx, fixture_with(&["2", "1"], &["4", "3"]));
+
+        cx.update(|cx| {
+            timeline.update(cx, |view, _cx| {
+                assert_eq!(
+                    shown_ids(view),
+                    ["2", "1"],
+                    "nothing arrives before the delay — the arrival is the point"
+                );
+                assert!(
+                    view.pending.is_none(),
+                    "the poll is simulated, not pre-filled into the pill's buffer"
+                );
+            });
+        });
+
+        cx.executor().advance_clock(std::time::Duration::from_secs(
+            super::TimelineView::FIXTURE_ARRIVAL_SECONDS + 1,
+        ));
+        cx.run_until_parked();
+
+        cx.update(|cx| {
+            timeline.update(cx, |view, _cx| {
+                assert_eq!(shown_ids(view), ["4", "3", "2", "1"]);
+                assert!(
+                    view.pending.is_none(),
+                    "at the top with follow on, nothing waits behind a pill"
+                );
             });
         });
     }
@@ -3993,7 +4086,7 @@ mod tests {
         // No token under this HOME, so startup settles at
         // `NotAuthenticated` with no client — past the startup gate, and
         // still unable to spend anything on the cache miss that follows.
-        let (window, timeline) = window_with(cx, paths.clone(), Startup::Live);
+        let (window, timeline) = window_with(cx, smoke_config(), paths.clone(), Startup::Live);
         let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
         visual.update(|window, cx| {
             let _ = window.draw(cx);
