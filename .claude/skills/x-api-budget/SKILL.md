@@ -110,7 +110,8 @@ task slot を差し替えても実行中の tick は止まらない (background 
 ミラーを List 側に使い、following だけ払う。ミラーは `sync_members_refresh_seconds`
 (既定 7 日) より古くなると全件読み直す。`0` でミラーを切る。
 
-手動同期と CLI dry-run は常に両側全件で、ミラーを作り直す。ミラー由来の plan が
+手動同期と CLI dry-run はミラーを使わない。diff まで進めば (手動は未消化の plan を先に流す)
+両側全件で読んでミラーを作り直す。ミラー由来の plan が
 おかしい (prune cap 超え、書き込みが拒否された) ときはミラーを捨てて次回全件読みへ落ちる。
 単価クラスも dedup も**未実測**なので、実測が取れたら `reference/pricing.md` を先に直すこと。
 

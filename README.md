@@ -201,8 +201,10 @@ stands in for it. Every write the sync sends is recorded in the mirror as
 it lands. `X_SYNC_MEMBERS_REFRESH_SECONDS` is how old the mirror may get
 before a scheduled diff pages the list again; `0` reads it every diff, as
 before. A sync started from the status bar, and a `--sync-list` dry run,
-always read the list in full and leave a fresh mirror behind — that is
-how you refresh it by hand. If something else edits the list in the
+never take the mirror's word for it: whenever one of those gets as far as
+a diff (the button first drains an outstanding plan, as above), it reads
+the list in full and leaves a fresh mirror behind — that is how you
+refresh it by hand. If something else edits the list in the
 meantime, the next full read says in the log how far the mirror had
 drifted, and a plan the mirror got wrong is thrown away rather than
 retried: a removal share over `X_SYNC_PRUNE_LIMIT_PERCENT`, or a write X

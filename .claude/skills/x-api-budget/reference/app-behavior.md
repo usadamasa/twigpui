@@ -61,8 +61,9 @@ follow side only. The mirror is re-read from X when it is older than
 `sync_members_refresh_seconds` (7 days by default; `0` turns the mirror
 off), and every write the sync sends is recorded in it as it lands.
 
-Three things always read the list in full and leave a fresh mirror behind:
-the CLI dry run, a sync started from the status bar, and the first
+Three diffs never take the mirror and leave a fresh one behind: the CLI
+dry run, a sync started from the status bar (once it gets as far as a
+diff — an outstanding plan is drained first, #174), and the first
 scheduled diff after the mirror is discarded. It is discarded whenever a
 mirror-derived plan looks wrong — removals over the prune cap, or a write
 X refuses — so a stale mirror costs one extra full read, never a retry

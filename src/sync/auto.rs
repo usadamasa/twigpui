@@ -159,9 +159,11 @@ pub(crate) fn tick(
 /// Read the follow side (and the members side, unless the mirror is fresh
 /// enough to stand in for it — #173) and write a fresh plan.
 ///
-/// A forced tick reads both sides in full whatever the mirror's age: the
-/// person who pressed the button was told that is what it costs, and it
-/// is also how the mirror gets a fresh generation on demand.
+/// A forced tick that gets this far reads both sides in full whatever the
+/// mirror's age: the person who pressed the button was told that is what
+/// it costs, and it is also how the mirror gets a fresh generation on
+/// demand. (Whether it gets this far is [`schedule::next_step`]'s call —
+/// an outstanding plan is drained first, and no read happens at all.)
 ///
 /// The clock is stamped **before** the reads, and stays stamped whether or
 /// not they succeed. Both halves matter: a crash part way through has
