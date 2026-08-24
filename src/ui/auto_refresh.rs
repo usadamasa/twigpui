@@ -181,16 +181,52 @@ pub(super) fn at_top(top_item: usize, offset_in_item: gpui::Pixels) -> bool {
     top_item == 0 && f32::from(offset_in_item).abs() <= AT_TOP_TOLERANCE_PX
 }
 
+/// `TimelineView`'s runtime switch for stick-to-top follow (#22): seeded
+/// from `config.follow_new_posts`, flipped by the View menu, never written
+/// back to the file — the config is the standing preference, this is
+/// today's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum FollowMode {
+    /// A poll's new posts flow straight on when the reader is at the top.
+    Follow,
+    /// Every poll waits behind the pill, whatever the scroll position.
+    Pill,
+}
+
+impl FollowMode {
+    /// The mode `config.follow_new_posts` seeds.
+    pub(super) fn from_config(follow_new_posts: bool) -> Self {
+        if follow_new_posts {
+            Self::Follow
+        } else {
+            Self::Pill
+        }
+    }
+
+    /// What the View menu's toggle does.
+    pub(super) fn flipped(self) -> Self {
+        match self {
+            Self::Follow => Self::Pill,
+            Self::Pill => Self::Follow,
+        }
+    }
+
+    /// Whether this is the [`Self::Follow`] side of the switch.
+    pub(super) fn is_following(self) -> bool {
+        matches!(self, Self::Follow)
+    }
+}
+
 /// Whether a poll's new posts should flow straight onto the screen rather
 /// than wait behind the pill (#22, #177).
 ///
-/// All three or nothing. The switch is the reader's standing instruction;
+/// All three or nothing. The mode is the reader's standing instruction;
 /// `loaded` keeps a `Failed`/`Loading` screen from being silently replaced
 /// by a poll nobody asked to see; and `at_top` is what separates "show me
 /// the newest" from "I am reading here" — the same line
 /// `preserved_scroll_target` draws from the other side.
-pub(super) fn follows(follow_new_posts: bool, loaded: bool, at_top: bool) -> bool {
-    follow_new_posts && loaded && at_top
+pub(super) fn follows(mode: FollowMode, loaded: bool, at_top: bool) -> bool {
+    mode.is_following() && loaded && at_top
 }
 
 /// Fraction of the remaining distance still left after one glide frame
@@ -211,7 +247,7 @@ pub(super) const GLIDE_FRAME_MS: u64 = 16;
 /// offset gpui keeps: 0 at the top, more negative the further down the
 /// reader is.
 pub(super) fn next_glide_y(y: f32) -> Option<f32> {
-    (y.abs() > GLIDE_DONE_PX).then(|| y * GLIDE_KEEP)
+    (y.abs() > GLIDE_DONE_PX).then_some(y * GLIDE_KEEP)
 }
 
 /// The half of auto-refresh that cannot be pure: the loop that spends
@@ -391,11 +427,7 @@ impl TimelineView {
     pub(super) fn present_poll(&mut self, pending: Pending, cx: &mut Context<'_, Self>) {
         let (top_item, offset_in_item) = self.list_scroll.logical_scroll_top();
         let loaded = matches!(self.state, TimelineState::Loaded(_));
-        if follows(
-            self.follow_new_posts,
-            loaded,
-            at_top(top_item, offset_in_item),
-        ) {
+        if follows(self.follow, loaded, at_top(top_item, offset_in_item)) {
             self.follow(pending, cx);
         } else {
             self.pending = Some(pending);
@@ -473,18 +505,15 @@ impl TimelineView {
                     {
                         return true;
                     }
-                    match next_glide_y(y) {
-                        Some(next) => {
-                            this.list_scroll.set_offset(gpui::point(offset.x, px(next)));
-                            last_set = Some(next);
-                            cx.notify();
-                            false
-                        }
-                        None => {
-                            this.list_scroll.set_offset(gpui::point(offset.x, px(0.)));
-                            cx.notify();
-                            true
-                        }
+                    if let Some(next) = next_glide_y(y) {
+                        this.list_scroll.set_offset(gpui::point(offset.x, px(next)));
+                        last_set = Some(next);
+                        cx.notify();
+                        false
+                    } else {
+                        this.list_scroll.set_offset(gpui::point(offset.x, px(0.)));
+                        cx.notify();
+                        true
                     }
                 }) else {
                     return;
@@ -724,10 +753,25 @@ mod tests {
     // missing falls back to the pill.
     #[test]
     fn follow_needs_the_switch_a_loaded_timeline_and_a_reader_at_the_top() {
-        assert!(follows(true, true, true));
-        assert!(!follows(false, true, true), "switched off means the pill");
-        assert!(!follows(true, false, true), "nothing loaded means the pill");
-        assert!(!follows(true, true, false), "scrolled down means the pill");
+        assert!(follows(FollowMode::Follow, true, true));
+        assert!(
+            !follows(FollowMode::Pill, true, true),
+            "switched off means the pill"
+        );
+        assert!(
+            !follows(FollowMode::Follow, false, true),
+            "nothing loaded means the pill"
+        );
+        assert!(
+            !follows(FollowMode::Follow, true, false),
+            "scrolled down means the pill"
+        );
+    }
+
+    #[test]
+    fn the_toggle_flips_between_the_two_modes_and_back() {
+        assert_eq!(FollowMode::Follow.flipped(), FollowMode::Pill);
+        assert_eq!(FollowMode::Pill.flipped(), FollowMode::Follow);
     }
 
     #[test]

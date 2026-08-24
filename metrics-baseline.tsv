@@ -168,14 +168,24 @@ src/toggle.rs	200
 # and clip instead of pushing the sign-in control off the window — the
 # 2026-08-24 lockout, where the screen's only advice named a button it
 # was not showing.
-src/ui/mod.rs	1850
+# 1850 -> 1900: #22's stick-to-top follow. The `follow`, `glide` and
+# `fixture_arrival` fields, the toggle's handler, and `show_fixture`'s
+# arrival branch — the follow/glide mechanism itself went to
+# `ui/auto_refresh.rs` below, which is why this is 50 rather than 200.
+src/ui/mod.rs	1900
 src/ui/reload_policy.rs	300
 # New in #21. Holds the whole of auto-refresh: the pure tick/pending
 # decisions with their tests, and an `impl TimelineView` block for the
 # poll loop that acts on them — see the module doc for why this one file
 # carries both halves where `reload_policy` and `render` carry only pure
 # functions.
-src/ui/auto_refresh.rs	400
+# 400 -> 600: #22's stick-to-top follow, in this file because it is the
+# third way a poll's posts reach the screen — `FollowMode`, the pure
+# at-top/follows/glide-step decisions with their tests, and the
+# `present_poll`/`follow`/`start_glide` half that walks the scroll
+# offset. About half the growth is the glide loop's docs: the settle
+# wait, the grab detection, and why each cancellation site exists.
+src/ui/auto_refresh.rs	600
 # New in #174, and the reason `ui/mod.rs` did not have to rise again for
 # it: `start_auto_sync` moved here out of `ui` and came back as
 # `start_sync`, joined by the status enum the status bar reports, the two

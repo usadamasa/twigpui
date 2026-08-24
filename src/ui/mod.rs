@@ -31,7 +31,7 @@ mod tasks;
 // `pub(crate)` merely to be reachable from the file next door. Widening
 // them would mean "anything in the crate may touch this", which is the
 // opposite of what splitting the file was for.
-use auto_refresh::{Pending, pending_after_poll, pending_label};
+use auto_refresh::{FollowMode, Pending, pending_after_poll, pending_label};
 use list_sync::{SyncOff, SyncStatus, SyncTrigger};
 use reload_policy::{
     CooldownTick, at_the_post_cap, cooldown_label, cooldown_tick, newly_arrived, offers_load_older,
@@ -433,12 +433,9 @@ pub(crate) struct TimelineView {
     /// but wrong.
     pending: Option<Pending>,
     /// Whether a poll that finds the reader at the top may flow its new
-    /// posts straight onto the screen (#22) — see
-    /// [`auto_refresh::follows`]. Seeded from `config.follow_new_posts`
-    /// and flipped at runtime by the View menu's toggle, which never
-    /// writes back to the file: the config is the standing preference,
-    /// this is today's.
-    follow_new_posts: bool,
+    /// posts straight onto the screen (#22) — see [`auto_refresh::follows`]
+    /// and [`FollowMode`] for who sets it and when.
+    follow: FollowMode,
     /// Holds the glide alive (#22) — the frame timer walking the scroll
     /// offset back to the top after a follow prepends posts above it. Its
     /// own slot for `auto_refresh`'s reason: none of the other task slots
@@ -577,7 +574,7 @@ impl TimelineView {
         let owned_lists = list_picker::cached_lists_or_empty(&paths);
         let selection_file = matches!(startup, Startup::Live).then(|| paths.selection_file());
         // #22: taken before `config` is moved below, like `source`.
-        let follow_new_posts = config.follow_new_posts;
+        let follow = FollowMode::from_config(config.follow_new_posts);
 
         let mut this = Self {
             config,
@@ -617,7 +614,7 @@ impl TimelineView {
             pending_sync: false,
             auto_refresh: None,
             pending: None,
-            follow_new_posts,
+            follow,
             glide: None,
             fixture_arrival: None,
             reposted_ids: HashSet::new(),
@@ -706,7 +703,7 @@ impl TimelineView {
                 })
                 .collect();
             let waiting = pending_after_poll(&displayed, combined);
-            if self.follow_new_posts {
+            if self.follow.is_following() {
                 // #22: with follow on, what a fixture is asked to show is
                 // the arrival itself — so instead of pre-filling the pill,
                 // hold the posts back and walk them through the door a
@@ -1813,8 +1810,8 @@ impl Render for TimelineView {
                 // reports which way it went through the banner a finished
                 // reload uses — `Outcome`, because it is the variant that
                 // is not a failure.
-                this.follow_new_posts = !this.follow_new_posts;
-                let outcome = if this.follow_new_posts {
+                this.follow = this.follow.flipped();
+                let outcome = if this.follow.is_following() {
                     "Following new posts."
                 } else {
                     "Not following — new posts will wait behind the pill."
@@ -3260,7 +3257,12 @@ mod tests {
         gpui::WindowHandle<gpui_component::Root>,
         gpui::Entity<super::TimelineView>,
     ) {
-        window_with(cx, smoke_config(), smoke_paths(), Startup::Fixture(Box::new(fixture)))
+        window_with(
+            cx,
+            smoke_config(),
+            smoke_paths(),
+            Startup::Fixture(Box::new(fixture)),
+        )
     }
 
     /// [`fixture_window`] with stick-to-top follow switched on (#22) —
@@ -3278,7 +3280,12 @@ mod tests {
             follow_new_posts: true,
             ..smoke_config()
         };
-        window_with(cx, config, smoke_paths(), Startup::Fixture(Box::new(fixture)))
+        window_with(
+            cx,
+            config,
+            smoke_paths(),
+            Startup::Fixture(Box::new(fixture)),
+        )
     }
 
     /// A window started `startup` against `config` and `paths`, and the
@@ -3501,7 +3508,7 @@ mod tests {
 
         cx.update(|cx| {
             timeline.update(cx, |view, cx| {
-                view.follow_new_posts = true;
+                view.follow = super::FollowMode::Follow;
                 let pending = pending_after_poll(
                     &["2", "1"],
                     ["4", "3", "2", "1"]
@@ -3529,7 +3536,7 @@ mod tests {
 
         cx.update(|cx| {
             timeline.update(cx, |view, cx| {
-                view.follow_new_posts = false;
+                view.follow = super::FollowMode::Pill;
                 let pending = pending_after_poll(
                     &["2", "1"],
                     ["4", "3", "2", "1"]
@@ -3567,10 +3574,12 @@ mod tests {
                     .list_scroll
                     .bounds_for_item(0)
                     .expect("the frame above laid the rows out");
-                view.list_scroll
-                    .set_offset(gpui::point(gpui::px(0.), -first_row.size.height));
+                view.list_scroll.set_offset(gpui::point(
+                    gpui::px(0.),
+                    gpui::px(-f32::from(first_row.size.height)),
+                ));
 
-                view.follow_new_posts = true;
+                view.follow = super::FollowMode::Follow;
                 let pending = pending_after_poll(
                     &["2", "1"],
                     ["4", "3", "2", "1"]
@@ -3651,7 +3660,7 @@ mod tests {
         cx.update(|cx| {
             timeline.update(cx, |view, _cx| {
                 assert!(
-                    view.follow_new_posts,
+                    view.follow.is_following(),
                     "the test config starts with follow off, so one toggle turns it on"
                 );
                 assert!(
