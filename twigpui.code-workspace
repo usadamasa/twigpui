@@ -1,0 +1,17 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"path": "../../../../.config/twigpui"
+		},
+		{
+			"path": "../../../../.local/state/twigpui"
+		},
+		{
+			"path": "../../../../.cache/twigpui"
+		}
+	],
+	"settings": {}
+}
