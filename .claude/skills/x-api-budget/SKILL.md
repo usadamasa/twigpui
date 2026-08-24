@@ -64,8 +64,9 @@ project の日次カウンタが 20 から 119 へ動いた。返却は 98 件�
 
 ### 自動更新 (#21) の課金の読み方
 
-既定は 5 分間隔 (`X_AUTO_REFRESH_INTERVAL_SECONDS`)。**リクエスト本数だけ見ると
-1 日 288 本**で多く見えるが、resource で数えると話が変わる。
+既定は 3 分間隔 (`X_AUTO_REFRESH_INTERVAL_SECONDS`。#22 の stick-to-top follow で
+5 分から詰めた)。**リクエスト本数だけ見ると 1 日 480 本**で多く見えるが、
+resource で数えると話が変わる。
 
 `GET /2/lists/:id/tweets` は `since_id` を取らないので、ポーリングは毎回先頭ページを
 読み直す。表の 20 はその上限であって実額ではない。同日 dedup が効くため、

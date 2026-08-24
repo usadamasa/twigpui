@@ -118,6 +118,18 @@ pub(crate) struct Config {
     /// this one is the cadence a poll actually runs at, and it is validated
     /// never to fall below the floor — see [`resolve_auto_refresh_interval`].
     pub auto_refresh_interval_seconds: u32,
+    /// Whether a poll's new posts flow onto the screen by themselves when
+    /// the reader is already at the top (#22).
+    ///
+    /// On by default — the point of #177's experience is a timeline that
+    /// keeps moving without being asked. Off, and every poll goes through
+    /// the pill instead, whatever the scroll position. Purely
+    /// presentational: this switch never changes what is fetched or when —
+    /// that is `auto_refresh`'s job — only what the window does with a
+    /// fetch that already happened. The seed for
+    /// `TimelineView::follow_new_posts`, which the View menu toggles at
+    /// runtime without writing back here.
+    pub follow_new_posts: bool,
 }
 
 const DEFAULT_USERNAME: &str = "XDevelopers";
@@ -176,7 +188,7 @@ const DEFAULT_SYNC_WRITES_PER_MINUTE: u8 = 2;
 /// with the key named, not a burst.
 const MAX_SYNC_WRITES_PER_MINUTE: u8 = 20;
 
-/// 5 minutes between auto-refresh polls (#21).
+/// 3 minutes between auto-refresh polls (#21).
 ///
 /// Chosen from what a poll actually bills rather than from how fresh a
 /// timeline could theoretically be. A poll re-reads the head page —
@@ -188,9 +200,12 @@ const MAX_SYNC_WRITES_PER_MINUTE: u8 = 20;
 /// after each UTC midnight, bounded by `max_results`.
 ///
 /// That makes the interval a responsiveness knob rather than a spending
-/// one, and five minutes is the point where a timeline feels live without
-/// the window sending a request every time someone glances at it.
-const DEFAULT_AUTO_REFRESH_INTERVAL_SECONDS: u32 = 300;
+/// one. It started at 5 minutes; #22's stick-to-top follow made the
+/// timeline something watched rather than glanced at, and 3 minutes is
+/// where the flow feels alive without the window sending a request every
+/// time someone looks over. What tightening it does spend is requests —
+/// 480 a day at this cadence, up from 288 — not resources.
+const DEFAULT_AUTO_REFRESH_INTERVAL_SECONDS: u32 = 180;
 
 /// The file-level settings loaded from `config.toml`.
 ///
@@ -254,6 +269,9 @@ struct FileSettings {
     /// Non-secret, same reasoning as `request_price`.
     #[serde(default)]
     auto_refresh_interval_seconds: Option<u32>,
+    /// Non-secret, same reasoning as `request_price`.
+    #[serde(default)]
+    follow_new_posts: Option<bool>,
     /// Raw `list_id` value (#161). Non-secret — a list id is visible in the
     /// list's own URL on x.com — so it belongs in `config.toml` like every
     /// key above. Validated by [`Config::resolve`] rather than here, so the
@@ -407,14 +425,15 @@ impl Config {
         let request_price = resolve_request_price(&var, file.request_price)?;
         let daily_request_budget = resolve_daily_request_budget(&var, file.daily_request_budget)?;
 
-        let auto_sync_list = resolve_auto_sync_list(&var, file.auto_sync_list)?;
+        let auto_sync_list = resolve_switch("X_AUTO_SYNC_LIST", &var, file.auto_sync_list)?;
         let sync_interval_seconds = resolve_sync_interval(&var, file.sync_interval_seconds)?;
         let sync_prune_limit_percent =
             resolve_sync_prune_limit(&var, file.sync_prune_limit_percent)?;
         let sync_writes_per_minute =
             resolve_sync_writes_per_minute(&var, file.sync_writes_per_minute)?;
 
-        let auto_refresh = resolve_auto_refresh(&var, file.auto_refresh)?;
+        let auto_refresh = resolve_switch("X_AUTO_REFRESH", &var, file.auto_refresh)?;
+        let follow_new_posts = resolve_switch("X_FOLLOW_NEW_POSTS", &var, file.follow_new_posts)?;
         // Takes `min_fetch_interval_seconds` because the floor it enforces
         // is that one — see [`resolve_auto_refresh_interval`].
         let auto_refresh_interval_seconds = resolve_auto_refresh_interval(
@@ -439,6 +458,7 @@ impl Config {
             sync_writes_per_minute,
             auto_refresh,
             auto_refresh_interval_seconds,
+            follow_new_posts,
         })
     }
 }
@@ -488,17 +508,20 @@ fn resolve_list_id(
     Ok(Some(raw))
 }
 
-/// Resolve `auto_sync_list`: env > file > on.
+/// Resolve one of the on-by-default boolean switches: env > file > on.
 ///
 /// Rejects an unrecognized value rather than falling back the way `theme`
 /// does. A typo'd theme is cosmetic; a typo'd `X_AUTO_SYNC_LIST=flase` read
 /// as the default would leave a paid background loop running for someone
-/// who was trying to switch it off.
-fn resolve_auto_sync_list(
+/// who was trying to switch it off. `X_FOLLOW_NEW_POSTS` costs nothing
+/// either way, but reading `flase` as "on" would still silently ignore
+/// what the person wrote.
+fn resolve_switch(
+    key: &str,
     var: impl Fn(&str) -> Option<String>,
     file_value: Option<bool>,
 ) -> Result<bool> {
-    let Some(raw) = var("X_AUTO_SYNC_LIST")
+    let Some(raw) = var(key)
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
     else {
@@ -507,7 +530,7 @@ fn resolve_auto_sync_list(
     match raw.to_ascii_lowercase().as_str() {
         "true" | "1" | "yes" | "on" => Ok(true),
         "false" | "0" | "no" | "off" => Ok(false),
-        _ => bail!("X_AUTO_SYNC_LIST must be true or false, got {raw:?}"),
+        _ => bail!("{key} must be true or false, got {raw:?}"),
     }
 }
 
@@ -617,30 +640,6 @@ fn resolve_sync_writes_per_minute(
                  write window is 300 per 15 minutes), got {writes}"
             )
         })
-}
-
-/// Resolve `auto_refresh` (#21): env > file > on.
-///
-/// Rejects an unrecognized value rather than falling back, for
-/// [`resolve_auto_sync_list`]'s exact reason: this is the switch someone
-/// reaches for to stop the app spending on a timer, and reading
-/// `X_AUTO_REFRESH=flase` as the default would leave the timer running for
-/// the one person who asked for it to stop.
-fn resolve_auto_refresh(
-    var: impl Fn(&str) -> Option<String>,
-    file_value: Option<bool>,
-) -> Result<bool> {
-    let Some(raw) = var("X_AUTO_REFRESH")
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-    else {
-        return Ok(file_value.unwrap_or(true));
-    };
-    match raw.to_ascii_lowercase().as_str() {
-        "true" | "1" | "yes" | "on" => Ok(true),
-        "false" | "0" | "no" | "off" => Ok(false),
-        _ => bail!("X_AUTO_REFRESH must be true or false, got {raw:?}"),
-    }
 }
 
 /// Resolve `auto_refresh_interval_seconds` (#21): env > file >
@@ -2120,5 +2119,81 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(error.contains("is not a number"), "{error}");
+    }
+
+    // --- #22: follow new posts ---
+
+    #[test]
+    fn following_new_posts_is_on_by_default() {
+        let config = Config::resolve(
+            vars(&[("X_OAUTH_CLIENT_ID", "client-123")]),
+            FileSettings::default(),
+        )
+        .unwrap();
+
+        assert!(config.follow_new_posts);
+    }
+
+    #[test]
+    fn following_new_posts_can_be_switched_off_from_the_environment() {
+        let config = Config::resolve(
+            vars(&[
+                ("X_OAUTH_CLIENT_ID", "client-123"),
+                ("X_FOLLOW_NEW_POSTS", "off"),
+            ]),
+            FileSettings::default(),
+        )
+        .unwrap();
+
+        assert!(!config.follow_new_posts);
+    }
+
+    #[test]
+    fn following_new_posts_can_be_switched_off_from_the_file() {
+        let config = Config::resolve(
+            vars(&[("X_OAUTH_CLIENT_ID", "client-123")]),
+            FileSettings {
+                follow_new_posts: Some(false),
+                ..FileSettings::default()
+            },
+        )
+        .unwrap();
+
+        assert!(!config.follow_new_posts);
+    }
+
+    #[test]
+    fn the_environment_wins_over_the_file_for_following_new_posts() {
+        let config = Config::resolve(
+            vars(&[
+                ("X_OAUTH_CLIENT_ID", "client-123"),
+                ("X_FOLLOW_NEW_POSTS", "true"),
+            ]),
+            FileSettings {
+                follow_new_posts: Some(false),
+                ..FileSettings::default()
+            },
+        )
+        .unwrap();
+
+        assert!(config.follow_new_posts);
+    }
+
+    // Unlike `X_AUTO_REFRESH`, a typo here costs nothing — the switch is
+    // about presentation, not spending. It is still rejected, for the
+    // plainer reason that reading `flase` as "on" silently ignores what
+    // the person wrote.
+    #[test]
+    fn rejects_an_unrecognized_follow_new_posts_value() {
+        let error = Config::resolve(
+            vars(&[
+                ("X_OAUTH_CLIENT_ID", "client-123"),
+                ("X_FOLLOW_NEW_POSTS", "flase"),
+            ]),
+            FileSettings::default(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("X_FOLLOW_NEW_POSTS"), "{error}");
     }
 }

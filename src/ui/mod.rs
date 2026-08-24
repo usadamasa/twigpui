@@ -31,7 +31,7 @@ mod tasks;
 // `pub(crate)` merely to be reachable from the file next door. Widening
 // them would mean "anything in the crate may touch this", which is the
 // opposite of what splitting the file was for.
-use auto_refresh::{Pending, pending_after_poll, pending_label};
+use auto_refresh::{FollowMode, Pending, pending_after_poll, pending_label};
 use list_sync::{SyncOff, SyncStatus, SyncTrigger};
 use reload_policy::{
     CooldownTick, at_the_post_cap, cooldown_label, cooldown_tick, newly_arrived, offers_load_older,
@@ -52,7 +52,7 @@ use render::{RowCounts, row_counts};
 
 use crate::menu::{
     BlurComposer, CloseWindow, FocusComposer, KEY_CONTEXT, Minimize, Reload, ScrollToTop,
-    ShowAbout, ShowNewPosts,
+    ShowAbout, ShowNewPosts, ToggleFollowNewPosts,
 };
 use crate::oauth;
 use crate::paths::Paths;
@@ -432,6 +432,24 @@ pub(crate) struct TimelineView {
     /// which paths do that and why a stale buffer is not merely useless
     /// but wrong.
     pending: Option<Pending>,
+    /// Whether a poll that finds the reader at the top may flow its new
+    /// posts straight onto the screen (#22) — see [`auto_refresh::follows`]
+    /// and [`FollowMode`] for who sets it and when.
+    follow: FollowMode,
+    /// Holds the glide alive (#22) — the frame timer walking the scroll
+    /// offset back to the top after a follow prepends posts above it. Its
+    /// own slot for `auto_refresh`'s reason: none of the other task slots
+    /// is something a glide should cancel. Dropped (cancelling the loop)
+    /// by every path that replaces the timeline or moves the scroll
+    /// itself; the loop also stops on its own the moment the offset is
+    /// not where it left it, which is the reader grabbing the wheel.
+    glide: Option<Task<()>>,
+    /// Holds a fixture's simulated poll alive (#22): the delay between
+    /// the window opening and its held-back posts walking through
+    /// [`Self::present_poll`], so the follow can be watched by hand
+    /// without a paid request. `None` in every live window — see
+    /// [`Self::show_fixture`].
+    fixture_arrival: Option<Task<()>>,
     /// Every post id this app has reposted, per the local record (#15) —
     /// refreshed from disk whenever the visible timeline changes (see
     /// [`Self::refresh_reposted_ids`]). The default source for
@@ -555,6 +573,8 @@ impl TimelineView {
         );
         let owned_lists = list_picker::cached_lists_or_empty(&paths);
         let selection_file = matches!(startup, Startup::Live).then(|| paths.selection_file());
+        // #22: taken before `config` is moved below, like `source`.
+        let follow = FollowMode::from_config(config.follow_new_posts);
 
         let mut this = Self {
             config,
@@ -594,6 +614,9 @@ impl TimelineView {
             pending_sync: false,
             auto_refresh: None,
             pending: None,
+            follow,
+            glide: None,
+            fixture_arrival: None,
             reposted_ids: HashSet::new(),
             reposted_ids_refresh: None,
             repost_overrides: HashMap::new(),
@@ -624,6 +647,12 @@ impl TimelineView {
         this.refresh_usage(cx);
         this
     }
+
+    /// How long a fixture holds its unseen posts back before simulating
+    /// the poll that would have brought them (#22). Long enough to get
+    /// the window on screen and the hands off the wheel; short enough
+    /// that watching it is not a chore.
+    const FIXTURE_ARRIVAL_SECONDS: u64 = 5;
 
     /// Render a fixture and nothing else (#146).
     ///
@@ -656,7 +685,7 @@ impl TimelineView {
         self.state = TimelineState::Loaded(fixture.items);
         // #21: built the same way a real poll's buffer is, from the same
         // pure function — the fixture supplies the posts, not the count,
-        // so the bar cannot say something a poll could not. `pending`
+        // so the bar cannot say something a poll could not. The buffer
         // holds the whole list it would display, which is the fixture's
         // unseen posts followed by the ones already on screen.
         if !fixture.pending.is_empty() {
@@ -673,7 +702,25 @@ impl TimelineView {
                     _ => Vec::new(),
                 })
                 .collect();
-            self.pending = pending_after_poll(&displayed, combined);
+            let waiting = pending_after_poll(&displayed, combined);
+            if self.follow.is_following() {
+                // #22: with follow on, what a fixture is asked to show is
+                // the arrival itself — so instead of pre-filling the pill,
+                // hold the posts back and walk them through the door a
+                // real poll uses. Launch, keep the hands off, and watch
+                // them flow in; scroll down first and the same delivery
+                // lands in the pill instead.
+                self.fixture_arrival = waiting.map(|waiting| {
+                    cx.spawn(async move |this, cx| {
+                        cx.background_executor()
+                            .timer(Duration::from_secs(Self::FIXTURE_ARRIVAL_SECONDS))
+                            .await;
+                        let _ = this.update(cx, |this, cx| this.present_poll(waiting, cx));
+                    })
+                });
+            } else {
+                self.pending = waiting;
+            }
         }
         // Avatars and attached images still download, from `pbs.twimg.com`
         // rather than the API — no quota, no credits (see `avatar`). A
@@ -1758,10 +1805,27 @@ impl Render for TimelineView {
                 // nothing at all when there is none.
                 this.apply_pending(cx);
             }))
+            .on_action(cx.listener(|this, _: &ToggleFollowNewPosts, _window, cx| {
+                // #22: the menu bar cannot draw a checkmark, so the flip
+                // reports which way it went through the banner a finished
+                // reload uses — `Outcome`, because it is the variant that
+                // is not a failure.
+                this.follow = this.follow.flipped();
+                let outcome = if this.follow.is_following() {
+                    "Following new posts."
+                } else {
+                    "Not following — new posts will wait behind the pill."
+                };
+                this.reload_notice = Some(ReloadNotice::Outcome(outcome.into()));
+                cx.notify();
+            }))
             .on_action(cx.listener(|this, _: &ScrollToTop, _window, cx| {
                 // #22: purely local — no request, no gate, nothing to
                 // report. `scroll_to_top_of_item(0)` rather than a pixel
-                // offset so it lands on the newest row itself.
+                // offset so it lands on the newest row itself. A glide
+                // in flight is walking to the same place — the jump
+                // supersedes it.
+                this.glide = None;
                 this.list_scroll.scroll_to_top_of_item(0);
                 cx.notify();
             }))
@@ -1841,9 +1905,9 @@ mod tests {
         at_the_post_cap, byline, compose_error_message, cooldown_label, cooldown_tick,
         format_timestamp, media_badge, media_columns, offers_delete, offers_like,
         offers_load_older, offers_quote, offers_reauthorize, offers_reply, offers_repost,
-        rate_limit, reload_failure_outcome, reload_gate, reload_start_state, reply_banner_label,
-        reply_target_label, repost_banner_label, row_counts, thread_action_label, usage,
-        usage_color, usage_label,
+        pending_after_poll, rate_limit, reload_failure_outcome, reload_gate, reload_start_state,
+        reply_banner_label, reply_target_label, repost_banner_label, row_counts,
+        thread_action_label, usage, usage_color, usage_label,
     };
 
     fn item_with(id: &str, author_username: &str, reposted_by: Option<&str>) -> TimelineItem {
@@ -3146,6 +3210,12 @@ mod tests {
             // Off for the same reason (#21).
             auto_refresh: false,
             auto_refresh_interval_seconds: 300,
+            // Off so the tests that exercise the pill path stay on it —
+            // a test harness always finds the scroll at the top, and the
+            // on-by-default follow (#22) would empty `pending` before a
+            // test could look at it. The follow tests switch it on
+            // per-view instead.
+            follow_new_posts: false,
         }
     }
 
@@ -3187,15 +3257,45 @@ mod tests {
         gpui::WindowHandle<gpui_component::Root>,
         gpui::Entity<super::TimelineView>,
     ) {
-        window_with(cx, smoke_paths(), Startup::Fixture(Box::new(fixture)))
+        window_with(
+            cx,
+            smoke_config(),
+            smoke_paths(),
+            Startup::Fixture(Box::new(fixture)),
+        )
     }
 
-    /// A window started `startup` against `paths`, and the view inside it —
-    /// what [`fixture_window`] is, minus the two things a live window
-    /// wants to choose (#164's `a_switch_is_remembered_on_disk_at_once`
-    /// starts live under its own directory so nothing else writes there).
+    /// [`fixture_window`] with stick-to-top follow switched on (#22) —
+    /// the one knob whose real default the follow tests need at
+    /// construction time, since `show_fixture` reads it to decide whether
+    /// the held-back posts wait behind the pill or arrive by themselves.
+    fn following_fixture_window(
+        cx: &mut gpui::TestAppContext,
+        fixture: Fixture,
+    ) -> (
+        gpui::WindowHandle<gpui_component::Root>,
+        gpui::Entity<super::TimelineView>,
+    ) {
+        let config = crate::config::Config {
+            follow_new_posts: true,
+            ..smoke_config()
+        };
+        window_with(
+            cx,
+            config,
+            smoke_paths(),
+            Startup::Fixture(Box::new(fixture)),
+        )
+    }
+
+    /// A window started `startup` against `config` and `paths`, and the
+    /// view inside it — what [`fixture_window`] is, minus the things a
+    /// caller wants to choose (#164's `a_switch_is_remembered_on_disk_at_once`
+    /// starts live under its own directory so nothing else writes there;
+    /// #22's follow tests start with the switch on).
     fn window_with(
         cx: &mut gpui::TestAppContext,
+        config: crate::config::Config,
         paths: crate::paths::Paths,
         startup: Startup,
     ) -> (
@@ -3211,8 +3311,8 @@ mod tests {
         let window = {
             let slot = slot.clone();
             cx.add_window(move |window, cx| {
-                let timeline = cx
-                    .new(|cx| super::TimelineView::new(smoke_config(), paths, startup, window, cx));
+                let timeline =
+                    cx.new(|cx| super::TimelineView::new(config, paths, startup, window, cx));
                 *slot.borrow_mut() = Some(timeline.clone());
                 gpui_component::Root::new(timeline, window, cx)
             })
@@ -3393,6 +3493,211 @@ mod tests {
                     view.pending.as_ref().map(|pending| pending.count),
                     Some(2),
                     "a click outside the bar must leave the offer standing"
+                );
+            });
+        });
+    }
+
+    /// #22: a poll that finds the reader at the top flows straight on —
+    /// no pill, no press. An undrawn window reads as "at the top"
+    /// (`logical_scroll_top` answers `(0, 0px)` before any layout), which
+    /// is also what a freshly opened window is.
+    #[gpui::test]
+    fn a_poll_flows_onto_the_screen_when_the_reader_is_at_the_top(cx: &mut gpui::TestAppContext) {
+        let (_window, timeline) = fixture_window(cx, fixture_with(&["2", "1"], &[]));
+
+        cx.update(|cx| {
+            timeline.update(cx, |view, cx| {
+                view.follow = super::FollowMode::Follow;
+                let pending = pending_after_poll(
+                    &["2", "1"],
+                    ["4", "3", "2", "1"]
+                        .map(|id| item_with(id, "someone", None))
+                        .to_vec(),
+                )
+                .expect("two posts arrived");
+                view.present_poll(pending, cx);
+
+                assert_eq!(shown_ids(view), ["4", "3", "2", "1"]);
+                assert!(
+                    view.pending.is_none(),
+                    "followed posts are on screen — a pill would offer them twice"
+                );
+                assert!(view.glide.is_some(), "the reveal is the glide's to make");
+            });
+        });
+    }
+
+    /// #22: following onto a screen with nothing on it — an empty List,
+    /// a fresh install — arrives at the top without arming a glide. There
+    /// is no row to keep in place, so the compensation would name an
+    /// index past the end of the list; gpui retains an unresolvable
+    /// anchor and retries it every prepaint, so a later "Load older"
+    /// growing the list past that index would jump the viewport under
+    /// the reader for no visible reason.
+    #[gpui::test]
+    fn following_onto_an_empty_timeline_snaps_without_a_glide(cx: &mut gpui::TestAppContext) {
+        let (_window, timeline) = fixture_window(cx, fixture_with(&[], &[]));
+
+        cx.update(|cx| {
+            timeline.update(cx, |view, cx| {
+                view.follow = super::FollowMode::Follow;
+                let pending = pending_after_poll(
+                    &[],
+                    ["2", "1"].map(|id| item_with(id, "someone", None)).to_vec(),
+                )
+                .expect("two posts arrived");
+                view.present_poll(pending, cx);
+
+                assert_eq!(shown_ids(view), ["2", "1"]);
+                assert!(view.pending.is_none());
+                assert!(
+                    view.glide.is_none(),
+                    "with no row to keep in place there is nothing to glide from"
+                );
+            });
+        });
+    }
+
+    /// #22: the switch off means every poll waits behind the pill,
+    /// whatever the scroll position.
+    #[gpui::test]
+    fn a_poll_waits_behind_the_pill_when_follow_is_off(cx: &mut gpui::TestAppContext) {
+        let (_window, timeline) = fixture_window(cx, fixture_with(&["2", "1"], &[]));
+
+        cx.update(|cx| {
+            timeline.update(cx, |view, cx| {
+                view.follow = super::FollowMode::Pill;
+                let pending = pending_after_poll(
+                    &["2", "1"],
+                    ["4", "3", "2", "1"]
+                        .map(|id| item_with(id, "someone", None))
+                        .to_vec(),
+                )
+                .expect("two posts arrived");
+                view.present_poll(pending, cx);
+
+                assert_eq!(shown_ids(view), ["2", "1"]);
+                assert_eq!(view.pending.as_ref().map(|pending| pending.count), Some(2));
+                assert!(view.glide.is_none(), "nothing moved, so nothing glides");
+            });
+        });
+    }
+
+    /// #22: a reader partway down keeps their place — follow yields to the
+    /// pill, which is `preserved_scroll_target`'s rule seen from above.
+    #[gpui::test]
+    fn a_poll_waits_behind_the_pill_when_the_reader_is_scrolled_down(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (window, timeline) = fixture_window(cx, fixture_with(&["2", "1"], &[]));
+
+        // A real frame, so `logical_scroll_top` has row bounds to answer
+        // from — an undrawn window cannot be anywhere but the top.
+        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        cx.update(|cx| {
+            timeline.update(cx, |view, cx| {
+                let first_row = view
+                    .list_scroll
+                    .bounds_for_item(0)
+                    .expect("the frame above laid the rows out");
+                view.list_scroll.set_offset(gpui::point(
+                    gpui::px(0.),
+                    gpui::px(-f32::from(first_row.size.height)),
+                ));
+
+                view.follow = super::FollowMode::Follow;
+                let pending = pending_after_poll(
+                    &["2", "1"],
+                    ["4", "3", "2", "1"]
+                        .map(|id| item_with(id, "someone", None))
+                        .to_vec(),
+                )
+                .expect("two posts arrived");
+                view.present_poll(pending, cx);
+
+                assert_eq!(
+                    shown_ids(view),
+                    ["2", "1"],
+                    "a reader mid-timeline must not have the screen replaced under them"
+                );
+                assert_eq!(view.pending.as_ref().map(|pending| pending.count), Some(2));
+            });
+        });
+    }
+
+    /// #22: with follow on, a fixture's held-back posts arrive by
+    /// themselves a few seconds in — the simulation of the poll that
+    /// would have brought them, so the flow can be watched by hand
+    /// (`cargo run -- --fixture fixtures/timeline.json`) without a paid
+    /// request.
+    #[gpui::test]
+    fn a_fixtures_waiting_posts_arrive_by_themselves_when_follow_is_on(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (_window, timeline) =
+            following_fixture_window(cx, fixture_with(&["2", "1"], &["4", "3"]));
+
+        cx.update(|cx| {
+            timeline.update(cx, |view, _cx| {
+                assert_eq!(
+                    shown_ids(view),
+                    ["2", "1"],
+                    "nothing arrives before the delay — the arrival is the point"
+                );
+                assert!(
+                    view.pending.is_none(),
+                    "the poll is simulated, not pre-filled into the pill's buffer"
+                );
+            });
+        });
+
+        cx.executor().advance_clock(std::time::Duration::from_secs(
+            super::TimelineView::FIXTURE_ARRIVAL_SECONDS + 1,
+        ));
+        cx.run_until_parked();
+
+        cx.update(|cx| {
+            timeline.update(cx, |view, _cx| {
+                assert_eq!(shown_ids(view), ["4", "3", "2", "1"]);
+                assert!(
+                    view.pending.is_none(),
+                    "at the top with follow on, nothing waits behind a pill"
+                );
+            });
+        });
+    }
+
+    /// #22: the View menu's toggle flips follow and says which way it
+    /// now points — the menu bar cannot show a checkmark, so the banner
+    /// is the only place the new state is visible.
+    #[gpui::test]
+    fn toggling_follow_flips_the_switch_and_reports_itself(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext as _;
+
+        let (window, timeline) = fixture_window(cx, fixture_with(&["2", "1"], &[]));
+
+        cx.update_window(window.into(), |_, window, cx| {
+            let _ = window.draw(cx);
+            window.dispatch_action(Box::new(crate::menu::ToggleFollowNewPosts), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+
+        cx.update(|cx| {
+            timeline.update(cx, |view, _cx| {
+                assert!(
+                    view.follow.is_following(),
+                    "the test config starts with follow off, so one toggle turns it on"
+                );
+                assert!(
+                    matches!(view.reload_notice, Some(ReloadNotice::Outcome(_))),
+                    "the flip must say which way it went, got {:?}",
+                    view.reload_notice
                 );
             });
         });
@@ -3821,7 +4126,7 @@ mod tests {
         // No token under this HOME, so startup settles at
         // `NotAuthenticated` with no client — past the startup gate, and
         // still unable to spend anything on the cache miss that follows.
-        let (window, timeline) = window_with(cx, paths.clone(), Startup::Live);
+        let (window, timeline) = window_with(cx, smoke_config(), paths.clone(), Startup::Live);
         let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
         visual.update(|window, cx| {
             let _ = window.draw(cx);
@@ -3950,6 +4255,8 @@ mod tests {
             // Off for the same reason (#21).
             auto_refresh: false,
             auto_refresh_interval_seconds: 300,
+            // Off for `smoke_config`'s reason (#22).
+            follow_new_posts: false,
         };
 
         cx.update(gpui_component::init);

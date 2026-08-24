@@ -297,6 +297,7 @@ mod tests {
             sync_writes_per_minute: 2,
             auto_refresh: false,
             auto_refresh_interval_seconds: 300,
+            follow_new_posts: false,
         }
     }
 
