@@ -95,6 +95,34 @@ pub(crate) fn decision(state: RateLimitState, now: i64) -> Result<(), RateLimite
     }
 }
 
+/// How long to wait after a 429 that the tracked window cannot explain,
+/// when its `x-rate-limit-reset` header cannot be trusted — see
+/// [`rate_limited_until`]. 15 minutes: X's per-endpoint windows run on
+/// that period, so it is long enough not to re-poke a hidden cap every
+/// few seconds and short enough that a genuine window has reopened by the
+/// time it elapses.
+pub(crate) const OPAQUE_LIMIT_BACKOFF_SECONDS: i64 = 900;
+
+/// When a 429 says the caller may retry, in unix seconds.
+///
+/// The header `x-rate-limit-reset` is only the honest answer when the
+/// window it describes is the one that refused the request — that is, when
+/// `remaining` is zero. A 429 that arrives with headroom left
+/// (`remaining > 0`) was refused by a limit X does not expose in these
+/// headers (measured: `POST /2/lists/:id/members` returns 429 with
+/// `remaining` 299 of 300 while a stricter write cap does the refusing).
+/// Its reset belongs to the untouched window and may be seconds away or
+/// already in the past, so trusting it makes the caller re-poke the hidden
+/// cap almost immediately. In every case but a genuinely exhausted window
+/// with a future reset, fall back to a fixed conservative backoff from
+/// `now` — an honest "try again later", not a countdown to the wrong clock.
+pub(crate) fn rate_limited_until(state: RateLimitState, now: i64) -> i64 {
+    match (state.remaining, state.reset_at) {
+        (Some(0), Some(reset_at)) if reset_at > now => reset_at,
+        _ => now.saturating_add(OPAQUE_LIMIT_BACKOFF_SECONDS),
+    }
+}
+
 /// The two distinct kinds of HTTP 429 X can return (#10). A type, not a
 /// string comparison at the call site — `x_api::client::check_status`
 /// matches on this instead of grepping the response body itself.
@@ -491,6 +519,76 @@ mod tests {
             reset_at: None,
         };
         assert!(decision(state, 0).is_ok());
+    }
+
+    // --- rate_limited_until ---
+
+    #[test]
+    fn an_exhausted_window_is_trusted_to_reset_when_its_header_says() {
+        // remaining 0 means this window really is the one that refused the
+        // request, so its own reset is the honest answer.
+        let state = RateLimitState {
+            limit: Some(300),
+            remaining: Some(0),
+            reset_at: Some(5_000),
+        };
+        assert_eq!(rate_limited_until(state, 1_000), 5_000);
+    }
+
+    #[test]
+    fn a_429_with_headroom_left_ignores_the_window_reset() {
+        // The measured failure (POST /2/lists/:id/members, 2026-08-24): X
+        // returned 429 with remaining 299 of 300 and a reset ~14 minutes
+        // out belonging to that untouched window. Trusting it would have
+        // the caller wait on the wrong clock; the conservative floor is
+        // used instead.
+        let state = RateLimitState {
+            limit: Some(300),
+            remaining: Some(299),
+            reset_at: Some(1_014),
+        };
+        assert_eq!(
+            rate_limited_until(state, 1_000),
+            1_000 + OPAQUE_LIMIT_BACKOFF_SECONDS
+        );
+    }
+
+    #[test]
+    fn a_429_whose_window_reset_is_already_past_uses_the_floor() {
+        // The other measured sample: the reset header was ~now. Honoring it
+        // would re-poke the hidden cap within seconds.
+        let state = RateLimitState {
+            limit: Some(300),
+            remaining: Some(299),
+            reset_at: Some(999),
+        };
+        assert_eq!(
+            rate_limited_until(state, 1_000),
+            1_000 + OPAQUE_LIMIT_BACKOFF_SECONDS
+        );
+    }
+
+    #[test]
+    fn an_exhausted_window_whose_reset_already_passed_uses_the_floor() {
+        // remaining 0 but the reset is behind us, yet X still 429'd — the
+        // header is stale, so fall back rather than retry immediately.
+        let state = RateLimitState {
+            limit: Some(300),
+            remaining: Some(0),
+            reset_at: Some(999),
+        };
+        assert_eq!(
+            rate_limited_until(state, 1_000),
+            1_000 + OPAQUE_LIMIT_BACKOFF_SECONDS
+        );
+    }
+
+    #[test]
+    fn a_429_with_no_headers_at_all_uses_the_floor() {
+        assert_eq!(
+            rate_limited_until(RateLimitState::default(), 1_000),
+            1_000 + OPAQUE_LIMIT_BACKOFF_SECONDS
+        );
     }
 
     // --- classify_429 ---
