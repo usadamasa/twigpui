@@ -188,7 +188,7 @@ const DEFAULT_SYNC_WRITES_PER_MINUTE: u8 = 2;
 /// with the key named, not a burst.
 const MAX_SYNC_WRITES_PER_MINUTE: u8 = 20;
 
-/// 5 minutes between auto-refresh polls (#21).
+/// 3 minutes between auto-refresh polls (#21).
 ///
 /// Chosen from what a poll actually bills rather than from how fresh a
 /// timeline could theoretically be. A poll re-reads the head page —
@@ -200,9 +200,12 @@ const MAX_SYNC_WRITES_PER_MINUTE: u8 = 20;
 /// after each UTC midnight, bounded by `max_results`.
 ///
 /// That makes the interval a responsiveness knob rather than a spending
-/// one, and five minutes is the point where a timeline feels live without
-/// the window sending a request every time someone glances at it.
-const DEFAULT_AUTO_REFRESH_INTERVAL_SECONDS: u32 = 300;
+/// one. It started at 5 minutes; #22's stick-to-top follow made the
+/// timeline something watched rather than glanced at, and 3 minutes is
+/// where the flow feels alive without the window sending a request every
+/// time someone looks over. What tightening it does spend is requests —
+/// 480 a day at this cadence, up from 288 — not resources.
+const DEFAULT_AUTO_REFRESH_INTERVAL_SECONDS: u32 = 180;
 
 /// The file-level settings loaded from `config.toml`.
 ///

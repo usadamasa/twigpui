@@ -131,7 +131,7 @@ pub(super) struct Pending {
 ///
 /// `None` means the poll found nothing new, which is the ordinary outcome
 /// and must leave the screen completely untouched: no pill, no banner, no
-/// scroll. A poll that reports "no new posts" every five minutes is noise
+/// scroll. A poll that reports "no new posts" every few minutes is noise
 /// the reader did not ask for, unlike a reload they pressed themselves
 /// (#141), which says so precisely because they are waiting to hear.
 ///
@@ -368,7 +368,7 @@ impl TimelineView {
     ///
     /// A failed poll does even less: it is logged and dropped. The reload
     /// path raises a banner because someone is waiting to hear the answer;
-    /// nobody is waiting on this one, and a network blip five minutes ago
+    /// nobody is waiting on this one, and a network blip minutes ago
     /// is not worth a red line over a timeline that is fine. `usage` is
     /// still refreshed either way — the request was sent and billed
     /// whether or not it parsed.

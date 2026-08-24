@@ -129,21 +129,30 @@ each time.
 | `X_SYNC_PRUNE_LIMIT_PERCENT` | no | `10` | The most of the list's membership the background sync may remove per diff, in percent. Over it, the removals are held for `--sync-list --apply --prune` to confirm; `100` turns the cap off — also `sync_prune_limit_percent` in `config.toml` (#176) |
 | `X_SYNC_WRITES_PER_MINUTE` | no | `2` | How many list writes the background sync sends per minute during a catch-up (#197). `1`–`20`; the ceiling is X's documented write window (300 per 15 min) spread evenly. Raise it only after a run at the default has shown no refusals — also `sync_writes_per_minute` in `config.toml` |
 | `X_AUTO_REFRESH` | no | `true` | Poll the timeline for new posts while the window is open — also `auto_refresh` in `config.toml` (#21). `false` and the app sends nothing you did not click |
-| `X_AUTO_REFRESH_INTERVAL_SECONDS` | no | `300` (5m) | How long auto-refresh waits between polls. Values below `X_MIN_FETCH_INTERVAL_SECONDS` are rejected — also `auto_refresh_interval_seconds` in `config.toml` |
+| `X_AUTO_REFRESH_INTERVAL_SECONDS` | no | `180` (3m) | How long auto-refresh waits between polls. Values below `X_MIN_FETCH_INTERVAL_SECONDS` are rejected — also `auto_refresh_interval_seconds` in `config.toml` |
+| `X_FOLLOW_NEW_POSTS` | no | `true` | Let a poll's new posts flow onto the screen by themselves when you are at the top (#22) — also `follow_new_posts` in `config.toml`. Presentation only: it never changes what is fetched or when. Toggle at runtime with View → Follow New Posts (`⌘⇧F`) |
 
 `.env` is gitignored. Do not commit credentials.
 
 ### Auto-refresh
 
-The window polls its timeline every five minutes and, when a poll brings
-posts you have not seen, offers them as an **"↑ N new posts"** bar between
-the toolbar and the list. Nothing moves until you press it — not the list,
-not your scroll position. Pressing it (or `⌘⇧R`, or View → Show New Posts)
-shows them and jumps to the top.
+The window polls its timeline every three minutes. What a poll's new posts
+do next depends on where you are (#22):
 
-That is the deliberate half of the design. A fetch you did not ask for must
+- **At the top** — they flow straight on, gliding down into view, so a
+  window left open keeps moving on its own. Toggle this with
+  View → Follow New Posts (`⌘⇧F`); the glide stops the moment you touch
+  the wheel.
+- **Reading further down** (or with follow off) — they wait behind an
+  **"↑ N new posts"** bar between the toolbar and the list. Nothing moves
+  until you press it — not the list, not your scroll position. Pressing it
+  (or `⌘⇧R`, or View → Show New Posts) shows them and jumps to the top.
+
+That second half is the deliberate one. A fetch you did not ask for must
 not slide the text you are reading down the screen, so a poll never touches
-what is displayed; it only fills a buffer the bar offers.
+a timeline mid-read; it only fills a buffer the bar offers. To watch the
+flow without spending anything, `cargo run -- --fixture fixtures/timeline.json`
+delivers the fixture's held-back posts five seconds in.
 
 **The cost is smaller than a five-minute timer sounds.** Reads are billed
 per post returned and deduplicated within a UTC day, so a day of polling
