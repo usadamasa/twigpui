@@ -76,7 +76,11 @@ src/paths.rs	400
 src/profile.rs	150
 # rate_limit.rs 350 -> 400: four `Endpoint` variants for #163's sync,
 # each with the doc explaining why it needs its own bucket.
-src/rate_limit.rs	400
+# 400 -> 450: `rate_limited_until` and its backoff constant — the pure seam
+# that stops a 429 from a limit X does not expose in its headers from being
+# retried against the wrong window's reset. Most of the added lines are the
+# doc carrying the measured `POST /2/lists/:id/members` behavior it fixes.
+src/rate_limit.rs	450
 src/repost.rs	150
 # sync/ is new in #163, split the way `cache` is: mod.rs holds the pure
 # diff, the plan file and the report (where the tests are), run.rs holds

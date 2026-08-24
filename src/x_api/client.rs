@@ -145,7 +145,12 @@ impl XClient {
                         continue;
                     }
 
-                    check_status(status, &body, state.reset_at)?;
+                    // Not `state.reset_at` directly: a 429 that came back
+                    // with the window still un-exhausted was refused by a
+                    // limit X does not expose here, so its reset header
+                    // belongs to the wrong bucket. See
+                    // `rate_limit::rate_limited_until`.
+                    check_status(status, &body, rate_limit::rate_limited_until(state, now))?;
                     return Ok(body);
                 }
                 Err(error) => {
@@ -1038,14 +1043,17 @@ fn describe_problem(body: &str) -> Option<String> {
 
 /// Validate a response status, translating a non-2xx into an error.
 ///
-/// `reset_at`, when known, is the endpoint's own `x-rate-limit-reset` from
-/// this same response — used to fill in [`rate_limit::RateLimited`]'s reset
-/// time on an ordinary 429. 401/403/404/other statuses keep the plain-text
-/// `anyhow` errors this crate already used before #10; only 429 changed, per
-/// #10's design: the two kinds of 429 become distinct types
+/// `retry_after` is when an ordinary 429 says the caller may try again, in
+/// unix seconds — already reconciled against the window state by
+/// [`rate_limit::rate_limited_until`], not the raw `x-rate-limit-reset`
+/// header, so a 429 from a limit these headers do not describe carries a
+/// conservative backoff rather than the wrong window's clock. Ignored for
+/// every status but an ordinary 429. 401/403/404/other statuses keep the
+/// plain-text `anyhow` errors this crate already used before #10; only 429
+/// changed, per #10's design: the two kinds of 429 become distinct types
 /// ([`rate_limit::UsageCapExceeded`], [`rate_limit::RateLimited`]) via
 /// [`rate_limit::classify_429`], rather than a string comparison here.
-fn check_status(status: u16, body: &str, reset_at: Option<i64>) -> Result<()> {
+fn check_status(status: u16, body: &str, retry_after: i64) -> Result<()> {
     if (200..300).contains(&status) {
         return Ok(());
     }
@@ -1067,9 +1075,10 @@ fn check_status(status: u16, body: &str, reset_at: Option<i64>) -> Result<()> {
             rate_limit::RateLimitKind::UsageCapExceeded => {
                 Err(rate_limit::UsageCapExceeded { detail }.into())
             }
-            rate_limit::RateLimitKind::RateLimited => {
-                Err(rate_limit::RateLimited { reset_at }.into())
+            rate_limit::RateLimitKind::RateLimited => Err(rate_limit::RateLimited {
+                reset_at: Some(retry_after),
             }
+            .into()),
         },
         _ => bail!("HTTP {status} — {detail}"),
     }
@@ -1081,8 +1090,8 @@ mod tests {
 
     #[test]
     fn accepts_success_statuses() {
-        assert!(check_status(200, "{}", None).is_ok());
-        assert!(check_status(299, "", None).is_ok());
+        assert!(check_status(200, "{}", 0).is_ok());
+        assert!(check_status(299, "", 0).is_ok());
     }
 
     #[test]
@@ -1472,7 +1481,7 @@ mod tests {
     fn explains_an_exhausted_credit_cap() {
         let body =
             r#"{"title":"UsageCapExceeded","detail":"Usage cap exceeded: Monthly product cap"}"#;
-        let error = check_status(429, body, None).unwrap_err().to_string();
+        let error = check_status(429, body, 0).unwrap_err().to_string();
         assert!(error.contains("429"), "{error}");
         assert!(error.contains("Usage cap exceeded"), "{error}");
     }
@@ -1484,7 +1493,7 @@ mod tests {
         // match on it instead of grepping the message.
         let body =
             r#"{"title":"UsageCapExceeded","detail":"Usage cap exceeded: Monthly product cap"}"#;
-        let error = check_status(429, body, Some(1_700_000_000)).unwrap_err();
+        let error = check_status(429, body, 1_700_000_000).unwrap_err();
         let typed = error
             .downcast_ref::<rate_limit::UsageCapExceeded>()
             .unwrap();
@@ -1492,24 +1501,19 @@ mod tests {
     }
 
     #[test]
-    fn an_ordinary_rate_limit_429_downcasts_to_the_typed_error_carrying_the_reset_time() {
+    fn an_ordinary_rate_limit_429_downcasts_to_the_typed_error_carrying_the_retry_time() {
+        // `check_status` carries whatever retry time it is handed — the
+        // reconciliation of that value against the window state lives in
+        // `rate_limit::rate_limited_until`, tested there.
         let body = r#"{"title":"TooManyRequests","detail":"Rate limit exceeded"}"#;
-        let error = check_status(429, body, Some(1_700_000_000)).unwrap_err();
+        let error = check_status(429, body, 1_700_000_000).unwrap_err();
         let typed = error.downcast_ref::<rate_limit::RateLimited>().unwrap();
         assert_eq!(typed.reset_at, Some(1_700_000_000));
     }
 
     #[test]
-    fn an_ordinary_rate_limit_429_with_no_reset_header_still_downcasts_cleanly() {
-        let body = r#"{"title":"TooManyRequests","detail":"Rate limit exceeded"}"#;
-        let error = check_status(429, body, None).unwrap_err();
-        let typed = error.downcast_ref::<rate_limit::RateLimited>().unwrap();
-        assert_eq!(typed.reset_at, None);
-    }
-
-    #[test]
     fn explains_a_rejected_token() {
-        let error = check_status(401, r#"{"title":"Unauthorized"}"#, None)
+        let error = check_status(401, r#"{"title":"Unauthorized"}"#, 0)
             .unwrap_err()
             .to_string();
         assert!(error.contains("bearer token was rejected"), "{error}");
@@ -1517,7 +1521,7 @@ mod tests {
 
     #[test]
     fn falls_back_to_the_raw_body_when_it_is_not_json() {
-        let error = check_status(503, "upstream unavailable", None)
+        let error = check_status(503, "upstream unavailable", 0)
             .unwrap_err()
             .to_string();
         assert!(error.contains("upstream unavailable"), "{error}");
@@ -1525,7 +1529,7 @@ mod tests {
 
     #[test]
     fn reports_an_empty_body_rather_than_nothing() {
-        let error = check_status(500, "", None).unwrap_err().to_string();
+        let error = check_status(500, "", 0).unwrap_err().to_string();
         assert!(error.contains("empty response body"), "{error}");
     }
 
