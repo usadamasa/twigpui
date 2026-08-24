@@ -44,6 +44,7 @@ pub(super) fn reload_notice_for_error(error: &anyhow::Error) -> ReloadNotice {
     match error.downcast_ref::<rate_limit::RateLimited>() {
         Some(rate_limit::RateLimited {
             reset_at: Some(reset_at),
+            ..
         }) => ReloadNotice::Cooldown {
             reset_at: *reset_at,
             cooldown: Cooldown::ApiRateLimit,

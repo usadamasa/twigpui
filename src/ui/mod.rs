@@ -2690,6 +2690,7 @@ mod tests {
         let items = vec![item_with("1", "alice", None)];
         let error: anyhow::Error = rate_limit::RateLimited {
             reset_at: Some(1_500),
+            opaque: false,
         }
         .into();
         let (state, notice) = reload_failure_outcome(TimelineState::Loaded(items.clone()), &error);
@@ -2720,6 +2721,7 @@ mod tests {
     fn reload_failure_outcome_falls_back_to_rate_limited_state_when_nothing_was_shown() {
         let error: anyhow::Error = rate_limit::RateLimited {
             reset_at: Some(1_500),
+            opaque: false,
         }
         .into();
         let (state, notice) = reload_failure_outcome(TimelineState::NotAuthenticated, &error);

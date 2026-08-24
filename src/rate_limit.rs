@@ -68,6 +68,13 @@ pub(crate) struct RateLimited {
     /// `x-rate-limit-reset` — [`decision`] itself only ever refuses with a
     /// known reset time, since that's part of its trigger condition.
     pub reset_at: Option<i64>,
+    /// Whether the refusal came from a cap the `x-rate-limit-*` headers do
+    /// not describe (#197) — see [`Refusal::Opaque`]. `false` for a
+    /// refusal the tracked window explains, including [`decision`]'s own
+    /// pre-send one. The distinction is the caller's to act on: a window
+    /// reopens when its header says, whereas an opaque cap has to be
+    /// backed away from, further each time it refuses.
+    pub opaque: bool,
 }
 
 impl std::fmt::Display for RateLimited {
@@ -90,6 +97,7 @@ pub(crate) fn decision(state: RateLimitState, now: i64) -> Result<(), RateLimite
     match (state.remaining, state.reset_at) {
         (Some(0), Some(reset_at)) if reset_at > now => Err(RateLimited {
             reset_at: Some(reset_at),
+            opaque: false,
         }),
         _ => Ok(()),
     }
@@ -97,29 +105,62 @@ pub(crate) fn decision(state: RateLimitState, now: i64) -> Result<(), RateLimite
 
 /// How long to wait after a 429 that the tracked window cannot explain,
 /// when its `x-rate-limit-reset` header cannot be trusted — see
-/// [`rate_limited_until`]. 15 minutes: X's per-endpoint windows run on
+/// [`Refusal::Opaque`]. 15 minutes: X's per-endpoint windows run on
 /// that period, so it is long enough not to re-poke a hidden cap every
 /// few seconds and short enough that a genuine window has reopened by the
-/// time it elapses.
+/// time it elapses. This is the *first* wait; a caller refused again is
+/// expected to wait longer (`sync::state::opaque_backoff_seconds`).
 pub(crate) const OPAQUE_LIMIT_BACKOFF_SECONDS: i64 = 900;
 
-/// When a 429 says the caller may retry, in unix seconds.
+/// Which limit a 429 came from, as far as its headers can say.
 ///
 /// The header `x-rate-limit-reset` is only the honest answer when the
 /// window it describes is the one that refused the request — that is, when
 /// `remaining` is zero. A 429 that arrives with headroom left
 /// (`remaining > 0`) was refused by a limit X does not expose in these
 /// headers (measured: `POST /2/lists/:id/members` returns 429 with
-/// `remaining` 299 of 300 while a stricter write cap does the refusing).
-/// Its reset belongs to the untouched window and may be seconds away or
-/// already in the past, so trusting it makes the caller re-poke the hidden
-/// cap almost immediately. In every case but a genuinely exhausted window
-/// with a future reset, fall back to a fixed conservative backoff from
-/// `now` — an honest "try again later", not a countdown to the wrong clock.
-pub(crate) fn rate_limited_until(state: RateLimitState, now: i64) -> i64 {
-    match (state.remaining, state.reset_at) {
-        (Some(0), Some(reset_at)) if reset_at > now => reset_at,
-        _ => now.saturating_add(OPAQUE_LIMIT_BACKOFF_SECONDS),
+/// `remaining` 299 of 300 while a stricter write cap does the refusing —
+/// and kept doing so for over twenty hours, #197). Its reset belongs to the
+/// untouched window and may be seconds away or already in the past, so
+/// trusting it makes the caller re-poke the hidden cap almost immediately.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Refusal {
+    /// The tracked window is exhausted and says when it reopens.
+    Window { reset_at: i64 },
+    /// A cap the headers do not describe. When it lifts is unknown; the
+    /// only honest answer is a conservative backoff from now, and a caller
+    /// that is refused again should back off further (`sync::state`).
+    Opaque,
+}
+
+impl Refusal {
+    /// Read a 429's window state into which limit refused it. Everything
+    /// but a genuinely exhausted window with a future reset is opaque —
+    /// including a reset already in the past, which is a stale header,
+    /// and no headers at all.
+    pub(crate) fn classify(state: RateLimitState, now: i64) -> Self {
+        match (state.remaining, state.reset_at) {
+            (Some(0), Some(reset_at)) if reset_at > now => Self::Window { reset_at },
+            _ => Self::Opaque,
+        }
+    }
+
+    /// When the caller may retry, in unix seconds: the window's own reset,
+    /// or [`OPAQUE_LIMIT_BACKOFF_SECONDS`] from `now` — an honest "try
+    /// again later", not a countdown to the wrong clock.
+    pub(crate) fn retry_at(self, now: i64) -> i64 {
+        match self {
+            Self::Window { reset_at } => reset_at,
+            Self::Opaque => now.saturating_add(OPAQUE_LIMIT_BACKOFF_SECONDS),
+        }
+    }
+
+    /// The typed error a 429 refused by this limit becomes.
+    pub(crate) fn into_error(self, now: i64) -> RateLimited {
+        RateLimited {
+            reset_at: Some(self.retry_at(now)),
+            opaque: matches!(self, Self::Opaque),
+        }
     }
 }
 
@@ -521,7 +562,7 @@ mod tests {
         assert!(decision(state, 0).is_ok());
     }
 
-    // --- rate_limited_until ---
+    // --- Refusal ---
 
     #[test]
     fn an_exhausted_window_is_trusted_to_reset_when_its_header_says() {
@@ -532,7 +573,9 @@ mod tests {
             remaining: Some(0),
             reset_at: Some(5_000),
         };
-        assert_eq!(rate_limited_until(state, 1_000), 5_000);
+        let refusal = Refusal::classify(state, 1_000);
+        assert_eq!(refusal, Refusal::Window { reset_at: 5_000 });
+        assert_eq!(refusal.retry_at(1_000), 5_000);
     }
 
     #[test]
@@ -547,14 +590,16 @@ mod tests {
             remaining: Some(299),
             reset_at: Some(1_014),
         };
+        let refusal = Refusal::classify(state, 1_000);
+        assert_eq!(refusal, Refusal::Opaque);
         assert_eq!(
-            rate_limited_until(state, 1_000),
+            refusal.retry_at(1_000),
             1_000 + OPAQUE_LIMIT_BACKOFF_SECONDS
         );
     }
 
     #[test]
-    fn a_429_whose_window_reset_is_already_past_uses_the_floor() {
+    fn a_429_whose_window_reset_is_already_past_is_opaque() {
         // The other measured sample: the reset header was ~now. Honoring it
         // would re-poke the hidden cap within seconds.
         let state = RateLimitState {
@@ -562,14 +607,11 @@ mod tests {
             remaining: Some(299),
             reset_at: Some(999),
         };
-        assert_eq!(
-            rate_limited_until(state, 1_000),
-            1_000 + OPAQUE_LIMIT_BACKOFF_SECONDS
-        );
+        assert_eq!(Refusal::classify(state, 1_000), Refusal::Opaque);
     }
 
     #[test]
-    fn an_exhausted_window_whose_reset_already_passed_uses_the_floor() {
+    fn an_exhausted_window_whose_reset_already_passed_is_opaque() {
         // remaining 0 but the reset is behind us, yet X still 429'd — the
         // header is stale, so fall back rather than retry immediately.
         let state = RateLimitState {
@@ -577,18 +619,50 @@ mod tests {
             remaining: Some(0),
             reset_at: Some(999),
         };
+        assert_eq!(Refusal::classify(state, 1_000), Refusal::Opaque);
+    }
+
+    #[test]
+    fn a_429_with_no_headers_at_all_is_opaque() {
+        let refusal = Refusal::classify(RateLimitState::default(), 1_000);
+        assert_eq!(refusal, Refusal::Opaque);
         assert_eq!(
-            rate_limited_until(state, 1_000),
+            refusal.retry_at(1_000),
             1_000 + OPAQUE_LIMIT_BACKOFF_SECONDS
         );
     }
 
     #[test]
-    fn a_429_with_no_headers_at_all_uses_the_floor() {
+    fn the_error_a_refusal_becomes_says_which_kind_it_was() {
+        // The whole reason the field exists (#197): the sync backs away
+        // from an opaque cap further each time, and must not do that to a
+        // window that reopens on schedule.
         assert_eq!(
-            rate_limited_until(RateLimitState::default(), 1_000),
-            1_000 + OPAQUE_LIMIT_BACKOFF_SECONDS
+            Refusal::Opaque.into_error(1_000),
+            RateLimited {
+                reset_at: Some(1_000 + OPAQUE_LIMIT_BACKOFF_SECONDS),
+                opaque: true,
+            }
         );
+        assert_eq!(
+            Refusal::Window { reset_at: 5_000 }.into_error(1_000),
+            RateLimited {
+                reset_at: Some(5_000),
+                opaque: false,
+            }
+        );
+    }
+
+    #[test]
+    fn a_pre_send_refusal_by_the_tracked_window_is_not_opaque() {
+        // `decision` refuses only on a window it can see, so nothing about
+        // that refusal is hidden.
+        let state = RateLimitState {
+            limit: Some(300),
+            remaining: Some(0),
+            reset_at: Some(5_000),
+        };
+        assert!(!decision(state, 1_000).unwrap_err().opaque);
     }
 
     // --- classify_429 ---

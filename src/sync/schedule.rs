@@ -37,9 +37,8 @@ pub(crate) struct Situation {
     /// they would pin [`next_step`] on `Apply` draining a plan it never
     /// finishes.
     pub pending: usize,
-    /// When the tracked rate-limit window for a write endpoint reopens,
-    /// from the [`crate::rate_limit::RateLimited`] that refused the last
-    /// send, or `None` if nothing is holding the loop back.
+    /// Until when nothing may be sent — [`super::state::SyncState::blocked_until`],
+    /// or `None` if nothing is holding the loop back.
     pub blocked_until: Option<i64>,
 }
 
@@ -110,54 +109,59 @@ pub(crate) enum Outcome {
         members_total: usize,
         held: bool,
     },
-    /// A batch of the plan's writes went out.
+    /// A batch of the plan's writes went out. `remaining` is what the loop
+    /// may still send — [`sendable`], so held removals are not counted.
     Applied { sent: usize, remaining: usize },
-    /// A write was refused by the tracked rate-limit window before it was
-    /// sent. Nothing was spent, and the plan on disk still records exactly
-    /// where the catch-up got to.
-    RateLimited { until: i64 },
+    /// A write was refused — by the tracked window before it was sent, or
+    /// by X with a 429. The plan on disk records exactly where the
+    /// catch-up got to: `sent` is how many of this batch landed before the
+    /// refusal, `remaining` what is still owed.
+    ///
+    /// `opaque` is the [`crate::rate_limit::RateLimited::opaque`] flag:
+    /// `true` for a cap the headers do not describe, which
+    /// [`super::state::settle`] backs away from further each time (#197).
+    /// `until` is only the answer for the other kind; for an opaque one it
+    /// is the client's first guess, and the state's streak decides.
+    RateLimited {
+        until: i64,
+        opaque: bool,
+        sent: usize,
+        remaining: usize,
+    },
 }
 
-/// When the loop should wake up next, and what it should carry forward
-/// about the rate limit.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Settled {
-    /// The soonest the next tick may run. The caller is free to wake
-    /// earlier and re-decide; it must not run a tick before this.
-    pub wake_at: i64,
-    /// What to pass back as [`Situation::blocked_until`].
-    pub blocked_until: Option<i64>,
-}
-
-/// Pace the loop from what the last tick did.
+/// What a batch of writes amounts to: the [`Outcome`] for the sends that
+/// went through and, if the batch stopped short, why.
 ///
-/// `outcome` is `None` when the tick failed outright. That earns a full
-/// interval rather than a quick retry, because the failures that reach here
-/// have already survived `rate_limit`'s own network retries — a revoked
-/// scope, a list that has been deleted, a plan file that will not parse —
-/// and none of them gets better by being asked again in a second.
+/// A rate limit is an outcome rather than an error whichever way it came
+/// — refused by the tracked window before sending, or by X with a 429 —
+/// because in both cases the plan on disk records everything that did
+/// land, and the only thing the loop has to do about it is wait. Every
+/// other failure propagates: carrying on past a revoked scope or a
+/// deleted list would keep spending writes against a credential or a
+/// list that has just proven it cannot take them.
 ///
-/// Everything that did some work comes straight back (`wake_at` is `now`).
-/// A diff has just written a plan that wants draining, and an apply batch
-/// is one of many. The caller's own floor is what keeps that from being a
-/// spin; this function's job is only to say there is more to do.
-pub(crate) fn settle(outcome: Option<&Outcome>, now: i64, interval_seconds: u32) -> Settled {
-    match outcome {
-        None => Settled {
-            wake_at: now.saturating_add(i64::from(interval_seconds)),
-            blocked_until: None,
-        },
-        Some(Outcome::Idle { until, .. }) => Settled {
-            wake_at: *until,
-            blocked_until: None,
-        },
-        Some(Outcome::RateLimited { until }) => Settled {
-            wake_at: *until,
-            blocked_until: Some(*until),
-        },
-        Some(Outcome::Diffed { .. } | Outcome::Applied { .. }) => Settled {
-            wake_at: now,
-            blocked_until: None,
+/// Pure apart from the downcast, which is why it is here rather than in
+/// `auto`: the mapping from "what the client said" to "what the loop
+/// remembers" is exactly the seam #198 lost information across.
+pub(crate) fn apply_outcome(
+    sent: usize,
+    remaining: usize,
+    result: anyhow::Result<()>,
+) -> anyhow::Result<Outcome> {
+    match result {
+        Ok(()) => Ok(Outcome::Applied { sent, remaining }),
+        Err(error) => match error.downcast_ref::<crate::rate_limit::RateLimited>() {
+            Some(crate::rate_limit::RateLimited {
+                reset_at: Some(until),
+                opaque,
+            }) => Ok(Outcome::RateLimited {
+                until: *until,
+                opaque: *opaque,
+                sent,
+                remaining,
+            }),
+            _ => Err(error),
         },
     }
 }
@@ -170,9 +174,10 @@ pub(crate) fn settle(outcome: Option<&Outcome>, now: i64, interval_seconds: u32)
 /// would turn a background feature into a stream of notifications about
 /// itself.
 ///
-/// A rate limit is logged rather than shown for a third reason: the loop
-/// re-reaches it on every tick until the window reopens, so a banner would
-/// come back however many times it was dismissed.
+/// A rate limit is logged rather than shown for a third reason: the status
+/// bar already carries it, with the streak and the countdown, for as long
+/// as it lasts — a banner would be the same news with a dismiss button
+/// that does nothing.
 pub(crate) fn notice(outcome: &Outcome) -> Option<String> {
     match outcome {
         // Shown once per diff, not once per apply tick: the loop
@@ -240,9 +245,9 @@ pub(crate) fn last_diff_for(forced: bool, recorded: Option<i64>) -> Option<i64> 
 /// a catch-up produces `Idle` with hundreds of writes still owed. That run
 /// has to keep waiting, not declare itself done.
 ///
-/// A failed tick (`None`) does not end the run either — [`settle`] has
-/// already given it a full interval to come back on, and the plan it was
-/// draining is still on disk.
+/// A failed tick (`None`) does not end the run either — [`super::state::settle`]
+/// has already given it a full interval to come back on, and the plan it
+/// was draining is still on disk.
 pub(crate) fn is_finished(outcome: Option<&Outcome>) -> bool {
     matches!(outcome, Some(Outcome::Idle { pending: 0, .. }))
 }
@@ -482,39 +487,75 @@ mod tests {
         assert_eq!(next_step(&situation, 1_000), Step::Diff);
     }
 
-    // --- settle ---
+    // --- apply_outcome ---
 
     #[test]
-    fn a_failed_tick_earns_a_full_interval_rather_than_a_retry() {
-        // Everything that reaches here has already survived `rate_limit`'s
-        // own network retries.
-        let settled = settle(None, 1_000, 21_600);
-        assert_eq!(settled.wake_at, 22_600);
-        assert_eq!(settled.blocked_until, None);
-    }
-
-    #[test]
-    fn a_rate_limit_is_both_the_deadline_and_the_thing_carried_forward() {
-        // Carried forward is what makes the *next* tick refuse to send
-        // before the window reopens, instead of finding out again the
-        // expensive way.
-        let settled = settle(Some(&Outcome::RateLimited { until: 5_000 }), 1_000, 21_600);
-        assert_eq!(settled.wake_at, 5_000);
-        assert_eq!(settled.blocked_until, Some(5_000));
-    }
-
-    #[test]
-    fn an_idle_tick_waits_out_the_deadline_it_was_handed() {
-        let settled = settle(
-            Some(&Outcome::Idle {
-                until: 9_000,
-                pending: 0,
-            }),
-            1_000,
-            21_600,
+    fn a_batch_that_finished_is_applied() {
+        assert_eq!(
+            apply_outcome(20, 400, Ok(())).unwrap(),
+            Outcome::Applied {
+                sent: 20,
+                remaining: 400
+            }
         );
-        assert_eq!(settled.wake_at, 9_000);
-        assert_eq!(settled.blocked_until, None);
+    }
+
+    #[test]
+    fn a_refusal_keeps_what_the_batch_sent_before_it() {
+        // The `sent` count is what lets the state tell "refused after
+        // three landed" from "refused again": the former restarts the
+        // streak.
+        let error: anyhow::Error = crate::rate_limit::RateLimited {
+            reset_at: Some(5_000),
+            opaque: true,
+        }
+        .into();
+        assert_eq!(
+            apply_outcome(3, 397, Err(error)).unwrap(),
+            Outcome::RateLimited {
+                until: 5_000,
+                opaque: true,
+                sent: 3,
+                remaining: 397,
+            }
+        );
+    }
+
+    #[test]
+    fn a_refusal_the_window_explains_carries_its_reset_and_is_not_opaque() {
+        let error: anyhow::Error = crate::rate_limit::RateLimited {
+            reset_at: Some(5_000),
+            opaque: false,
+        }
+        .into();
+        assert!(matches!(
+            apply_outcome(0, 400, Err(error)).unwrap(),
+            Outcome::RateLimited {
+                until: 5_000,
+                opaque: false,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn any_other_failure_propagates() {
+        // A revoked scope, a deleted list: not something to wait out.
+        let error = apply_outcome(0, 400, Err(anyhow::anyhow!("403 Forbidden"))).unwrap_err();
+        assert!(error.to_string().contains("403"), "{error}");
+    }
+
+    #[test]
+    fn a_rate_limit_with_no_reset_time_at_all_propagates() {
+        // Production always fills `reset_at` (`Refusal::into_error`); this
+        // is the shape a future client change could produce, and it is
+        // safer as a logged failure than as a wait until nothing.
+        let error: anyhow::Error = crate::rate_limit::RateLimited {
+            reset_at: None,
+            opaque: false,
+        }
+        .into();
+        assert!(apply_outcome(0, 1, Err(error)).is_err());
     }
 
     // --- #174: forcing a tick past the interval ---
@@ -607,7 +648,12 @@ mod tests {
 
     #[test]
     fn a_run_that_was_refused_by_the_rate_limit_is_not_finished() {
-        assert!(!is_finished(Some(&Outcome::RateLimited { until: 9_000 })));
+        assert!(!is_finished(Some(&Outcome::RateLimited {
+            until: 9_000,
+            opaque: true,
+            sent: 0,
+            remaining: 40,
+        })));
     }
 
     // `settle` has already handed a failed tick a full interval to come
@@ -615,48 +661,6 @@ mod tests {
     #[test]
     fn a_run_whose_tick_failed_is_not_finished() {
         assert!(!is_finished(None));
-    }
-
-    #[test]
-    fn a_diff_comes_straight_back_to_drain_what_it_found() {
-        let settled = settle(
-            Some(&Outcome::Diffed {
-                adds: 3,
-                removals: 1,
-                members_total: 100,
-                held: false,
-            }),
-            1_000,
-            21_600,
-        );
-        assert_eq!(settled.wake_at, 1_000);
-    }
-
-    #[test]
-    fn an_applied_batch_comes_straight_back_for_the_next_one() {
-        let settled = settle(
-            Some(&Outcome::Applied {
-                sent: 20,
-                remaining: 400,
-            }),
-            1_000,
-            21_600,
-        );
-        assert_eq!(settled.wake_at, 1_000);
-    }
-
-    #[test]
-    fn a_tick_that_did_work_clears_the_remembered_rate_limit() {
-        // It just sent something, so whatever window was closed is open.
-        let settled = settle(
-            Some(&Outcome::Applied {
-                sent: 1,
-                remaining: 0,
-            }),
-            1_000,
-            21_600,
-        );
-        assert_eq!(settled.blocked_until, None);
     }
 
     // --- notice ---
@@ -723,9 +727,9 @@ mod tests {
 
     #[test]
     fn neither_idling_nor_a_rate_limit_reaches_the_banner() {
-        // The rate limit especially: the loop re-reaches it on every tick
-        // until the window reopens, so a banner would come back however
-        // many times it was dismissed.
+        // The rate limit especially: the status bar carries it for as long
+        // as it lasts, so a banner would be the same news with a dismiss
+        // button that does nothing.
         assert_eq!(
             notice(&Outcome::Idle {
                 until: 9_000,
@@ -733,7 +737,15 @@ mod tests {
             }),
             None
         );
-        assert_eq!(notice(&Outcome::RateLimited { until: 9_000 }), None);
+        assert_eq!(
+            notice(&Outcome::RateLimited {
+                until: 9_000,
+                opaque: true,
+                sent: 0,
+                remaining: 40,
+            }),
+            None
+        );
     }
 
     // --- next_batch ---

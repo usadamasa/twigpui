@@ -9,7 +9,8 @@
 
 use anyhow::{Context as _, Result};
 
-use super::{Action, Plan, load_plan, plan, report, save_plan};
+use super::schedule::Outcome;
+use super::{Action, Plan, load_plan, load_state, plan, report, save_plan, save_state};
 use crate::cache;
 use crate::config::Config;
 use crate::oauth;
@@ -136,12 +137,22 @@ fn seed_users(paths: &Paths, client: &XClient, usernames: &[&str], now: i64) -> 
 /// proven it cannot take them.
 ///
 /// Not unit-tested, for the reason [`read_all`] isn't.
-fn apply(paths: &Paths, client: &XClient, plan: &mut Plan, prune: bool, now: i64) -> Result<()> {
-    apply_some(paths, client, plan, prune, now, usize::MAX).map(|_| ())
+fn apply(
+    paths: &Paths,
+    client: &XClient,
+    plan: &mut Plan,
+    prune: bool,
+    now: i64,
+) -> (usize, Result<()>) {
+    apply_some(paths, client, plan, prune, now, usize::MAX)
 }
 
 /// [`apply`], but sending at most `limit` entries before returning — the
-/// background sync's unit of work. Returns how many actually went through.
+/// background sync's unit of work. Returns how many actually went through,
+/// **alongside** the failure if one stopped the batch: the count is what
+/// lets `sync::state` tell a refusal that followed a landed write from a
+/// refusal that followed a refusal, and a `Result<usize>` would have to
+/// drop one to report the other.
 ///
 /// The CLI has no use for a bound: `--apply` is a foreground command whose
 /// whole job is to finish. The loop does, for two reasons that have nothing
@@ -163,18 +174,23 @@ pub(super) fn apply_some(
     prune: bool,
     now: i64,
     limit: usize,
-) -> Result<usize> {
+) -> (usize, Result<()>) {
     let mut sent = 0usize;
     for (action, user_id) in super::schedule::next_batch(plan, prune, limit) {
-        match action {
-            Action::Add => client.add_list_member(paths, &plan.list_id, &user_id, now)?,
-            Action::Remove => client.remove_list_member(paths, &plan.list_id, &user_id, now)?,
+        let result = match action {
+            Action::Add => client.add_list_member(paths, &plan.list_id, &user_id, now),
+            Action::Remove => client.remove_list_member(paths, &plan.list_id, &user_id, now),
+        };
+        if let Err(error) = result {
+            return (sent, Err(error));
         }
         plan.mark_applied(&user_id, action);
         sent = sent.saturating_add(1);
-        save_plan(&paths.sync_plan_file(), plan)?;
+        if let Err(error) = save_plan(&paths.sync_plan_file(), plan) {
+            return (sent, Err(error));
+        }
     }
-    Ok(sent)
+    (sent, Ok(()))
 }
 
 /// What `--sync-list` was asked to do.
@@ -243,7 +259,14 @@ pub(crate) fn run_cli(config: &Config, paths: &Paths, request: Request) -> i32 {
         }
     };
 
-    match run(paths, &client, &user_id, &list_id, request) {
+    match run(
+        paths,
+        &client,
+        &user_id,
+        &list_id,
+        request,
+        config.sync_interval_seconds,
+    ) {
         Ok(report) => {
             println!("{report}");
             0
@@ -271,12 +294,21 @@ fn resolve_own_id(paths: &Paths, client: &XClient) -> Result<String> {
 /// The part of [`run_cli`] that has a credential and a list, split out so
 /// every error above is a plain refusal and everything below is one
 /// `Result`.
+///
+/// `--apply` shares the background sync's memory ([`super::SyncState`]):
+/// it reads the backoff, says so, and **sends anyway** — a person at a
+/// terminal choosing to send one batch into a cap to see whether it has
+/// lifted is the cheapest measurement #197 has, and refusing would take
+/// it away. What comes back is settled into the same state, so a write
+/// that lands ends the streak for the loop too, and a refusal lengthens
+/// it.
 fn run(
     paths: &Paths,
     client: &XClient,
     user_id: &str,
     list_id: &str,
     request: Request,
+    interval_seconds: u32,
 ) -> Result<String> {
     let plan_path = paths.sync_plan_file();
     let now = oauth::unix_now();
@@ -306,14 +338,42 @@ fn run(
         plan.list_id
     );
 
-    let outcome = apply(paths, client, &mut plan, request.prune, now);
+    let state_path = paths.sync_state_file();
+    let state = load_state(&state_path);
+    if state.is_blocked(now) {
+        eprintln!(
+            "note: the background sync is backing off until unix time {} after {} consecutive \
+             refusal(s); sending anyway, and recording what happens for it",
+            state.blocked_until.unwrap_or(now),
+            state.refusals
+        );
+    }
+
+    let (sent, result) = apply(paths, client, &mut plan, request.prune, now);
+    let remaining = super::schedule::sendable(&plan, request.prune);
+    let outcome = super::schedule::apply_outcome(sent, remaining, result);
+    let settled = super::state::settle(state, outcome.as_ref().ok(), now, interval_seconds);
+    save_state(&state_path, &settled.state)?;
+
     let finished = plan.is_complete() || (!request.prune && plan.pending_count(Action::Add) == 0);
-    if outcome.is_ok() && finished {
+    if matches!(outcome, Ok(Outcome::Applied { .. })) && finished {
         // Nothing left to resume from, and leaving it behind would make the
         // next --apply look like there is work outstanding.
         std::fs::remove_file(&plan_path)
             .with_context(|| format!("could not remove {}", plan_path.display()))?;
     }
-    outcome?;
-    Ok(report(&plan))
+    match outcome? {
+        Outcome::RateLimited { opaque, .. } => anyhow::bail!(
+            "rate limited after {sent} write(s) landed{}; the plan on file records them. \
+             Backing off until unix time {} (refusal #{}); re-run --apply after that.",
+            if opaque {
+                " — by a cap the x-rate-limit headers do not describe"
+            } else {
+                ""
+            },
+            settled.wake_at,
+            settled.state.refusals
+        ),
+        _ => Ok(report(&plan)),
+    }
 }
