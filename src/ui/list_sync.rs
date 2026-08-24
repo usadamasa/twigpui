@@ -356,6 +356,7 @@ impl TimelineView {
 
         let paths = self.paths.clone();
         let interval = self.config.sync_interval_seconds;
+        let prune_limit = self.config.sync_prune_limit_percent;
         log::info(&format!(
             "list sync started for {list_id} ({trigger:?}), interval {interval}s"
         ));
@@ -412,7 +413,15 @@ impl TimelineView {
                                 (paths.clone(), client.clone(), list_id.clone());
                             cx.background_executor()
                                 .spawn(async move {
-                                    sync::tick(&paths, &client, &user_id, &list_id, pacing, now)
+                                    sync::tick(
+                                        &paths,
+                                        &client,
+                                        &user_id,
+                                        &list_id,
+                                        pacing,
+                                        prune_limit,
+                                        now,
+                                    )
                                 })
                                 .await
                         };
@@ -759,7 +768,9 @@ mod tests {
             status_after(
                 Some(&sync::Outcome::Diffed {
                     adds: 3,
-                    removals: 1
+                    removals: 1,
+                    members_total: 100,
+                    held: false,
                 }),
                 1_000,
                 0

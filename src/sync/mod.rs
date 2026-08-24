@@ -94,6 +94,13 @@ pub(crate) struct Plan {
     /// would otherwise rewrite the wrong list's membership.
     pub list_id: String,
     pub created_at: i64,
+    /// How many accounts the list held when this plan was diffed — the
+    /// denominator #176's prune cap measures `Remove` entries against.
+    /// `#[serde(default)]` so a plan file from before the cap still loads;
+    /// it reads as 0, which `schedule::prune_allowed` treats as "hold every
+    /// removal" rather than as a list that was empty.
+    #[serde(default)]
+    pub members_total: usize,
     pub entries: Vec<PlanEntry>,
 }
 
@@ -173,6 +180,7 @@ pub(crate) fn plan(list_id: &str, now: i64, following: &[User], members: &[User]
     Plan {
         list_id: list_id.to_string(),
         created_at: now,
+        members_total: members.len(),
         entries: adds.chain(removals).collect(),
     }
 }
@@ -207,6 +215,16 @@ pub(crate) fn report(plan: &Plan) -> String {
         lines.push(format!(
             "{done} entr{} already applied by an earlier run — not resent",
             if done == 1 { "y" } else { "ies" }
+        ));
+    }
+    // The CLI has no prune cap (#176): this line is what stands in for
+    // it. Someone who reads "1,900 of the list's 2,000 members" and types
+    // `--prune` anyway has confirmed it; the background sync, which has
+    // nobody reading, holds the same plan instead.
+    if removals > 0 {
+        lines.push(format!(
+            "{removals} of the list's {} members would be removed",
+            plan.members_total
         ));
     }
     lines.push(format!(
@@ -475,6 +493,47 @@ mod tests {
         assert_eq!(load_plan(&path).unwrap(), Some(written));
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // --- #176: the list size a plan's removals are measured against ---
+
+    #[test]
+    fn the_plan_records_how_many_members_the_list_had() {
+        // The denominator of the prune cap. A removal count on its own
+        // says nothing about how much of the list it is.
+        let plan = plan(
+            "7",
+            0,
+            &[user("1", "alice")],
+            &[user("2", "bob"), user("3", "carol")],
+        );
+        assert_eq!(plan.members_total, 2);
+    }
+
+    #[test]
+    fn a_plan_file_written_before_the_cap_reads_with_an_unknown_list_size() {
+        // Loads rather than fails — the entries in it were paid for — but
+        // with a total of 0, which `schedule::prune_allowed` reads as
+        // "hold every removal".
+        let json = r#"{"list_id":"7","created_at":0,"entries":[{"user_id":"2","username":"bob","action":"Remove"}]}"#;
+        let plan: Plan = serde_json::from_str(json).unwrap();
+        assert_eq!(plan.members_total, 0);
+        assert_eq!(plan.pending_count(Action::Remove), 1);
+    }
+
+    #[test]
+    fn the_report_measures_removals_against_the_list() {
+        // The CLI has no cap; the number is what lets the person reading
+        // the dry-run decide whether `--prune` is the right next command.
+        let plan = plan("7", 0, &[], &[user("2", "bob"), user("3", "carol")]);
+        let report = report(&plan);
+        assert!(report.contains("2 of the list's 2 members"), "{report}");
+    }
+
+    #[test]
+    fn the_report_does_not_measure_when_there_is_nothing_to_remove() {
+        let report = report(&plan("7", 0, &[user("1", "alice")], &[]));
+        assert!(!report.contains("members"), "{report}");
     }
 
     #[test]

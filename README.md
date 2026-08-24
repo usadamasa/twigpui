@@ -126,6 +126,7 @@ each time.
 | `X_DAILY_REQUEST_BUDGET` | no | unset | Daily request-count budget that colors the header's usage line as it's approached — also `daily_request_budget` in `config.toml` (#18) |
 | `X_AUTO_SYNC_LIST` | no | `true` | Keep `X_LIST_ID`'s membership mirroring your follows while the app runs — also `auto_sync_list` in `config.toml`. **Spends on a timer**; see below |
 | `X_SYNC_INTERVAL_SECONDS` | no | `21600` (6h) | How long the background sync waits between diffs. Values under `900` are rejected — also `sync_interval_seconds` in `config.toml` |
+| `X_SYNC_PRUNE_LIMIT_PERCENT` | no | `10` | The most of the list's membership the background sync may remove per diff, in percent. Over it, the removals are held for `--sync-list --apply --prune` to confirm; `100` turns the cap off — also `sync_prune_limit_percent` in `config.toml` (#176) |
 | `X_AUTO_REFRESH` | no | `true` | Poll the timeline for new posts while the window is open — also `auto_refresh` in `config.toml` (#21). `false` and the app sends nothing you did not click |
 | `X_AUTO_REFRESH_INTERVAL_SECONDS` | no | `300` (5m) | How long auto-refresh waits between polls. Values below `X_MIN_FETCH_INTERVAL_SECONDS` are rejected — also `auto_refresh_interval_seconds` in `config.toml` |
 
@@ -399,6 +400,7 @@ request_price = 0.02
 daily_request_budget = 500
 auto_sync_list = true
 sync_interval_seconds = 21600
+sync_prune_limit_percent = 10
 auto_refresh = true
 auto_refresh_interval_seconds = 300
 ```

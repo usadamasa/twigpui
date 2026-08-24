@@ -3107,6 +3107,7 @@ mod tests {
             // background loop is not part of what they are checking.
             auto_sync_list: false,
             sync_interval_seconds: 21_600,
+            sync_prune_limit_percent: 10,
             // Off for the same reason (#21).
             auto_refresh: false,
             auto_refresh_interval_seconds: 300,
@@ -3845,6 +3846,7 @@ mod tests {
             // background loop is not part of what they are checking.
             auto_sync_list: false,
             sync_interval_seconds: 21_600,
+            sync_prune_limit_percent: 10,
             // Off for the same reason (#21).
             auto_refresh: false,
             auto_refresh_interval_seconds: 300,
