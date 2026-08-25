@@ -200,9 +200,17 @@ pub(super) fn sync_blocked_reason(status: &SyncStatus) -> Option<&'static str> {
 
 /// ダイアログが名指す書き込み先 (#205)｡
 ///
-/// 名前は所有 list のキャッシュ (#164) から引く｡そこに無ければ id で
-/// 名指す — 黙るより良い｡どの list へ書くのかを押す前に確かめる手立ては
-/// 他に無い｡
+/// 名前は所有 list のキャッシュ (#164) から引く｡アプリの中で list の名前が
+/// 存在する場所はそこだけだ — timeline の fetch は list の名前を返さない
+/// ので､`owned_lists` にまだ何も無いウィンドウには名乗る材料が無い｡
+///
+/// そこで取りに行くことはしない｡`/2/users/:id/owned_lists` は返る list
+/// ごとに課金されるので (`x-api-budget`)､ダイアログを開くだけで支払う
+/// ことになり､cancel した人にも請求が行く｡issue の「cancel は API request
+/// を送らない」はそこも含む｡
+///
+/// だから名前が無ければ id で名指す｡黙るより良い — どの list へ書くのかを
+/// 押す前に確かめる手立ては他に無い｡
 pub(super) fn sync_target_label(name: Option<&str>, list_id: &str) -> String {
     name.map_or_else(|| format!("list {list_id}"), ToString::to_string)
 }

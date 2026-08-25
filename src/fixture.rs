@@ -244,6 +244,23 @@ mod tests {
             sync.blocked_for_seconds > 0 && sync.refusals >= 2,
             "the busiest label: a stuck catch-up counting down to a JST hour"
         );
+        // #205: ダイアログが名指す list の名前は所有 list のキャッシュ
+        // (#164) からしか来ない｡フィクスチャはそのキャッシュを丸ごと
+        // 置き換えるので､ミラー先がそこに無ければダイアログは id へ落ちる
+        // — 撮っても確かめたかったものが写らない｡`cargo run --fixture` は
+        // debug ビルド､つまり dev プロファイルなので､突き合わせる相手は
+        // その既定の list である｡
+        let mirrored = crate::profile::Profile::Dev
+            .default_list_id()
+            .expect("the dev profile mirrors into a list");
+        assert!(
+            fixture
+                .lists
+                .iter()
+                .any(|list| list.id == mirrored && !list.name.is_empty()),
+            "the list the dev profile syncs into has to be among the cached \
+             lists with a name, or the sync dialog shows a bare id (#205)"
+        );
         // バーは表示中のものに対して新着を数えるので､すでに `items` に
         // ある pending な post は数えられたうえで何も現さない — 見せる
         // ために書かれたものを黙って見せなくなるフィクスチャだ｡
