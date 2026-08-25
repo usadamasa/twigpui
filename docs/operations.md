@@ -137,6 +137,29 @@ X からではなくファイルからウィンドウを埋める｡**認証情�
 そのままなので､#9 以降に足したフィールドはすべて省略可能で､fixture は対象と
 しているケースだけを書けばよい｡
 
+## メモリと CPU を測る
+
+```sh
+cargo run --release -- --fixture fixtures/timeline.json --perf 60 > ./tmp/perf.tsv
+```
+
+`--perf <seconds>` は､走っているプロセス自身の RSS と累積 CPU 時間を 1 秒ごとに
+`ps(1)` で読んで TSV を stdout へ流し､時間が来たら要約 (平均と最大の CPU 使用率､
+最初・最後・最大の RSS) と測定条件 (debug/release､画面ロックの有無､occluded でも
+描くか) を stderr とログへ出して自分で終了する｡`--fixture` としか組めない —
+live の window は起動だけで課金される｡
+
+アプリの中に置いてあるのは､Claude Code の sandbox が `ps` `top` `footprint` を
+通さず (プロセス一覧の取得そのものが拒まれる)､sandbox の外で走るのが
+`cargo *` だけだからだ｡`cargo run` で立ったプロセスが自分を読むのが､Claude が
+自律的に測れる唯一の経路になる｡`getrusage(2)` ではなく `ps` なのは
+`unsafe_code = "forbid"` のため — `activity.rs` が `ioreg` を､`browser.rs` が
+`open(1)` を起こすのと同じ線だ｡
+
+読み方､何を issue にするかの閾値､過去の測定記録は `runtime-profiling` スキル
+(`.claude/skills/runtime-profiling/SKILL.md`) にある｡**閾値は測る前に決めて
+あり､数字を見てから動かさない｡**
+
 ## テスト
 
 ```sh
