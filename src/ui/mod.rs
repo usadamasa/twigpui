@@ -24,6 +24,7 @@ mod list_picker;
 mod list_sync;
 mod reload_policy;
 mod render;
+mod scroll;
 mod sync_row;
 mod tasks;
 
