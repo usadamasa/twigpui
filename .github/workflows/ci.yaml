@@ -1,6 +1,13 @@
 name: CI
 
+# main への push でも走らせるのはキャッシュを作るためだ｡Actions のキャッシュ
+# は branch ごとに隔離されていて､pull request が読めるのは自分のものと base
+# branch のものだけになる｡pull request でしか走らなければキャッシュは
+# `refs/pull/N/merge` にしか残らず､どの pull request も他の pull request の
+# ものを読めない — つまり毎回ビルドを一から始めることになる｡
 "on":
+  push:
+    branches: [main]
   pull_request:
   merge_group:
 
@@ -43,8 +50,15 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c  # stable
 
+      # 書き込むのは main だけで､pull request と merge queue は読むだけにする｡
+      # pull request ごとに 1.6 GB を書くと 10 GB の上限で互いに追い出し合い､
+      # 次の pull request がまた冷える｡代わりに残る trade-off が 1 つある:
+      # main と Cargo.lock が違う pull request は､その差分を push のたびに
+      # ビルドし直す (prefix での restore は効くので､一から建て直しはしない)｡
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Run tests
         run: cargo test --locked --all-targets
@@ -149,8 +163,11 @@ jobs:
         with:
           components: clippy, rustfmt
 
+      # Test ジョブと同じ理由で､書き込むのは main だけにする｡
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Check formatting
         run: cargo fmt --all -- --check
