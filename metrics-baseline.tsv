@@ -84,7 +84,10 @@ src/oauth/tokens.rs	200
 # キャッシュと picker の選択 — それぞれ doc にキャッシュか状態かの理屈を
 # 載せている｡3 行の超過だが､ルールはルールだ｡
 src/paths.rs	400
-src/perf.rs	250
+# perf.rs: `--perf` の自己測定｡実装 370 行ほどのうち 3 分の 1 は doc で､
+# 「なぜ外から ps で見ないのか (sandbox)」「なぜ unsafe でなく ps なのか」
+# はコードのどこにも書かれていなければ誰も復元できない｡
+src/perf.rs	400
 # profile.rs 100 -> 150: #169 は出発点の 3 つの名前を超えて育った —
 # dev の List 既定値と sync の seed で､それぞれ単なる設定ではない理由を
 # 載せている｡

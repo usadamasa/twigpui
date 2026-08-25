@@ -141,6 +141,12 @@ fn main() {
         }
     };
 
+    // `--perf <seconds>`: このプロセス自身の RSS と CPU を測る (`perf.rs`)｡
+    let perf = perf::arm(&args, &startup).unwrap_or_else(|message| {
+        eprintln!("{message}");
+        std::process::exit(1);
+    });
+
     // #49: ここから先､知る価値のあることは stderr だけでなくログファイルへ
     // も出す — Finder から起動した `.app` では stderr がどこにも行かないので
     // (#40, #45)､それが唯一の記録になる｡
@@ -222,6 +228,7 @@ fn main() {
             }
 
             cx.activate(true);
+            perf::start(cx, perf);
         });
 }
 
