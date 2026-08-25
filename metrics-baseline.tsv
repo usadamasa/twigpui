@@ -1,247 +1,237 @@
-# Per-file ceilings on implementation lines (#48). Checked by
-# `scripts/code-metrics.sh --check`, which CI runs.
+# ファイルごとの実装行数の天井 (#48)｡CI が走らせる
+# `scripts/code-metrics.sh --check` が突き合わせる｡
 #
-# These are NOT targets. Every value is today's measurement rounded up to
-# the next 50, which gives an ordinary change room to breathe while making
-# sustained growth impossible to add without noticing: the moment a file
-# crosses its ceiling, CI fails and the only way through is to edit this
-# file in the same pull request — where a reviewer sees it.
+# これらは目標では**ない**｡どの値も今日の実測を次の 50 へ切り上げたもので､
+# 普通の変更には息をする余地を与えつつ､持続的な成長を気づかれずに足すことを
+# 不可能にする: ファイルが天井を超えた瞬間に CI が落ち､通す道は同じ pull
+# request でこのファイルを編集することだけになる — レビュアーの目に入る場所だ｡
 #
-# Raising a ceiling is a legitimate thing to do. Doing it silently is not,
-# which is the whole mechanism.
+# 天井を上げるのは正当な行いだ｡黙って上げることが正当でない｡それが仕掛けの
+# すべてだ｡
 #
-# Lower a ceiling whenever a file shrinks below it. `src/ui.rs` used to be
-# the one that matters -- 3,352 implementation lines against a ceiling of
-# the same number, no headroom at all, holding rendering, state
-# transitions, async task management and `EntityInputHandler` together.
-# #126 split it into `src/ui/{mod,render,reload_policy}.rs` and these
-# ceilings are the measurements afterwards, lowered rather than carried
-# over: a ceiling kept at the old number would not notice the file
-# growing back.
+# ファイルが天井より縮んだら､そのつど天井を下げる｡かつて問題だったのは
+# `src/ui.rs` だ -- 実装 3,352 行に対して天井も同じ数字､余裕はまったく無く､
+# 描画､状態遷移､非同期タスクの管理､`EntityInputHandler` を 1 つに抱えて
+# いた｡#126 がそれを `src/ui/{mod,render,reload_policy}.rs` に分割し､
+# ここの天井はその後の実測だ｡引き継がずに下げてある: 古い数字のままの天井は
+# ファイルが元に戻るのを見逃す｡
 #
-# A new file must be added here before it can be committed — an unlisted
-# file is a failure, not a pass, so this cannot be sidestepped by adding
-# code somewhere new.
+# 新しいファイルはコミットする前にここへ足さなければならない — 載っていない
+# ファイルは pass ではなく失敗なので､どこか新しい場所へコードを足して
+# すり抜けることはできない｡
 #
-# Format: <path><TAB><max implementation lines>
+# 形式: <path><TAB><実装行数の上限>
 src/assets.rs	100
 src/avatar.rs	100
 src/browser.rs	100
-# #161 raised four ceilings; each reason sits above the line it explains.
+# #161 は天井を 4 つ上げた｡理由はそれぞれ説明する行の上に置いてある｡
 #
-# cache/mod.rs 550 -> 650: `TimelineSource` and the switch from a
-# home-only trio (`startup_home`/`reload_home`/`load_older_home`) to a
-# source-parameterized one. A fourth parallel copy of the trio would have
-# been the alternative and is what #92 exists to stop.
+# cache/mod.rs 550 -> 650: `TimelineSource` と､home 専用の三点セット
+# (`startup_home`/`reload_home`/`load_older_home`) から source を引数に取る
+# ものへの切り替え｡代わりの案は三点セットの 4 つ目の並行コピーで､それこそ
+# #92 が止めるために存在するものだ｡
 src/cache/mod.rs	650
 src/cache/timeline.rs	250
 src/compose.rs	350
-# config.rs 400 -> 450: `list_id` plus `resolve_list_id`, which validates
-# the value because it lands in a URL path segment.
-# 450 -> 550: `auto_sync_list` and `sync_interval_seconds` for the
-# background list sync, each with a resolver. Most of the added lines are
-# the two constants' docs, which carry the cost figures behind the default
-# interval and the floor.
-# 550 -> 700: #21's `auto_refresh` and `auto_refresh_interval_seconds`, each
-# with a resolver, plus `resolve_theme` — the theme block moved out of
-# `resolve_for_profile` verbatim to keep it under `clippy::too_many_lines`,
-# taking a doc comment (and losing a paragraph that had been pasted twice)
-# on the way. As with the sync pair above, most of the growth is the two
-# new constants' docs: the default interval carries the reasoning that a
-# poll bills only genuinely-new posts, and the floor carries why a cadence
-# under `min_fetch_interval_seconds` is a timer that can never fire.
-# 700 -> 750: #176's `sync_prune_limit_percent` with its resolver and the
-# default's doc, which carries why a tenth and why no absolute floor.
-# 750 -> 850: #197's `sync_writes_per_minute` — the field, two constants
-# whose docs carry the measured basis (the cap engaged at ~7/min and
-# recovered in 24h), the resolver, and its eight tests.
+# config.rs 400 -> 450: `list_id` と `resolve_list_id`｡値が URL のパス
+# セグメントに入るので検証する｡
+# 450 -> 550: バックグラウンドの list 同期のための `auto_sync_list` と
+# `sync_interval_seconds`｡それぞれに resolver が付く｡増えた行の大半は
+# 2 つの定数の doc で､既定の間隔と下限の裏にあるコストの数字を載せている｡
+# 550 -> 700: #21 の `auto_refresh` と `auto_refresh_interval_seconds`｡
+# それぞれに resolver が付き､さらに `resolve_theme` — theme のブロックは
+# `clippy::too_many_lines` に収めるため `resolve_for_profile` からそのまま
+# 移し､その途中で doc コメントを得た (そして 2 回貼られていた段落を 1 つ
+# 落とした)｡上の sync の 2 つと同じく､成長の大半は新しい 2 つの定数の doc
+# だ: 既定の間隔は､poll が本当に新しい post だけを課金するという理屈を
+# 載せている｡下限は､`min_fetch_interval_seconds` を下回る間隔が決して
+# 発火しないタイマーである理由を載せている｡
+# 700 -> 750: #176 の `sync_prune_limit_percent`｡resolver と既定値の doc
+# 付きで､doc はなぜ 10 分の 1 か､なぜ絶対値の下限を置かないかを載せている｡
+# 750 -> 850: #197 の `sync_writes_per_minute` — フィールド､実測の根拠を
+# doc に載せた 2 つの定数 (上限は約 7/min で作動し 24h で回復した)､
+# resolver､そしてその 8 本のテスト｡
 src/config.rs	850
 src/fixture.rs	100
 src/image_cache.rs	150
 src/like.rs	150
 src/log.rs	350
-# main.rs 600 -> 650: #169's window title is read off `Paths` rather than
-# hardcoded, plus the `profile` module declaration.
+# main.rs 600 -> 650: #169 のウィンドウタイトルはハードコードせず `Paths`
+# から読む｡加えて `profile` モジュールの宣言｡
 src/main.rs	650
 src/menu.rs	350
 src/oauth/callback.rs	350
 src/oauth/mod.rs	300
 src/oauth/pkce.rs	150
 src/oauth/tokens.rs	200
-# paths.rs 300 -> 350: #169 threads a `Profile` through the three base
-# directories, adds the `for_profile` seam the tests need to name one, and
-# documents why the component is not a constant any more.
-# paths.rs 350 -> 400: #164 adds two files — the owned-lists cache and the
-# picker's selection — each with the cache-or-state reasoning its doc
-# carries. Three lines over, but the rule is the rule.
+# paths.rs 300 -> 350: #169 は 3 つのベースディレクトリに `Profile` を
+# 通し､テストがプロファイルを名指すのに要る `for_profile` の継ぎ目を足し､
+# そのコンポーネントがもう定数ではない理由を書いた｡
+# paths.rs 350 -> 400: #164 は 2 つのファイルを足す — 所有 list の
+# キャッシュと picker の選択 — それぞれ doc にキャッシュか状態かの理屈を
+# 載せている｡3 行の超過だが､ルールはルールだ｡
 src/paths.rs	400
-# profile.rs 100 -> 150: #169 grew past the three names it started with —
-# the dev List default and the sync seed, each carrying the reason it is
-# not simply configuration.
+# profile.rs 100 -> 150: #169 は出発点の 3 つの名前を超えて育った —
+# dev の List 既定値と sync の seed で､それぞれ単なる設定ではない理由を
+# 載せている｡
 src/profile.rs	150
-# rate_limit.rs 350 -> 400: four `Endpoint` variants for #163's sync,
-# each with the doc explaining why it needs its own bucket.
-# 400 -> 450: `rate_limited_until` and its backoff constant — the pure seam
-# that stops a 429 from a limit X does not expose in its headers from being
-# retried against the wrong window's reset. Most of the added lines are the
-# doc carrying the measured `POST /2/lists/:id/members` behavior it fixes.
-# 450 -> 500: `rate_limited_until` became `Refusal`, a type that says which
-# limit a 429 came from, and `RateLimited` carries it as `opaque` — what
-# lets the sync back away from a cap the headers do not describe (#197).
+# rate_limit.rs 350 -> 400: #163 の sync 用の 4 つの `Endpoint` variant｡
+# それぞれになぜ専用のバケツが要るかを説明する doc が付く｡
+# 400 -> 450: `rate_limited_until` とその backoff 定数 — X がヘッダに出さない
+# 制限から来た 429 が､誤ったウィンドウのリセットに対して再試行されるのを
+# 止める純粋な継ぎ目だ｡増えた行の大半は､これが直す
+# `POST /2/lists/:id/members` の実測挙動を載せた doc｡
+# 450 -> 500: `rate_limited_until` は `Refusal` になった｡429 がどの制限から
+# 来たかを言う型で､`RateLimited` はそれを `opaque` として持つ — ヘッダが
+# 説明しない上限から sync が退くことを可能にするものだ (#197)｡
 src/rate_limit.rs	500
 src/repost.rs	150
-# sync/ is new in #163, split the way `cache` is: mod.rs holds the pure
-# diff, the plan file and the report (where the tests are), run.rs holds
-# the paged reads, the apply loop and the CLI entry point (where the
-# spending is).
-# mod.rs 250 -> 350: `SyncState` and its file pair, plus the module doc
-# rewritten where the background sync overrode #163's "no polling" and
-# "removals are opt-in" rules.
-# 350 -> 300: `SyncState` moved out to state.rs (#197, #198), where the
-# pacing it now carries has the transition function next to it.
+# sync/ は #163 で新設｡`cache` と同じ分け方だ: mod.rs は純粋な diff と
+# plan ファイルとレポートを持ち (テストがある場所)､run.rs はページ分割の
+# 読み取りと apply のループと CLI の入口を持つ (金を使う場所)｡
+# mod.rs 250 -> 350: `SyncState` とその file の対､加えてバックグラウンド
+# 同期が #163 の "no polling" と "removals are opt-in" のルールを上書き
+# したところを書き直したモジュール doc｡
+# 350 -> 300: `SyncState` は state.rs へ移した (#197, #198)｡そこでは今
+# それが担うペース配分の隣に遷移関数がある｡
 src/sync/mod.rs	300
-# sync/run.rs 300 -> 350: #169's `seed_users`, the fixed-screen-name stand-in
-# a development sync reads instead of the whole follow graph.
-# 350 -> 400: `apply_some`, the bounded batch the background sync drains a
-# plan with. `apply` is now a call to it with no bound, which is what keeps
-# the CLI's behavior identical.
+# sync/run.rs 300 -> 350: #169 の `seed_users`｡開発時の sync が follow
+# グラフ全体の代わりに読む､固定の screen name の代替物だ｡
+# 350 -> 400: `apply_some`｡バックグラウンド同期が plan を捌く上限付きの
+# バッチだ｡`apply` は今やそれを上限無しで呼ぶだけで､それが CLI の挙動を
+# 同一に保っている｡
 src/sync/run.rs	400
-# schedule.rs and auto.rs are the background sync, split on the same line
-# mod.rs and run.rs are: schedule.rs decides what a tick should do and
-# carries every test, auto.rs performs it and makes the requests.
-# sync/schedule.rs 250 -> 300: #174's `is_finished` and `last_diff_for`,
-# the two decisions the manual sync turns on. Both are three lines with a
-# paragraph above them, which is the right ratio here — one protects a
-# plan a paid diff produced, the other is the whole of what "force" means.
-# 300 -> 350: #176's `prune_allowed` and `sendable`. The verdict is one
-# comparison; the doc above it is the whole argument for holding every
-# removal rather than trimming to fit, and for never capping the CLI.
-# 350 -> 400: `apply_outcome` (the client's error mapped to what the loop
-# remembers, in one testable place) and `blocked_for` (which block a
-# forced tick may step over, now that blocks persist — #198). `settle`
-# moved out to state.rs.
+# schedule.rs と auto.rs はバックグラウンド同期で､mod.rs と run.rs と同じ
+# 線で分けてある: schedule.rs は tick が何をすべきかを決め､テストをすべて
+# 持つ｡auto.rs はそれを実行し､リクエストを出す｡
+# sync/schedule.rs 250 -> 300: #174 の `is_finished` と `last_diff_for`｡
+# 手動の sync が拠って立つ 2 つの判断だ｡どちらも 3 行で上に段落が 1 つ付く｡
+# ここではそれが正しい比率だ — 一方は課金された diff が生んだ plan を守り､
+# もう一方は "force" が意味するもののすべてだ｡
+# 300 -> 350: #176 の `prune_allowed` と `sendable`｡判定は比較 1 つ｡上の
+# doc は､収まるように削るのではなく削除をすべて保留する理由と､CLI には
+# 決して上限を掛けない理由の全論拠だ｡
+# 350 -> 400: `apply_outcome` (クライアントのエラーを､ループが覚えるものへ
+# 1 箇所のテスト可能な場所で対応づける) と `blocked_for` (block が永続する
+# ようになった今､強制の tick がどの block を跨いでよいか — #198)｡`settle`
+# は state.rs へ移した｡
 src/sync/schedule.rs	400
-# auto.rs 200 -> 250: #176 threads the prune verdict through `tick`, `diff`
-# and `apply`, and the module doc gains the rule that a held plan is not
-# finished work — the deadlock `sendable` exists to prevent.
-# 250 -> 350: `tick` now owns the state file's whole round trip (load,
-# perform, settle, save) and returns a `Tick` the window reads its status
-# from, and `log_outcome` is #199's one line per tick. The loop in
-# `ui/list_sync.rs` shrank by what this grew.
+# auto.rs 200 -> 250: #176 は prune の判定を `tick`､`diff`､`apply` に
+# 通し､モジュール doc は保留された plan は終わった仕事ではないというルールを
+# 得た — `sendable` が防ぐために存在するデッドロックだ｡
+# 250 -> 350: `tick` は今や state ファイルの往復すべて (load, perform,
+# settle, save) を own し､ウィンドウが状態を読む `Tick` を返す｡そして
+# `log_outcome` は #199 の tick ごとの 1 行だ｡`ui/list_sync.rs` のループは
+# ここが増えた分だけ縮んだ｡
 src/sync/auto.rs	350
-# state.rs is new in #197/#198: the sync's memory (`SyncState`) and the
-# one function that moves it (`settle`), with the backoff ladder. Pure,
-# and where the tests for pacing live.
+# state.rs は #197/#198 で新設: sync の記憶 (`SyncState`) と､それを動かす
+# 唯一の関数 (`settle`)､そして backoff の梯子｡純粋であり､ペース配分の
+# テストが住む場所だ｡
 src/sync/state.rs	250
 src/theme.rs	350
 src/thread.rs	100
 src/toggle.rs	200
-# ui/mod.rs 2700 -> 2750: a `source` field threaded through `start`,
-# `reload`, `load_older` and `confirm_delete`, and `primary_source`. #137 is
-# already open on whether to split `impl TimelineView`; this raise does not
-# settle it, and the file is now 16 lines past where #137 found it.
-# 2750 -> 2900: `start_auto_sync` and the `auto_sync` task field. The loop
-# body is thin — it asks `sync::tick` what happened and `sync::settle` when
-# to come back — but the doc explaining why it reuses `start`'s credential
-# instead of resolving its own is most of the addition, and it is the part
-# nobody can reconstruct from the code. #137 is still open on splitting
-# `impl TimelineView`; this raise does not settle it.
-# 2900 -> 3000: #21's `pending` and `auto_refresh` fields, the pending
-# bar's row in `render`, the `ShowNewPosts` handler, `clear_pending` calls
-# at the four sites that replace the timeline from a fresher source, and
-# `show_fixture`'s pending wiring. The loop and the three methods around
-# the buffer are NOT here — they went to `ui/auto_refresh.rs` below, which
-# is why this is 100 rather than 300. #137 is still open on splitting
-# `impl TimelineView`; this raise does not settle it.
-# 3000 -> 2900, back where #21 found it: #174 moved `start_auto_sync` out
-# to `ui/list_sync.rs` and put back only the three fields and the status
-# bar's segment, which is a net loss of about a hundred lines. Lowered
-# rather than left with the headroom, so the next time this file grows
-# there is something to notice it against.
-# 2900 -> 1800: #137's answer. Every method holding a `cx.spawn` moved to
-# `ui/tasks.rs` below — twenty of them, about eleven hundred lines. This
-# is the ceiling the file has not had since #126, and it is set to the
-# measurement rather than to the old number so the next raise has to be
-# argued from here.
-# 1800 -> 1850: the signed-out body carries its own "Sign in with X"
-# button, and the toolbar's left cluster is wrapped so a dozen tabs shrink
-# and clip instead of pushing the sign-in control off the window — the
-# 2026-08-24 lockout, where the screen's only advice named a button it
-# was not showing.
-# 1850 -> 1900: #22's stick-to-top follow. The `follow`, `glide` and
-# `fixture_arrival` fields, the toggle's handler, and `show_fixture`'s
-# arrival branch — the follow/glide mechanism itself went to
-# `ui/auto_refresh.rs` below, which is why this is 50 rather than 200.
+# ui/mod.rs 2700 -> 2750: `start`､`reload`､`load_older`､`confirm_delete` に
+# 通した `source` フィールドと､`primary_source`｡`impl TimelineView` を
+# 分割するかは #137 ですでに open だ｡この引き上げはそれを決着させないし､
+# ファイルは今や #137 が見つけた地点から 16 行伸びている｡
+# 2750 -> 2900: `start_auto_sync` と `auto_sync` のタスクフィールド｡
+# ループ本体は薄い — 何が起きたかを `sync::tick` に､いつ戻るかを
+# `sync::settle` に尋ねるだけだ — が､自分で解決せず `start` の資格情報を
+# 使い回す理由を説明する doc が追加の大半で､そこはコードから誰も復元できない
+# 部分だ｡`impl TimelineView` の分割は #137 でまだ open｡この引き上げはそれを
+# 決着させない｡
+# 2900 -> 3000: #21 の `pending` と `auto_refresh` のフィールド､`render` の
+# 中の pending バーの行､`ShowNewPosts` のハンドラ､より新しい source から
+# timeline を差し替える 4 箇所での `clear_pending` 呼び出し､そして
+# `show_fixture` の pending 配線｡ループとバッファ周りの 3 つのメソッドは
+# ここには**無い** — 下の `ui/auto_refresh.rs` へ行った｡だからこれは 300 では
+# なく 100 だ｡`impl TimelineView` の分割は #137 でまだ open｡この引き上げは
+# それを決着させない｡
+# 3000 -> 2900､#21 が見つけた地点へ戻る: #174 が `start_auto_sync` を
+# `ui/list_sync.rs` へ出し､3 つのフィールドとステータスバーの区画だけを
+# 戻したので､差し引き約 100 行の減だ｡余裕を残さず下げてある｡次にこの
+# ファイルが育つとき､気づくための基準があるようにだ｡
+# 2900 -> 1800: #137 への答え｡`cx.spawn` を持つメソッドはすべて下の
+# `ui/tasks.rs` へ移した — 20 個､約 1100 行｡これは #126 以来このファイルが
+# 持っていなかった天井で､古い数字ではなく実測に合わせてある｡次の引き上げは
+# ここから論じなければならない｡
+# 1800 -> 1850: サインアウト時の本体が自前の "Sign in with X" ボタンを
+# 持つようになり､ツールバー左側のまとまりは折り返すようにした｡タブが
+# 十数個あってもサインインの操作をウィンドウの外へ押し出さず､縮んで
+# クリップされる — 2026-08-24 の締め出しへの対応だ｡あのとき画面が出す
+# 唯一の案内は､画面に出ていないボタンを名指していた｡
+# 1850 -> 1900: #22 の先頭追従 (stick-to-top)｡`follow`､`glide`､
+# `fixture_arrival` のフィールド､トグルのハンドラ､`show_fixture` の到着
+# 分岐 — follow/glide の機構そのものは下の `ui/auto_refresh.rs` へ行った｡
+# だからこれは 200 ではなく 50 だ｡
 src/ui/mod.rs	1900
 src/ui/reload_policy.rs	300
-# New in #21. Holds the whole of auto-refresh: the pure tick/pending
-# decisions with their tests, and an `impl TimelineView` block for the
-# poll loop that acts on them — see the module doc for why this one file
-# carries both halves where `reload_policy` and `render` carry only pure
-# functions.
-# 400 -> 600: #22's stick-to-top follow, in this file because it is the
-# third way a poll's posts reach the screen — `FollowMode`, the pure
-# at-top/follows/glide-step decisions with their tests, and the
-# `present_poll`/`follow`/`start_glide` half that walks the scroll
-# offset. About half the growth is the glide loop's docs: the settle
-# wait, the grab detection, and why each cancellation site exists.
+# #21 で新設｡auto-refresh のすべてを持つ: 純粋な tick/pending の判断と
+# そのテスト､そしてそれらに基づいて動く poll ループの `impl TimelineView`
+# ブロック — `reload_policy` と `render` が純粋な関数だけを持つのに対し､
+# なぜこの 1 ファイルが両方の半分を担うかはモジュール doc を参照｡
+# 400 -> 600: #22 の先頭追従｡poll の post が画面へ届く 3 つ目の道なので
+# このファイルにある — `FollowMode`､純粋な at-top/follows/glide-step の
+# 判断とそのテスト､そしてスクロールオフセットを歩く
+# `present_poll`/`follow`/`start_glide` の半分だ｡成長の約半分は glide
+# ループの doc だ: 落ち着くまでの待ち､掴みの検出､そして各キャンセル箇所が
+# 存在する理由｡
 src/ui/auto_refresh.rs	600
-# New in #174, and the reason `ui/mod.rs` did not have to rise again for
-# it: `start_auto_sync` moved here out of `ui` and came back as
-# `start_sync`, joined by the status enum the status bar reports, the two
-# labels, and the manual trigger's two-step. Same shape as
-# `auto_refresh.rs` above — pure functions with their tests, then an
-# `impl TimelineView` block.
+# #174 で新設｡`ui/mod.rs` がこのために再び上がらずに済んだ理由でもある:
+# `start_auto_sync` が `ui` からここへ移り､`start_sync` として戻ってきた｡
+# 加えてステータスバーが報告する status の enum､2 つのラベル､手動トリガの
+# 2 段構えが同居する｡形は上の `auto_refresh.rs` と同じ — 純粋な関数と
+# そのテスト､続いて `impl TimelineView` ブロック｡
 src/ui/list_sync.rs	650
-# New in #164, for the same reason `list_sync.rs` was: `ui/mod.rs` sat one
-# line under its ceiling, so the picker — the saved selection, the segment
-# list, the switch, and the one paid fetch that names the segments — went
-# into its own file in the same shape. `primary_source` moved out of `ui`
-# with it, which is what paid for the two fields the picker needed there.
+# #164 で新設｡理由は `list_sync.rs` と同じだ: `ui/mod.rs` が天井の 1 行下に
+# 座っていたので､picker — 保存された選択､区画の一覧､切り替え､そして区画に
+# 名前を与える 1 回の課金付き fetch — を同じ形で専用ファイルへ出した｡
+# `primary_source` も一緒に `ui` から出ており､それが picker のために
+# 必要だった 2 つのフィールドの代金を払っている｡
 src/ui/list_picker.rs	450
-# ui/render.rs 1050 -> 1100: #21's `new_posts_bar`, the one element in the
-# banner column that is a button rather than a report.
+# ui/render.rs 1050 -> 1100: #21 の `new_posts_bar`｡バナー列の中で唯一､
+# 報告ではなくボタンである要素だ｡
 #
-# 1100 -> 1150: #184's `Addressable`. Four implementation lines — a trait
-# with one defaulted method and a blanket impl — carrying the doc comment
-# that says why gpui's `.id(..)` and `debug_selector` have to be the same
-# string. It is what lets a test click an element by name instead of by a
-# coordinate, and it is line-neutral at every call site it replaces.
+# 1100 -> 1150: #184 の `Addressable`｡実装は 4 行 — 既定実装を 1 つ持つ
+# trait とブランケット impl — で､gpui の `.id(..)` と `debug_selector` が
+# なぜ同じ文字列でなければならないかを言う doc コメントを載せている｡これが
+# テストに座標ではなく名前で要素をクリックさせるものであり､置き換えた
+# どの呼び出し箇所でも行数は変わらない｡
 src/ui/render.rs	1150
-# New in #137, which asked whether to split `impl TimelineView` and where.
-# This is its option (b): every method holding a `cx.spawn`. Large, and
-# deliberately so — the seam is "this is where the money goes", and a
-# spending method left behind in `ui` would make that sentence false.
-# Nothing here is unit tested (every branch is a request or a file a
-# request's result is written to), which is why `ui/mod.rs`'s test module
-# did not move and the test count did not change.
+# #137 で新設｡#137 は `impl TimelineView` を分割するか､どこで分けるかを
+# 問うたものだ｡これはその選択肢 (b): `cx.spawn` を持つメソッドすべて｡
+# 大きいが､それは意図的だ — 継ぎ目は「金が出ていくのはここだ」であり､
+# 支出するメソッドが `ui` に取り残されればその一文が嘘になる｡ここには
+# ユニットテストが 1 つも無い (どの分岐もリクエストか､リクエストの結果を
+# 書き込むファイルだ)｡それが `ui/mod.rs` のテストモジュールが動かず､
+# テスト数も変わらなかった理由だ｡
 src/ui/tasks.rs	1200
-# New in #165. One builder and two escaping policies, shared by
-# `x_api::client` and `oauth::pkce` — which is why it sits at the top
-# level rather than inside either of them.
+# #165 で新設｡ビルダ 1 つとエスケープの方針 2 つで､`x_api::client` と
+# `oauth::pkce` が共有する — だからどちらかの内側ではなくトップレベルに
+# 座っている｡
 src/url.rs	200
 src/usage.rs	350
-# x_api/client.rs 750 -> 800: `list_timeline` and `list_timeline_url`,
-# carrying the doc comment that explains why neither takes a `since_id`.
-# x_api/client.rs 800 -> 1000: #163's four endpoints, their URL builders,
-# the shared user-page parser, and the POST body sender for the one write
-# whose body is a `user_id`. The bulk is doc comments marking which parts
-# are spec-derived and unverified — this PR spent no requests.
-# 1000 -> 1050: #165's builder. This file grew rather than shrank, which
-# is the honest outcome: a `.segment("users").segment(user_id)` chain is
-# more lines than the format string it replaces, and `TIMELINE_FIELDS`
-# went from one four-line literal to a sixteen-line array of pairs. What
-# was bought is that a value can no longer reach a URL unescaped and a
-# separator can no longer be misplaced — neither of which the old shape
-# let the compiler check.
-# x_api/client.rs 1050 -> 1100: #164's `owned_lists` — method, URL builder
-# and parse helper in the same three-part shape as #163's paged reads.
-# 1100 -> 1150: `log_429` (#199), the one WARN line that records a 429's
-# headers and body — the first `log::` call in this file, and the record
-# #197 had nothing of.
+# x_api/client.rs 750 -> 800: `list_timeline` と `list_timeline_url`｡
+# どちらも `since_id` を取らない理由を説明する doc コメントを載せている｡
+# x_api/client.rs 800 -> 1000: #163 の 4 つのエンドポイント､その URL
+# ビルダ､共有のユーザーページのパーサ､そして body が `user_id` である
+# 唯一の書き込みのための POST body 送信｡大部分は､どこが spec 由来で未検証
+# かを示す doc コメントだ — この PR はリクエストを 1 つも使っていない｡
+# 1000 -> 1050: #165 のビルダ｡このファイルは縮まず増えた｡それが正直な
+# 結果だ: `.segment("users").segment(user_id)` の連鎖は置き換えた書式
+# 文字列より行数が多いし､`TIMELINE_FIELDS` は 4 行のリテラル 1 つから
+# 16 行の対の配列になった｡買えたのは､値がエスケープされずに URL へ届く
+# ことがなくなり､区切りを置き違えることもなくなった点だ — 古い形では
+# どちらもコンパイラに検査させられなかった｡
+# x_api/client.rs 1050 -> 1100: #164 の `owned_lists` — メソッド､URL
+# ビルダ､パース補助が #163 のページ読み取りと同じ三部構成で並ぶ｡
+# 1100 -> 1150: `log_429` (#199)｡429 のヘッダと body を記録する唯一の
+# WARN 行だ — このファイルで最初の `log::` 呼び出しであり､#197 が何も
+# 持っていなかった記録だ｡
 src/x_api/client.rs	1150
 src/x_api/mod.rs	50
-# x_api/model.rs 750 -> 800: `UserIdRequest` and `UserPageResponse` for
-# #163's reads and writes.
-# x_api/model.rs 800 -> 850: `ListSummary` and `ListPageResponse` for #164.
+# x_api/model.rs 750 -> 800: #163 の読み書きのための `UserIdRequest` と
+# `UserPageResponse`｡
+# x_api/model.rs 800 -> 850: #164 のための `ListSummary` と `ListPageResponse`｡
 src/x_api/model.rs	850

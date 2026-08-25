@@ -1,28 +1,27 @@
-//! Whether a reload may run, and what the app says when one does not.
+//! reload を走らせてよいか､走らせないときアプリが何を言うか｡
 //!
-//! Split out of `ui` (#126) alongside [`super::render`], on a different
-//! line: these are the functions standing between a click and a paid
-//! request. `reload_gate` and `reload_cooldown` decide whether to spend
-//! anything at all; `reload_failure_outcome` and `cooldown_tick` decide
-//! what survives on screen when the answer is no. Together they read as
-//! one piece of money-facing logic rather than a handful of functions
-//! scattered among render helpers.
+//! [`super::render`] と並んで `ui` から分けた (#126)｡ただし線は別だ:
+//! ここにあるのはクリックと課金されるリクエストの間に立つ関数だ｡
+//! `reload_gate` と `reload_cooldown` はそもそも金を使うかを決め､
+//! `reload_failure_outcome` と `cooldown_tick` は答えが「使わない」の
+//! ときに画面へ何が残るかを決める｡両者は render の補助関数の間に散った
+//! 数個の関数ではなく､金に面した 1 つのロジックとして読める｡
 //!
-//! Pure, and tested as such — the async paths that call them stay in `ui`
-//! and are not unit tested.
+//! 純粋であり､そのようにテストしてある — これらを呼ぶ非同期の経路は
+//! `ui` に残り､ユニットテストしていない｡
 
 use super::{Cooldown, ReloadNotice, ReloadTrigger, TimelineState, cache, rate_limit};
 
-/// Countdown text for the reload button while blocked by #10's rate-limit
-/// decision. `remaining` is clamped to zero rather than going negative if
-/// `reset_at` has (just) passed by the time this renders.
+/// #10 のレート制限判断で塞がれている間の reload ボタンのカウントダウン
+/// 文言｡描画時点で `reset_at` を (ちょうど) 過ぎていた場合､`remaining` は
+/// 負にせず 0 に丸める｡
 ///
-/// The two cooldowns read differently on purpose: only one of them is X
-/// actually rate limiting this app, and reporting the self-imposed interval
-/// as a rate limit would misdescribe what happened.
+/// 2 つの cooldown が違う読み方になるのは意図的だ: このアプリを実際に
+/// レート制限しているのは片方だけであり､自分で課した間隔をレート制限と
+/// 報告すれば何が起きたかを取り違えて伝えることになる｡
 pub(super) fn cooldown_label(cooldown: Cooldown, reset_at: i64, now: i64) -> String {
-    // `saturating_sub` (#47): `reset_at` comes from an API header and
-    // `now` from the clock, so neither is this code's to trust.
+    // `saturating_sub` (#47): `reset_at` は API のヘッダから､`now` は
+    // クロックから来る｡どちらもこのコードが信用してよいものではない｡
     let remaining = reset_at.saturating_sub(now).max(0);
     match cooldown {
         Cooldown::LocalInterval => format!("Waiting out the fetch interval — {remaining}s"),
@@ -30,16 +29,15 @@ pub(super) fn cooldown_label(cooldown: Cooldown, reset_at: i64, now: i64) -> Str
     }
 }
 
-/// Classify a failed reload/load-older's error into the [`ReloadNotice`] it
-/// should raise (#57) — the single place that decides "rate limit with a
-/// known reset time" vs "plain failure", shared by [`map_reload_error`] (the
-/// fallback for when there's nothing else to show) and
-/// [`reload_failure_outcome`] (the common case, once there's a timeline that
-/// must survive the failure).
+/// 失敗した reload / load-older のエラーを､上げるべき [`ReloadNotice`] へ
+/// 分類する (#57) — 「reset 時刻が分かっているレート制限」と「ただの失敗」を
+/// 決める唯一の場所であり､[`map_reload_error`] (他に見せるものが無いときの
+/// フォールバック) と [`reload_failure_outcome`] (失敗を生き延びるべき
+/// timeline がすでにある通常のケース) が共有する｡
 ///
-/// #10: a blocked-send carries a known reset time and is shown as a
-/// countdown; everything else (including a rate limit whose 429 carried no
-/// usable reset header) falls back to the plain error message.
+/// #10: 送信がブロックされた場合は reset 時刻が分かるのでカウントダウンで
+/// 見せる｡それ以外 (429 に使える reset ヘッダが無かったレート制限も含む) は
+/// 素のエラーメッセージへ落ちる｡
 pub(super) fn reload_notice_for_error(error: &anyhow::Error) -> ReloadNotice {
     match error.downcast_ref::<rate_limit::RateLimited>() {
         Some(rate_limit::RateLimited {
@@ -53,41 +51,40 @@ pub(super) fn reload_notice_for_error(error: &anyhow::Error) -> ReloadNotice {
     }
 }
 
-/// Map a failed reload's error to the state that should show it, for when
-/// there is nothing else on screen to fall back to. The only caller left as
-/// of #57 is [`reload_failure_outcome`], and only once it has confirmed
-/// there is no loaded timeline this failure would otherwise evict —
-/// `TimelineView::reload` and `TimelineView::load_older` both reach this
-/// exclusively through that path now, never directly.
+/// 失敗した reload のエラーを､それを見せるべき state へ対応づける｡画面に
+/// 落ちる先が他に無いとき向けだ｡#57 の時点で残る唯一の呼び出し元は
+/// [`reload_failure_outcome`] で､しかもこの失敗が追い出してしまうような
+/// 読み込み済みの timeline が無いと確認した後だけだ —
+/// `TimelineView::reload` と `TimelineView::load_older` はどちらも今や
+/// その経路からのみここへ届き､直接来ることはない｡
 pub(super) fn map_reload_error(error: &anyhow::Error) -> TimelineState {
     match reload_notice_for_error(error) {
         ReloadNotice::Cooldown { reset_at, cooldown } => {
             TimelineState::RateLimited { reset_at, cooldown }
         }
-        // `Outcome` is unreachable here: the argument comes from
-        // `reload_notice_for_error`, which only builds failure variants.
-        // Listed rather than left to a wildcard so a variant added later
-        // has to be considered instead of silently landing in `Failed`.
+        // ここで `Outcome` には到達しない: 引数は失敗の variant しか
+        // 作らない `reload_notice_for_error` から来る｡ワイルドカードに
+        // 任せず並べてあるのは､後で足された variant が黙って `Failed` に
+        // 落ちるのではなく､検討を強いられるようにするためだ｡
         ReloadNotice::Failed(message) | ReloadNotice::Outcome(message) => {
             TimelineState::Failed(message)
         }
     }
 }
 
-/// What a failed fetch should do to `state`, and which notice (if any) it
-/// should raise (#57) — shared by [`TimelineView::reload`] (via
-/// `TimelineView::apply_reload_failure`) and `TimelineView::load_older`, a
-/// pure function so "an existing timeline survives a failed fetch" can be
-/// unit tested without gpui. A failed refresh is not evidence that whatever
-/// is already loaded is wrong, so whenever `state` already holds posts, they
-/// are returned untouched and the failure becomes a notice, via
-/// [`reload_notice_for_error`] — this is the only branch that returns
-/// `Some`. When there is nothing being displayed yet, the failure instead
-/// becomes the state itself — the same [`map_reload_error`] mapping every
-/// other failed fetch in this file uses — and the notice comes back `None`:
-/// `state` (`Failed`/`RateLimited`) is already telling the body what
-/// happened, so a banner repeating the identical message would just be a
-/// duplicated failure on screen.
+/// 失敗した fetch が `state` に何をすべきか､どの notice を (もしあれば)
+/// 上げるべきか (#57) — [`TimelineView::reload`]
+/// (`TimelineView::apply_reload_failure` 経由) と
+/// `TimelineView::load_older` が共有する｡「すでにある timeline は失敗した
+/// fetch を生き延びる」を gpui 無しでユニットテストできるよう純粋な関数に
+/// してある｡refresh の失敗は､すでに読み込まれているものが誤りだという証拠
+/// ではない｡だから `state` がすでに post を持つときは手を触れずに返し､
+/// 失敗は [`reload_notice_for_error`] を通じて notice になる — `Some` を
+/// 返すのはこの分岐だけだ｡まだ何も表示されていないときは､失敗が state
+/// そのものになる — このファイルの他のあらゆる失敗した fetch が使うのと
+/// 同じ [`map_reload_error`] の対応づけだ — そして notice は `None` で
+/// 返る: `state` (`Failed`/`RateLimited`) がすでに本文へ何が起きたかを
+/// 伝えているので､同じ文言を繰り返すバナーは画面上の失敗の重複でしかない｡
 pub(super) fn reload_failure_outcome(
     state: TimelineState,
     error: &anyhow::Error,
@@ -101,16 +98,16 @@ pub(super) fn reload_failure_outcome(
     }
 }
 
-/// Whether the header should offer a "Load older" button (#11): only once a
-/// response has actually carried a `meta.next_token` to resume from, and
-/// only while the timeline is in a state where clicking it makes sense.
+/// ヘッダが "Load older" ボタンを出すべきか (#11): レスポンスが実際に
+/// 再開用の `meta.next_token` を運んできた後で､かつ timeline がそれを
+/// 押す意味のある状態にある間だけだ｡
 ///
-/// Withheld at the post cap, which is the part that matters for money.
-/// `cache::splice` truncates back down to `MAX_CACHED_POSTS`, so at the
-/// cap a click would spend a real API request and then discard every post it
-/// bought — a paid no-op, in a project whose entire cache exists to avoid
-/// exactly that. [`at_the_post_cap`] renders an explanation in its place so
-/// the button does not just silently vanish.
+/// post の上限では出さない｡そこが金に効く部分だ｡`cache::splice` は
+/// `MAX_CACHED_POSTS` まで切り詰めるので､上限でクリックすると本物の API
+/// リクエストを消費したうえで買った post をすべて捨てることになる — 金を
+/// 払った no-op であり､キャッシュ全体がまさにそれを避けるために存在する
+/// このプロジェクトでは筋が通らない｡ボタンが黙って消えないよう､
+/// [`at_the_post_cap`] がその場所に説明を描く｡
 pub(super) fn offers_load_older(next_page_token: Option<&str>, state: &TimelineState) -> bool {
     match state {
         TimelineState::Loaded(items) => {
@@ -120,17 +117,17 @@ pub(super) fn offers_load_older(next_page_token: Option<&str>, state: &TimelineS
     }
 }
 
-/// Whether the loaded timeline has hit the cap that [`offers_load_older`]
-/// stops at, so the body can say why there is nothing further back.
+/// 読み込み済みの timeline が [`offers_load_older`] の止まる上限に達したか｡
+/// 本文がこれ以上遡れない理由を言えるようにするためのものだ｡
 pub(super) fn at_the_post_cap(state: &TimelineState) -> bool {
     matches!(state, TimelineState::Loaded(items) if items.len() >= cache::MAX_CACHED_POSTS)
 }
 
-/// Whether [`TimelineView::reload`] should refuse to run right now, per
-/// `config.min_fetch_interval_seconds` (#10). `None` means "go ahead" —
-/// either there has never been a reload yet, or the interval since the last
-/// one has already elapsed. `Some(reset_at)` means "not yet", carrying when
-/// it becomes allowed again, in the same shape [`cooldown_label`] expects.
+/// `config.min_fetch_interval_seconds` に照らして [`TimelineView::reload`]
+/// が今の実行を拒むべきか (#10)｡`None` は「進めてよい」 — reload がまだ
+/// 一度も無いか､前回からの間隔がすでに経過している｡`Some(reset_at)` は
+/// 「まだだ」で､いつ再び許されるかを [`cooldown_label`] が期待するのと
+/// 同じ形で運ぶ｡
 pub(super) fn reload_cooldown(
     last_reload_at: Option<i64>,
     min_interval_seconds: u32,
@@ -141,13 +138,13 @@ pub(super) fn reload_cooldown(
     (reset_at > now).then_some(reset_at)
 }
 
-/// Whether [`TimelineView::reload`] should refuse to run right now, given
-/// `trigger` (#57). `ReloadTrigger::UserAction` bypasses [`reload_cooldown`]
-/// entirely and always returns `None` — see [`ReloadTrigger`]'s doc for why
-/// a post-submit or sign-in reload must never be blocked by an interval that
-/// exists to suppress polling, not to gate a direct response to something
-/// the user just did. `ReloadTrigger::Polling` defers to `reload_cooldown`
-/// unchanged.
+/// `trigger` を踏まえて [`TimelineView::reload`] が今の実行を拒むべきか
+/// (#57)｡`ReloadTrigger::UserAction` は [`reload_cooldown`] を丸ごと
+/// 迂回して常に `None` を返す — post の送信やサインイン後の reload が､
+/// polling を抑えるために存在する間隔で塞がれてはならない理由は
+/// [`ReloadTrigger`] の doc にある｡その間隔は､ユーザーが今やったことへの
+/// 直接の応答を制限するためのものではない｡`ReloadTrigger::Polling` は
+/// `reload_cooldown` にそのまま委ねる｡
 pub(super) fn reload_gate(
     trigger: ReloadTrigger,
     last_reload_at: Option<i64>,
@@ -160,16 +157,16 @@ pub(super) fn reload_gate(
     }
 }
 
-/// What `state` should become right before spawning a fetch (#57) — shared
-/// by [`TimelineView::reload`] and `TimelineView::load_older`, a pure
-/// function so "an existing timeline survives a fetch in progress" can be
-/// unit tested without gpui. Fetching a fresh copy is not evidence the
-/// previous one is stale or wrong, so whenever `previous` already holds
-/// posts, this leaves them in place; the header's busy indicator comes from
-/// `TimelineView::reloading` instead, set alongside this rather than folded
-/// into `state` (see that field's doc). Only when there is nothing loaded
-/// yet does this fall back to `TimelineState::Loading`, matching the
-/// pre-#57 behavior for the one case where there is nothing to lose.
+/// fetch を spawn する直前に `state` が何になるべきか (#57) —
+/// [`TimelineView::reload`] と `TimelineView::load_older` が共有する｡
+/// 「すでにある timeline は進行中の fetch を生き延びる」を gpui 無しで
+/// ユニットテストできるよう純粋な関数にしてある｡新しいコピーを取りに行く
+/// ことは､前のものが古いとか誤っているとかの証拠ではない｡だから
+/// `previous` がすでに post を持つならそのまま残す｡ヘッダの busy 表示は
+/// 代わりに `TimelineView::reloading` から来る｡これは `state` に畳み込まず
+/// 並べて設定してある (そのフィールドの doc を参照)｡まだ何も読み込まれて
+/// いないときだけ `TimelineState::Loading` へ落ちる｡失うものが無い唯一の
+/// ケースについて､#57 より前の挙動に合わせている｡
 pub(super) fn reload_start_state(previous: TimelineState) -> TimelineState {
     match previous {
         TimelineState::Loaded(items) => TimelineState::Loaded(items),
@@ -177,64 +174,61 @@ pub(super) fn reload_start_state(previous: TimelineState) -> TimelineState {
     }
 }
 
-/// What one wake-up of [`TimelineView::start_cooldown_ticker`]'s loop should
-/// do (#57's item 3), given the current `reload_notice` and the time — the
-/// pure decision behind that loop, factored out so it's unit-testable
-/// without gpui's timer; the loop itself just matches on this and either
-/// keeps going or returns.
+/// 現在の `reload_notice` と時刻を踏まえて､
+/// [`TimelineView::start_cooldown_ticker`] のループの 1 回の起床が何を
+/// すべきか (#57 の項目 3) — そのループの背後にある純粋な判断で､gpui の
+/// タイマー無しでユニットテストできるよう切り出してある｡ループ自身は
+/// これに match して､続けるか返るかするだけだ｡
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum CooldownTick {
-    /// Nothing to tick: `reload_notice` is `None`, or holds a `Failed`
-    /// notice with no countdown to advance — either it was never a
-    /// cooldown, or something else (a success, a plain failure) has
-    /// already replaced it since the ticker started. The loop should stop
-    /// without touching `reload_notice`.
+    /// 刻むものが無い: `reload_notice` が `None` か､進めるカウントダウンの
+    /// 無い `Failed` の notice を持っている — もともと cooldown ではなかった
+    /// か､ticker が始まってから他の何か (成功､ただの失敗) がすでに置き換えた
+    /// かのどちらかだ｡ループは `reload_notice` に触れず止まるべきだ｡
     NotTicking,
-    /// Still inside the cooldown window: re-notify so the banner's
-    /// countdown advances, then wait another second.
+    /// まだ cooldown の窓の中だ: バナーのカウントダウンが進むよう再通知し､
+    /// もう 1 秒待つ｡
     StillWaiting,
-    /// `reset_at` has passed. The loop should clear `reload_notice` — the
-    /// banner disappearing, and "Reload" becoming clickable again, is the
-    /// user-visible "done waiting" signal — and stop.
+    /// `reset_at` を過ぎた｡ループは `reload_notice` を消して止まるべきだ —
+    /// バナーが消え "Reload" が再び押せるようになることが､ユーザーから
+    /// 見える「待ち終わった」の合図だ｡
     Elapsed,
 }
 
-/// Pure core of [`CooldownTick`]'s decision — see its doc for what each
-/// variant means the loop should do.
+/// [`CooldownTick`] の判断の純粋な中核 — 各 variant がループに何をさせる
+/// 意味なのかは､その doc を参照｡
 pub(super) fn cooldown_tick(notice: Option<&ReloadNotice>, now: i64) -> CooldownTick {
     match notice {
         Some(ReloadNotice::Cooldown { reset_at, .. }) if *reset_at > now => {
             CooldownTick::StillWaiting
         }
         Some(ReloadNotice::Cooldown { .. }) => CooldownTick::Elapsed,
-        // An `Outcome` means a reload finished while the ticker was still
-        // running, which is exactly the "something else has replaced it"
-        // case `NotTicking` describes (#141).
+        // `Outcome` は ticker がまだ動いている間に reload が終わったという
+        // ことで､それはまさに `NotTicking` が説明する「他の何かが置き換えた」
+        // ケースだ (#141)｡
         Some(ReloadNotice::Failed(_) | ReloadNotice::Outcome(_)) | None => CooldownTick::NotTicking,
     }
 }
 
-/// Where the reader should be left after a reload prepends new posts
-/// (#22): the index in the *new* list of whatever row was at the top of
-/// the viewport before, or `None` to leave the scroll position alone.
+/// reload が新しい post を先頭に足した後､読み手をどこに置くべきか (#22):
+/// 直前まで viewport の先頭にあった行の *新しい* 一覧での index か､
+/// スクロール位置に手を触れないなら `None`｡
 ///
-/// `None` means both "stay where you are" cases, which are the same
-/// instruction to the caller even though they are different situations:
-/// the reader was already at the very top, so the new posts should simply
-/// appear above nothing and be seen; or nothing was prepended, so there is
-/// nothing to compensate for.
+/// `None` は「そこに留まる」2 つのケースの両方を意味する｡状況は違っても
+/// 呼び出し元への指示は同じだ: 読み手がすでに一番上にいたので､新しい
+/// post はその上に何も無いまま現れて目に入ればよい｡あるいは先頭に何も
+/// 足されなかったので､埋め合わせるものが無い｡
 ///
-/// Anything else shifts the reader. A reload that brings six new posts
-/// while someone is twenty rows down moves what they were reading twenty-
-/// six rows down the list, and the viewport stays where it was — the text
-/// under their eyes changes without them touching anything. Counting the
-/// leading ids that were not on file is exactly how far to scroll to undo
-/// that.
+/// それ以外は読み手をずらす｡20 行下にいる人のところへ新しい post を 6 件
+/// 運んでくる reload は､その人が読んでいたものを一覧の 26 行下へ動かす｡
+/// viewport は元の場所に留まるので､何も触っていないのに目の下の文章が
+/// 変わる｡手元に無かった先頭の id を数えることが､それを取り消すのに
+/// ちょうど必要なスクロール量だ｡
 ///
-/// Takes ids rather than items so it stays a pure function over what
-/// changed, and counts only the *leading* run: an id appearing further
-/// down is a post that moved rather than one that arrived, and moving the
-/// viewport for it would be wrong.
+/// 何が変わったかに対する純粋な関数のままでいられるよう､item ではなく
+/// id を取る｡そして *先頭の* 連なりだけを数える: それより下に現れる id は
+/// 到着した post ではなく移動した post であり､そのために viewport を
+/// 動かすのは誤りだ｡
 pub(super) fn preserved_scroll_target(
     previous_ids: &[&str],
     new_ids: &[&str],
@@ -250,14 +244,13 @@ pub(super) fn preserved_scroll_target(
     Some(top_item.saturating_add(prepended))
 }
 
-/// How many posts a reload brought in: the leading run of ids that were
-/// not already on file.
+/// reload が何件の post を運んできたか: 手元に無かった id の先頭の連なりだ｡
 ///
-/// The *leading* run, because an id further down is a post that moved
-/// rather than one that arrived. Both callers depend on that reading —
-/// [`preserved_scroll_target`] would push the reader past what they were
-/// on, and [`reload_outcome_label`] would claim posts that were already
-/// there — so the rule lives in one place rather than in each of them.
+/// *先頭の* 連なりなのは､それより下の id が到着した post ではなく移動した
+/// post だからだ｡呼び出し元は 2 つともこの読み方に依存している —
+/// [`preserved_scroll_target`] は読み手を見ていた場所より先へ押しやって
+/// しまうし､[`reload_outcome_label`] はすでにそこにあった post を新着だと
+/// 言ってしまう — だからルールはそれぞれではなく 1 箇所に置いてある｡
 pub(super) fn newly_arrived(previous_ids: &[&str], new_ids: &[&str]) -> usize {
     let previous: std::collections::HashSet<&str> = previous_ids.iter().copied().collect();
     new_ids
@@ -266,17 +259,16 @@ pub(super) fn newly_arrived(previous_ids: &[&str], new_ids: &[&str]) -> usize {
         .count()
 }
 
-/// What a finished reload says for itself (#141).
+/// 終わった reload が自分について何を言うか (#141)｡
 ///
-/// A reload used to report only its failures. On success the header's
-/// button flicked to `Loading…` and back, which on a fast response is a
-/// frame or two — and never where the reader is looking when they pressed
-/// `cmd-r` or used the menu rather than the button.
+/// かつて reload は失敗しか報告しなかった｡成功時はヘッダのボタンが
+/// `Loading…` へ切り替わって戻るだけで､応答が速ければ 1､2 フレームだ —
+/// しかもボタンではなく `cmd-r` やメニューを使ったとき､読み手が見ている
+/// 場所では決してない｡
 ///
-/// So the outcome is stated instead of implied, and "nothing arrived" is
-/// stated too: that is the case where the screen is otherwise identical
-/// before and after, and the one where a reader is most likely to think
-/// the press did not register.
+/// だから結果はほのめかさず明言する｡「何も来なかった」も明言する: それは
+/// 前後で画面が他は同一になるケースであり､押下が届かなかったと読み手が
+/// 最も思いやすいケースだ｡
 pub(super) fn reload_outcome_label(new_posts: usize) -> String {
     match new_posts {
         0 => "No new posts.".to_string(),

@@ -1,49 +1,47 @@
-//! The toolbar's list picker (#164): which timeline the window shows, how
-//! that choice survives a relaunch, and where the segments get their names.
+//! ツールバーの list picker (#164): ウィンドウがどの timeline を見せるか､
+//! その選択が再起動をどう生き延びるか､区画がどこから名前を得るか｡
 //!
-//! #161 made a List the window's primary source, but one List, decided at
-//! startup from `config.list_id`. #95 had already drawn the segmented
-//! control it would be switched from — with one segment and no click
-//! handler, because there was nothing to switch *to*. This file supplies
-//! the other segments and the click.
+//! #161 は List をウィンドウの primary source にしたが､それは起動時に
+//! `config.list_id` から決まる 1 つの List だった｡#95 はすでに切り替え元と
+//! なる segmented control を描いていた — 区画は 1 つ､クリックハンドラは
+//! 無し｡切り替える *先* が無かったからだ｡このファイルが残りの区画と
+//! クリックを供給する｡
 //!
-//! Laid out like [`super::list_sync`]: pure functions with their tests
-//! first, then an `impl TimelineView` block for the parts that touch the
-//! window or spend a request.
+//! 並びは [`super::list_sync`] と同じ: まず純粋な関数とそのテスト､続いて
+//! ウィンドウに触れるかリクエストを使う部分の `impl TimelineView`
+//! ブロック｡
 //!
-//! # Where the money is
+//! # 金がかかるのはどこか
 //!
-//! Switching spends nothing. The window renders whatever `source`'s cache
-//! file holds, and only a list that has never been read — no cache file at
-//! all — falls through to the ordinary reload, which is the same request a
-//! first launch makes. Switching back and forth between lists already
-//! read costs zero requests, however often; the issue's third completion
-//! criterion is exactly that, and
-//! `switching_between_cached_sources_sends_nothing` in `ui`'s tests holds
-//! it.
+//! 切り替えは何も使わない｡ウィンドウは `source` のキャッシュファイルが
+//! 持つものを描くだけで､一度も読まれていない list — キャッシュファイルが
+//! そもそも無い場合 — だけが通常の reload へ落ちる｡それは初回起動が出すのと
+//! 同じリクエストだ｡すでに読んだ list の間を行き来する分には､何度やっても
+//! リクエストは 0 だ｡issue の 3 つ目の完了条件がまさにそれで､`ui` の
+//! テストの `switching_between_cached_sources_sends_nothing` がそれを
+//! 押さえている｡
 //!
-//! Naming the segments does cost one request: `GET /2/users/:id/owned_lists`
-//! bills per list returned (`x-api-budget`). It is never sent on the
-//! window's own initiative — the picker offers a button that says what it
-//! costs, and the result is cached without a TTL, so the only way to spend
-//! it again is to press the button again.
+//! 区画に名前を付けるのはリクエストを 1 つ使う: `GET
+//! /2/users/:id/owned_lists` は返された list ごとに課金される
+//! (`x-api-budget`)｡ウィンドウの独断で送られることは決してない — picker は
+//! いくらかかるかを言うボタンを出し､結果は TTL 無しでキャッシュされるので､
+//! 再び使う唯一の道はもう一度ボタンを押すことだ｡
 //!
-//! # What wins at startup
+//! # 起動時に何が勝つか
 //!
-//! The saved selection beats `config.list_id`, and so beats `X_LIST_ID`
-//! too. That is the reverse of the usual "environment over file" rule and
-//! it is deliberate: the dev profile always has a default list
-//! (`Profile::default_list_id`), so if the configuration won, a dev build
-//! would snap back to that list on every launch and the picker's choice
-//! would never outlive the window. The configuration is where the window
-//! *starts* until someone picks; a pick is a later, more specific decision.
+//! 保存された選択が `config.list_id` に勝ち､したがって `X_LIST_ID` にも
+//! 勝つ｡これは通常の「ファイルより環境変数」のルールの逆であり､意図的だ:
+//! dev プロファイルは常に既定の list を持つので (`Profile::default_list_id`)､
+//! 設定が勝てば dev ビルドは起動のたびにその list へ戻り､picker の選択が
+//! ウィンドウより長生きすることは決してなくなる｡設定は誰かが選ぶまでの
+//! ウィンドウの *出発点* であり､選択はより後の､より具体的な決定だ｡
 
 use std::path::Path;
 
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
 
-// Spelled out rather than `use super::*`, for [`super::list_sync`]'s reason.
+// `use super::*` ではなく書き下している｡理由は [`super::list_sync`] と同じ｡
 use super::render::{Addressable as _, tab_segment, tab_trough};
 use super::{
     AnyElement, Context, IntoElement as _, ParentElement as _, ReloadNotice, ReloadTrigger,
@@ -55,29 +53,29 @@ use crate::paths::Paths;
 use crate::theme;
 use crate::x_api::ListSummary;
 
-/// What the picker remembers between launches: the timeline that was
-/// showing when the window last switched.
+/// picker が起動をまたいで覚えていること: ウィンドウが最後に切り替えた
+/// ときに表示していた timeline だ｡
 ///
-/// Its own type rather than a `Serialize` on [`TimelineSource`], because
-/// this one is written to disk and read back by a later build. The cache
-/// module's history (#97, a schema version added and removed) is the
-/// warning: an on-disk shape must not be whatever an internal enum's
-/// derive happens to emit today. The `kind` tag keeps a third variant
-/// from ever being mistaken for a list id.
+/// [`TimelineSource`] に `Serialize` を付けるのではなく専用の型にしてある｡
+/// こちらはディスクに書かれ､後のビルドが読み戻すからだ｡cache モジュールの
+/// 履歴 (#97､schema バージョンを足して外した) が警告になっている:
+/// ディスク上の形は､内部の enum の derive が今日たまたま吐くものであっては
+/// ならない｡`kind` タグは､3 つ目の variant が list id と取り違えられるのを
+/// 防ぐ｡
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum Selection {
-    /// `GET /2/users/:id/timelines/reverse_chronological` — Home.
+    /// `GET /2/users/:id/timelines/reverse_chronological` — Home｡
     Home,
-    /// `GET /2/lists/:id/tweets` for this list.
+    /// この list に対する `GET /2/lists/:id/tweets`｡
     List {
-        /// The list's id, bare digits.
+        /// list の id｡数字だけ｡
         id: String,
     },
 }
 
 impl Selection {
-    /// The selection that names `source`.
+    /// `source` を名指す selection｡
     pub(super) fn of(source: &TimelineSource) -> Self {
         match source {
             TimelineSource::Home => Self::Home,
@@ -85,9 +83,10 @@ impl Selection {
         }
     }
 
-    /// The source this selection names, or `None` if the file's list id is
-    /// nothing `Config::resolve` would have accepted — a hand-edited file
-    /// should fall back, not build a request URL out of whatever it said.
+    /// この selection が名指す source｡ファイルの list id が
+    /// `Config::resolve` なら受け付けないものなら `None` — 手で編集された
+    /// ファイルは､書いてある内容からリクエスト URL を組むのではなく
+    /// フォールバックすべきだ｡
     fn into_source(self) -> Option<TimelineSource> {
         match self {
             Self::Home => Some(TimelineSource::Home),
@@ -97,24 +96,24 @@ impl Selection {
     }
 }
 
-/// The whole contents of [`Paths::selection_file`].
+/// [`Paths::selection_file`] の中身すべて｡
 ///
-/// One field, and a struct anyway — [`crate::sync::SyncState`]'s reason:
-/// the next thing worth remembering about the picker should not have to
-/// change the file's shape to get in.
+/// フィールドは 1 つだが､それでも struct にしてある — [`crate::sync::SyncState`]
+/// と同じ理由だ: picker について次に覚える価値のあるものが､入るために
+/// ファイルの形を変えずに済むようにするためだ｡
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub(crate) struct SelectionState {
-    /// The last timeline switched to, or `None` if the picker has never
-    /// been used.
+    /// 最後に切り替えた先の timeline｡picker が一度も使われていなければ
+    /// `None`｡
     #[serde(default)]
     pub selected: Option<Selection>,
 }
 
-/// Read the picker's saved choice back from `path`.
+/// picker が保存した選択を `path` から読み戻す｡
 ///
-/// Infallible, like [`crate::sync::load_state`] and for the same reason:
-/// losing this costs one click, so a missing or corrupt file is the
-/// default rather than an error that stops the window opening.
+/// [`crate::sync::load_state`] と同じく失敗しない｡理由も同じだ: これを
+/// 失う代償はクリック 1 回なので､ファイルが無い・壊れている場合は
+/// ウィンドウが開くのを止めるエラーではなく既定値になる｡
 pub(crate) fn load_selection(path: &Path) -> SelectionState {
     let Ok(contents) = std::fs::read_to_string(path) else {
         return SelectionState::default();
@@ -122,18 +121,18 @@ pub(crate) fn load_selection(path: &Path) -> SelectionState {
     serde_json::from_str(&contents).unwrap_or_default()
 }
 
-/// Write the picker's choice to `path`.
+/// picker の選択を `path` へ書く｡
 pub(crate) fn save_selection(path: &Path, state: &SelectionState) -> Result<()> {
     let json = serde_json::to_string_pretty(state).context("could not serialize the selection")?;
     std::fs::write(path, json).with_context(|| format!("could not write {}", path.display()))
 }
 
-/// Which timeline the window opens on (#161, #164).
+/// ウィンドウがどの timeline で開くか (#161, #164)｡
 ///
-/// The saved selection first, then `config.list_id`, then Home — see the
-/// module doc for why the file beats the configuration. A saved list is
-/// honored whether or not the account still owns it: any list id can be
-/// read, and #161's configured list need not be an owned one either.
+/// まず保存された選択､次に `config.list_id`､最後に Home — ファイルが設定に
+/// 勝つ理由はモジュール doc を参照｡保存された list は､アカウントが今も
+/// それを所有しているかどうかに関わらず尊重される: どの list id でも読める
+/// し､#161 の設定された list も所有している必要は無い｡
 pub(super) fn initial_source(
     saved: Option<Selection>,
     configured_list_id: Option<&str>,
@@ -147,12 +146,12 @@ pub(super) fn initial_source(
     }
 }
 
-/// The saved selection a window starting `startup` should honor: the file's
-/// for a live window, none for a fixture. A fixture is the same screen
-/// every time by definition (`fixture-visual-check`), and a state file
-/// left behind by the last live run must not be able to change which
-/// segment it draws lifted. The write side is gated the same way, by
-/// `TimelineView::selection_file` being `None`.
+/// `startup` で起動するウィンドウが尊重すべき保存された選択: live な
+/// ウィンドウならファイルのもの､fixture なら無し｡fixture は定義上毎回
+/// 同じ画面であり (`fixture-visual-check`)､前回の live 実行が残した state
+/// ファイルが､どの区画を持ち上げて描くかを変えられてはならない｡書き込み側も
+/// 同じように塞いである｡`TimelineView::selection_file` が `None` になる
+/// ことによってだ｡
 pub(super) fn saved_selection_for(startup: &Startup, paths: &Paths) -> Option<Selection> {
     match startup {
         Startup::Live => load_selection(&paths.selection_file()).selected,
@@ -160,10 +159,10 @@ pub(super) fn saved_selection_for(startup: &Startup, paths: &Paths) -> Option<Se
     }
 }
 
-/// The lists the picker last fetched, or none if it never has — and none,
-/// with a log line, if the cache file could not be read. A picker that
-/// cannot name any list still has a Home segment and a button to fetch
-/// the rest, so an unreadable cache is not worth failing the window over.
+/// picker が最後に取得した list｡一度も取得していなければ空 — キャッシュ
+/// ファイルが読めなかった場合もログ 1 行を残して空だ｡どの list にも名前を
+/// 付けられない picker にも Home の区画と残りを取得するボタンはあるので､
+/// 読めないキャッシュはウィンドウを失敗させるほどのものではない｡
 pub(super) fn cached_lists_or_empty(paths: &Paths) -> Vec<ListSummary> {
     match cache::cached_owned_lists(paths) {
         Ok(lists) => lists.unwrap_or_default(),
@@ -174,25 +173,25 @@ pub(super) fn cached_lists_or_empty(paths: &Paths) -> Vec<ListSummary> {
     }
 }
 
-/// One segment of the picker: what it is called, what it switches to, and
-/// whether it is the one showing.
+/// picker の区画 1 つ: 何と呼ばれるか､何へ切り替えるか､そしてそれが今
+/// 表示中のものかどうか｡
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Segment {
-    /// The element name a window test can find the segment by
-    /// (`render::Addressable`).
+    /// ウィンドウのテストがこの区画を見つけるための要素名
+    /// (`render::Addressable`)｡
     pub name: String,
-    /// What the segment says.
+    /// 区画が言うこと｡
     pub label: String,
-    /// What clicking it switches the window to.
+    /// クリックしたときウィンドウが切り替わる先｡
     pub source: TimelineSource,
-    /// Whether this is the timeline currently showing.
+    /// これが今表示中の timeline かどうか｡
     pub selected: bool,
 }
 
-/// The picker's segments, in drawing order: Home, then every owned list as
-/// the API ordered them, then — only if the window is showing a list it
-/// does not own, #161's configured list being the usual case — that list,
-/// so the selected segment always exists to be lifted out of the trough.
+/// picker の区画を描画順に並べたもの: Home､次に所有する list を API が
+/// 並べた順に､そして — ウィンドウが所有していない list を表示している
+/// ときだけ､通常は #161 の設定された list がそれだ — その list｡選択中の
+/// 区画が必ず存在し､trough から持ち上げられるようにするためだ｡
 pub(super) fn segments(current: &TimelineSource, owned: &[ListSummary]) -> Vec<Segment> {
     let mut segments = vec![segment(TimelineSource::Home, "Home".to_string(), current)];
     for list in owned {
@@ -219,7 +218,7 @@ fn segment(source: TimelineSource, label: String, current: &TimelineSource) -> S
     }
 }
 
-/// The element name of the segment that switches to `source`.
+/// `source` へ切り替える区画の要素名｡
 pub(super) fn segment_name(source: &TimelineSource) -> String {
     match source {
         TimelineSource::Home => "tab-home".to_string(),
@@ -227,9 +226,9 @@ pub(super) fn segment_name(source: &TimelineSource) -> String {
     }
 }
 
-/// What a list's segment says: its name, or its id when the API sent none
-/// (`ListSummary::name`'s doc has why that is tolerated at all). An id is
-/// an ugly label but a usable one; a blank segment is neither.
+/// list の区画が言うこと: その名前､API が名前を寄越さなかったときは id
+/// (それがそもそも許される理由は `ListSummary::name` の doc にある)｡id は
+/// 見苦しいラベルだが使える｡空白の区画はどちらでもない｡
 pub(super) fn segment_label(list: &ListSummary) -> String {
     if list.name.trim().is_empty() {
         list.id.clone()
@@ -238,15 +237,15 @@ pub(super) fn segment_label(list: &ListSummary) -> String {
     }
 }
 
-/// Whether the toolbar offers the button that fetches the lists: only
-/// with a client to spend through and an id to ask about. A fixture
-/// window has neither, which is what keeps a fixture free of charge.
+/// ツールバーが list を取得するボタンを出すかどうか: 金を使うための
+/// client と､問い合わせる id の両方があるときだけだ｡fixture の
+/// ウィンドウはどちらも持たない｡それが fixture を無課金に保っている｡
 pub(super) fn offers_list_fetch(has_client: bool, user_known: bool) -> bool {
     has_client && user_known
 }
 
-/// The fetch button's text. It names its price in every resting state,
-/// per `x-api-budget`'s rule for clicks that send requests.
+/// 取得ボタンの文言｡リクエストを送るクリックについての `x-api-budget` の
+/// ルールに従い､静止している状態では必ず値段を示す｡
 pub(super) fn lists_button_label(has_lists: bool, fetching: bool) -> &'static str {
     if fetching {
         "Loading lists…"
@@ -257,19 +256,19 @@ pub(super) fn lists_button_label(has_lists: bool, fetching: bool) -> &'static st
     }
 }
 
-/// Whether a switch has to wait for startup to finish.
+/// 切り替えが起動の完了を待たねばならないかどうか｡
 ///
-/// `start` reads the cache for the source it was given and then puts the
-/// result on screen; a switch in the middle of that would have the
-/// startup's rows appear under the new segment. The tell is `Loading`
-/// with no client yet — once either changes, startup has settled.
+/// `start` は渡された source のキャッシュを読み､その結果を画面へ出す｡
+/// その途中で切り替えると､起動時の行が新しい区画の下に現れてしまう｡
+/// 見分け方は､client がまだ無い状態の `Loading` だ — どちらかが変われば
+/// 起動は落ち着いている｡
 pub(super) fn switch_waits_for_startup(state: &TimelineState, has_client: bool) -> bool {
     matches!(state, TimelineState::Loading) && !has_client
 }
 
 impl TimelineView {
-    /// The toolbar's segmented control (#95), now with every segment
-    /// clickable (#164).
+    /// ツールバーの segmented control (#95)｡今はどの区画もクリックできる
+    /// (#164)｡
     pub(super) fn list_picker(&self, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = self.theme;
         let mut trough = tab_trough(theme);
@@ -286,10 +285,9 @@ impl TimelineView {
         trough.into_any_element()
     }
 
-    /// The button that fetches the lists' names (#164), or `None` when
-    /// there is nothing to fetch them with — see [`offers_list_fetch`].
-    /// Plain text while a fetch is in flight: a second click would only
-    /// buy the same page twice.
+    /// list の名前を取得するボタン (#164)｡取得する手立てが無いときは
+    /// `None` — [`offers_list_fetch`] を参照｡取得が飛んでいる間はただの
+    /// テキストになる: 2 度目のクリックは同じページを 2 回買うだけだ｡
     pub(super) fn lists_control(&self, cx: &mut Context<'_, Self>) -> Option<AnyElement> {
         if !offers_list_fetch(self.client.is_some(), self.home_user_id.is_some()) {
             return None;
@@ -311,19 +309,18 @@ impl TimelineView {
         )
     }
 
-    /// Show `source` instead of whatever is showing (#164).
+    /// 今表示しているものの代わりに `source` を見せる (#164)｡
     ///
-    /// Everything that belonged to the previous source goes with it: the
-    /// in-flight reload or "Load older" (its result would land under the
-    /// wrong segment), the pagination cursor (a Home cursor means nothing
-    /// to a list endpoint), the poll buffer (`clear_pending`'s doc), open
-    /// threads, and the scroll position. Then the new source's cache is
-    /// put on screen, and only if there is none does this spend the same
-    /// reload a first launch would.
+    /// 前の source に属していたものはすべて一緒に消える: 飛行中の reload や
+    /// "Load older" (その結果が誤った区画の下に着地してしまう)､ページング
+    /// カーソル (Home のカーソルは list のエンドポイントには何の意味も
+    /// 無い)､poll のバッファ (`clear_pending` の doc)､開いているスレッド､
+    /// そしてスクロール位置｡そのうえで新しい source のキャッシュを画面へ
+    /// 出し､それが無い場合にだけ初回起動と同じ reload を使う｡
     ///
-    /// The auto-refresh loop is restarted rather than left running: it
-    /// captured the old source when it started, and would keep polling it
-    /// — writing the old list's posts over the new one's screen.
+    /// auto-refresh のループは動かしたままにせず再起動する: ループは開始
+    /// 時点の source を捕まえており､そのまま古いほうを poll し続ける —
+    /// 古い list の post を新しいほうの画面へ書き込むことになる｡
     pub(super) fn switch_source(&mut self, source: TimelineSource, cx: &mut Context<'_, Self>) {
         if self.source == source || switch_waits_for_startup(&self.state, self.client.is_some()) {
             return;
@@ -338,9 +335,9 @@ impl TimelineView {
         self.thread_fetches.clear();
         self.list_scroll.scroll_to_top_of_item(0);
 
-        // Gated the same way the read side is: a fixture's segments name
-        // lists that do not exist, and remembering one would send the
-        // next live launch to reload a 404.
+        // 読み取り側と同じように塞いである: fixture の区画は存在しない
+        // list を名指しており､それを覚えると次の live 起動が 404 を
+        // reload しに行くことになる｡
         if let Some(selection_file) = &self.selection_file {
             let remembered = SelectionState {
                 selected: Some(Selection::of(&self.source)),
@@ -365,13 +362,13 @@ impl TimelineView {
             None => self.reload(ReloadTrigger::UserAction, cx),
         }
         self.start_auto_refresh(cx);
-        // After `state` is replaced, for `start`'s reason (#120).
+        // `state` を差し替えた後で｡理由は `start` と同じ (#120)｡
         self.refresh_images(cx);
         cx.notify();
     }
 
-    /// Spend the one request that names the lists (#164), and cache what
-    /// comes back. Refuses while one is already in flight.
+    /// list に名前を与える 1 回のリクエストを使い (#164)､返ってきたものを
+    /// キャッシュする｡すでに 1 つ飛行中なら拒否する｡
     pub(super) fn fetch_owned_lists(&mut self, cx: &mut Context<'_, Self>) {
         if self.lists_fetch.is_some() {
             return;
@@ -388,9 +385,9 @@ impl TimelineView {
                     let now = oauth::unix_now();
                     let (lists, next_token) = client.owned_lists(&paths, &user_id, None, now)?;
                     if next_token.is_some() {
-                        // One page is the picker's whole vocabulary — see
-                        // `XClient::owned_lists`. Said out loud rather than
-                        // silently truncated.
+                        // 1 ページが picker の語彙のすべてだ —
+                        // `XClient::owned_lists` を参照｡黙って切り詰めず
+                        // 声に出して言う｡
                         log::warn("the account owns more lists than one page holds; the picker shows the first 100");
                     }
                     cache::save_owned_lists(&paths, &lists, now)?;
@@ -434,7 +431,7 @@ mod tests {
         dir.join("selection.json")
     }
 
-    // --- the saved selection ---
+    // --- 保存された選択 ---
 
     #[test]
     fn a_selection_round_trips_through_its_file() {
@@ -451,8 +448,8 @@ mod tests {
 
     #[test]
     fn the_file_names_its_kind_rather_than_leaking_an_enum_shape() {
-        // The on-disk shape is a contract with later builds, so it is
-        // pinned here rather than left to whatever the derive emits.
+        // ディスク上の形は後のビルドとの契約なので､derive が吐くものに
+        // 任せずここで固定する｡
         let path = scratch("shape");
         save_selection(
             &path,
@@ -476,15 +473,15 @@ mod tests {
 
     #[test]
     fn a_corrupt_selection_file_is_the_default() {
-        // Losing the choice costs one click; failing the window over it
-        // would cost more.
+        // 選択を失う代償はクリック 1 回｡それでウィンドウを失敗させるほうが
+        // 高くつく｡
         let path = scratch("corrupt");
         std::fs::write(&path, b"{not json").unwrap();
         assert_eq!(load_selection(&path), SelectionState::default());
         std::fs::remove_file(&path).unwrap();
     }
 
-    // --- which timeline the window opens on ---
+    // --- ウィンドウがどの timeline で開くか ---
 
     #[test]
     fn nothing_configured_and_nothing_saved_reads_the_home_timeline() {
@@ -493,8 +490,8 @@ mod tests {
 
     #[test]
     fn a_configured_list_replaces_the_home_timeline() {
-        // Replaces, not supplements (#161): #157 left nothing in the home
-        // timeline worth falling back to.
+        // 補うのではなく置き換える (#161): #157 の後､home の timeline には
+        // フォールバックする価値のあるものが残っていない｡
         assert_eq!(
             initial_source(None, Some("2091351590695588200")),
             TimelineSource::List("2091351590695588200".to_string())
@@ -503,8 +500,8 @@ mod tests {
 
     #[test]
     fn a_saved_selection_beats_the_configured_list() {
-        // The dev profile always configures a list; if that won, a dev
-        // build would forget the picker's choice on every launch.
+        // dev プロファイルは常に list を設定する｡それが勝てば dev ビルドは
+        // 起動のたびに picker の選択を忘れる｡
         assert_eq!(
             initial_source(
                 Some(Selection::List {
@@ -522,8 +519,8 @@ mod tests {
 
     #[test]
     fn a_saved_list_id_that_is_not_digits_falls_back_to_the_configuration() {
-        // The same rule `Config::resolve` applies to `list_id`, applied to
-        // a file someone can edit by hand.
+        // `Config::resolve` が `list_id` に適用するのと同じルールを､
+        // 人が手で編集できるファイルに適用する｡
         assert_eq!(
             initial_source(
                 Some(Selection::List {
@@ -550,7 +547,7 @@ mod tests {
         );
     }
 
-    // --- the segments ---
+    // --- 区画 ---
 
     #[test]
     fn home_comes_first_then_the_owned_lists_in_api_order() {
@@ -577,8 +574,8 @@ mod tests {
 
     #[test]
     fn a_list_the_account_does_not_own_still_gets_a_segment_while_showing() {
-        // #161's configured list need not be an owned one; without this
-        // the trough would have no lifted segment at all.
+        // #161 の設定された list は所有しているものである必要が無い｡
+        // これが無いと trough に持ち上がった区画が 1 つも無くなる｡
         let current = TimelineSource::List("9".to_string());
         let segments = segments(&current, &[list("1", "mine")]);
         assert_eq!(segments.len(), 3);
@@ -601,7 +598,7 @@ mod tests {
         assert_eq!(segment_label(&list("7", "rust")), "rust");
     }
 
-    // --- the fetch button ---
+    // --- 取得ボタン ---
 
     #[test]
     fn the_fetch_is_offered_only_with_a_client_and_a_known_user() {
@@ -619,8 +616,8 @@ mod tests {
 
     #[test]
     fn a_fixture_window_ignores_the_saved_selection() {
-        // The same screen every time, whatever the last live run left in
-        // the state directory.
+        // 前回の live 実行が state ディレクトリに何を残していようと､
+        // 毎回同じ画面になる｡
         let home = std::env::temp_dir().join("twigpui-selection-fixture");
         let home_str = home.display().to_string();
         let paths = Paths::from_vars(move |key| (key == "HOME").then(|| home_str.clone())).unwrap();

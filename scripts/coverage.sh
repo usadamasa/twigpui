@@ -1,38 +1,36 @@
 #!/usr/bin/env bash
-# Report test coverage of the implementation — not of the tests.
+# 実装のテストカバレッジを報告する — テストのカバレッジではない｡
 #
-# `cargo llvm-cov` instruments everything it compiles, and this crate keeps
-# its tests in the same file as the code under `#[cfg(test)]`. Those test
-# functions run by definition, so they count as covered and pull the number
-# up: 1077 of 1880 instrumented functions are test functions, and the
-# headline figure reads 79% where the implementation alone is 54%
-# (measured 2026-08-24). Reporting the raw number would be reporting how
-# well the tests cover the tests.
+# `cargo llvm-cov` はコンパイルしたものすべてを計測対象にするが､この crate は
+# テストをコードと同じファイルの `#[cfg(test)]` 以下に置いている｡テスト関数は
+# 定義上必ず実行されるので covered として数えられ､数字を押し上げる: 計測対象
+# 1880 関数のうち 1077 がテスト関数で､実装だけなら 54% のところ見出しの数字は
+# 79% と読める (2026-08-24 に計測)｡素の数字を報告することは､テストがテストを
+# どれだけ覆っているかを報告することになる｡
 #
-# So every figure here is filtered to regions that start before the
-# `#[cfg(test)]` line — the same boundary `code-metrics.sh` uses to split
-# implementation lines from test lines. Two scripts, one definition of
-# "implementation".
+# そこでここの数字はすべて､`#[cfg(test)]` 行より前で始まる region に絞って
+# ある — `code-metrics.sh` が実装行とテスト行を分けるのと同じ境界だ｡2 つの
+# スクリプトで「実装」の定義は 1 つ｡
 #
-# Three modes:
+# 3 つのモード:
 #
-# - no argument: print the markdown report (per-file table, then the
-#   files with the least coverage). This is what CI appends to the step
-#   summary, and what to read first locally.
-# - `--gaps [path-prefix]`: print uncovered functions as
-#   `file:line function` — one per line, sorted by file. This is the mode
-#   an agent reads to decide where a test is missing. The optional prefix
-#   narrows it to one file or directory.
-# - `--json`: print the filtered per-file numbers as JSON, for anything
-#   that wants to compute rather than read.
+# - 引数なし: markdown のレポートを出す (ファイルごとの表と､続いてカバレッジ
+#   の低いファイル)｡CI が step summary へ追記するのはこれで､手元でも最初に
+#   読むのはこれ｡
+# - `--gaps [path-prefix]`: 未カバーの関数を `file:line function` の形で
+#   1 行ずつ､ファイル順に出す｡テストがどこに足りないかを判断するために
+#   agent が読むのはこのモードだ｡prefix は任意で､1 ファイルや 1 ディレクトリ
+#   に絞れる｡
+# - `--json`: 絞り込んだファイルごとの数字を JSON で出す｡読むのではなく
+#   計算したいもの向け｡
 #
-# Deliberately no threshold and no gate. The repo's rule (see
-# `metrics-baseline.tsv`) is that a check failing from day one gets
-# disabled instead of fixed, and a coverage floor has a second problem the
-# file-size ratchet does not: this app's untestable surface is real and
-# documented (#115 — menus, and everything past the `Scene`), so a feature
-# PR that adds rendering code lowers the percentage through no fault of
-# its own. The gaps list is the deliverable; the percentage is a map.
+# 閾値もゲートも意図して置いていない｡このリポジトリのルール
+# (`metrics-baseline.tsv` を参照) は､初日から落ちるチェックは直されずに
+# 無効化される､というものだ｡さらにカバレッジの下限には､ファイルサイズの
+# ラチェットには無いもう一つの問題がある: このアプリのテスト不能な面は
+# 実在し文書化もされている (#115 — メニューと､`Scene` から先のすべて)｡
+# 描画コードを足す機能 PR は､それ自体に落ち度が無くても割合を下げる｡
+# 成果物は gaps の一覧であって､割合は地図だ｡
 set -euo pipefail
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -42,10 +40,10 @@ work_dir="./tmp/coverage"
 cov_json="$work_dir/llvm-cov.json"
 cutoffs_json="$work_dir/cutoffs.json"
 
-# `llvm-tools-preview` normally comes from rustup. A Homebrew toolchain has
-# no rustup, so fall back to Homebrew's LLVM — but only when its version
-# matches rustc's, since the profile format moves between LLVM releases and
-# a mismatch fails in the middle of a report rather than at the start.
+# `llvm-tools-preview` は通常 rustup から来る｡Homebrew の toolchain には
+# rustup が無いので Homebrew の LLVM へフォールバックする — ただしバージョンが
+# rustc のものと一致するときだけだ｡profile のフォーマットは LLVM のリリース
+# ごとに動くので､食い違うと最初ではなくレポートの途中で失敗する｡
 ensure_llvm_tools() {
   if [ -n "${LLVM_COV:-}" ] && [ -n "${LLVM_PROFDATA:-}" ]; then
     return
@@ -53,7 +51,7 @@ ensure_llvm_tools() {
 
   local brew_llvm="/opt/homebrew/opt/llvm/bin"
   if [ ! -x "$brew_llvm/llvm-cov" ]; then
-    # Nothing to fall back to. cargo-llvm-cov will say what is missing.
+    # フォールバック先が無い｡何が足りないかは cargo-llvm-cov が言う｡
     return
   fi
 
@@ -72,9 +70,9 @@ ensure_llvm_tools() {
   export LLVM_PROFDATA="$brew_llvm/llvm-profdata"
 }
 
-# Where each file stops being implementation. Mirrors
-# `code-metrics.sh`'s `implementation_lines`, including how it tells "no
-# test module" (grep exit 1) from a real read failure (anything else).
+# 各ファイルで実装が終わる位置｡`code-metrics.sh` の `implementation_lines` を
+# 写したもので､「テストモジュールが無い」(grep exit 1) と本当の読み取り失敗
+# (それ以外) を見分けるやり方も含めて同じだ｡
 write_cutoffs() {
   local file match status
   {
@@ -89,8 +87,8 @@ write_cutoffs() {
           printf 'error: could not read %s (grep exit %s)\n' "$file" "$status" >&2
           exit 1
         fi
-        # No test module: every line is implementation. Larger than any
-        # real file, so nothing is filtered out.
+        # テストモジュールが無い: 全行が実装だ｡実在するどのファイルよりも
+        # 大きい値なので､何も除外されない｡
         cut=999999
       fi
       [ "$first" -eq 1 ] || printf ','
@@ -101,31 +99,31 @@ write_cutoffs() {
   } >"$cutoffs_json"
 }
 
-# Whether the profile on disk predates the code it claims to describe.
+# ディスク上の profile が､それが説明していると称するコードより古いかどうか｡
 #
-# This is what makes reading the report cheap without ever making it wrong.
-# An instrumented build takes 1-2 minutes, and the loop this script exists
-# for — read the table, list the gaps for one file, write a test, check it
-# closed — would pay that four times over if every invocation rebuilt. But
-# reusing a profile from before an edit reports the old code, which is
-# worse than being slow. So the mtime decides.
+# これがレポートを読むコストを下げつつ､内容を決して誤らせないための仕掛けだ｡
+# 計測付きのビルドは 1-2 分かかる｡このスクリプトが存在する目的のループ —
+# 表を読み､1 ファイルの gaps を並べ､テストを書き､埋まったか確かめる — は､
+# 呼び出しのたびに再ビルドすればその代金を 4 回払うことになる｡とはいえ編集前の
+# profile を使い回せば古いコードを報告することになり､それは遅いことより悪い｡
+# だから mtime が決める｡
 profile_is_stale() {
   if [ ! -f "$cov_json" ]; then
     return 0
   fi
-  # `-print -quit` stops at the first newer file rather than walking the
-  # whole tree; the answer is the same and it does not depend on the count.
+  # `-print -quit` はツリー全体を歩かず最初に見つけた新しいファイルで止まる｡
+  # 答えは同じで､ファイル数にも左右されない｡
   local newer
   newer=$(find src Cargo.toml Cargo.lock -newer "$cov_json" -print -quit)
   [ -n "$newer" ]
 }
 
-# Run the instrumented tests, then report from that data. `report` re-reads
-# the profile without rebuilding, so the three modes below share one build.
+# 計測付きのテストを走らせ､そのデータから報告する｡`report` は再ビルドせずに
+# profile を読み直すので､下の 3 つのモードは 1 回のビルドを共有する｡
 #
-# `COVERAGE_REUSE=1` forces reuse even when the profile is stale. CI sets it
-# for the second and third passes over a profile it just built, where the
-# tree cannot have changed in between.
+# `COVERAGE_REUSE=1` は profile が古くても再利用を強制する｡CI は､自分で
+# 組み立てたばかりの profile に対する 2 回目と 3 回目のパスでこれを設定する｡
+# その間にツリーが変わりようがないからだ｡
 measure() {
   ensure_llvm_tools
   mkdir -p "$work_dir"
@@ -149,14 +147,13 @@ measure() {
   write_cutoffs
 }
 
-# jq is fed both files and produces one row per source file. A function
-# belongs to the implementation when its first region starts before the
-# cutoff; `regions[i][4]` is the execution count, so a region is covered
-# when that is not zero.
+# jq には両方のファイルを食わせ､ソースファイルごとに 1 行を出す｡最初の
+# region が cutoff より前で始まる関数が実装に属する｡`regions[i][4]` は実行
+# 回数なので､それが 0 でなければその region は covered だ｡
 #
-# `strings` guards the filename: llvm's JSON is machine-written, but this
-# reads one field out of it by path and a non-string there would abort the
-# whole filter rather than skip a row.
+# `strings` はファイル名を守っている: llvm の JSON は機械が書いたものだが､
+# ここではその中の 1 フィールドをパスで読んでおり､そこが文字列でなければ
+# 1 行を飛ばすのではなくフィルタ全体が落ちてしまう｡
 per_file_json() {
   jq -n \
     --slurpfile cuts "$cutoffs_json" \
@@ -183,15 +180,15 @@ case "${1:-}" in
 --gaps)
   measure >&2
   prefix="${2:-src}"
-  # Uncovered *functions*, not lines: a function with no covered region at
-  # all was never called, which is the actionable shape — "nothing
-  # exercises this" rather than "one branch is missing". Closures appear
-  # as their own entries, which is wanted: a closure nothing ran is a
-  # branch nothing took.
+  # 行ではなく未カバーの *関数*: covered な region が 1 つも無い関数は一度も
+  # 呼ばれていないということで､こちらが動きようのある形だ — 「1 つの分岐が
+  # 欠けている」ではなく「これを動かすものが何も無い」｡クロージャはそれぞれ
+  # 独立した項目として現れるが､それが望みどおりだ: 何も走らせなかった
+  # クロージャは､何も通らなかった分岐だ｡
   #
-  # Locations only. llvm reports names v0-mangled
-  # (`_RNvNtNtCs..._7twigpui4sync4auto4diff`), and the source line at that
-  # location reads better than any demangling of it would.
+  # 位置だけを出す｡llvm は名前を v0 でマングルして報告するので
+  # (`_RNvNtNtCs..._7twigpui4sync4auto4diff`)､その位置のソース行のほうが
+  # どんなデマングルよりも読みやすい｡
   jq -r -n \
     --slurpfile cuts "$cutoffs_json" \
     --slurpfile cov "$cov_json" \
@@ -212,9 +209,9 @@ case "${1:-}" in
     exit 0
   fi
 
-  # Each source file is walked once rather than once per hit: with a few
-  # hundred locations, a `sed -n` per line is the slow way round.
-  # shellcheck disable=SC2046  # the word split is the point: one arg per file
+  # ソースファイルはヒットごとではなく 1 回ずつ歩く: 数百の位置がある状況で
+  # 1 行ごとの `sed -n` は遠回りだ｡
+  # shellcheck disable=SC2046  # 単語分割が狙いだ: ファイル 1 つにつき引数 1 つ
   awk '
     NR == FNR {
       split($0, at, ":")
@@ -249,10 +246,10 @@ case "${1:-}" in
   printf '%s' "$report" |
     jq -r '.[] | "| \(.file) | \(.total) | \(.covered) | \(.percent)% |"'
 
-  # shellcheck disable=SC2016  # the backticks are markdown, not a subshell
+  # shellcheck disable=SC2016  # バッククォートは markdown であってサブシェルではない
   printf '\nRun `scripts/coverage.sh --gaps src/path.rs` for the functions '
   printf 'nothing calls. What is worth covering here — and what is not — is '
-  # shellcheck disable=SC2016  # same
+  # shellcheck disable=SC2016  # 同上
   printf 'in the `coverage-gaps` skill.\n'
   ;;
 *)

@@ -1,103 +1,103 @@
-//! When the window polls its own timeline, and what it does with what
-//! comes back (#21).
+//! ウィンドウが自分の timeline をいつポーリングし､返ってきたものを
+//! どう扱うか (#21)｡
 //!
-//! Split out of `ui` the way [`super::reload_policy`] was (#126), but on a
-//! different line. That file holds decisions and leaves the acting to
-//! `ui`; this one holds the whole of #21 — the pure decisions *and* the
-//! loop that acts on them, as an `impl TimelineView` block below the
-//! functions it calls. A timer, a buffer, and the two ways the buffer is
-//! emptied are one mechanism, and half of it filed under `ui`'s other
-//! three thousand lines is half nobody finds.
+//! [`super::reload_policy`] と同じく `ui` から切り出した (#126) が､線の
+//! 引き方は違う｡あちらは判断を持ち､動くところは `ui` に任せる｡こちらは
+//! #21 の全体 — 純粋な判断 *と* それに基づいて動くループ — を､呼び出す
+//! 関数の下に `impl TimelineView` ブロックとして持つ｡タイマーと､バッファ
+//! と､バッファが空になる 2 通りの経路は 1 つの機構であり､その半分が
+//! `ui` の他の 3000 行の下に綴じられていたら､それは誰も見つけない半分
+//! だ｡
 //!
-//! What the split still buys is the thing it was for: everything above the
-//! `impl` is pure, so the decisions that make auto-refresh either cheap or
-//! expensive are unit tested without gpui.
+//! 分割が今も買っているのは､そもそもの狙いだ: `impl` より上はすべて純粋
+//! なので､auto-refresh を安くも高くもする判断を gpui 抜きでユニット
+//! テストできる｡
 //!
-//! #22 added the third way a poll's posts reach the screen: when the
-//! reader is already at the top, [`follows`] lets them skip the buffer and
-//! glide straight on — see [`TimelineView::follow`]. The buffer and the
-//! pill remain the path for everyone else.
+//! #22 は､ポーリングの post が画面に届く 3 つ目の経路を足した: 読み手が
+//! すでに最上部にいるとき､[`follows`] はバッファを飛ばしてそのまま滑り
+//! 込ませる — [`TimelineView::follow`] を見よ｡それ以外の読み手にとっては､
+//! バッファと pill が引き続き経路のままだ｡
 //!
-//! # Why this is not `since_id` polling
+//! # なぜこれが `since_id` ポーリングではないのか
 //!
-//! #21 was written for the home timeline, where an incremental fetch is a
-//! `since_id` away. #161 moved the window onto a List, and
-//! `GET /2/lists/:id/tweets` accepts no `since_id` at all — see
-//! `XClient::list_timeline`. There is no cheaper request to send: a poll
-//! re-reads the head page or it does not run.
+//! #21 は home timeline 向けに書かれた｡あちらなら差分取得は `since_id`
+//! ひとつで済む｡#161 がウィンドウを List に載せ替え､
+//! `GET /2/lists/:id/tweets` は `since_id` をまったく受け付けない —
+//! `XClient::list_timeline` を見よ｡これより安いリクエストは無い:
+//! ポーリングは先頭ページを読み直すか､走らないかのどちらかだ｡
 //!
-//! That sounds worse than it is. Reads bill per returned resource,
-//! deduplicated within a UTC day (see the `x-api-budget` skill), so
-//! re-reading the same head page all afternoon bills only the posts that
-//! were genuinely new — which is what reading them costs however they
-//! arrive. The repeated charge is one head page after each UTC midnight,
-//! bounded by `max_results`.
+//! 聞こえるほど悪くはない｡read は返った resource ごとに課金され､UTC の
+//! 1 日の中で重複排除される (`x-api-budget` スキルを見よ)｡だから午後中
+//! 同じ先頭ページを読み直しても､課金されるのは本当に新しかった post
+//! だけで､それはどう届こうと読むのにかかる分と変わらない｡繰り返し課金
+//! されるのは UTC の各深夜のあとの先頭ページ 1 回分で､`max_results` が
+//! 上限になる｡
 //!
-//! So the design here spends its care somewhere else than on the request:
-//! on not disturbing the reader with what the request brought back. A poll
-//! never replaces what a reader is in the middle of. It parks the merged
-//! timeline in a [`Pending`] buffer and the window offers it as a count
-//! the reader can press — #21's own wording — unless the reader is sitting
-//! at the top with the follow switch on (#22), where "do not move what I
-//! am reading" and "show me the newest" are the same instruction.
+//! そこでここの設計は､リクエストではなく別のところに気を遣う: リクエスト
+//! が持ち帰ったもので読み手を邪魔しないことに｡ポーリングは読み手が読んで
+//! いる途中のものを決して置き換えない｡マージ済みの timeline を [`Pending`]
+//! バッファに預け､ウィンドウはそれを読み手が押せる件数として差し出す —
+//! #21 自身の言い回しだ — ただし読み手が follow を入れたまま最上部に座って
+//! いる場合 (#22) は別だ｡そこでは「読んでいるものを動かすな」と「いちばん
+//! 新しいものを見せろ」は同じ指示になる｡
 
-// `super::*` rather than a list, matching [`super::render`]: the `impl`
-// block below reaches most of what `ui` imports, and keeping the two child
-// modules' preambles the same shape is worth more than an exact list that
-// has to be edited every time a method moves in or out.
+// リストではなく `super::*` を使う｡[`super::render`] に合わせた: 下の
+// `impl` ブロックは `ui` が import するものの大半に手を伸ばすし､2 つの
+// 子モジュールの前置きを同じ形に保つことのほうが､メソッドが出入りする
+// たびに書き換えないといけない正確なリストより価値がある｡
 use super::*;
 
-/// How long a tick waits before looking again when a fetch the reader
-/// started is still in flight.
+/// 読み手が始めた fetch がまだ飛んでいるとき､tick が次に見るまで待つ
+/// 長さ｡
 ///
-/// Short, because it is not a cadence — it is a re-check. Whichever fetch
-/// is running has already moved `last_reload_at` to its own start time, so
-/// the tick after this one computes a full interval from there. Nothing
-/// polls twice as a result of waiting a few seconds here.
+/// 短いのは､これが cadence ではなく再確認だからだ｡走っている fetch は
+/// どれであれ `last_reload_at` を自分の開始時刻に動かし済みなので､次の
+/// tick はそこから丸ごと 1 interval を計算する｡ここで数秒待った結果として
+/// 二重にポーリングすることは無い｡
 const BUSY_RECHECK_SECONDS: i64 = 5;
 
-/// What one wake-up of the auto-refresh loop should do.
+/// auto-refresh ループの 1 回の起床が何をすべきか｡
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Tick {
-    /// Nothing due yet. Sleep until this unix time and decide again —
-    /// the loop re-reads the clock rather than trusting this deadline,
-    /// so a machine that slept through it simply polls on waking.
+    /// まだ期限が来ていない｡この unix 時刻まで眠って判断し直す —
+    /// ループはこの期限を信じるのではなく時計を読み直すので､期限を
+    /// 寝過ごしたマシンは起きたときに素直にポーリングする｡
     Wait { until: i64 },
-    /// Spend a poll now.
+    /// 今ポーリングに支払う｡
     Poll,
 }
 
-/// Everything [`next_tick`] decides from.
+/// [`next_tick`] が判断の材料にするものすべて｡
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Situation {
-    /// When the last fetch of any kind went out — the button, a shortcut,
-    /// a previous poll. `None` when nothing has been fetched this session,
-    /// which is the startup-cache-hit case: see [`next_tick`] for why that
-    /// falls back to `started_at` rather than polling straight away.
+    /// 種類を問わず最後の fetch が出ていった時刻 — ボタン､ショートカット､
+    /// 前回のポーリング｡このセッションで何も取っていなければ `None` で､
+    /// 起動時にキャッシュが当たった場合がそれだ: なぜ即ポーリングせず
+    /// `started_at` に落とすかは [`next_tick`] を見よ｡
     pub last_reload_at: Option<i64>,
-    /// When the loop was started, as the anchor for the first poll.
+    /// ループが始まった時刻｡最初のポーリングの起点にする｡
     ///
-    /// A fixed timestamp rather than "now plus an interval" computed each
-    /// wake-up: the latter moves with the clock, so the deadline would
-    /// recede exactly as fast as the loop approached it and the first poll
-    /// would never arrive.
+    /// 起床ごとに計算する「今から 1 interval 後」ではなく､固定の
+    /// timestamp にする: 後者は時計とともに動くので､期限はループが
+    /// 近づくのとまったく同じ速さで遠ざかり､最初のポーリングは永遠に
+    /// 来ない｡
     pub started_at: i64,
     pub interval_seconds: u32,
-    /// Whether a fetch is already in flight — see [`BUSY_RECHECK_SECONDS`].
+    /// すでに fetch が飛んでいるかどうか — [`BUSY_RECHECK_SECONDS`] を見よ｡
     pub busy: bool,
 }
 
-/// What this wake-up should do.
+/// この起床が何をすべきか｡
 ///
-/// The anchor is `last_reload_at`, falling back to `started_at`, which is
-/// what keeps auto-refresh a *cadence* rather than a change to what the
-/// app spends at either end:
+/// 起点は `last_reload_at`､無ければ `started_at`｡これが auto-refresh を
+/// *cadence* に留め､アプリがどちらの端で支払う額をも変えないようにして
+/// いる:
 ///
-/// - A manual reload pushes the next poll a full interval out, so pressing
-///   the button does not also buy a poll a few seconds later.
-/// - A startup that spent nothing because the cache answered (#9) still
-///   spends nothing for one interval. Auto-refresh adds a rhythm to a
-///   window left open; it is not a second opinion on what startup decided.
+/// - 手動の reload は次のポーリングを丸ごと 1 interval 先へ押しやるので､
+///   ボタンを押すことが数秒後のポーリングまで買うことにはならない｡
+/// - キャッシュが答えたので何も支払わなかった起動 (#9) は､その後も
+///   1 interval は何も支払わない｡auto-refresh は開けっぱなしのウィンドウ
+///   にリズムを足すもので､起動時の判断への second opinion ではない｡
 pub(super) fn next_tick(situation: &Situation, now: i64) -> Tick {
     if situation.busy {
         return Tick::Wait {
@@ -113,31 +113,31 @@ pub(super) fn next_tick(situation: &Situation, now: i64) -> Tick {
     }
 }
 
-/// Posts a poll fetched that the reader has not been shown yet (#21).
+/// ポーリングが取ってきた､まだ読み手に見せていない post (#21)｡
 #[derive(Debug)]
 pub(super) struct Pending {
-    /// The whole merged timeline the poll came back with, not just the new
-    /// rows — `cache::reload_primary` returns cache and fresh batch already
-    /// spliced, and that combined list is what should be displayed once the
-    /// reader asks for it. Keeping only the new rows would drop everything
-    /// a "Load older" had appended.
+    /// ポーリングが返してきたマージ済み timeline の全体で､新しい行だけ
+    /// ではない — `cache::reload_primary` はキャッシュと新しいバッチを
+    /// 継ぎ合わせて返すし､読み手が求めたときに表示すべきなのはその結合
+    /// 済みのリストだ｡新しい行だけを持っていたら､"Load older" が足した
+    /// ものをすべて落としてしまう｡
     pub items: Vec<TimelineItem>,
-    /// How many of them are new relative to what is on screen. What the
-    /// pill counts, and never zero — see [`pending_after_poll`].
+    /// そのうち画面にあるものと比べて新しいのが何件か｡pill が数えるのは
+    /// これで､ゼロには決してならない — [`pending_after_poll`] を見よ｡
     pub count: usize,
 }
 
-/// What a finished poll leaves waiting for the reader.
+/// 終わったポーリングが読み手のために残すもの｡
 ///
-/// `None` means the poll found nothing new, which is the ordinary outcome
-/// and must leave the screen completely untouched: no pill, no banner, no
-/// scroll. A poll that reports "no new posts" every few minutes is noise
-/// the reader did not ask for, unlike a reload they pressed themselves
-/// (#141), which says so precisely because they are waiting to hear.
+/// `None` はポーリングが新着を見つけなかったということで､これが普通の
+/// 結果であり､画面をまったく触らないでいなければならない: pill も
+/// バナーも scroll も無し｡数分おきに "no new posts" と報告するポーリング
+/// は読み手が頼んでいないノイズだ｡自分で押した reload (#141) はそう言う
+/// が､それはまさに答えを待っているからで､こちらとは違う｡
 ///
-/// Counted with [`newly_arrived`] — the same leading-run rule the manual
-/// reload's own count and scroll compensation use, so the pill can never
-/// promise more posts than pressing it actually reveals.
+/// 数え方は [`newly_arrived`] — 手動 reload 自身の件数と scroll の補正が
+/// 使うのと同じ先頭連続の規則なので､pill が押して実際に現れるより多くの
+/// post を約束することは決してない｡
 pub(super) fn pending_after_poll(
     displayed: &[&str],
     incoming: Vec<TimelineItem>,
@@ -153,13 +153,13 @@ pub(super) fn pending_after_poll(
     })
 }
 
-/// What the pill says.
+/// pill が言うこと｡
 ///
-/// Singular and plural spelled out rather than an "(s)", matching
-/// `reload_policy::reload_outcome_label`, which this deliberately reads
-/// like: the two report the same fact from the two directions a post can
-/// arrive from, and a reader should not have to notice which one they are
-/// looking at.
+/// "(s)" ではなく単数形と複数形を書き分ける｡これは
+/// `reload_policy::reload_outcome_label` に合わせたもので､意図的に
+/// それと同じように読めるようにしてある: 2 つは post が届きうる 2 つの
+/// 方向から同じ事実を報告しているので､読み手はいま自分がどちらを見て
+/// いるのかに気づかされる必要が無い｡
 pub(super) fn pending_label(count: usize) -> String {
     match count {
         1 => "1 new post".to_string(),
@@ -167,34 +167,34 @@ pub(super) fn pending_label(count: usize) -> String {
     }
 }
 
-/// How far from the exact top still reads as "at the top" (#22), in
-/// pixels. Not zero: a trackpad flick can leave the offset a hair short,
-/// and that reader believes they are at the top — a pill appearing over
-/// half a pixel would look like follow is broken.
+/// 厳密な最上部からどれだけ離れていても「最上部」と読めるか (#22)､
+/// 単位は pixel｡ゼロではない: トラックパッドの弾きは offset をわずかに
+/// 届かないところに残しうるし､その読み手は自分が最上部にいると思って
+/// いる — 半 pixel で pill が出たら follow が壊れて見える｡
 const AT_TOP_TOLERANCE_PX: f32 = 2.0;
 
-/// Whether the reader is at the top of the timeline (#22), from
-/// `ScrollHandle::logical_scroll_top`'s two-part answer: the index of the
-/// row under the top edge of the viewport, and how far into that row the
-/// edge sits.
+/// 読み手が timeline の最上部にいるかどうか (#22)｡
+/// `ScrollHandle::logical_scroll_top` の 2 つ組の答え — viewport の上端の
+/// 下にある行の index と､その行のどこまで上端が入り込んでいるか — から
+/// 決める｡
 pub(super) fn at_top(top_item: usize, offset_in_item: gpui::Pixels) -> bool {
     top_item == 0 && f32::from(offset_in_item).abs() <= AT_TOP_TOLERANCE_PX
 }
 
-/// `TimelineView`'s runtime switch for stick-to-top follow (#22): seeded
-/// from `config.follow_new_posts`, flipped by the View menu, never written
-/// back to the file — the config is the standing preference, this is
-/// today's.
+/// 最上部に貼り付く follow のための `TimelineView` の実行時スイッチ
+/// (#22): `config.follow_new_posts` を種にし､View メニューで反転し､
+/// ファイルへ書き戻すことは決してない — config が常設の設定で､こちらは
+/// 今日の分だ｡
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum FollowMode {
-    /// A poll's new posts flow straight on when the reader is at the top.
+    /// 読み手が最上部にいるとき､ポーリングの新着 post がそのまま流れ込む｡
     Follow,
-    /// Every poll waits behind the pill, whatever the scroll position.
+    /// scroll 位置に関わらず､どのポーリングも pill の後ろで待つ｡
     Pill,
 }
 
 impl FollowMode {
-    /// The mode `config.follow_new_posts` seeds.
+    /// `config.follow_new_posts` が種にするモード｡
     pub(super) fn from_config(follow_new_posts: bool) -> Self {
         if follow_new_posts {
             Self::Follow
@@ -203,7 +203,7 @@ impl FollowMode {
         }
     }
 
-    /// What the View menu's toggle does.
+    /// View メニューのトグルがすること｡
     pub(super) fn flipped(self) -> Self {
         match self {
             Self::Follow => Self::Pill,
@@ -211,80 +211,78 @@ impl FollowMode {
         }
     }
 
-    /// Whether this is the [`Self::Follow`] side of the switch.
+    /// これがスイッチの [`Self::Follow`] 側かどうか｡
     pub(super) fn is_following(self) -> bool {
         matches!(self, Self::Follow)
     }
 }
 
-/// Whether a poll's new posts should flow straight onto the screen rather
-/// than wait behind the pill (#22, #177).
+/// ポーリングの新着 post が pill の後ろで待つのではなく､そのまま画面へ
+/// 流れ込むべきかどうか (#22, #177)｡
 ///
-/// All three or nothing. The mode is the reader's standing instruction;
-/// `loaded` keeps a `Failed`/`Loading` screen from being silently replaced
-/// by a poll nobody asked to see; and `at_top` is what separates "show me
-/// the newest" from "I am reading here" — the same line
-/// `preserved_scroll_target` draws from the other side.
+/// 3 つ揃うか､さもなくば無しだ｡モードは読み手の常設の指示｡`loaded` は
+/// `Failed`/`Loading` の画面が､誰も見たいと頼んでいないポーリングに黙って
+/// 置き換えられるのを防ぐ｡そして `at_top` が「いちばん新しいものを見せろ」
+/// と「ここを読んでいる」を分ける — `preserved_scroll_target` が反対側から
+/// 引くのと同じ線だ｡
 pub(super) fn follows(mode: FollowMode, loaded: bool, at_top: bool) -> bool {
     mode.is_following() && loaded && at_top
 }
 
-/// Fraction of the remaining distance still left after one glide frame
-/// (#22). Multiplicative rather than a fixed speed, so a big batch starts
-/// fast and every glide lands softly — and the duration stays near a
-/// second whatever the distance, instead of scaling with it.
+/// glide の 1 フレームのあとに残る､残り距離の割合 (#22)｡固定の速度では
+/// なく乗算にしてあるので､大きなバッチは速く始まり､どの glide も柔らかく
+/// 着地する — そして所要時間は距離に比例せず､距離によらず 1 秒近くに
+/// 留まる｡
 const GLIDE_KEEP: f32 = 0.85;
 
-/// Close enough to the top to stop gliding and snap the last fraction of
-/// a pixel (#22) — multiplicative decay never reaches zero on its own.
+/// glide をやめて最後の 1 pixel 未満を吸着させてよいだけ最上部に近い
+/// 距離 (#22) — 乗算の減衰はそれ自体ではゼロに届かない｡
 const GLIDE_DONE_PX: f32 = 1.0;
 
-/// How long one glide frame lasts (#22) — 16ms tracks a 60Hz display.
+/// glide の 1 フレームの長さ (#22) — 16ms は 60Hz のディスプレイに追随する｡
 pub(super) const GLIDE_FRAME_MS: u64 = 16;
 
-/// The next scroll offset of a glide toward the top, or `None` when the
-/// remaining distance is not worth a frame (#22). `y` is the scroll
-/// offset gpui keeps: 0 at the top, more negative the further down the
-/// reader is.
+/// 最上部へ向かう glide の次の scroll offset､または残りの距離が 1 フレーム
+/// に値しないときは `None` (#22)｡`y` は gpui が持っている scroll offset
+/// で､最上部で 0､読み手が下へ行くほど負の方向に大きくなる｡
 pub(super) fn next_glide_y(y: f32) -> Option<f32> {
     (y.abs() > GLIDE_DONE_PX).then_some(y * GLIDE_KEEP)
 }
 
-/// The half of auto-refresh that cannot be pure: the loop that spends
-/// the request, and what the window does with the answer (#21).
+/// auto-refresh のうち純粋になれない半分: リクエストに支払うループと､
+/// その答えをウィンドウがどう扱うか (#21)｡
 ///
-/// An `impl` block in a child module, unlike [`super::reload_policy`] and
-/// [`super::render`], which are free functions over data. The reason is
-/// that #21 is one mechanism — a timer, a buffer, and the two ways the
-/// buffer is emptied — and splitting it across a pure file here and four
-/// methods in `ui` would leave neither half readable on its own. A child
-/// module can see its parent's private items, so `TimelineView`'s fields
-/// stay private to `ui` and nothing is widened to make this possible.
+/// [`super::reload_policy`] や [`super::render`] がデータ上の自由関数で
+/// あるのと違い､子モジュールに置いた `impl` ブロックだ｡理由は #21 が
+/// 1 つの機構 — タイマー､バッファ､そしてバッファが空になる 2 通りの
+/// 経路 — であり､それをここの純粋なファイルと `ui` の 4 つのメソッドに
+/// 割ったら､どちらの半分も単独では読めなくなるからだ｡子モジュールは親の
+/// 非公開項目を見られるので､`TimelineView` のフィールドは `ui` に閉じた
+/// ままで､これを可能にするために何かを広げることも無い｡
 impl TimelineView {
-    /// Poll the timeline for new posts on a timer while the window is open
-    /// (#21).
+    /// ウィンドウが開いている間､タイマーで timeline に新着 post を
+    /// ポーリングする (#21)｡
     ///
-    /// Returns before spawning anything when `config.auto_refresh` is off
-    /// or there is no client to fetch with. That early return is the whole
-    /// of #21's "switch it off and the app sends nothing" condition:
-    /// nothing else in this method is reachable, so there is no timer left
-    /// running to be trusted not to fire.
+    /// `config.auto_refresh` が off か､取得に使う client が無いときは､
+    /// 何も spawn せずに返る｡この早期 return が #21 の「切ればアプリは
+    /// 何も送らない」条件のすべてだ: このメソッドの他の部分には到達
+    /// できないので､発火しないと信じるべき生き残ったタイマーは存在しない｡
     ///
-    /// Started from [`Self::start`] and again from [`Self::sign_in`], the
-    /// same two places `start_auto_sync` is, and for the same reason — a
-    /// client only exists after one of them. Reassigning cancels whatever
-    /// loop was already running, so a re-sign-in leaves one loop, not two.
+    /// [`Self::start`] から､そして [`Self::sign_in`] からも始まる｡
+    /// `start_auto_sync` と同じ 2 か所で､理由も同じ — client はその
+    /// どちらかの後にしか存在しない｡代入し直すと走っていたループは
+    /// キャンセルされるので､サインインし直してもループは 2 つでなく 1 つ｡
     ///
-    /// What a tick decides is [`auto_refresh::next_tick`]'s, and what it
-    /// does with the result is [`pending_after_poll`]'s; both are pure and
-    /// tested next door. What is left here is the part that cannot be:
-    /// spending the request and putting the answer somewhere.
+    /// tick が何を決めるかは [`auto_refresh::next_tick`] の担当､その結果を
+    /// どう扱うかは [`pending_after_poll`] の担当で､どちらも純粋で隣で
+    /// テストされている｡ここに残るのは純粋になれない部分だ:
+    /// リクエストに支払い､答えをどこかに置くこと｡
     pub(super) fn start_auto_refresh(&mut self, cx: &mut Context<'_, Self>) {
-        /// Longest one `timer` call waits, so the loop re-reads the clock
-        /// rather than trusting a deadline computed before the machine
-        /// slept — `start_auto_sync`'s constant, for its reason.
+        /// `timer` 1 回が待つ最長時間｡マシンが眠る前に計算した期限を
+        /// 信じるのではなくループが時計を読み直すため —
+        /// `start_auto_sync` の定数と同じで､理由も同じ｡
         const MAX_SLEEP_SECONDS: i64 = 60;
-        /// Shortest gap between wake-ups, so the loop stays cancellable.
+        /// 起床の最短間隔｡ループがキャンセル可能なままでいられるように｡
         const MIN_SLEEP_SECONDS: i64 = 1;
 
         if !self.config.auto_refresh {
@@ -305,8 +303,8 @@ impl TimelineView {
 
         self.auto_refresh = Some(cx.spawn(async move |this, cx| {
             loop {
-                // `Err` is the window being gone, which is the one reason
-                // this loop ever ends — `start_auto_sync`'s contract.
+                // `Err` はウィンドウが消えたということで､このループが
+                // 終わる唯一の理由だ — `start_auto_sync` の約束｡
                 let Ok(situation) = this.update(cx, |this, _| Situation {
                     last_reload_at: this.last_reload_at,
                     started_at,
@@ -320,10 +318,10 @@ impl TimelineView {
                 let sleep_until = match next_tick(&situation, now) {
                     Tick::Wait { until } => until,
                     Tick::Poll => {
-                        // Recorded before the request goes out, exactly as
-                        // `reload` does it: the fetch has been decided on,
-                        // so it is what the next interval is measured
-                        // from, whether or not it comes back.
+                        // `reload` とまったく同じく､リクエストが出ていく
+                        // 前に記録する: fetch はもう決まったので､返って
+                        // くるかどうかに関わらず､それが次の interval を
+                        // 測る起点になる｡
                         let _ = this.update(cx, |this, _| this.last_reload_at = Some(now));
 
                         let result = {
@@ -357,25 +355,25 @@ impl TimelineView {
         }));
     }
 
-    /// What a finished poll does to the window (#21).
+    /// 終わったポーリングがウィンドウに対してすること (#21)｡
     ///
-    /// Deliberately quiet. A poll is not something the reader asked for,
-    /// so it may not take the screen: `state` is untouched, the scroll
-    /// position is untouched, and `reload_notice` — which belongs to the
-    /// reader's own last reload, countdown included — is never written
-    /// here. All a successful poll can do is fill `pending`, which the
-    /// pill offers and nothing else acts on.
+    /// 意図的に静かだ｡ポーリングは読み手が頼んだものではないので､画面を
+    /// 取ってはいけない: `state` は触らない､scroll 位置も触らない､
+    /// そして `reload_notice` — カウントダウンを含め､読み手自身の最後の
+    /// reload のものだ — をここで書くことは決してない｡成功したポーリングに
+    /// できるのは `pending` を埋めることだけで､それを差し出すのは pill､
+    /// 他に動くものは無い｡
     ///
-    /// A failed poll does even less: it is logged and dropped. The reload
-    /// path raises a banner because someone is waiting to hear the answer;
-    /// nobody is waiting on this one, and a network blip minutes ago
-    /// is not worth a red line over a timeline that is fine. `usage` is
-    /// still refreshed either way — the request was sent and billed
-    /// whether or not it parsed.
+    /// 失敗したポーリングはもっと何もしない: ログに出して捨てる｡reload の
+    /// 経路がバナーを上げるのは､答えを聞こうと待っている人がいるからだ｡
+    /// こちらを待っている人はいないし､数分前のネットワークの瞬断は､
+    /// 問題無い timeline の上に赤い行を出すほどのものではない｡`usage` は
+    /// どちらにせよ更新する — parse できたかどうかに関わらず､リクエストは
+    /// 送られて課金されている｡
     ///
-    /// `next_page_token` is deliberately not updated. It is the "Load
-    /// older" cursor, describing how far back the reader has paged; a head
-    /// page fetched behind their back would reset it mid-scroll.
+    /// `next_page_token` は意図的に更新しない｡これは "Load older" の
+    /// カーソルで､読み手がどこまで遡ったかを表す｡背後で取った先頭ページ
+    /// は､scroll の途中でそれを巻き戻してしまう｡
     pub(super) fn apply_poll(
         &mut self,
         result: anyhow::Result<cache::ReloadedPrimary>,
@@ -385,16 +383,16 @@ impl TimelineView {
         let reloaded = match result {
             Ok(reloaded) => reloaded,
             Err(error) => {
-                // `log::redact` runs on the way out — an API error can
-                // quote the request that produced it.
+                // `log::redact` は出ていく途中で走る — API のエラーは
+                // それを生んだリクエストを引用しうる｡
                 log::error(&format!("auto-refresh poll failed: {error:#}"));
                 return;
             }
         };
 
-        // The header names the signed-in account and several affordances
-        // need the id; a poll resolves both for free, so it may as well
-        // fill them in if the startup fetch never managed to.
+        // ヘッダーはサインイン中のアカウントを名指しし､いくつかの操作は
+        // その id を必要とする｡ポーリングはどちらもただで解決するので､
+        // 起動時の fetch が埋められなかったなら､ここで埋めてしまってよい｡
         self.home_user_id = Some(reloaded.me.id);
         self.home_username = Some(reloaded.me.username);
 
@@ -403,27 +401,26 @@ impl TimelineView {
             _ => Vec::new(),
         };
         let Some(pending) = pending_after_poll(&displayed, reloaded.items) else {
-            // Nothing new. Not even a notice — see this method's doc.
+            // 新着無し｡notice すら出さない — このメソッドの doc を見よ｡
             return;
         };
         self.present_poll(pending, cx);
     }
 
-    /// What a poll's new posts become on screen (#21, #22): a flow or an
-    /// offer. [`follows`] decides which — the reader at the top with the
-    /// switch on gets [`Self::follow`]; everyone else gets the pill, and
-    /// the doc on [`Self::apply_poll`] about a poll never taking the
-    /// screen still holds for them word for word.
+    /// ポーリングの新着 post が画面上で何になるか (#21, #22): 流し込みか､
+    /// 差し出しか｡どちらかを決めるのは [`follows`] — スイッチを入れたまま
+    /// 最上部にいる読み手には [`Self::follow`]､それ以外には pill｡そして
+    /// ポーリングは決して画面を取らないという [`Self::apply_poll`] の doc
+    /// は､その人たちにはそのまま一言一句当てはまる｡
     ///
-    /// Images are not fetched ahead for the pill's buffer.
-    /// `refresh_avatars`/`refresh_media` read `self.state` to decide what
-    /// is missing, and both hold a single task slot that assigning cancels
-    /// — pre-downloading the buffer's images would mean either teaching
-    /// them to read from somewhere else or cancelling the visible
-    /// timeline's own downloads on a timer. [`Self::apply_pending`]
-    /// fetches them the moment the rows are actually on screen, which is
-    /// the same path and the same brief placeholder a manual reload
-    /// already has.
+    /// pill のバッファのために画像を先読みすることはしない｡
+    /// `refresh_avatars`/`refresh_media` は何が足りないかを `self.state`
+    /// を読んで決めるし､どちらも代入するとキャンセルされる単一の task
+    /// スロットを持つ — バッファの画像を先にダウンロードするなら､別の
+    /// ところから読むよう教えるか､表示中の timeline 自身のダウンロードを
+    /// タイマーでキャンセルするかのどちらかになる｡[`Self::apply_pending`]
+    /// は行が実際に画面に出た瞬間に取る｡手動 reload がすでに持っているのと
+    /// 同じ経路､同じ短いプレースホルダーだ｡
     pub(super) fn present_poll(&mut self, pending: Pending, cx: &mut Context<'_, Self>) {
         let (top_item, offset_in_item) = self.list_scroll.logical_scroll_top();
         let loaded = matches!(self.state, TimelineState::Loaded(_));
@@ -435,33 +432,31 @@ impl TimelineView {
         }
     }
 
-    /// Flow a poll's new posts onto a screen whose reader is at the top
-    /// (#22) — the third way the buffer empties, and the only one that
-    /// skips the buffer entirely.
+    /// 読み手が最上部にいる画面へ､ポーリングの新着 post を流し込む
+    /// (#22) — バッファが空になる 3 つ目の経路であり､バッファを丸ごと
+    /// 飛ばす唯一の経路｡
     ///
-    /// The replacement itself moves nothing: the row that was under the
-    /// viewport's top edge is index `count` in the new list, and parking
-    /// it back at the top makes the arrival invisible. What the reader
-    /// then sees is the glide — the new rows sliding down into view at a
-    /// pace the eye can follow, which is #177's "always flowing"
-    /// impression, made of posts a poll already paid for.
+    /// 置き換えそのものは何も動かさない: viewport の上端の下にあった行は
+    /// 新しいリストでは index `count` にあり､それを最上部へ戻して駐める
+    /// ことで到着が見えなくなる｡そのあと読み手が見るのは glide — 新しい行
+    /// が目で追える速さで視界へ滑り降りてくる｡それが #177 の "always
+    /// flowing" の印象で､ポーリングがすでに支払った post でできている｡
     fn follow(&mut self, pending: Pending, cx: &mut Context<'_, Self>) {
         let count = pending.count;
-        // A buffer parked by an earlier poll is staler than this one and
-        // measured against a timeline that is about to be replaced.
+        // 前のポーリングが駐めたバッファはこれより古く､しかも今まさに
+        // 置き換えられる timeline を基準に測られている｡
         self.clear_pending();
         let nothing_was_kept = count == pending.items.len();
         self.state = TimelineState::Loaded(pending.items);
         if nothing_was_kept {
-            // Every row is new — an empty List filling for the first
-            // time, or a head page with no overlap. There is no row to
-            // keep in place, so the compensation below would name an
-            // index past the end of the list; gpui *retains* an
-            // unresolvable anchor and retries it at every prepaint, and
-            // a later "Load older" growing the list past that index
-            // would jump the viewport under the reader. Land at the top
-            // instead, with no glide: gliding is revealing rows above
-            // the one being read, and there is no such row.
+            // どの行も新しい — 空の List が初めて埋まるか､重なりの無い
+            // 先頭ページか｡その場に留めるべき行が無いので､下の補正は
+            // リストの末尾より後ろの index を名指しすることになる｡gpui は
+            // 解決できない anchor を *保持* して prepaint のたびに再試行
+            // するし､後の "Load older" がリストをその index より伸ばせば
+            // viewport が読み手の下で飛ぶ｡代わりに glide 無しで最上部に
+            // 着地する: glide は読んでいる行より上の行を見せることであり､
+            // ここにはそんな行が無い｡
             self.list_scroll.scroll_to_top_of_item(0);
         } else {
             self.list_scroll.scroll_to_top_of_item(count);
@@ -471,35 +466,33 @@ impl TimelineView {
         cx.notify();
     }
 
-    /// Walk the scroll offset back up to the top, one frame at a time
-    /// (#22).
+    /// scroll offset を 1 フレームずつ最上部まで歩いて戻す (#22)｡
     ///
-    /// The distance it walks is not there yet when this is called:
-    /// [`Self::follow`]'s `scroll_to_top_of_item` lands at the next
-    /// prepaint. So the loop spends its first frames waiting for the
-    /// offset to move off zero, bounded — a compensation that never lands
-    /// (an empty list, a window that stopped drawing) degrades into the
-    /// snap the pill does, not a hang.
+    /// 歩く距離は､これが呼ばれた時点ではまだそこに無い:
+    /// [`Self::follow`] の `scroll_to_top_of_item` は次の prepaint で
+    /// 着地する｡だからループは最初の数フレームを､offset がゼロから
+    /// 動くのを待つのに使う｡回数には上限があり､決して着地しない補正
+    /// (空のリスト､描画をやめたウィンドウ) は､ハングではなく pill が
+    /// やるのと同じ吸着に落ちる｡
     ///
-    /// Every step compares where the offset is against where the last
-    /// step left it. A difference is the reader on the wheel, and the
-    /// glide stops where they put it rather than fighting them for the
-    /// scrollbar — the same deference that made [`Self::apply_poll`]
-    /// buffer instead of replace.
+    /// どのステップも､offset が今どこにあるかを前のステップが置いた
+    /// ところと比べる｡差があれば読み手がホイールを回しているということで､
+    /// glide はスクロールバーを取り合うのではなく読み手が置いたところで
+    /// 止まる — [`Self::apply_poll`] に置き換えではなくバッファを選ばせた
+    /// のと同じ譲り方だ｡
     fn start_glide(&mut self, cx: &mut Context<'_, Self>) {
-        /// How many frames to wait for the compensation to land before
-        /// concluding it never will.
+        /// 補正が決して着地しないと結論づけるまでに､何フレーム待つか｡
         const SETTLE_FRAMES: u8 = 10;
-        /// How far the offset may sit from where the glide left it before
-        /// that reads as the reader scrolling, in pixels.
+        /// glide が置いたところから offset がどれだけ離れていたら読み手の
+        /// scroll と読むか､単位は pixel｡
         const GRAB_PX: f32 = 1.0;
 
         self.glide = Some(cx.spawn(async move |this, cx| {
             let frame = Duration::from_millis(GLIDE_FRAME_MS);
             for _ in 0..SETTLE_FRAMES {
                 cx.background_executor().timer(frame).await;
-                // `Err` is the window being gone — `start_auto_refresh`'s
-                // contract, here and below.
+                // `Err` はウィンドウが消えたということ — ここも以下も
+                // `start_auto_refresh` の約束｡
                 let Ok(settled) = this.update(cx, |this, _| {
                     f32::from(this.list_scroll.offset().y).abs() > GLIDE_DONE_PX
                 }) else {
@@ -540,28 +533,27 @@ impl TimelineView {
         }));
     }
 
-    /// Show what the last poll fetched (#21).
+    /// 最後のポーリングが取ってきたものを見せる (#21)｡
     ///
-    /// The one thing the pill does, and everything it does: replace the
-    /// timeline with the buffered list and put the reader at the top of
-    /// it, which is where the posts they just asked to see are.
+    /// pill がする唯一のこと､そしてそのすべて: timeline をバッファ済みの
+    /// リストで置き換え､読み手をその最上部に置く｡いま見せろと言われた
+    /// post があるのはそこだ｡
     ///
-    /// Scrolling to the top rather than compensating the way
-    /// [`Self::keep_the_reader_in_place`] does for a reload, because the
-    /// two answer opposite requests. A reload is "refresh this, I am
-    /// reading here"; pressing a pill that counts new posts is "show me
-    /// those", and leaving the reader exactly where they were would be a
-    /// button that visibly does nothing.
+    /// reload に対して [`Self::keep_the_reader_in_place`] がやるような
+    /// 補正ではなく最上部へ scroll するのは､2 つが正反対の要求に答えて
+    /// いるからだ｡reload は「ここを読んでいる､これを更新しろ」であり､
+    /// 新着件数を数える pill を押すのは「それを見せろ」だ｡読み手を元の
+    /// ところにそのまま置いたら､見た目には何もしないボタンになる｡
     ///
-    /// No `ReloadNotice::Outcome` is raised: the pill already said how
-    /// many posts there were, and a banner repeating the count the instant
-    /// the pill disappears is the same fact told twice.
+    /// `ReloadNotice::Outcome` は上げない: pill がすでに何件あったかを
+    /// 言っているし､pill が消えた瞬間にその件数を繰り返すバナーは､同じ
+    /// 事実を 2 度言うことになる｡
     pub(super) fn apply_pending(&mut self, cx: &mut Context<'_, Self>) {
         let Some(pending) = self.pending.take() else {
             return;
         };
-        // A glide still walking is aiming at offsets measured against the
-        // list this replaces (#22).
+        // まだ歩いている glide は､これが置き換えるリストを基準に測った
+        // offset を狙っている (#22)｡
         self.glide = None;
         self.state = TimelineState::Loaded(pending.items);
         self.list_scroll.scroll_to_top_of_item(0);
@@ -569,22 +561,20 @@ impl TimelineView {
         cx.notify();
     }
 
-    /// Drop whatever a poll left waiting (#21).
+    /// ポーリングが待たせていたものを捨てる (#21)｡
     ///
-    /// Called from every path that replaces `state` from a fresher source
-    /// than the buffer: a finished reload, a finished "Load older", a
-    /// delete, a sign-in. A stale buffer is not merely out of date, it is
-    /// wrong in a way that undoes work — applying one fetched before a
-    /// delete puts the deleted post back on screen, and one fetched before
-    /// a "Load older" drops the page that was just appended.
+    /// バッファより新しい source から `state` を置き換える経路すべてから
+    /// 呼ばれる: 終わった reload､終わった "Load older"､削除､サインイン｡
+    /// 古いバッファは単に時代遅れなのではなく､作業を巻き戻す形で誤って
+    /// いる — 削除の前に取ったものを適用すれば削除した post が画面へ戻り､
+    /// "Load older" の前に取ったものは､いま足したばかりのページを落とす｡
     ///
-    /// The count would be wrong too: it was measured against a timeline
-    /// that is no longer what is displayed, so the pill would be promising
-    /// posts that are already visible.
+    /// 件数も誤る: もう表示されていない timeline を基準に測ったものなので､
+    /// pill はすでに見えている post を約束することになる｡
     ///
-    /// The glide is dropped for the same staleness (#22): its offsets were
-    /// measured against the rows being replaced, so letting it keep
-    /// walking would scroll the fresher list by a stale distance.
+    /// glide も同じ古さのために捨てる (#22): その offset は置き換えられる
+    /// 行を基準に測ったものなので､歩かせ続ければ古い距離のぶんだけ新しい
+    /// リストを scroll してしまう｡
     pub(super) fn clear_pending(&mut self) {
         self.pending = None;
         self.glide = None;
@@ -630,9 +620,9 @@ mod tests {
         );
     }
 
-    // The deadline has to be a fixed instant. Computed from `now` on every
-    // wake-up it would recede as fast as the loop approached it, and
-    // auto-refresh would be a timer that never fires.
+    // 期限は固定の瞬間でなければならない｡起床のたびに `now` から計算して
+    // いたら､ループが近づくのと同じ速さで遠ざかり､auto-refresh は決して
+    // 発火しないタイマーになる｡
     #[test]
     fn the_first_polls_deadline_does_not_move_as_the_loop_waits() {
         assert_eq!(
@@ -655,9 +645,9 @@ mod tests {
         );
     }
 
-    // #10's interval and #21's cadence must agree about what a reload
-    // costs: pressing the button is a fetch, so it pushes the next poll
-    // out rather than being followed by one moments later.
+    // #10 の interval と #21 の cadence は､reload の値段について一致して
+    // いなければならない: ボタンを押すのは fetch なので､直後にポーリング
+    // が続くのではなく､次のポーリングを先へ押しやる｡
     #[test]
     fn a_manual_reload_pushes_the_next_poll_a_full_interval_out() {
         let mut situation = situation(Some(2_000), 500);
@@ -694,8 +684,8 @@ mod tests {
         assert_eq!(pending.count, 2);
     }
 
-    // The buffer is the whole merged list, so applying it cannot drop the
-    // pages a "Load older" appended below what the poll fetched.
+    // バッファはマージ済みリストの全体なので､適用してもポーリングが取った
+    // 下に "Load older" が足したページを落とすことは無い｡
     #[test]
     fn the_pending_buffer_holds_the_whole_timeline_not_just_the_new_rows() {
         let displayed = ["3", "2", "1"];
@@ -706,9 +696,9 @@ mod tests {
         assert_eq!(pending.items.len(), 4);
     }
 
-    // Only the leading run counts, exactly as a manual reload counts it —
-    // an id further down is a post that moved, not one that arrived, and
-    // the pill must not promise a post pressing it will not reveal.
+    // 数えるのは先頭の連続だけで､手動 reload の数え方とまったく同じだ —
+    // もっと下にある id は移動した post であって到着した post ではないし､
+    // pill は押しても現れない post を約束してはならない｡
     #[test]
     fn only_the_leading_run_of_new_ids_is_counted() {
         let displayed = ["2", "1"];
@@ -718,8 +708,8 @@ mod tests {
         assert_eq!(pending.count, 1);
     }
 
-    // A window that has nothing on screen yet (a failed startup, an empty
-    // list) treats everything a poll brought as new, which is what it is.
+    // まだ画面に何も無いウィンドウ (失敗した起動､空のリスト) は､
+    // ポーリングが持ち帰ったものをすべて新着として扱う｡実際そうだからだ｡
     #[test]
     fn everything_is_new_when_nothing_is_displayed_yet() {
         let pending =
@@ -737,16 +727,16 @@ mod tests {
         assert_eq!(pending_label(6), "6 new posts");
     }
 
-    // --- #22: stick-to-top follow ---
+    // --- #22: 最上部に貼り付く follow ---
 
     #[test]
     fn the_reader_at_the_exact_top_is_at_the_top() {
         assert!(at_top(0, px(0.)));
     }
 
-    // The tolerance is for a trackpad that leaves the offset a hair off
-    // the top — that reader believes they are at the top, and a pill
-    // appearing because of half a pixel would look like follow is broken.
+    // 許容量はトラックパッドのためのもので､offset を最上部からわずかに
+    // ずらして残す — その読み手は自分が最上部にいると思っているし､半
+    // pixel のせいで pill が出たら follow が壊れて見える｡
     #[test]
     fn a_hair_below_the_top_still_counts() {
         assert!(at_top(0, px(-1.5)));
@@ -762,9 +752,9 @@ mod tests {
         assert!(!at_top(3, px(0.)));
     }
 
-    // Follow needs all three: the switch on, a timeline to prepend to,
-    // and a reader whose position says "show me the newest". Any one
-    // missing falls back to the pill.
+    // follow には 3 つすべてが要る: スイッチが入っていること､前に足す
+    // timeline があること､そして位置が「いちばん新しいものを見せろ」と
+    // 言っている読み手｡どれか 1 つでも欠ければ pill に落ちる｡
     #[test]
     fn follow_needs_the_switch_a_loaded_timeline_and_a_reader_at_the_top() {
         assert!(follows(FollowMode::Follow, true, true));
@@ -801,9 +791,9 @@ mod tests {
         assert_eq!(next_glide_y(0.), None);
     }
 
-    // Multiplicative decay never reaches zero by itself — the `None` below
-    // one pixel is what terminates it. This pins that the two together
-    // finish a screenful-sized glide in a bounded number of frames.
+    // 乗算の減衰はそれ自体ではゼロに届かない — 終わらせるのは 1 pixel を
+    // 切ったときの `None` だ｡この 2 つが合わさって､画面 1 枚ぶんの glide
+    // を有限のフレーム数で終わらせることをここで固定する｡
     #[test]
     fn a_glide_from_a_screenful_away_finishes_within_a_couple_of_seconds() {
         let mut y = -3_000.0_f32;

@@ -1,57 +1,52 @@
-//! Mirroring the accounts this app follows into a List (#163).
+//! このアプリが follow しているアカウントを List へミラーする (#163)｡
 //!
-//! #161 made a List the window's primary source, which makes the list's
-//! membership the timeline's contents. Typing a following list back in by
-//! hand is not a thing anyone does twice, and a list does not follow along
-//! when the account does — so the two sides get diffed here and the
-//! difference applied.
+//! #161 で List がウィンドウの主たる情報源になり､list の membership が
+//! そのまま timeline の中身になった｡follow の一覧を手で打ち直すのは誰も
+//! 二度とやらないし､アカウントを follow しても list はついてこない — なので
+//! 両側をここで diff し､その差分を適用する｡
 //!
-//! # One direction
+//! # 一方向
 //!
-//! Following is the truth; the list follows it. The reverse would mean
-//! adding an account on x.com by editing a list, which is not what a
-//! mirror is for.
+//! follow が真であり､list がそれに従う｡逆向きは list を編集して x.com 上で
+//! アカウントを follow するということで､ミラーの目的ではない｡
 //!
-//! # Two rules that outrank convenience
+//! # 利便性に優先する二つの規則
 //!
-//! **A partial read never becomes a plan.** Both sides are paged, and the
-//! diff is a set difference: an account missing from a truncated follow
-//! list reads as unfollowed and earns a deletion, and a truncated member
-//! list re-adds accounts that are already there. So [`read_all`]'s failure
-//! is fatal to the whole sync rather than something to carry on from —
-//! there is no such thing as a usable partial answer here.
+//! **部分的な read は決して plan にならない｡** 両側ともページングされ､
+//! diff は集合差だ: 途中で切れた follow list に無いアカウントは unfollow と
+//! 読まれて削除を得るし､途中で切れた member list は既にいるアカウントを
+//! 再追加する｡だから [`read_all`] の失敗は続行の材料ではなく sync 全体に
+//! とって致命的だ — ここに使える部分的な答えなど存在しない｡
 //!
-//! **Removals are opt-in on the CLI.** A list can hold accounts put there
-//! by hand, and a plan always *lists* removals whether or not it is asked
-//! to send them, so `--sync-list --apply` still leaves them alone without
-//! `--prune`.
+//! **CLI では removal は opt-in｡** list は手で入れたアカウントを持ちうるし､
+//! plan は送るよう求められたかどうかによらず removal を常に *列挙* するので､
+//! `--prune` が無ければ `--sync-list --apply` はそれらに手を触れない｡
 //!
-//! The background sync does prune (2026-08-23, by the owner's decision),
-//! because "the list is what this app follows" is the whole contract it
-//! offers. Accounts added to the list by hand are deleted by it. That is
-//! the intended behavior, not an accident, and it is why the all-or-
-//! nothing rule above matters more than it did: a truncated follow read
-//! plus pruning is a mass deletion rather than a missed addition.
+//! background sync の方は prune する (2026-08-23､オーナーの決定による)｡
+//! 「list とはこのアプリが follow しているものだ」がそれの提供する契約
+//! すべてだからだ｡手で list に足したアカウントはそれに消される｡これは
+//! 事故ではなく意図した挙動であり､上の all-or-nothing の規則が以前より
+//! 重くなった理由でもある: 途中で切れた follow の read に prune が加われば､
+//! addition の取りこぼしではなく大量削除になる｡
 //!
-//! # Cost
+//! # 費用
 //!
-//! Both reads bill per returned resource (`x-api-budget`), so a dry-run
-//! against a few thousand follows is dollars, not cents — which is why the
-//! plan is written to disk. Re-running `--apply` after a failure resumes
-//! from the file rather than paying to read both sides again, and each
-//! entry is marked as it lands so nothing is sent twice.
+//! どちらの read も返した resource ごとに課金される (`x-api-budget`) ので､
+//! 数千の follow に対する dry-run はセントではなくドルの話だ — plan を disk
+//! に書くのはそのためだ｡失敗後に `--apply` を再実行すれば両側を読み直す
+//! 支払いをせずにファイルから再開するし､entry は届くたびに印が付くので
+//! 二度送られるものは無い｡
 //!
-//! # On a timer
+//! # タイマー駆動
 //!
-//! #163 ruled out automatic polling for that reason. That was overridden
-//! (2026-08-23), and the reason was kept rather than dropped: the diff runs
-//! on a long, configurable interval whose last *attempt* is persisted in
-//! [`SyncState`], so relaunching the app does not buy the same answer
-//! again. [`schedule`] holds the decision, [`auto::tick`] performs it, and
-//! [`state::settle`] is the one thing that moves the memory on afterwards
-//! — the deadline after a refusal included, which is what keeps a
-//! catch-up from sending into a cap every two minutes (#198) and from
-//! sending into it at the same fifteen-minute pace for a day (#197).
+//! #163 はその理由で自動ポーリングを退けた｡それは覆されたが
+//! (2026-08-23)､理由の方は捨てずに残した: diff は長く設定可能な interval で
+//! 走り､その最後の *試行* が [`SyncState`] に永続化されるので､アプリを
+//! 再起動しても同じ答えを買い直さずに済む｡判断は [`schedule`] が持ち､
+//! [`auto::tick`] が実行し､そのあと記憶を進める唯一のものが
+//! [`state::settle`] だ — refusal のあとの期限を含めてで､これが catch-up に
+//! 2 分ごとに上限へ送り込ませない (#198)､また丸一日 15 分間隔で同じように
+//! 送り込ませない (#197) ための仕組みだ｡
 
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
@@ -68,64 +63,65 @@ pub(crate) use run::{Request, run_cli};
 pub(crate) use schedule::{Outcome, is_finished, notice};
 pub(crate) use state::{SyncState, load_state, save_state};
 
-/// Which side of the diff an entry came from.
+/// entry が diff のどちら側から来たか｡
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum Action {
-    /// Followed, but not in the list.
+    /// follow しているが list にいない｡
     Add,
-    /// In the list, but not followed.
+    /// list にいるが follow していない｡
     Remove,
 }
 
-/// One account the sync would act on.
+/// sync が手を加えるアカウント 1 件｡
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct PlanEntry {
     pub user_id: String,
-    /// Carried only so the report can name accounts rather than ids. Not
-    /// used to match anything: a screen name changes, an id does not.
+    /// report が id ではなくアカウント名を出せるようにするためだけに
+    /// 持っている｡照合には使わない: screen name は変わるが id は変わらない｡
     pub username: String,
     pub action: Action,
-    /// Set once the request for this entry has come back `Ok`. `#[serde(default)]`
-    /// so a plan file written before an interrupted apply still loads.
+    /// この entry の request が `Ok` で返ってきたら立てる｡
+    /// `#[serde(default)]` なのは､中断された apply より前に書かれた plan
+    /// ファイルも読み込めるようにするためだ｡
     #[serde(default)]
     pub applied: bool,
 }
 
-/// What a sync would do, as written to [`crate::paths::Paths::sync_plan_file`].
+/// sync が何をするか｡[`crate::paths::Paths::sync_plan_file`] に書かれる｡
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Plan {
-    /// The list this plan was computed against. Checked before applying:
-    /// a plan is only meaningful for the list it was diffed from, and
-    /// pointing `list_id` somewhere else between the dry-run and the apply
-    /// would otherwise rewrite the wrong list's membership.
+    /// この plan を計算した相手の list｡適用前に検査する: plan が意味を
+    /// 持つのは diff された list に対してだけで､dry-run と apply のあいだに
+    /// `list_id` を別の場所へ向ければ､そうしなければ誤った list の
+    /// membership を書き換えてしまう｡
     pub list_id: String,
     pub created_at: i64,
-    /// How many accounts the list held when this plan was diffed — the
-    /// denominator #176's prune cap measures `Remove` entries against.
-    /// `#[serde(default)]` so a plan file from before the cap still loads;
-    /// it reads as 0, which `schedule::prune_allowed` treats as "hold every
-    /// removal" rather than as a list that was empty.
+    /// この plan が diff された時点で list が持っていたアカウント数 —
+    /// #176 の prune 上限が `Remove` entry を測る分母だ｡
+    /// `#[serde(default)]` なのは上限が入る前の plan ファイルも読み込める
+    /// ようにするためで､0 と読まれる｡これを `schedule::prune_allowed` は
+    /// 空の list ではなく「removal をすべて保留」として扱う｡
     #[serde(default)]
     pub members_total: usize,
     pub entries: Vec<PlanEntry>,
 }
 
 impl Plan {
-    /// Entries of `action` that have not been applied yet.
+    /// まだ適用されていない `action` の entry｡
     pub(crate) fn pending(&self, action: Action) -> impl Iterator<Item = &PlanEntry> {
         self.entries
             .iter()
             .filter(move |entry| entry.action == action && !entry.applied)
     }
 
-    /// How many entries of `action` are still outstanding.
+    /// `action` の entry が何件残っているか｡
     pub(crate) fn pending_count(&self, action: Action) -> usize {
         self.pending(action).count()
     }
 
-    /// Record that `user_id`'s `action` went through. A no-op for an id the
-    /// plan does not carry, which cannot happen from `apply` but keeps this
-    /// from being a panic if it ever does.
+    /// `user_id` の `action` が通ったことを記録する｡plan が持たない id には
+    /// 何もしない｡`apply` からは起こりえないが､万一起きても panic には
+    /// しないためだ｡
     pub(crate) fn mark_applied(&mut self, user_id: &str, action: Action) {
         for entry in &mut self.entries {
             if entry.user_id == user_id && entry.action == action {
@@ -134,21 +130,21 @@ impl Plan {
         }
     }
 
-    /// Whether every entry has been applied — the point at which the plan
-    /// file has nothing left to say and can be discarded.
+    /// すべての entry が適用済みかどうか — plan ファイルにもう言うことが
+    /// 無く､捨ててよくなる地点だ｡
     pub(crate) fn is_complete(&self) -> bool {
         self.entries.iter().all(|entry| entry.applied)
     }
 }
 
-/// The first scope `--sync-list` needs that `granted` does not carry, or
-/// `None` when the session can do the whole job.
+/// `--sync-list` に必要な scope のうち `granted` が持たない最初のもの｡
+/// session が仕事を丸ごとこなせるなら `None`｡
 ///
-/// Checked before the first request rather than discovered at it: reading
-/// the follow list costs one billed resource per account, so a session
-/// that would be refused at the first *write* must be turned away before
-/// it pays for the reads. Both scopes are new in #163, so every session
-/// authorized before it fails this.
+/// 最初の request で気づくのではなく､その前に検査する: follow list の
+/// read はアカウントごとに 1 課金 resource かかるので､最初の *write* で
+/// 拒否されるような session は read を支払う前に追い返さなければならない｡
+/// どちらの scope も #163 で新しく入ったので､それ以前に認可された session は
+/// すべてここで落ちる｡
 pub(crate) fn missing_scope(granted: Option<&str>) -> Option<&'static str> {
     [
         crate::oauth::tokens::FOLLOWS_READ_SCOPE,
@@ -158,16 +154,16 @@ pub(crate) fn missing_scope(granted: Option<&str>) -> Option<&'static str> {
     .find(|required| !crate::oauth::tokens::has_scope(granted, required))
 }
 
-/// Diff the two sides into a plan (#163's core, and the only part of this
-/// module that can be tested without a network).
+/// 両側を diff して plan にする (#163 の核心であり､この module のうち
+/// ネットワーク無しでテストできる唯一の部分だ)｡
 ///
-/// Matching is by user id throughout. A screen name is not an identity: an
-/// account that renames itself between the two reads would otherwise be
-/// removed and re-added, spending two writes to change nothing.
+/// 照合は終始 user id で行う｡screen name は同一性ではない: 二つの read の
+/// あいだに改名したアカウントは､そうしなければ削除して再追加され､何も
+/// 変えないのに write を 2 回使うことになる｡
 ///
-/// Order is `following`'s for additions and `members`' for removals, so a
-/// report reads in the same order the API handed the accounts over rather
-/// than in whatever order a hash set iterates.
+/// 順序は addition が `following` の順､removal が `members` の順なので､
+/// report は hash set が反復する任意の順ではなく､API がアカウントを
+/// 渡してきた順のまま読める｡
 pub(crate) fn plan(list_id: &str, now: i64, following: &[User], members: &[User]) -> Plan {
     let member_ids: std::collections::HashSet<&str> =
         members.iter().map(|user| user.id.as_str()).collect();
@@ -200,14 +196,13 @@ fn entry(user: &User, action: Action) -> PlanEntry {
     }
 }
 
-/// The dry-run's report: what the plan would do, and what it has already
-/// done if this is a re-run.
+/// dry-run の report: plan が何をするか､そして再実行なら既に何をしたか｡
 ///
-/// Prices are deliberately absent. `x-api-budget` records the read side as
-/// measured ($0.005/resource for other people's posts, $0.001 for one's
-/// own) but has nothing measured for `/2/lists/:id/members` or for either
-/// write, so any figure here would be docs restated as fact. Counts are
-/// what this crate actually knows.
+/// 価格は意図的に載せていない｡`x-api-budget` は read 側を実測値として
+/// 記録している (他人の post は $0.005/resource､自分のものは $0.001) が､
+/// `/2/lists/:id/members` にも write のどちらにも実測が無いので､ここに
+/// 数字を出せば docs を事実として言い直すだけになる｡件数はこの crate が
+/// 実際に知っていることだ｡
 pub(crate) fn report(plan: &Plan) -> String {
     let adds = plan.pending_count(Action::Add);
     let removals = plan.pending_count(Action::Remove);
@@ -223,10 +218,10 @@ pub(crate) fn report(plan: &Plan) -> String {
             if done == 1 { "y" } else { "ies" }
         ));
     }
-    // The CLI has no prune cap (#176): this line is what stands in for
-    // it. Someone who reads "1,900 of the list's 2,000 members" and types
-    // `--prune` anyway has confirmed it; the background sync, which has
-    // nobody reading, holds the same plan instead.
+    // CLI に prune の上限は無い (#176): この行がその代わりを務める｡
+    // 「list の 2,000 members のうち 1,900」と読んだうえで `--prune` と
+    // 打つ人は確認を済ませている｡読む人がいない background sync の方は､
+    // 同じ plan を保留する｡
     if removals > 0 {
         lines.push(format!(
             "{removals} of the list's {} members would be removed",
@@ -247,10 +242,10 @@ pub(crate) fn report(plan: &Plan) -> String {
     lines.join("\n")
 }
 
-/// Read `plan` back from `path`. Unlike the timeline caches, a corrupt file
-/// is an error rather than a clean miss: a cache miss costs one avoidable
-/// request, whereas silently treating an unreadable plan as "no plan" would
-/// send an apply back to reading both sides in full.
+/// `path` から `plan` を読み戻す｡timeline のキャッシュと違い､壊れた
+/// ファイルはきれいな miss ではなくエラーだ: キャッシュの miss は避けられた
+/// はずの request 1 回で済むが､読めない plan を黙って「plan 無し」として
+/// 扱えば､apply は両側を丸ごと読み直すところまで押し戻される｡
 pub(crate) fn load_plan(path: &std::path::Path) -> Result<Option<Plan>> {
     let contents = match std::fs::read_to_string(path) {
         Ok(contents) => contents,
@@ -264,7 +259,7 @@ pub(crate) fn load_plan(path: &std::path::Path) -> Result<Option<Plan>> {
     Ok(Some(plan))
 }
 
-/// Write `plan` to `path`.
+/// `plan` を `path` へ書く｡
 pub(crate) fn save_plan(path: &std::path::Path, plan: &Plan) -> Result<()> {
     let json = serde_json::to_string_pretty(plan).context("could not serialize the sync plan")?;
     std::fs::write(path, json).with_context(|| format!("could not write {}", path.display()))
@@ -289,8 +284,8 @@ mod tests {
             .collect()
     }
 
-    /// Everything `SCOPES` requests as of #163 — what a session authorized
-    /// today carries.
+    /// #163 時点で `SCOPES` が要求するものすべて — 今日認可された session が
+    /// 持つもの｡
     const CURRENT_SCOPES: &str = "tweet.read users.read tweet.write like.write list.read list.write follows.read \
          offline.access";
 
@@ -301,17 +296,17 @@ mod tests {
 
     #[test]
     fn a_session_predating_163_is_turned_away_before_it_reads_anything() {
-        // The expensive failure this prevents: paging thousands of billed
-        // accounts and then being refused at the first write.
+        // これが防ぐ高くつく失敗: 課金対象のアカウントを数千ページング
+        // したあとで最初の write に拒否されること｡
         let pre_163 = "tweet.read users.read tweet.write like.write list.read offline.access";
         assert_eq!(missing_scope(Some(pre_163)), Some("follows.read"));
     }
 
     #[test]
     fn a_session_that_can_read_follows_but_not_write_the_list_is_still_refused() {
-        // The live token carried `follows.read` for a while as a leftover
-        // from #157's investigation. Reading both sides with it would have
-        // been billed in full and then refused at the first add.
+        // 実運用の token は #157 の調査の名残でしばらく `follows.read` を
+        // 持っていた｡それで両側を読めば満額課金されたうえ､最初の add で
+        // 拒否されていたはずだ｡
         let read_only = "tweet.read users.read tweet.write like.write list.read follows.read \
                          offline.access";
         assert_eq!(missing_scope(Some(read_only)), Some("list.write"));
@@ -319,7 +314,7 @@ mod tests {
 
     #[test]
     fn an_unrecorded_scope_is_treated_as_insufficient() {
-        // `has_scope`'s own rule: unknown is not permission.
+        // `has_scope` 自身の規則: 不明は許可ではない｡
         assert_eq!(missing_scope(None), Some("follows.read"));
     }
 
@@ -339,24 +334,24 @@ mod tests {
 
     #[test]
     fn an_account_on_both_sides_is_left_alone() {
-        // The overwhelmingly common case on a re-run. Spending a write on
-        // it would make every sync cost the size of the whole list.
+        // 再実行では圧倒的に多い場合｡ここに write を使えば､どの sync も
+        // list 全体の大きさ分の費用になってしまう｡
         let plan = plan("7", 0, &[user("1", "alice")], &[user("1", "alice")]);
         assert!(plan.entries.is_empty());
     }
 
     #[test]
     fn matching_is_by_id_not_by_screen_name() {
-        // An account that renamed itself between the two reads is the same
-        // account. Matching on the name would remove and re-add it.
+        // 二つの read のあいだに改名したアカウントは同じアカウントだ｡
+        // 名前で照合すれば削除して再追加してしまう｡
         let plan = plan("7", 0, &[user("1", "newname")], &[user("1", "oldname")]);
         assert!(plan.entries.is_empty());
     }
 
     #[test]
     fn two_accounts_sharing_a_screen_name_are_still_two_accounts() {
-        // The mirror of the test above: the same name on different ids must
-        // not collapse into one entry.
+        // 上のテストの裏返し: id が違えば同じ名前でも 1 entry に潰れては
+        // ならない｡
         let plan = plan("7", 0, &[user("1", "alice"), user("2", "alice")], &[]);
         assert_eq!(ids(&plan, Action::Add), ["1", "2"]);
     }
@@ -374,8 +369,8 @@ mod tests {
 
     #[test]
     fn the_plan_records_which_list_it_was_diffed_against() {
-        // Applying a plan to a different list would rewrite the wrong
-        // list's membership; the apply path compares this.
+        // plan を別の list に適用すれば誤った list の membership を書き換える｡
+        // apply 経路はこれを比較する｡
         let plan = plan("2091351590695588200", 0, &[user("1", "a")], &[]);
         assert_eq!(plan.list_id, "2091351590695588200");
     }
@@ -390,9 +385,8 @@ mod tests {
 
     #[test]
     fn marking_an_addition_does_not_mark_a_removal_of_the_same_id() {
-        // An id can legitimately appear on both sides only through a bug,
-        // but if it ever does, applying one must not silently retire the
-        // other.
+        // 同じ id が両側に正当に現れるのはバグ経由でしかないが､万一起きた
+        // ときに片方を適用してもう片方を黙って引退させてはならない｡
         let mut plan = plan("7", 0, &[user("1", "a")], &[user("2", "b")]);
         plan.entries.push(PlanEntry {
             user_id: "1".to_string(),
@@ -431,8 +425,8 @@ mod tests {
 
     #[test]
     fn the_report_says_what_an_earlier_run_already_applied() {
-        // A re-run that silently showed a smaller number would look like
-        // the follow list had shrunk.
+        // 再実行が黙って小さい数を見せれば､follow list が縮んだように
+        // 見えてしまう｡
         let mut plan = plan("7", 0, &[user("1", "alice"), user("2", "bob")], &[]);
         plan.mark_applied("1", Action::Add);
         let report = report(&plan);
@@ -443,9 +437,9 @@ mod tests {
 
     #[test]
     fn the_report_quotes_no_price() {
-        // `x-api-budget` has nothing measured for either write or for
-        // `/2/lists/:id/members`. Printing a docs figure as if it were
-        // known is the failure #162 is open about.
+        // `x-api-budget` は write のどちらにも `/2/lists/:id/members` にも
+        // 実測を持たない｡docs の数字を既知であるかのように印字するのは
+        // #162 が明示している失敗だ｡
         let report = report(&plan("7", 0, &[user("1", "alice")], &[]));
         assert!(!report.contains('$'), "{report}");
     }
@@ -465,12 +459,12 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    // --- #176: the list size a plan's removals are measured against ---
+    // --- #176: plan の removal を測る分母となる list の大きさ ---
 
     #[test]
     fn the_plan_records_how_many_members_the_list_had() {
-        // The denominator of the prune cap. A removal count on its own
-        // says nothing about how much of the list it is.
+        // prune 上限の分母｡removal の件数だけでは､それが list のどれだけを
+        // 占めるのか何も言えない｡
         let plan = plan(
             "7",
             0,
@@ -482,9 +476,9 @@ mod tests {
 
     #[test]
     fn a_plan_file_written_before_the_cap_reads_with_an_unknown_list_size() {
-        // Loads rather than fails — the entries in it were paid for — but
-        // with a total of 0, which `schedule::prune_allowed` reads as
-        // "hold every removal".
+        // 失敗せずに読み込む — 中の entry は支払い済みだ — が total は 0 に
+        // なり､`schedule::prune_allowed` はそれを「removal をすべて保留」と
+        // 読む｡
         let json = r#"{"list_id":"7","created_at":0,"entries":[{"user_id":"2","username":"bob","action":"Remove"}]}"#;
         let plan: Plan = serde_json::from_str(json).unwrap();
         assert_eq!(plan.members_total, 0);
@@ -493,8 +487,8 @@ mod tests {
 
     #[test]
     fn the_report_measures_removals_against_the_list() {
-        // The CLI has no cap; the number is what lets the person reading
-        // the dry-run decide whether `--prune` is the right next command.
+        // CLI に上限は無い｡この数字があるから､dry-run を読む人は次の
+        // コマンドが `--prune` でよいか判断できる｡
         let plan = plan("7", 0, &[], &[user("2", "bob"), user("3", "carol")]);
         let report = report(&plan);
         assert!(report.contains("2 of the list's 2 members"), "{report}");
@@ -516,8 +510,8 @@ mod tests {
 
     #[test]
     fn a_corrupt_plan_file_is_an_error_naming_the_path() {
-        // Unlike a timeline cache, treating this as a miss would send the
-        // apply back to paying for both full reads.
+        // timeline のキャッシュと違い､これを miss として扱えば apply は
+        // 両側を丸ごと読む支払いまで押し戻される｡
         let path =
             std::env::temp_dir().join(format!("twigpui-bad-plan-{}.json", std::process::id()));
         std::fs::write(&path, "{ not json").unwrap();

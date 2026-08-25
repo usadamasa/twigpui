@@ -5,67 +5,65 @@
 <h1 align="center">twigpui</h1>
 
 <p align="center">
-  A development-only X (Twitter) timeline viewer, built with Rust and
-  <a href="https://crates.io/crates/gpui">gpui</a>.<br>
-  macOS only — no other platform is considered.
+  Rust と <a href="https://crates.io/crates/gpui">gpui</a> で書いた
+  開発用途専用の X (Twitter) タイムラインビューア｡<br>
+  macOS 専用 — 他のプラットフォームは考慮しない｡
 </p>
 
-## What it does
+## 何ができるか
 
-- Shows your home timeline in a scrollable window, with a reload button and
-  a "Load older" button that pages further back.
-- Expands reposts and quotes inline, so a repost shows the original text
-  rather than a truncated `RT @user: …`.
-- Shows reply context ("Replying to @someone") for free, and offers an
-  opt-in "Show thread" walk up the parent chain that spells out its worst
-  case in requests before you click it.
-- Shows reply, repost and like counts as a snapshot from fetch time.
-- Posts, replies, quotes, reposts, likes and deletes.
-- Renders attached images and author avatars.
-- Opens a post, an author, or a prefilled composer in your browser.
-- Runs headless: `--fetch-only` prints a single user's posts,
-  `--fetch-post` prints one or more posts as JSON, `--usage` prints what the
-  API has cost so far.
-- Opens the window on a file instead of an account with
-  `--fixture fixtures/timeline.json` — no credential, no request, the same
-  screen every run (see [docs/operations.md](docs/operations.md)).
+- ホームタイムラインをスクロールできるウィンドウに表示する｡リロードボタンと､
+  さらに過去へ遡る "Load older" ボタンがある｡
+- repost と quote をインラインで展開するので､repost は切り詰められた
+  `RT @user: …` ではなく元の本文を表示する｡
+- リプライの文脈 ("Replying to @someone") を追加コストなしで表示し､
+  親チェーンを遡る "Show thread" をオプトインで提供する｡押す前に､
+  最悪ケースで何リクエストかかるかを明示する｡
+- リプライ・repost・いいねの数を取得時点のスナップショットとして表示する｡
+- 投稿・返信・引用・repost・いいね・削除ができる｡
+- 添付画像と投稿者のアバターを表示する｡
+- 投稿・投稿者・内容を埋めたコンポーザーをブラウザで開く｡
+- ヘッドレスで動く: `--fetch-only` は単一ユーザーの投稿を､`--fetch-post` は
+  1 つ以上の投稿を JSON で､`--usage` はここまでの API のコストを出力する｡
+- `--fixture fixtures/timeline.json` でアカウントではなくファイルから
+  ウィンドウを開く — 認証情報もリクエストも不要で､毎回同じ画面が出る
+  ([docs/operations.md](docs/operations.md) を参照)｡
 
-Signing in with X is the only way to authenticate. The app-only bearer token
-was removed: it could not read the home timeline and could not post, repost,
-quote, like or delete, which is most of what this app does.
+認証の手段は X でのサインインだけである｡app-only の bearer token は削除した:
+ホームタイムラインを読めず､投稿・repost・引用・いいね・削除もできなかった｡
+それはこのアプリがやることのほとんどである｡
 
-## Documentation
+## ドキュメント
 
-| File | Contents |
+| ファイル | 内容 |
 | --- | --- |
-| [docs/timeline.md](docs/timeline.md) | What the window shows and how a row is assembled |
-| [docs/writing.md](docs/writing.md) | Posting, replying, quoting, reposting, liking, deleting, opening in a browser |
-| [docs/media.md](docs/media.md) | Attached images and author avatars |
-| [docs/operations.md](docs/operations.md) | Logs, code metrics, tests |
-| [.claude/skills/app-bundle](.claude/skills/app-bundle/SKILL.md) | Building the `.app` bundle, release and development |
+| [docs/timeline.md](docs/timeline.md) | ウィンドウが何を表示するか､1 行がどう組み立てられるか |
+| [docs/writing.md](docs/writing.md) | 投稿､返信､引用､repost､いいね､削除､ブラウザで開く |
+| [docs/media.md](docs/media.md) | 添付画像と投稿者のアバター |
+| [docs/operations.md](docs/operations.md) | ログ､コードメトリクス､テスト |
+| [.claude/skills/app-bundle](.claude/skills/app-bundle/SKILL.md) | `.app` バンドルのビルド (release と development) |
 
-## Requirements
+## 必要なもの
 
-The `macos-blade` feature is enabled so the build does not need `xcrun metal`,
-which ships with full Xcode rather than the Command Line Tools. Rendering goes
-through blade instead.
+`macos-blade` フィーチャを有効にしてあるので､ビルドに `xcrun metal` は要らない｡
+これは Command Line Tools ではなく完全な Xcode に同梱されるものである｡描画は
+代わりに blade を通る｡
 
 
-## Setup
+## セットアップ
 
-An OAuth client id is required. There is no other credential (#33).
+OAuth client id が必要である｡ほかに認証情報は無い (#33)｡
 
-**Recommended: put `oauth_client_id` in `config.toml`.** It's the only
-non-secret credential twigpui has (a public OAuth client has no client
-secret), so it is fine to check into a dotfiles repo — and unlike an
-exported environment variable, it's picked up no matter how
-twigpui is started. An exported `X_OAUTH_CLIENT_ID` is invisible to a
-different terminal, a fresh shell that never sourced your profile, and a
-`.app` launched from Finder/Spotlight/Dock (#40) — none of which inherit your
-shell's environment. That gap is exactly how #54 happened: a stored session
-expired, couldn't refresh without the client id in that particular shell, and
-the app quietly kept working in a degraded, read-only mode with nothing on
-screen explaining why.
+**推奨: `oauth_client_id` を `config.toml` に置く｡** twigpui が持つ唯一の
+非秘匿な認証情報であり (public な OAuth client には client secret が無い)､
+dotfiles リポジトリにコミットして構わない — そして export した環境変数と違い､
+twigpui をどう起動しても読まれる｡export した `X_OAUTH_CLIENT_ID` は､別の
+ターミナル､プロファイルを一度も source していない新しいシェル､
+Finder/Spotlight/Dock から起動した `.app` (#40) からは見えない — どれもシェルの
+環境を継承しないためである｡この隙間がまさに #54 の原因だった: 保存済みの
+セッションが期限切れになり､そのシェルには client id が無いのでリフレッシュ
+できず､アプリは理由を画面に出さないまま､読み取り専用の劣化モードで黙って
+動きつづけた｡
 
 ```sh
 mkdir -p ~/.config/twigpui
@@ -75,349 +73,338 @@ EOF
 cargo run
 ```
 
-(`~/.config/twigpui/config.toml` is the default path —
-`$XDG_CONFIG_HOME/twigpui/config.toml` if that's set. See "`config.toml`"
-below for the full path resolution and every other key the file accepts.)
+(`~/.config/twigpui/config.toml` が既定のパスである — `$XDG_CONFIG_HOME` が
+設定されていれば `$XDG_CONFIG_HOME/twigpui/config.toml`｡パス解決の全体と､
+このファイルが受け付けるほかのキーは後述の "`config.toml`" を参照｡)
 
-Or keep a local `.env`, which `dotenvy` loads into the environment, if
-you'd rather not use `config.toml`:
+`config.toml` を使いたくなければ､ローカルに `.env` を置いてもよい｡`dotenvy` が
+環境変数として読み込む:
 
 ```sh
 cp .env.example .env
-$EDITOR .env          # fill in X_OAUTH_CLIENT_ID
+$EDITOR .env          # X_OAUTH_CLIENT_ID を書く
 cargo run
 ```
 
-### Migrating from the bearer token
+<a id="migrating-from-the-bearer-token"></a>
+### bearer token からの移行
 
-`X_BEARER_TOKEN` is gone. If that is what you had configured:
+`X_BEARER_TOKEN` は無くなった｡それを設定していたなら:
 
-1. Set `X_OAUTH_CLIENT_ID`, or add `oauth_client_id = "…"` to
-   `config.toml` — the client id of a public OAuth client from the X
-   Developer Portal. It is not a secret.
-2. Remove any `bearer_token` key from `config.toml`. Startup fails while it
-   is still there, on purpose: ignoring it would leave you believing you are
-   configured when nothing reads it.
-3. Run twigpui and click **Sign in with X** once. The session persists to
-   `$XDG_STATE_HOME/twigpui/oauth_tokens.json`, and every later launch —
-   including `--fetch-only` and `--fetch-post`, which never open a browser —
-   reuses it.
+1. `X_OAUTH_CLIENT_ID` を設定するか､`config.toml` に
+   `oauth_client_id = "…"` を足す — X Developer Portal で作った public な
+   OAuth client の client id である｡秘密情報ではない｡
+2. `config.toml` から `bearer_token` キーを消す｡残っている間は起動が失敗する｡
+   意図的である: 無視すれば､何も読んでいないのに設定できているつもりのままに
+   なる｡
+3. twigpui を起動して **Sign in with X** を一度クリックする｡セッションは
+   `$XDG_STATE_HOME/twigpui/oauth_tokens.json` に永続化され､以降の起動 —
+   ブラウザを開かない `--fetch-only` と `--fetch-post` を含む — はそれを
+   再利用する｡
 
-App-only access could not read the home timeline (401) and could not post,
-repost, quote, like or delete. Keeping it meant a second credential path
-through config resolution, the timeline source, and every affordance in the
-header, in exchange for a strictly less capable app.
+app-only アクセスはホームタイムラインを読めず (401)､投稿・repost・引用・
+いいね・削除もできなかった｡残すことは､設定解決・タイムラインのソース・
+ヘッダーのあらゆる操作要素に 2 本目の認証情報の経路を通すことを意味し､
+見返りは厳密に能力の劣るアプリだった｡
 
-An environment variable always overrides the same key in `config.toml` (see
-"`config.toml`" below) — handy for a one-off override, but not a substitute
-for putting `oauth_client_id` in the file if you want it to survive across
-terminals and launch methods without having to remember to export it again
-each time.
+環境変数は常に `config.toml` の同名キーを上書きする (後述の "`config.toml`" を
+参照) — 一度きりの上書きには便利だが､ターミナルや起動方法をまたいで､毎回
+export し直すのを覚えていなくても効くようにしたいなら､`oauth_client_id` を
+ファイルに置くことの代わりにはならない｡
 
-| Variable | Required | Default | Meaning |
+| 変数 | 必須 | 既定値 | 意味 |
 | --- | --- | --- | --- |
-| `X_OAUTH_CLIENT_ID` | **yes** | — | OAuth 2.0 client id for "Sign in with X" — non-secret, may also live in `config.toml` as `oauth_client_id` |
-| `X_TARGET_USERNAME` | no | `XDevelopers` | Screen name `--fetch-only` fetches, without a leading `@` |
-| `X_MAX_RESULTS` | no | `20` | Posts per fetch, 5–100 |
-| `X_LIST_ID` | no | unset (a development build defaults to its own list, #169) | Numeric id of an X List to show in the window **instead of** the home timeline — also `list_id` in `config.toml` (#161) |
-| `X_MIN_FETCH_INTERVAL_SECONDS` | no | `60` | Floor on how often a fetch may run, in seconds (#10) |
-| `X_THEME` | no | `light` | Color theme: `light`, `dark`, or `system` (follows the OS appearance) — also `theme` in `config.toml` (#19) |
-| `X_REQUEST_PRICE` | no | unset | Price per API request, in whatever unit you have in mind — also `request_price` in `config.toml` (#18, see [Usage tracking](.claude/skills/x-api-budget/reference/app-behavior.md#usage-tracking)) |
-| `X_DAILY_REQUEST_BUDGET` | no | unset | Daily request-count budget that colors the header's usage line as it's approached — also `daily_request_budget` in `config.toml` (#18) |
-| `X_AUTO_SYNC_LIST` | no | `true` | Keep `X_LIST_ID`'s membership mirroring your follows while the app runs — also `auto_sync_list` in `config.toml`. **Spends on a timer**; see below |
-| `X_SYNC_INTERVAL_SECONDS` | no | `21600` (6h) | How long the background sync waits between diffs. Values under `900` are rejected — also `sync_interval_seconds` in `config.toml` |
-| `X_SYNC_PRUNE_LIMIT_PERCENT` | no | `10` | The most of the list's membership the background sync may remove per diff, in percent. Over it, the removals are held for `--sync-list --apply --prune` to confirm; `100` turns the cap off — also `sync_prune_limit_percent` in `config.toml` (#176) |
-| `X_SYNC_WRITES_PER_MINUTE` | no | `2` | How many list writes the background sync sends per minute during a catch-up (#197). `1`–`20`; the ceiling is X's documented write window (300 per 15 min) spread evenly. Raise it only after a run at the default has shown no refusals — also `sync_writes_per_minute` in `config.toml` |
-| `X_AUTO_REFRESH` | no | `true` | Poll the timeline for new posts while the window is open — also `auto_refresh` in `config.toml` (#21). `false` and the app sends nothing you did not click |
-| `X_AUTO_REFRESH_INTERVAL_SECONDS` | no | `180` (3m) | How long auto-refresh waits between polls. Values below `X_MIN_FETCH_INTERVAL_SECONDS` are rejected — also `auto_refresh_interval_seconds` in `config.toml` |
-| `X_FOLLOW_NEW_POSTS` | no | `true` | Let a poll's new posts flow onto the screen by themselves when you are at the top (#22) — also `follow_new_posts` in `config.toml`. Presentation only: it never changes what is fetched or when. Toggle at runtime with View → Follow New Posts (`⌘⇧F`) |
+| `X_OAUTH_CLIENT_ID` | **はい** | — | "Sign in with X" 用の OAuth 2.0 client id — 非秘匿で､`config.toml` に `oauth_client_id` として置いてもよい |
+| `X_TARGET_USERNAME` | いいえ | `XDevelopers` | `--fetch-only` が取得するスクリーンネーム｡先頭の `@` は付けない |
+| `X_MAX_RESULTS` | いいえ | `20` | 1 回の取得あたりの投稿数､5–100 |
+| `X_LIST_ID` | いいえ | 未設定 (development ビルドは自身のリストを既定にする, #169) | ホームタイムラインの**代わりに**ウィンドウへ表示する X List の数値 id — `config.toml` では `list_id` (#161) |
+| `X_MIN_FETCH_INTERVAL_SECONDS` | いいえ | `60` | 取得を実行できる間隔の下限 (秒) (#10) |
+| `X_THEME` | いいえ | `light` | カラーテーマ: `light`, `dark`, `system` (OS の外観に従う) — `config.toml` では `theme` (#19) |
+| `X_REQUEST_PRICE` | いいえ | 未設定 | API リクエスト 1 回あたりの価格｡単位は任意 — `config.toml` では `request_price` (#18, [Usage tracking](.claude/skills/x-api-budget/reference/app-behavior.md#usage-tracking) を参照) |
+| `X_DAILY_REQUEST_BUDGET` | いいえ | 未設定 | 1 日のリクエスト数の予算｡近づくとヘッダーの使用量の行が色付く — `config.toml` では `daily_request_budget` (#18) |
+| `X_AUTO_SYNC_LIST` | いいえ | `true` | アプリの実行中､`X_LIST_ID` のメンバーをフォローに追従させつづける — `config.toml` では `auto_sync_list`｡**タイマーで課金する**; 後述 |
+| `X_SYNC_INTERVAL_SECONDS` | いいえ | `21600` (6 時間) | バックグラウンド同期が diff の間に待つ時間｡`900` 未満の値は拒否する — `config.toml` では `sync_interval_seconds` |
+| `X_SYNC_PRUNE_LIMIT_PERCENT` | いいえ | `10` | バックグラウンド同期が 1 回の diff で削除できるメンバーの上限 (パーセント)｡超えた分の削除は保留し､`--sync-list --apply --prune` での確認に回す; `100` で上限を外す — `config.toml` では `sync_prune_limit_percent` (#176) |
+| `X_SYNC_WRITES_PER_MINUTE` | いいえ | `2` | 追いつき処理の間にバックグラウンド同期が 1 分あたりに送るリスト書き込みの数 (#197)｡`1`–`20`; 上限は X が文書化した書き込みウィンドウ (15 分あたり 300) を均等にならした値である｡既定値での実行が拒否を出さないと分かってから上げる — `config.toml` では `sync_writes_per_minute` |
+| `X_AUTO_REFRESH` | いいえ | `true` | ウィンドウが開いている間､新しい投稿をタイムラインにポーリングする — `config.toml` では `auto_refresh` (#21)｡`false` なら､アプリはクリックしていないものを一切送らない |
+| `X_AUTO_REFRESH_INTERVAL_SECONDS` | いいえ | `180` (3 分) | 自動更新がポーリングの間に待つ時間｡`X_MIN_FETCH_INTERVAL_SECONDS` を下回る値は拒否する — `config.toml` では `auto_refresh_interval_seconds` |
+| `X_FOLLOW_NEW_POSTS` | いいえ | `true` | 先頭にいるとき､ポーリングで届いた新しい投稿がひとりでに画面へ流れ込むようにする (#22) — `config.toml` では `follow_new_posts`｡表示だけの話で､何をいつ取得するかは変えない｡実行中は View → Follow New Posts (`⌘⇧F`) で切り替える |
 
-`.env` is gitignored. Do not commit credentials.
+`.env` は gitignore してある｡認証情報をコミットしないこと｡
 
-### Auto-refresh
+### 自動更新
 
-The window polls its timeline every three minutes. What a poll's new posts
-do next depends on where you are (#22):
+ウィンドウは 3 分ごとにタイムラインをポーリングする｡届いた新しい投稿がその後
+どうなるかは､いまどこにいるかで決まる (#22):
 
-- **At the top** — they flow straight on, gliding down into view, so a
-  window left open keeps moving on its own. Toggle this with
-  View → Follow New Posts (`⌘⇧F`); the glide stops the moment you touch
-  the wheel.
-- **Reading further down** (or with follow off) — they wait behind an
-  **"↑ N new posts"** bar between the toolbar and the list. Nothing moves
-  until you press it — not the list, not your scroll position. Pressing it
-  (or `⌘⇧R`, or View → Show New Posts) shows them and jumps to the top.
+- **先頭にいるとき** — そのまま流れ込み､滑るように視界へ降りてくる｡開きっぱなし
+  のウィンドウはひとりでに動きつづける｡View → Follow New Posts (`⌘⇧F`) で
+  切り替える; ホイールに触れた瞬間に滑りは止まる｡
+- **下の方を読んでいるとき** (または follow が off のとき) — ツールバーとリストの
+  間の **"↑ N new posts"** バーの裏で待つ｡押すまで何も動かない — リストも､
+  スクロール位置も｡押す (または `⌘⇧R`､View → Show New Posts) と表示され､
+  先頭へ跳ぶ｡
 
-That second half is the deliberate one. A fetch you did not ask for must
-not slide the text you are reading down the screen, so a poll never touches
-a timeline mid-read; it only fills a buffer the bar offers. To watch the
-flow without spending anything, `cargo run -- --fixture fixtures/timeline.json`
-delivers the fixture's held-back posts five seconds in.
+後半が意図した設計である｡頼んでいない取得が､読んでいる本文を画面の下へ滑らせて
+はならない｡だからポーリングは読書中のタイムラインに触れず､バーが差し出す
+バッファを埋めるだけである｡課金なしでこの流れを見るには､
+`cargo run -- --fixture fixtures/timeline.json` が 5 秒後にフィクスチャの
+保留分を届ける｡
 
-**The cost is smaller than a five-minute timer sounds.** Reads are billed
-per post returned and deduplicated within a UTC day, so a day of polling
-bills the posts that were genuinely new that day — which is what reading
-them costs however they arrive. The one repeated charge is the first head
-page after each UTC midnight, bounded by `X_MAX_RESULTS`.
+**コストは 5 分タイマーという響きほど大きくない｡** 読み取りは返ってきた投稿ごと
+に課金され､UTC の 1 日の中で重複が除かれる｡だから 1 日ポーリングしても､その日に
+本当に新しかった投稿の分だけが課金される — どう届こうと､それを読むコストは同じ
+である｡繰り返し課金されるのは UTC の深夜を越えた最初の先頭ページだけで､
+`X_MAX_RESULTS` が上限になる｡
 
-`⌘R` and `⌘⇧R` are deliberate opposites where money is concerned: `⌘R`
-buys a fetch, `⌘⇧R` reveals one the timer already paid for.
+`⌘R` と `⌘⇧R` は金の面で意図的に正反対である: `⌘R` は取得を買い､`⌘⇧R` は
+タイマーが既に払ったものを見せる｡
 
-Turn it off with `X_AUTO_REFRESH=false`. There is no timer left running
-behind that switch — the loop is never started at all.
+`X_AUTO_REFRESH=false` で止める｡このスイッチの裏でタイマーが回りつづけることは
+無い — ループはそもそも開始されない｡
 
-### The background list sync
+### バックグラウンドのリスト同期
 
-With `X_LIST_ID` set, the window keeps that list's membership mirroring the
-accounts you follow, for as long as it is open. Accounts you follow are
-added; accounts you no longer follow are removed. It is on by default and
-turned off with `X_AUTO_SYNC_LIST=false`.
+`X_LIST_ID` を設定すると､ウィンドウは開いている間ずっと､そのリストのメンバーを
+フォロー中のアカウントに追従させつづける｡フォローしたアカウントは追加され､
+フォローを外したアカウントは削除される｡既定で有効で､`X_AUTO_SYNC_LIST=false`
+で無効になる｡
 
-**It removes accounts you added to the list by hand.** The list *is* the
-mirror — that is the whole contract. If you want a list you curate
-yourself, either turn the sync off or point `X_LIST_ID` at a different
-list.
+**手でリストに追加したアカウントも削除する｡** リストは*それ自体が*ミラーであり､
+それが契約のすべてである｡自分で選んで作るリストが欲しいなら､同期を切るか
+`X_LIST_ID` を別のリストに向ける｡
 
-**The status bar says what it is doing** (#174). "List sync: up to date"
-is the steady state; "List sync: 1100 to go" is a catch-up working
-through its plan; "List sync: no list configured" and "List sync:
-re-authorize to enable" name the gate a stopped sync is stopped at.
-Before this the feature was invisible from the window, and a catch-up
-that had hours left looked exactly like nothing happening.
+**ステータスバーが何をしているかを示す** (#174)｡"List sync: up to date" が定常
+状態､"List sync: 1100 to go" は計画を消化中の追いつき処理である｡"List sync:
+no list configured" と "List sync: re-authorize to enable" は､止まっている
+同期が何に阻まれているかを示す｡これが入るまでこの機能はウィンドウから見えず､
+あと数時間かかる追いつき処理は､何も起きていない状態とまったく同じに見えた｡
 
-**Clicking it starts a sync**, in any state where one can start. It asks
-first, because the reads it buys are the most expensive click in this
-app. A sync started this way ignores the interval — that is the point of
-the button — but not the rate limit, and not an outstanding plan: if a
-catch-up is already part way through, pressing it resumes that plan
-rather than paying to diff both sides again.
+**クリックすると同期が始まる**｡開始できる状態ならどれでも始まる｡先に確認を出す｡
+それが買う読み取りは､このアプリで最も高価なクリックだからである｡この方法で
+始めた同期は間隔を無視する — それがボタンの意義である — が､レートリミットと
+未消化の計画は無視しない: 追いつき処理が途中まで進んでいれば､両側を再び diff
+する代金を払わずにその計画を再開する｡
 
-With `X_AUTO_SYNC_LIST=false` the timer never runs and the button is the
-only way a sync happens. That run stops once there is nothing left to do.
+`X_AUTO_SYNC_LIST=false` ではタイマーが回らず､同期はこのボタンでしか起きない｡
+その実行はやることが無くなった時点で止まる｡
 
-**It spends money on a timer.** Every diff reads your whole follow list and
-the whole list membership, and both are billed per account returned. At
-four diffs a day that is roughly $2 per thousand follows if X's documented
-24-hour deduplication covers these reads, and roughly $8 if it does not —
-`x-api-budget` has that rule measured for Posts only. This is why the
-interval defaults to six hours and refuses anything under fifteen minutes.
+**タイマーで金を使う｡** diff のたびにフォローリスト全体とリストのメンバー全体を
+読み､どちらも返ってきたアカウントごとに課金される｡1 日 4 回の diff なら､X が
+文書化した 24 時間の重複排除がこれらの読み取りに効くならフォロー 1000 件あたり
+約 $2､効かないなら約 $8 である — `x-api-budget` がその規則を実測できているのは
+Posts だけである｡だから間隔の既定は 6 時間で､15 分未満は拒否する｡
 
-The writes are spread out rather than sent in a burst: two a minute by
-default (`sync_writes_per_minute`), so a list that is thousands of
-accounts behind is caught up over hours rather than minutes. That default
-is deliberate. X refuses list additions with a cap
-its `x-rate-limit-*` headers do not describe (#193, #197): a burst of
-roughly a hundred in twenty minutes tripped it, and it then refused every
-write for more than a day. A refusal pauses the catch-up rather than
-failing it, and each refusal in a row waits longer than the last — 15
-minutes, then 30, an hour, two, four, and six hours from then on — so a
-cap that stays down costs a handful of rejected writes a day, not one
-every quarter hour. The status bar says "rate limited" for the first
-refusal and "refused N× in a row" in red from the second, because twenty
-hours of a countdown that keeps restarting looks like waiting, and it is
-not. The log has one line per refusal with the 429's headers and body.
+書き込みはまとめて送らずに分散させる: 既定で 1 分あたり 2 件
+(`sync_writes_per_minute`)｡だから数千アカウント遅れているリストは､数分ではなく
+数時間かけて追いつく｡この既定値は意図的である｡X は `x-rate-limit-*` ヘッダーが
+説明しない上限でリストへの追加を拒否する (#193, #197): 20 分で約 100 件のまとめ
+送りがそれに引っかかり､その後 1 日以上すべての書き込みを拒否した｡拒否は追いつき
+処理を失敗させずに一時停止させ､連続した拒否は前回より長く待つ — 15 分､次に
+30 分､1 時間､2 時間､4 時間､以降は 6 時間 — ので､上限が下りたままでも 1 日に
+数件の拒否で済み､15 分ごとに 1 件にはならない｡ステータスバーは最初の拒否で
+"rate limited"､2 回目からは赤字で "refused N× in a row" と出す｡やり直しつづける
+カウントダウンの 20 時間は待っているように見えるが､そうではないからである｡
+ログには拒否 1 件につき 1 行､429 のヘッダーとボディが残る｡
 
-Progress is written to `$XDG_STATE_HOME/twigpui/sync_plan.json` after
-every single change, so quitting mid-catch-up costs nothing — the next
-launch picks up exactly where it stopped.
-`$XDG_STATE_HOME/twigpui/sync_state.json` holds when the last diff ran,
-which is what stops a relaunch from paying for both reads again, and the
-backoff — until when writes are paused and how many refusals in a row —
-so a relaunch does not send into the cap either.
+進捗は変更 1 件ごとに `$XDG_STATE_HOME/twigpui/sync_plan.json` へ書かれるので､
+追いつき処理の途中で終了しても何も失わない — 次の起動が止まった場所から
+ちょうど再開する｡`$XDG_STATE_HOME/twigpui/sync_state.json` は最後に diff を
+実行した時刻を持つ｡これが再起動時に両方の読み取りを再び払うのを止める｡加えて
+バックオフ — いつまで書き込みを止めるか､連続何回拒否されたか — も持つので､
+再起動が上限へ送り込むこともない｡
 
-It needs the same scopes `--sync-list` does. A session that predates them
-is skipped with a line in the log rather than an error on screen — click
-"Re-authorize" once and the sync starts without a restart.
+必要なスコープは `--sync-list` と同じである｡それより前に取ったセッションは､
+画面へのエラーではなくログの 1 行を残してスキップされる — "Re-authorize" を
+一度クリックすれば､再起動なしで同期が始まる｡
 
-The interval is counted from the last diff, not from launch, and that count
-is kept on disk. Restarting the app does not trigger a sync: if the last one
-ran an hour ago, the next is still five hours out.
+間隔は起動時点ではなく最後の diff から数え､その記録はディスクに残る｡アプリを
+再起動しても同期は始まらない: 最後の実行が 1 時間前なら､次はまだ 5 時間先である｡
 
-A debug build syncs too, and none of the costs above apply to it (#169): it
-mirrors the fixed seed screen names into the development list rather than
-reading your follow graph, against its own `twigpui-dev` state directory. The
-figures in this section are what a `--release` build spends.
+debug ビルドも同期するが､上のコストはどれも当てはまらない (#169): フォロー
+グラフを読まず､固定のシード screen name を development 用のリストへミラーし､
+独自の `twigpui-dev` state ディレクトリを使う｡この節の数字は `--release`
+ビルドが使う額である｡
 
-### `--sync-list` — mirror your follows into the list (#163)
+### `--sync-list` — フォローをリストへミラーする (#163)
 
-A List only shows what is in it, so #161's window is only as good as the
-list's membership. `--sync-list` diffs the accounts you follow against the
-list's members and mirrors one onto the other.
+List は中にあるものしか表示しないので､#161 のウィンドウの出来はリストのメンバー
+次第である｡`--sync-list` はフォロー中のアカウントとリストのメンバーを diff し､
+一方をもう一方へミラーする｡
 
 ```sh
-cargo run --release -- --sync-list          # dry run: read both sides, write a plan, print it
-cargo run --release -- --sync-list --apply  # send the additions
-cargo run --release -- --sync-list --apply --prune   # …and the removals
+cargo run --release -- --sync-list          # dry run: 両側を読み､計画を書き､表示する
+cargo run --release -- --sync-list --apply  # 追加を送る
+cargo run --release -- --sync-list --apply --prune   # …と削除も
 ```
 
-**`--release` is load-bearing here** (#169). A debug build is the
-development profile: it syncs *its* list from four fixed X accounts, not
-your list from your follows. Dropping `--release` does not fail — it
-quietly syncs the wrong pair, which is exactly what the development profile
-is for. See [Development builds](#development-builds).
+**ここでは `--release` が効いている** (#169)｡debug ビルドは development
+プロファイルであり､あなたのフォローからあなたのリストへではなく､固定の 4 つの
+X アカウントから*development 用の*リストへ同期する｡`--release` を落としても
+失敗はしない — 黙って別の組み合わせを同期する｡それがまさに development
+プロファイルの目的である｡[development ビルド](#development-builds) を参照｡
 
-**A dry run is not free.** Both reads are billed per account returned, so
-one against a few thousand follows costs dollars, not cents. Check the
-prices in the developer console before the first `--apply` — #162 is open
-because this app's own usage numbers count requests, not resources.
+**dry run は無料ではない｡** どちらの読み取りも返ってきたアカウントごとに課金
+されるので､数千件のフォローに対して 1 回走らせればセントではなくドル単位になる｡
+最初の `--apply` の前に developer console で価格を確認すること — このアプリ自身の
+使用量の数字はリソースではなくリクエストを数えているので､#162 は開いたままである｡
 
-The plan is written to `$XDG_STATE_HOME/twigpui/sync_plan.json` and each
-entry is marked as it lands, so an interrupted `--apply` resumes from the
-file without paying to read either side again. `--apply` with no plan on
-file is an error: the dry run is what produces the plan.
+計画は `$XDG_STATE_HOME/twigpui/sync_plan.json` に書かれ､各エントリは反映される
+たびに印が付く｡だから中断した `--apply` は､どちらの側も読み直す代金を払わずに
+ファイルから再開する｡ファイルに計画が無い `--apply` はエラーである: 計画を作る
+のは dry run である｡
 
-Removals need `--prune` **here**. On the CLI a list may hold accounts you
-added by hand and deleting them stays your call; the background sync above
-prunes unconditionally, because a mirror that only grows is not a mirror.
+**ここでは**削除に `--prune` が要る｡CLI ではリストが手で追加したアカウントを
+抱えている可能性があり､それを消すかどうかは利用者の判断のままにする｡上の
+バックグラウンド同期は無条件に削除する｡増えるだけのミラーはミラーではない
+からである｡
 
-Both read the same plan file, so a dry run's plan is what the background
-sync drains next — including its removals. If you want to look at a diff
-without any of it being applied, turn the sync off first.
+どちらも同じ計画ファイルを読むので､dry run が作った計画は次にバックグラウンド
+同期が消化するものになる — その削除も含めて｡何も適用されない状態で diff を
+眺めたいなら､先に同期を切ること｡
 
-They share the backoff too. `--apply` while the background sync is backing
-off from a refusal (#197) says so on stderr and **sends anyway** — one
-deliberate batch is the cheapest way to find out whether the cap has
-lifted — and what comes back is recorded for the background sync as well:
-a write that lands ends its streak, a refusal lengthens it.
+バックオフも共有する｡バックグラウンド同期が拒否を受けてバックオフしている最中の
+`--apply` (#197) は､その旨を stderr に出して**それでも送る** — 意図した 1
+バッチは､上限が解除されたかを知る最も安い方法である — そして返ってきた結果は
+バックグラウンド同期のためにも記録される: 通った書き込みは連続を終わらせ､拒否は
+連続を伸ばす｡
 
-Both sides need scopes this app did not request before #163
-(`follows.read`, `list.write`), so an existing session is refused before it
-spends anything — launch twigpui and click "Re-authorize" once.
+どちらの側も､#163 より前のこのアプリが要求していなかったスコープ
+(`follows.read`, `list.write`) を必要とする｡だから既存のセッションは何も使う前に
+拒否される — twigpui を起動して "Re-authorize" を一度クリックすること｡
 
-## Signing in with X (OAuth 2.0 Authorization Code + PKCE)
+## X でのサインイン (OAuth 2.0 Authorization Code + PKCE)
 
-Everything this app does — the home timeline, posting, replying, liking,
-deleting — acts as *you* rather than reading public data, so all of it needs
-a user-context OAuth 2.0 session. twigpui gets one with the Authorization
-Code + PKCE flow (RFC 6749 + RFC 7636), run entirely from the window via a
-"Sign in with X" button.
+このアプリがやること — ホームタイムライン､投稿､返信､いいね､削除 — はすべて
+公開データの読み取りではなく*本人として*の操作なので､どれも user context の
+OAuth 2.0 セッションを必要とする｡twigpui は Authorization Code + PKCE フロー
+(RFC 6749 + RFC 7636) でそれを取得する｡その全体を "Sign in with X" ボタンから
+ウィンドウ内で実行する｡
 
-**Developer Portal prerequisite.** Register a **public client** (no client
-secret) in the X Developer Portal, and add this exact redirect URI:
+**Developer Portal 側の前提｡** X Developer Portal で **public client**
+(client secret 無し) を登録し､この redirect URI をそのまま追加する:
 
 ```
 http://127.0.0.1:8733/callback
 ```
 
-X requires an exact match, so the port can't be ephemeral — `8733` is fixed
-in the code (`profile::Profile::loopback_port`) and must match the Portal
-registration verbatim. A development build uses `8734` and its own X app;
-see [Development builds](#development-builds).
+X は完全一致を要求するので､ポートを動的にはできない — `8733` はコード内
+(`profile::Profile::loopback_port`) に固定してあり､Portal の登録と一字一句
+一致していなければならない｡development ビルドは `8734` と専用の X app を使う｡
+[development ビルド](#development-builds) を参照｡
 
-**Client id.** Copy the client id the Portal shows you into `X_OAUTH_CLIENT_ID`
-(env or `.env`) or `oauth_client_id` in `config.toml`. It's non-secret — a
-public client has no secret to protect — so it is fine to check into a
-dotfiles repo.
+**Client id｡** Portal が表示する client id を `X_OAUTH_CLIENT_ID` (環境変数
+または `.env`) か `config.toml` の `oauth_client_id` へ写す｡非秘匿である —
+public client には守るべき secret が無い — ので dotfiles リポジトリに
+コミットして構わない｡
 
-**Scopes.** twigpui requests `tweet.read users.read tweet.write like.write
-offline.access`: enough to read posts, resolve user context, post (#14),
-like (#68), and refresh the session without re-prompting.
+**スコープ｡** twigpui は `tweet.read users.read tweet.write like.write
+offline.access` を要求する: 投稿の読み取り､user context の解決､投稿 (#14)､
+いいね (#68)､再認証を求めないセッションのリフレッシュに足りる分である｡
 
-**If you signed in before #14 or #68,** your stored session predates
-`tweet.write` or `like.write` and can't post or like yet — the API rejects
-the write with a 403 it has no way to fix on its own. twigpui records the
-scope granted with each session (and treats a session from before that
-existed as "unknown," never as "assume it's fine"), so the header shows a
-**"Re-authorize"** button next to the usual reload/sign-in controls whenever
-the current session is missing any write scope the app needs. Clicking it
-re-runs the same sign-in flow above end to end — new browser consent screen,
-new tokens, every scope at once — and nothing else in the app changes as a
-result.
+**#14 や #68 より前にサインインしていたなら､** 保存済みのセッションは
+`tweet.write` や `like.write` より古く､まだ投稿もいいねもできない — API は
+書き込みを 403 で拒否し､アプリ側にそれを自力で直す手立ては無い｡twigpui は
+セッションごとに付与されたスコープを記録し (記録が始まる前のセッションは
+"unknown" として扱い､「たぶん大丈夫」とは決して見なさない)､現在のセッションに
+アプリが必要とする書き込みスコープが欠けているときは､通常のリロード/サインイン
+の操作の隣にヘッダーが **"Re-authorize"** ボタンを出す｡クリックすると上の
+サインインフローを最初から最後までもう一度走らせる — 新しいブラウザの同意画面､
+新しいトークン､すべてのスコープを一度に — そしてそれ以外にアプリで変わるものは
+無い｡
 
-**What happens when you click "Sign in with X":** the app opens your default
-browser at X's consent screen, and a short-lived HTTP listener on
-`127.0.0.1:8733` (`8734` for a development build) catches the redirect back
-(waiting up to two minutes). The two ports never collide, so a sign-in in
-one build and a sign-in in the other can be in flight at once. Once
-X redirects with an authorization code, twigpui exchanges it for an access
-token and a refresh token, then falls straight into a normal reload.
+**"Sign in with X" をクリックすると何が起きるか:** アプリは既定のブラウザで X の
+同意画面を開き､`127.0.0.1:8733` (development ビルドでは `8734`) の短命な HTTP
+リスナーが戻りのリダイレクトを受け取る (最大 2 分待つ)｡2 つのポートは衝突しない
+ので､片方のビルドのサインインともう片方のサインインを同時に進行させられる｡X が
+authorization code を付けてリダイレクトすると､twigpui はそれを access token と
+refresh token に交換し､そのまま通常のリロードへ入る｡
 
-**Where tokens are stored.** `$XDG_STATE_HOME/twigpui/oauth_tokens.json`
-(see the table below), written `0600` (owner read/write only) — the access
-token, refresh token, and an absolute expiry, in plain JSON. This is a
-development-only, single-user app; see issue #7 for why a Keychain wasn't
-used instead (ad-hoc builds change signing identity on every rebuild, which
-would re-prompt for Keychain access each time).
+**トークンの保存先｡** `$XDG_STATE_HOME/twigpui/oauth_tokens.json` (後述の表を
+参照)｡`0600` (所有者の読み書きのみ) で書き､access token・refresh token・絶対
+時刻の有効期限を素の JSON で持つ｡これは開発用途専用の単一ユーザー向けアプリ
+である｡Keychain を使わなかった理由は issue #7 を参照 (ad-hoc ビルドはリビルドの
+たびに署名 identity が変わり､その都度 Keychain アクセスの確認が出ることになる)｡
 
-A stored session is refreshed automatically, shortly before it expires,
-whenever the app needs a token — no re-prompting as long as the refresh
-token stays valid.
+保存済みのセッションは､アプリがトークンを必要とするたび､期限の少し前に自動で
+リフレッシュされる — refresh token が有効なかぎり再認証は求められない｡
 
-### File locations (XDG Base Directory)
+<a id="file-locations-xdg-base-directory"></a>
+### ファイルの置き場所 (XDG Base Directory)
 
-Everything twigpui persists lives under three directories, resolved per the
+twigpui が永続化するものはすべて 3 つのディレクトリの下にある｡
 [XDG Base Directory
-spec](https://specifications.freedesktop.org/basedir-spec/latest/) and
-created (mode `0700`) on startup:
+spec](https://specifications.freedesktop.org/basedir-spec/latest/) に従って
+解決し､起動時に (mode `0700` で) 作成する:
 
-| Variable | Default | Holds |
+| 変数 | 既定値 | 持つもの |
 | --- | --- | --- |
 | `XDG_CONFIG_HOME` | `~/.config/twigpui/` | `config.toml` |
-| `XDG_CACHE_HOME` | `~/.cache/twigpui/` | Response cache: `user_ids.json`, `timeline-<user_id>.json` (#9), `me.json`, `home-timeline-<user_id>.json` (#11), `thread-<reply_id>.json` (#12), `avatars/` (#64), `media/` (#65) |
+| `XDG_CACHE_HOME` | `~/.cache/twigpui/` | レスポンスキャッシュ: `user_ids.json`, `timeline-<user_id>.json` (#9), `me.json`, `home-timeline-<user_id>.json` (#11), `thread-<reply_id>.json` (#12), `avatars/` (#64), `media/` (#65) |
 | `XDG_STATE_HOME` | `~/.local/state/twigpui/` | `oauth_tokens.json` (mode `0600`), `rate_limit.json` (#10), `usage.json` (#18), `reposted_posts.json` (#15), `liked_posts.json` (#68), `logs/` (#49) |
 
-An `XDG_*` variable is only honored if it is set to a non-blank absolute
-path; a relative or blank value falls back to the default, per spec.
+`XDG_*` 変数は､空でない絶対パスが設定されているときにだけ尊重される｡相対パスや
+空の値は spec に従って既定値へ落ちる｡
 
-A development build appends `twigpui-dev` instead of `twigpui` to all three,
-so it shares no file with the installed app — see
-[Development builds](#development-builds).
+development ビルドは 3 つとも `twigpui` ではなく `twigpui-dev` を付けるので､
+インストール済みのアプリとファイルを共有しない —
+[development ビルド](#development-builds) を参照｡
 
-### Development builds
+<a id="development-builds"></a>
+### development ビルド
 
-A debug build (`cargo run`, or `./scripts/build-app-bundle.sh --dev`) is a
-separate installation from the release build the `.app` bundle ships. It
-signs into a separate X app, keeps its own session and cache, and says so in
-its window title (#169):
+debug ビルド (`cargo run` または `./scripts/build-app-bundle.sh --dev`) は､
+`.app` バンドルが配る release ビルドとは別のインストールである｡別の X app に
+サインインし､独自のセッションとキャッシュを持ち､それをウィンドウタイトルに
+示す (#169):
 
-| | release build | debug build |
+| | release ビルド | debug ビルド |
 | --- | --- | --- |
-| Directories | `~/.config/twigpui/` etc. | `~/.config/twigpui-dev/` etc. |
+| ディレクトリ | `~/.config/twigpui/` など | `~/.config/twigpui-dev/` など |
 | OAuth redirect URI | `http://127.0.0.1:8733/callback` | `http://127.0.0.1:8734/callback` |
-| Window title | `twigpui` | `twigpui (dev)` |
-| Bundle | `dist/twigpui.app` | `dist/twigpui-dev.app` (see the [`app-bundle` skill](.claude/skills/app-bundle/SKILL.md)) |
-| Bundle id | `com.github.usadamasa.twigpui` | `com.github.usadamasa.twigpui.dev` |
-| Icon | `assets/AppIcon.png` | the same artwork, desaturated |
-| Default `list_id` | none — the home timeline | a throwaway list, in `profile.rs` |
-| `--sync-list` source | everyone you follow | four fixed X accounts |
+| ウィンドウタイトル | `twigpui` | `twigpui (dev)` |
+| バンドル | `dist/twigpui.app` | `dist/twigpui-dev.app` ([`app-bundle` skill](.claude/skills/app-bundle/SKILL.md) を参照) |
+| バンドル id | `com.github.usadamasa.twigpui` | `com.github.usadamasa.twigpui.dev` |
+| アイコン | `assets/AppIcon.png` | 同じ図柄の彩度を落としたもの |
+| 既定の `list_id` | 無し — ホームタイムライン | 使い捨てのリスト (`profile.rs` にある) |
+| `--sync-list` のソース | フォローしている全員 | 固定の 4 つの X アカウント |
 
-The last two rows are what keep the parts of this app that cost money from
-being expensive to work on. A development `--sync-list` that read the real
-follow graph would bill a dry run for every account on it (#163), and one
-that defaulted to the real List could rewrite it over a forgotten export —
-so the development build carries its own list id and its own four-account
-source, both in `src/profile.rs`. `X_LIST_ID` and `list_id` still override
-the default; there is no override for the sync source, because a
-development build spending the real read cost is the thing being prevented.
+最後の 2 行が､このアプリの金のかかる部分を触るコストを抑えている｡development の
+`--sync-list` が本物のフォローグラフを読めば､dry run はその全アカウント分を
+課金される (#163)｡本物の List を既定にすれば､忘れられた export の上から書き換え
+かねない — だから development ビルドは自分用の list id と自分用の 4 アカウントの
+ソースを持ち､どちらも `src/profile.rs` にある｡`X_LIST_ID` と `list_id` は今も
+既定値を上書きする｡同期のソースに上書き手段は無い｡development ビルドが本物の
+読み取りコストを使うことこそが､防ぎたい当のものだからである｡
 
-Which one you get is decided at compile time by `debug_assertions`, with no
-flag and no environment variable. That is deliberate: the failure this
-guards against is *forgetting*, and a debug binary cannot be talked into
-addressing the release installation's tokens or cache. The cost is the one
-case where the two disagree — **`cargo run --release` from this checkout
-uses the release profile**, and so the installed app's files. Use
-`./scripts/build-app-bundle.sh --dev` when you want an optimized-looking
-development app; it builds debug on purpose, for exactly this reason.
+どちらになるかはコンパイル時に `debug_assertions` で決まり､フラグも環境変数も
+無い｡意図的である: これが防ぐ失敗は*忘れること*であり､debug バイナリを説き伏せて
+release インストール側のトークンやキャッシュを触らせることはできない｡代償は両者が
+食い違う唯一のケースである — **このチェックアウトからの `cargo run --release` は
+release プロファイルを使う**｡つまりインストール済みアプリのファイルを使う｡
+最適化された見た目の development アプリが欲しいときは
+`./scripts/build-app-bundle.sh --dev` を使う｡まさにこの理由から､意図的に debug
+でビルドする｡
 
-**Setting one up.** Register a second public client in the X Developer
-Portal with `http://127.0.0.1:8734/callback` as its redirect URI, then put
-its client id where only the development build will read it:
+**用意のしかた｡** X Developer Portal で 2 つ目の public client を
+`http://127.0.0.1:8734/callback` を redirect URI として登録し､その client id を
+development ビルドだけが読む場所へ置く:
 
 ```sh
 mkdir -p ~/.config/twigpui-dev
 cat >> ~/.config/twigpui-dev/config.toml <<'EOF'
-oauth_client_id = "…the development app's client id…"
+oauth_client_id = "…development 用アプリの client id…"
 EOF
 ```
 
-`config.toml` rather than `.env`: a `.env` in this checkout is read by
-whichever profile runs from here, so a client id left there would follow a
-release-profile run into the installed app's state.
+`.env` ではなく `config.toml` にする理由: このチェックアウトの `.env` はここから
+走るどのプロファイルからも読まれるので､そこに置いた client id は release
+プロファイルの実行についていき､インストール済みアプリの state に届いてしまう｡
 
 ### `config.toml`
 
-`$XDG_CONFIG_HOME/twigpui/config.toml` is an optional, hand-edited settings
-file with the same keys as the environment variables above:
+`$XDG_CONFIG_HOME/twigpui/config.toml` は任意の､手で編集する設定ファイルである｡
+キーは上の環境変数と同じである:
 
 ```toml
 target_username = "XDevelopers"
@@ -436,134 +423,126 @@ auto_refresh = true
 auto_refresh_interval_seconds = 300
 ```
 
-A missing file is fine — it just means there are no file-level settings.
-Precedence is **environment variable > `config.toml` > built-in default**,
-so an env var always wins over the file. `oauth_client_id` is safe to check
-in — it is a public client id, not a secret.
+ファイルが無くても構わない — ファイルレベルの設定が無いというだけである｡
+優先順位は **環境変数 > `config.toml` > 組み込みの既定値** で､環境変数は常に
+ファイルに勝つ｡`oauth_client_id` はコミットして安全である — public な
+client id であり､秘密情報ではない｡
 
-`list_id` is the number in a list's own URL on x.com
-(`https://x.com/i/lists/<list_id>`). Setting it replaces the home timeline
-rather than adding a second view: `GET /2/users/:id/timelines/reverse_chronological`
-stopped returning followed authors' posts for this account (#157) and nothing
-here can fix that, so a List is how a following-shaped feed is read at all.
-A non-numeric value fails startup instead of being ignored — silently falling
-back to the empty home timeline would look like the list was empty.
+`list_id` は x.com のリスト自身の URL に含まれる数字である
+(`https://x.com/i/lists/<list_id>`)｡設定すると 2 つ目のビューが増えるのではなく､
+ホームタイムラインが置き換わる: `GET /2/users/:id/timelines/reverse_chronological`
+はこのアカウントに対してフォロー中の投稿者の投稿を返さなくなり (#157)､ここから
+それを直す手立ては無い｡だからフォローの形をしたフィードを読む唯一の方法が List
+である｡数字でない値は無視されずに起動を失敗させる — 黙って空のホームタイムライン
+へ落ちると､リストが空だったように見えるからである｡
 
-A `bearer_token` key is **rejected** rather than ignored (#33): the
-credential it named no longer exists, and a file that still carries it would
-otherwise look configured while nothing read it.
+`bearer_token` キーは無視ではなく**拒否**する (#33): それが指していた認証情報は
+もう存在せず､それを抱えたままのファイルは､何も読んでいないのに設定済みに
+見えてしまう｡
 
-### Theme
+### テーマ
 
-`theme` accepts `light`, `dark`, or `system` (case-insensitive, surrounding
-whitespace trimmed), via `X_THEME` or `theme` in `config.toml`, with the same
-env > file > default precedence as everything else above. It defaults to
-`light`. `system` follows the OS appearance, read once at startup via gpui's
-`Window::appearance()`. An unrecognized value is not a startup error — a
-typo'd theme is cosmetic, not worth blocking the app over — it falls back to
-`light` and prints a warning to stderr naming the value it ignored.
+`theme` は `light`, `dark`, `system` を受け付ける (大文字小文字は区別せず､前後の
+空白は落とす)｡`X_THEME` または `config.toml` の `theme` で指定し､優先順位は上の
+ほかと同じく 環境変数 > ファイル > 既定値 である｡既定値は `light`｡`system` は
+OS の外観に従い､gpui の `Window::appearance()` で起動時に一度だけ読む｡認識できない
+値は起動エラーにしない — テーマの打ち間違いは見た目の話で､アプリを止めるほどでは
+ない — `light` へ落ち､無視した値を挙げた警告を stderr に出す｡
 
 
-## Keyboard shortcuts
+## キーボードショートカット
 
-| Key | Action |
+| キー | 動作 |
 | --- | --- |
-| `⌘R` | Reload |
-| `⌘⇧R` | Show the posts auto-refresh already fetched (spends nothing) |
-| `⌘N` | Focus the composer |
-| `esc` | Leave the composer (the draft is kept) |
-| `⌘↑` | Back to the newest post |
-| `⌘Q` | Quit |
-| `⌘W` | Close the window |
-| `⌘M` | Minimize |
+| `⌘R` | リロード |
+| `⌘⇧R` | 自動更新が既に取得済みの投稿を表示する (課金なし) |
+| `⌘N` | コンポーザーへフォーカスする |
+| `esc` | コンポーザーから抜ける (下書きは保持する) |
+| `⌘↑` | 最新の投稿へ戻る |
+| `⌘Q` | 終了する |
+| `⌘W` | ウィンドウを閉じる |
+| `⌘M` | 最小化する |
 
-Every one of them is in the menu bar (#99), which is where a macOS user
-looks for a keystroke. #58 also printed the first four in a permanent strip
-under the header, on the reasoning that a help screen nobody opens
-documents nothing; #95 removed that strip, because a line of hints under
-the toolbar is not something a native app does, and the menu bar had made
-it redundant.
+どれもメニューバーにある (#99)｡macOS のユーザーがキー操作を探す場所だから
+である｡#58 は､誰も開かないヘルプ画面は何も説明しないという理由で､最初の 4 つを
+ヘッダーの下の常設の帯にも出していた｡#95 はその帯を消した｡ツールバーの下に
+ヒントの行を並べるのはネイティブアプリのやることではなく､メニューバーがそれを
+不要にしていたからである｡
 
-**No binding is a bare printable key, deliberately.** The hazard #58 is
-really about is a bare `j`/`k`/`n` firing while you are typing a post;
-nothing bound today can, because every binding either carries `⌘` or is a
-named key that types nothing (`esc`). Bare keys become worth having once posts can be selected,
-and that needs a second key context the composer's focus removes — see
-`menu::KEY_CONTEXT`.
+**どのバインドも裸の印字可能キーではない｡意図的である｡** #58 が本当に問題に
+している危険は､投稿を入力している最中に裸の `j`/`k`/`n` が発火することである｡
+今あるバインドにそれはできない｡どれも `⌘` を伴うか､何も入力しない名前付きキー
+(`esc`) だからである｡裸のキーが価値を持つのは投稿を選択できるようになってからで､
+それにはコンポーザーのフォーカスが外す 2 つ目の key context が要る —
+`menu::KEY_CONTEXT` を参照｡
 
-**`⌘Q` is the one binding with no key context.** The others answer a
-question about the timeline and belong to the view that answers it.
-Quitting is not the window's business, and scoping it would mean `⌘Q` doing
-nothing whenever focus sat anywhere else — so it is registered globally and
-handled on the `App` rather than on the window's root (#99).
+**`⌘Q` は key context を持たない唯一のバインドである｡** ほかはタイムラインに
+ついての問いに答えるもので､答えるビューに属する｡終了はウィンドウの仕事ではなく､
+スコープを付ければフォーカスが別の場所にある間ずっと `⌘Q` が何もしないことに
+なる — だからグローバルに登録し､ウィンドウのルートではなく `App` 側で処理する
+(#99)｡
 
-**No key posts.** The composer's button is the only way, which is how it
-was being used anyway; `⌘↩` was bound for it from #58 until #142 removed
-both that and its menu item. Plain `↩` was never bound and still is not,
-for the reason that outlives the removal — it has to keep inserting a
-newline, and a post is not undoable.
+**投稿するキーは無い｡** コンポーザーのボタンが唯一の手段であり､実際そう使われて
+いた｡`⌘↩` は #58 から割り当てられていたが､#142 がそれとメニュー項目の両方を
+消した｡素の `↩` は一度も割り当てていないし､今もしていない｡削除より長生きする
+理由がある — 改行を入れつづけなければならないし､投稿は取り消せない｡
 
-**`esc` moves focus only.** The draft is left exactly as typed: losing it to
-a stray key is unrecoverable, and never losing a draft is the composer's
-main promise (#14).
+**`esc` はフォーカスを移すだけである｡** 下書きは打ったそのままにしておく: 誤打で
+失えば取り返せないし､下書きを決して失わないことがコンポーザーの主な約束である
+(#14)｡
 
-**A reload does not move you.** Posts arriving at the top of a list you
-are part-way down would otherwise slide everything under your eyes; the
-timeline scrolls by however many posts arrived, so the row you were reading
-stays where it is. At the very top, nothing moves and the new posts simply
-appear (#22).
+**リロードは読み手を動かさない｡** 途中まで下っているリストの先頭に投稿が届けば､
+そのままでは目の下ですべてが滑ってしまう｡タイムラインは届いた投稿の数だけ
+スクロールするので､読んでいた行はその場に留まる｡いちばん上にいるときは何も
+動かず､新しい投稿がただ現れる (#22)｡
 
-**A reload says what it did.** A muted line under the header reports how
-many posts arrived — including none, which is the case where the screen is
-otherwise identical before and after and the press looks like it did
-nothing. It counts the same posts the scroll compensates for, so the number
-and the movement always agree (#141).
+**リロードは何をしたかを伝える｡** ヘッダーの下の控えめな行が､届いた投稿の数を
+報告する — 0 件のときも含む｡それは前後で画面がまったく同じになり､押しても何も
+起きなかったように見えるケースだからである｡数えるのはスクロールが打ち消すのと
+同じ投稿なので､数字と動きは常に一致する (#141)｡
 
-**"Load older" has no shortcut.** Each press pages backwards for one paid
-request, and a key that spends money on a mis-hit is not a convenience.
-`⌘R` does spend requests, but it is the reload gesture every app shares and
-not one anyone hits by accident — and it goes through the same throttle
-(#10) and cooldown reporting (#57) as the button, so a held-down `⌘R`
-cannot outrun the interval that exists to stop this app spending in a loop.
+**"Load older" にショートカットは無い｡** 押すたびに課金されるリクエスト 1 回で
+過去へ遡るので､誤打で金を使うキーは便利さではない｡`⌘R` もリクエストを使うが､
+どのアプリにもあるリロードの操作で､誤って押すものではない — しかもボタンと同じ
+スロットル (#10) とクールダウンの報告 (#57) を通るので､`⌘R` を押しっぱなしに
+しても､このアプリがループで課金するのを止めるための間隔を追い越せない｡
 
 
-## Menu bar
+## メニューバー
 
-| Menu | Items |
+| メニュー | 項目 |
 | --- | --- |
 | twigpui | About twigpui, Quit twigpui |
 | File | New Post |
 | View | Reload, Back to Top |
 | Window | Minimize, Close Window |
 
-Every item dispatches the same action its keystroke does, and macOS draws
-the key equivalent beside it from the keymap. One `menu::Shortcut` constant
-holds the keystroke, both wordings, **and the action** (#119), and the key
-bindings, the on-screen strip and the menu items are all built from it — so
-none of the four can be changed for one of them and not the others.
+どの項目もキー操作と同じアクションを発行し､macOS はキーマップからキー等価表示を
+その横に描く｡1 つの `menu::Shortcut` 定数がキー操作､2 通りの文言､**そして
+アクション**を持ち (#119)､キーバインド､画面上の帯､メニュー項目はすべてそこから
+組み立てられる — だから 4 つのうち 1 つだけを変えて､ほかを変えないままにはできない｡
 
-The claim used to be broader than what the code guaranteed. Until #119 the
-constant held only the key and the labels; which action each one dispatched
-was written out again in both `init` and `menus`, and pairing a label with
-the wrong action type compiled cleanly. What is left for a test to catch is
-narrower: `menus` still decides which menu an item belongs to, so a
-shortcut can carry a menu label and be left out of every menu.
+この主張はかつてコードが保証する範囲より広かった｡#119 まで定数はキーとラベルしか
+持たず､どのアクションを発行するかは `init` と `menus` の両方に書き直されていて､
+ラベルを誤ったアクション型と組み合わせても普通にコンパイルが通った｡テストが
+捕まえるべき範囲は今は狭い: どのメニューに項目が属するかは今も `menus` が決めるので､
+ショートカットがメニュー用のラベルを持ちながら､どのメニューにも入らないことは
+ありうる｡
 
-The wordings differ between the two lists on purpose: a menu item is read
-on its own ("New Post"), while the strip is read as a row of hints under a
-heading ("⌘N Focus the composer").
+2 つの一覧で文言が違うのは意図的である: メニュー項目は単独で読まれ ("New Post")､
+帯は見出しの下のヒントの並びとして読まれる ("⌘N Focus the composer")｡
 
-**The Window menu's name is load-bearing.** gpui hands a menu to AppKit's
-`setWindowsMenu_` only when it is called exactly `Window`. Rename it and
-`⌘W`/`⌘M` keep working — they are ordinary bindings — but the menu stops
-being the one macOS treats as the window list (#109).
+**Window メニューの名前は効いている｡** gpui がメニューを AppKit の
+`setWindowsMenu_` へ渡すのは､名前がちょうど `Window` のときだけである｡改名しても
+`⌘W`/`⌘M` は動きつづける — ただのバインドだからである — が､そのメニューは macOS
+がウィンドウ一覧として扱うものではなくなる (#109)｡
 
-**`⌘W` ends the app**, since there is one window — but only because closing
-the last window quits explicitly (#139). gpui keeps the process alive on
-its own, which is right for an app you can ask for another window; this one
-cannot, so `⌘W` used to leave a process running with nothing on screen and
-nothing but `⌘Q` able to reach it.
+**`⌘W` はアプリを終わらせる**｡ウィンドウが 1 つだからだが､それは最後のウィンドウ
+を閉じたときに明示的に終了しているからにすぎない (#139)｡gpui は放っておくと
+プロセスを生かしつづける｡もう 1 枚ウィンドウを開けるアプリならそれが正しい｡この
+アプリはできないので､`⌘W` はかつて､画面に何も出ておらず `⌘Q` でしか届かない
+プロセスを残していた｡
 
-Like `⌘Q`, it does not prompt, and an unsent draft goes with it — the same
-hazard `⌘Q` has always had.
+`⌘Q` と同じく確認は出さず､送っていない下書きも一緒に消える — `⌘Q` がずっと
+抱えてきたのと同じ危険である｡
 

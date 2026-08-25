@@ -15,10 +15,10 @@ use crate::usage;
 const API_BASE: &str = "https://api.x.com/2";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 
-/// Blocking client for the read endpoints reachable with an app-only Bearer token.
+/// app-only の Bearer token で届く read エンドポイント向けの blocking client｡
 ///
-/// Every call is billed against the account's API credits, so the UI fetches
-/// only on explicit user action (initial load and the reload button).
+/// 呼び出しはどれもアカウントの API クレジットから課金されるので､UI は明示的な
+/// ユーザー操作のときだけ取得する (初回ロードとリロードボタン)｡
 #[derive(Clone)]
 pub(crate) struct XClient {
     agent: Agent,
@@ -29,8 +29,8 @@ impl XClient {
     pub(crate) fn new(bearer_token: String) -> Self {
         let config = Agent::config_builder()
             .timeout_global(Some(REQUEST_TIMEOUT))
-            // Read the body ourselves so failures carry the API's own explanation
-            // instead of a bare status code.
+            // 失敗が素のステータスコードではなく API 自身の説明を伴うよう､
+            // ボディは自分で読む｡
             .http_status_as_error(false)
             .build();
         Self {
@@ -39,39 +39,37 @@ impl XClient {
         }
     }
 
-    /// Perform one GET, enforcing #10's central rule first — never send
-    /// while the tracked window for `endpoint` reports zero remaining and
-    /// its reset time hasn't arrived (see [`rate_limit::decision`]) —
-    /// retrying network errors and 5xx with backoff, and persisting
-    /// whatever the response's rate-limit headers reveal before returning.
-    /// Neither kind of 429 is ever retried here: an ordinary rate limit
-    /// recovers on its own schedule (never sooner for having retried), and
-    /// a usage-cap 429 never recovers at all.
+    /// GET を 1 回行う｡まず #10 の中心的な規則を守る — `endpoint` の追跡中の
+    /// ウィンドウが remaining ゼロを報告し､その reset 時刻がまだ来ていない
+    /// あいだは決して送らない ([`rate_limit::decision`] を見よ) — ネットワーク
+    /// エラーと 5xx は backoff を挟んで retry し､返る前にレスポンスの
+    /// rate limit ヘッダが明かすものを永続化する｡どちらの種類の 429 もここでは
+    /// retry しない: 普通の rate limit は自分のスケジュールで回復する
+    /// (retry したところで早まらない) し､usage cap の 429 はそもそも回復しない｡
     ///
-    /// #18: every actual HTTP send is counted via [`usage::record_request`],
-    /// right before [`Self::send_once`] — including retries. X bills each
-    /// send it receives regardless of the outcome (a 5xx still reached the
-    /// server), so a retried request is counted once per attempt, not once
-    /// per logical call. A request refused before ever sending by
-    /// [`rate_limit::decision`] above is not counted, since nothing went
-    /// out. This is the one place in the whole crate `usage.rs` is written
-    /// from, by design: nothing can spend a request without going through
-    /// this method first.
+    /// #18: 実際に HTTP を送るたび [`Self::send_once`] の直前に
+    /// [`usage::record_request`] で数える — retry も含めてだ｡X は結果に関わらず
+    /// 受け取った送信ごとに課金する (5xx でもサーバーには届いている) ので､
+    /// retry したリクエストは論理的な呼び出し 1 回ごとではなく試行 1 回ごとに
+    /// 数える｡上の [`rate_limit::decision`] が送る前に拒んだリクエストは､
+    /// 何も出ていないので数えない｡クレート全体で `usage.rs` へ書くのはここ
+    /// だけであり､意図してそうしてある: このメソッドを通らずにリクエストを
+    /// 使うことはできない｡
     ///
-    /// Not unit-tested directly — it touches the network and, via `paths`,
-    /// the filesystem, the same way `cache::reload` isn't. The pure seams
-    /// that carry this behavior's actual test coverage are
-    /// `rate_limit::decision`, `rate_limit::backoff_delay`,
-    /// `rate_limit::parse_headers`, `rate_limit::classify_429` (via
-    /// [`check_status`], below), and `usage::record`.
+    /// 直接の unit test は無い — `cache::reload` がそうでないのと同じく､
+    /// ネットワークと､`paths` 経由でファイルシステムに触れるからだ｡この
+    /// 振る舞いのテストカバレッジを実際に担っている純粋な継ぎ目は
+    /// `rate_limit::decision`､`rate_limit::backoff_delay`､
+    /// `rate_limit::parse_headers`､`rate_limit::classify_429` (下の
+    /// [`check_status`] 経由)､そして `usage::record` だ｡
     fn get(&self, paths: &Paths, endpoint: Endpoint, url: &str, now: i64) -> Result<String> {
         Self::send_with_retry(paths, endpoint, now, || self.send_once(url))
     }
 
-    /// Perform one `POST /2/tweets` (#14, `quote_tweet_id` added by #16),
-    /// sharing every rate-limit and retry rule [`Self::get`] already follows
-    /// — see [`Self::send_with_retry`], which the two now share so #10's
-    /// central rule stays in exactly one place regardless of HTTP method.
+    /// `POST /2/tweets` を 1 回行う (#14､`quote_tweet_id` は #16 で追加)｡
+    /// [`Self::get`] がすでに従う rate limit と retry の規則をすべて共有する
+    /// — [`Self::send_with_retry`] を見よ｡HTTP メソッドに関わらず #10 の
+    /// 中心的な規則がちょうど 1 箇所に留まるよう､両者はこれを共有している｡
     fn post(
         &self,
         paths: &Paths,
@@ -83,28 +81,26 @@ impl XClient {
         Self::send_with_retry(paths, endpoint, now, || self.send_post_once(url, draft))
     }
 
-    /// Perform one DELETE (#15's un-repost), sharing every rate-limit/retry
-    /// rule [`Self::get`]/[`Self::post`] already follow via
-    /// [`Self::send_with_retry`] — #10's central rule applies identically
-    /// regardless of HTTP method, and DELETE gains it here rather than a
-    /// parallel retry loop being written just for un-reposting.
+    /// DELETE を 1 回行う (#15 の repost 取り消し)｡[`Self::get`] と
+    /// [`Self::post`] が [`Self::send_with_retry`] 経由ですでに従う
+    /// rate limit と retry の規則をすべて共有する — #10 の中心的な規則は HTTP
+    /// メソッドに関わらず同じように適用され､repost の取り消しのためだけに
+    /// 並行する retry ループを書くのではなく､DELETE もここでそれを得る｡
     fn delete(&self, paths: &Paths, endpoint: Endpoint, url: &str, now: i64) -> Result<String> {
         Self::send_with_retry(paths, endpoint, now, || self.send_delete_once(url))
     }
 
-    /// The retry/persist loop shared by [`Self::get`] and [`Self::post`]:
-    /// enforce #10's rate-limit decision before sending anything, then
-    /// retry a network error or 5xx with backoff (never either kind of
-    /// 429 — see the doc on [`is_retryable_status`]), persisting whatever
-    /// the tracked window looks like after every attempt whether or not it
-    /// succeeded.
+    /// [`Self::get`] と [`Self::post`] が共有する retry と永続化のループ:
+    /// 何かを送る前に #10 の rate limit の判断を守り､ネットワークエラーや 5xx
+    /// は backoff を挟んで retry する (どちらの種類の 429 も retry しない —
+    /// [`is_retryable_status`] の doc を見よ)｡成功したかどうかに関わらず､
+    /// 試行のたびに追跡中のウィンドウの姿を永続化する｡
     ///
-    /// Not unit-tested directly for the same reason `get`/`post` aren't —
-    /// it touches the network and, via `paths`, the filesystem. The pure
-    /// seams that carry this behavior's actual test coverage are
-    /// `rate_limit::decision`, `rate_limit::backoff_delay`,
-    /// `rate_limit::parse_headers`, and `rate_limit::classify_429` (via
-    /// [`check_status`]).
+    /// `get`/`post` と同じ理由で直接の unit test は無い — ネットワークと､
+    /// `paths` 経由でファイルシステムに触れるからだ｡この振る舞いのテスト
+    /// カバレッジを実際に担っている純粋な継ぎ目は `rate_limit::decision`､
+    /// `rate_limit::backoff_delay`､`rate_limit::parse_headers`､そして
+    /// `rate_limit::classify_429` ([`check_status`] 経由) だ｡
     fn send_with_retry(
         paths: &Paths,
         endpoint: Endpoint,
@@ -118,22 +114,21 @@ impl XClient {
         loop {
             match send_once() {
                 Ok((status, body, state)) => {
-                    // Counted here rather than before the send, because a
-                    // response coming back is the only evidence available
-                    // that X actually processed (and so billed) the request.
-                    // Counting up front would charge the user for every
-                    // connection that never arrived — and a flaky network
-                    // retries up to `MAX_RETRIES` times, so one reload could
-                    // invent five requests that were never made. Counted per
-                    // send, not per call, since a retried request is billed
-                    // again. The remaining inaccuracy is the opposite case: a
-                    // request X processed whose response was lost in transit
-                    // is billed but not counted here.
+                    // 送信前ではなくここで数える｡X が実際にリクエストを処理
+                    // した (つまり課金した) 証拠は､レスポンスが返ってくること
+                    // しかないからだ｡先に数えると､届かなかった接続まで
+                    // ユーザーに請求することになる — 不安定なネットワークでは
+                    // `MAX_RETRIES` 回まで retry するので､1 回のリロードが
+                    // 実在しない 5 件のリクエストをでっち上げかねない｡retry
+                    // したリクエストは再び課金されるので､呼び出し単位ではなく
+                    // 送信単位で数える｡残る不正確さは逆の場合だ: X が処理した
+                    // のにレスポンスが途中で失われたリクエストは､課金されるが
+                    // ここでは数えられない｡
                     usage::record_request(paths, endpoint, now)?;
 
-                    // Persisted even on a non-2xx response — an exhausted
-                    // window's own 429 is exactly the information #10 needs
-                    // tracked so the *next* call refuses to send at all.
+                    // 2xx でないレスポンスでも永続化する — 使い切った
+                    // ウィンドウ自身の 429 こそ､*次の* 呼び出しがそもそも送信を
+                    // 拒むために #10 が追跡したい情報だ｡
                     rate_limit::save(paths, endpoint, state)?;
 
                     if is_retryable_status(status) && attempt < rate_limit::MAX_RETRIES {
@@ -145,11 +140,10 @@ impl XClient {
                         continue;
                     }
 
-                    // Not `state.reset_at` directly: a 429 that came back
-                    // with the window still un-exhausted was refused by a
-                    // limit X does not expose here, so its reset header
-                    // belongs to the wrong bucket. See
-                    // `rate_limit::Refusal`.
+                    // `state.reset_at` を直接は使わない: ウィンドウを使い切って
+                    // いないのに返ってきた 429 は､X がここで見せていない別の
+                    // limit に拒まれたものなので､その reset ヘッダは誤った
+                    // バケツのものだ｡`rate_limit::Refusal` を見よ｡
                     let refusal = rate_limit::Refusal::classify(state, now);
                     if status == 429 {
                         log_429(endpoint, state, refusal, &body);
@@ -172,10 +166,9 @@ impl XClient {
         }
     }
 
-    /// One raw HTTP GET: send the request, read the body, and parse
-    /// whatever `x-rate-limit-*` headers came back via
-    /// [`rate_limit::parse_headers`]. Split out from [`Self::get`] so the
-    /// retry loop there can call it more than once.
+    /// 生の HTTP GET 1 回: リクエストを送り､ボディを読み､返ってきた
+    /// `x-rate-limit-*` ヘッダを [`rate_limit::parse_headers`] でパースする｡
+    /// [`Self::get`] の retry ループが二度以上呼べるよう､そこから切り出した｡
     fn send_once(&self, url: &str) -> Result<(u16, String, RateLimitState)> {
         let mut response = self
             .agent
@@ -184,10 +177,9 @@ impl XClient {
             .call()
             .with_context(|| format!("request to {url} failed"))?;
 
-        // A closure rather than a free function so it borrows `response`
-        // without needing to name ureq's response type: the borrow ends
-        // once the last call below returns, freeing `response` for the
-        // `body_mut()` call that follows.
+        // 自由関数ではなくクロージャにして､ureq のレスポンス型を名指さずに
+        // `response` を借りる: 下の最後の呼び出しが返った時点で借用が終わり､
+        // 続く `body_mut()` の呼び出しのために `response` が解放される｡
         let header = |name: &str| -> Option<String> {
             response
                 .headers()
@@ -209,11 +201,11 @@ impl XClient {
         Ok((status, body, state))
     }
 
-    /// One raw HTTP POST for `POST /2/tweets` (#14, `quote_tweet_id` added
-    /// by #16), mirroring [`Self::send_once`]'s shape so
-    /// [`Self::send_with_retry`] can treat the two identically. `send_json`
-    /// (the `ureq` `json` feature, already a dependency) both serializes
-    /// [`super::model::PostTweetRequest`] and sets `Content-Type: application/json`.
+    /// `POST /2/tweets` のための生の HTTP POST 1 回 (#14､`quote_tweet_id` は
+    /// #16 で追加)｡[`Self::send_with_retry`] が両者を同じに扱えるよう
+    /// [`Self::send_once`] の形をなぞる｡`send_json` (`ureq` の `json` feature｡
+    /// すでに依存にある) が [`super::model::PostTweetRequest`] を serialize し､
+    /// `Content-Type: application/json` も設定する｡
     fn send_post_once(&self, url: &str, draft: Draft<'_>) -> Result<(u16, String, RateLimitState)> {
         let mut response = self
             .agent
@@ -243,9 +235,9 @@ impl XClient {
         Ok((status, body, state))
     }
 
-    /// One raw HTTP DELETE (#15), mirroring [`Self::send_once`]'s shape
-    /// exactly so [`Self::send_with_retry`] can treat it identically — no
-    /// request body, unlike [`Self::send_post_once`]/[`Self::send_tweet_id_once`].
+    /// 生の HTTP DELETE 1 回 (#15)｡[`Self::send_with_retry`] が同じに扱えるよう
+    /// [`Self::send_once`] の形をそのままなぞる — リクエストボディは無く､
+    /// [`Self::send_post_once`]/[`Self::send_tweet_id_once`] とはそこが違う｡
     fn send_delete_once(&self, url: &str) -> Result<(u16, String, RateLimitState)> {
         let mut response = self
             .agent
@@ -275,15 +267,14 @@ impl XClient {
         Ok((status, body, state))
     }
 
-    /// One raw HTTP POST for the two endpoints whose body is a single
-    /// `tweet_id` — `POST /2/users/:id/retweets` (#15) and
-    /// `POST /2/users/:id/likes` (#68) — mirroring [`Self::send_post_once`]'s
-    /// shape but serializing [`TweetIdRequest`] instead of
-    /// [`super::model::PostTweetRequest`]. Kept separate from `send_post_once` rather than
-    /// parameterizing it over the body type: the duplication here is a
-    /// handful of lines, not the retry/rate-limit logic that actually needs
-    /// sharing (that lives in [`Self::send_with_retry`], used identically by
-    /// all three).
+    /// ボディが `tweet_id` 1 つだけの 2 つのエンドポイント —
+    /// `POST /2/users/:id/retweets` (#15) と `POST /2/users/:id/likes` (#68)
+    /// — のための生の HTTP POST 1 回｡[`Self::send_post_once`] の形をなぞるが､
+    /// [`super::model::PostTweetRequest`] ではなく [`TweetIdRequest`] を
+    /// serialize する｡ボディの型でパラメータ化せず `send_post_once` と別に
+    /// してある: ここの重複は数行であって､本当に共有が要る retry と rate limit
+    /// のロジックではない (そちらは [`Self::send_with_retry`] にあり､3 つとも
+    /// 同じように使っている)｡
     fn send_tweet_id_once(
         &self,
         url: &str,
@@ -317,12 +308,12 @@ impl XClient {
         Ok((status, body, state))
     }
 
-    /// One raw HTTP POST for the one endpoint whose body is a single
-    /// `user_id` — `POST /2/lists/:id/members` (#163). A sibling of
-    /// [`Self::send_tweet_id_once`] for the reason that one is a sibling of
-    /// [`Self::send_post_once`]: what wants sharing is the retry and
-    /// rate-limit logic, and that already lives in
-    /// [`Self::send_with_retry`], which all four go through.
+    /// ボディが `user_id` 1 つだけの唯一のエンドポイント —
+    /// `POST /2/lists/:id/members` (#163) — のための生の HTTP POST 1 回｡
+    /// [`Self::send_tweet_id_once`] の兄弟であり､理由はあれが
+    /// [`Self::send_post_once`] の兄弟であるのと同じだ: 共有したいのは retry と
+    /// rate limit のロジックで､それはすでに [`Self::send_with_retry`] にあり､
+    /// 4 つともそこを通る｡
     fn send_user_id_once(&self, url: &str, user_id: &str) -> Result<(u16, String, RateLimitState)> {
         let mut response = self
             .agent
@@ -352,7 +343,7 @@ impl XClient {
         Ok((status, body, state))
     }
 
-    /// Resolve a screen name to the numeric user id the timeline endpoint needs.
+    /// screen name を､timeline エンドポイントが要る数値の user id へ解決する｡
     pub(crate) fn user_id_by_username(
         &self,
         paths: &Paths,
@@ -366,7 +357,7 @@ impl XClient {
             serde_json::from_str(&body).context("could not parse the user lookup response")?;
         match response.data {
             Some(user) => Ok(user.id),
-            // A 200 with no `data` is how X reports an unknown screen name.
+            // `data` の無い 200 が､未知の screen name に対する X の報告の仕方だ｡
             None => match describe_problem(&body) {
                 Some(message) => bail!("could not resolve @{username}: {message}"),
                 None => bail!("could not resolve @{username}: the API returned no user"),
@@ -374,11 +365,10 @@ impl XClient {
         }
     }
 
-    /// Fetch recent posts for `user_id` directly (the caller already
-    /// resolved the screen name — see `cache::reload`), newest first.
-    /// `since_id`, when given, asks the API to return only posts newer than
-    /// it, keeping both the response and the credit cost down on an
-    /// incremental reload.
+    /// `user_id` の最近の post を直接取得する (呼び出し側はすでに screen name
+    /// を解決している — `cache::reload` を見よ)｡新しい順だ｡`since_id` を
+    /// 渡すと API はそれより新しい post だけを返し､差分リロードでレスポンスも
+    /// クレジットの費用も抑えられる｡
     pub(crate) fn timeline(
         &self,
         paths: &Paths,
@@ -395,10 +385,9 @@ impl XClient {
         Ok(response.into_items())
     }
 
-    /// Resolve the signed-in user's own id and screen name via
-    /// `GET /2/users/me` (#11). Requires an OAuth user-context token — an
-    /// app-only bearer token gets a 401 here, the same way it does on the
-    /// home timeline itself.
+    /// `GET /2/users/me` でサインイン中のユーザー自身の id と screen name を
+    /// 解決する (#11)｡OAuth の user-context token が要る — app-only の bearer
+    /// token はここで 401 になる｡home timeline 自体と同じだ｡
     pub(crate) fn me(&self, paths: &Paths, now: i64) -> Result<User> {
         let url = me_url();
         let body = self.get(paths, Endpoint::Me, &url, now)?;
@@ -414,12 +403,11 @@ impl XClient {
         }
     }
 
-    /// Fetch a page of the signed-in user's home timeline (#11), newest
-    /// first, alongside `meta.next_token` for #11's "Load older". `since_id`
-    /// (an incremental reload) and `pagination_token` (resuming from a prior
-    /// `next_token`) are mutually exclusive in practice — see
-    /// [`home_timeline_url`] — but the caller decides which one it needs;
-    /// this just passes both through.
+    /// サインイン中のユーザーの home timeline を 1 ページ取得する (#11)｡新しい
+    /// 順で､#11 の "Load older" のための `meta.next_token` も一緒に返す｡
+    /// `since_id` (差分リロード) と `pagination_token` (前の `next_token` から
+    /// の再開) は実際上は排他だ — [`home_timeline_url`] を見よ — が､どちらが
+    /// 要るかを決めるのは呼び出し側で､ここは両方をそのまま通すだけだ｡
     pub(crate) fn home_timeline(
         &self,
         paths: &Paths,
@@ -438,20 +426,19 @@ impl XClient {
         Ok((response.into_items(), next_token))
     }
 
-    /// Fetch a page of a List's timeline (#161), newest first, alongside
-    /// `meta.next_token` for "Load older" — the same pair
-    /// [`Self::home_timeline`] returns, so the caller treats the two
-    /// sources identically once the response is in hand.
+    /// List の timeline を 1 ページ取得する (#161)｡新しい順で､"Load older" の
+    /// ための `meta.next_token` も一緒に返す — [`Self::home_timeline`] が返す
+    /// のと同じ組なので､レスポンスが手に入れば呼び出し側は 2 つの source を
+    /// 同じに扱える｡
     ///
-    /// **There is no `since_id` here**, unlike every other timeline call in
-    /// this file. `GET /2/lists/:id/tweets` documents `max_results` and
-    /// `pagination_token` and nothing else, so an incremental reload is not
-    /// expressible: every reload re-reads the head page. That is safe
-    /// (`cache::timeline::splice` merges by id, so no row is duplicated)
-    /// but not free — see `x-api-budget`: reads bill per returned resource,
-    /// and while the same post is billed once per UTC day, the first reload
-    /// after a day boundary pays for the whole head page again whether or
-    /// not anything in it is new.
+    /// **ここには `since_id` が無い**｡このファイルの他の timeline 呼び出しとは
+    /// 違う｡`GET /2/lists/:id/tweets` が文書化しているのは `max_results` と
+    /// `pagination_token` だけで､差分リロードは表現できない: リロードのたびに
+    /// 先頭ページを読み直す｡それは安全だ (`cache::timeline::splice` は id で
+    /// マージするので行は重複しない) が､ただではない — `x-api-budget` を見よ:
+    /// read は返ってきた resource ごとに課金され､同じ post は UTC の 1 日に
+    /// つき 1 回の課金とはいえ､日付の境目をまたいだ最初のリロードは､中身が
+    /// 新しいかどうかに関わらず先頭ページ全体をもう一度支払う｡
     pub(crate) fn list_timeline(
         &self,
         paths: &Paths,
@@ -469,18 +456,17 @@ impl XClient {
         Ok((response.into_items(), next_token))
     }
 
-    /// Fetch one page of the accounts this app follows (#163), with the
-    /// cursor for the next. `user_id` is the signed-in account's own id
-    /// (`/me`); `pagination_token` is the previous page's cursor, or `None`
-    /// for the first page.
+    /// このアプリがフォローしているアカウントを 1 ページ取得し (#163)､次への
+    /// カーソルも返す｡`user_id` はサインイン中のアカウント自身の id (`/me`)､
+    /// `pagination_token` は前のページのカーソルで､最初のページでは `None` だ｡
     ///
-    /// One page, not all of them: the caller loops, so a failure part-way
-    /// is visible to whoever decides what a partial read means. `sync`
-    /// treats it as fatal — see [`crate::sync`]'s doc for why a partial
-    /// follow list must never reach the diff.
+    /// 全部ではなく 1 ページ: ループするのは呼び出し側なので､途中の失敗は
+    /// 部分的な read の意味を決める側から見える｡`sync` はそれを致命的として
+    /// 扱う — 部分的なフォロー一覧が決して diff に届いてはならない理由は
+    /// [`crate::sync`] の doc を見よ｡
     ///
-    /// Requires `follows.read`, which #163 added to `SCOPES`; a session
-    /// authorized before it gets a 403 here.
+    /// `follows.read` が要る｡#163 が `SCOPES` に足したもので､それ以前に認可
+    /// されたセッションはここで 403 になる｡
     pub(crate) fn following(
         &self,
         paths: &Paths,
@@ -493,9 +479,9 @@ impl XClient {
         parse_user_page(&body, "following")
     }
 
-    /// Fetch one page of a list's members (#163) — the other side of the
-    /// diff [`Self::following`] feeds. Same shape, same one-page-at-a-time
-    /// contract, same reasoning.
+    /// list のメンバーを 1 ページ取得する (#163) — [`Self::following`] が
+    /// 供給する diff のもう一方の側だ｡同じ形､一度に 1 ページという同じ契約､
+    /// 同じ理屈｡
     pub(crate) fn list_members(
         &self,
         paths: &Paths,
@@ -508,17 +494,17 @@ impl XClient {
         parse_user_page(&body, "list members")
     }
 
-    /// Fetch one page of the lists `user_id` owns (#164) — what the
-    /// toolbar's picker names its segments after. Requires `list.read`.
+    /// `user_id` が所有する list を 1 ページ取得する (#164) — ツールバーの
+    /// picker がセグメントの名前に使うものだ｡`list.read` が要る｡
     ///
-    /// One page, and the caller is expected to stop there: the picker is
-    /// a row of segments, and an account owning more than the spec's
-    /// 100-per-page has outgrown a row of segments long before it has
-    /// outgrown one request. The cursor is returned anyway so that
-    /// decision is the caller's to log, not this method's to hide.
+    /// 1 ページだけで､呼び出し側はそこで止まる前提だ: picker はセグメントを
+    /// 横に並べたもので､spec の 1 ページ 100 件を超える list を持つアカウント
+    /// は､1 リクエストを超えるより前にとっくにセグメントの列を超えている｡
+    /// それでもカーソルは返す｡その判断を記録するのは呼び出し側であって､
+    /// このメソッドが隠すことではないからだ｡
     ///
-    /// Bills per returned list (`x-api-budget`): 1 request plus as many
-    /// Lists-read resources as the account owns.
+    /// 返った list ごとに課金される (`x-api-budget`): リクエスト 1 件に加え､
+    /// アカウントが持つ数だけの Lists-read resource｡
     pub(crate) fn owned_lists(
         &self,
         paths: &Paths,
@@ -531,14 +517,14 @@ impl XClient {
         parse_list_page(&body)
     }
 
-    /// `POST /2/lists/:id/members` (#163) — add `member_user_id` to the
-    /// list. Requires `list.write`.
+    /// `POST /2/lists/:id/members` (#163) — `member_user_id` を list に足す｡
+    /// `list.write` が要る｡
     ///
-    /// Returns nothing on success: `sync` records progress from whether
-    /// this returned `Ok`, not from anything in the response. **Whether a
-    /// second call for an account already in the list succeeds or errors is
-    /// unmeasured**, which is why the plan file marks each entry as it
-    /// lands rather than relying on a retry being harmless.
+    /// 成功時は何も返さない: `sync` はレスポンスの中身ではなく､これが `Ok` を
+    /// 返したかどうかで進捗を記録する｡**すでに list にいるアカウントに対する
+    /// 2 回目の呼び出しが成功するのかエラーになるのかは未計測だ**｡だから plan
+    /// ファイルは､retry が無害であることに頼らず､エントリが着地するたびに印を
+    /// 付ける｡
     pub(crate) fn add_list_member(
         &self,
         paths: &Paths,
@@ -553,10 +539,9 @@ impl XClient {
         Ok(())
     }
 
-    /// `DELETE /2/lists/:id/members/:user_id` (#163) — remove an account
-    /// from the list. Requires `list.write`. The acted-on id is a path
-    /// segment here rather than a body field, mirroring
-    /// [`delete_repost_url`].
+    /// `DELETE /2/lists/:id/members/:user_id` (#163) — アカウントを list から
+    /// 外す｡`list.write` が要る｡操作対象の id はボディのフィールドではなく
+    /// パスセグメントで､[`delete_repost_url`] と同じ形だ｡
     pub(crate) fn remove_list_member(
         &self,
         paths: &Paths,
@@ -569,24 +554,23 @@ impl XClient {
         Ok(())
     }
 
-    /// `GET /2/tweets?ids=` (#12). `ids` is whatever the caller already
-    /// joined with commas — X's own query parameter accepts a
-    /// comma-separated list natively, so there is nothing here to loop
-    /// over *up to 100 ids*, which is where X caps that parameter (#112).
-    /// Neither caller can reach the cap: the parent-chain walk sends one
-    /// id, and `main::parse_post_ids` refuses a longer list before it gets
-    /// here. Chunking is deliberately not done anywhere — it would turn one
-    /// invocation into several paid requests. Two callers rely on that: `cache::fetch_thread`'s parent-chain
-    /// walk passes exactly one id at a time (each level's id is only known
-    /// once the previous one resolves), while `main::fetch_post` (#42)
-    /// joins every id from `--fetch-post` into a single call, so looking up
-    /// five posts still costs exactly one request. Returns whatever
-    /// [`TimelineResponse::into_items`] produces for whichever of the
-    /// requested posts the API hands back: fewer entries than ids requested
-    /// (down to zero) when some are missing from `data` entirely (deleted,
-    /// protected, or otherwise absent) — the parent-chain walk treats that
-    /// as stopping cleanly rather than an error, and `--fetch-post` reports
-    /// the shortfall on stderr rather than failing outright.
+    /// `GET /2/tweets?ids=` (#12)｡`ids` は呼び出し側がすでにカンマで繋いだもの
+    /// だ — X のクエリパラメータ自体がカンマ区切りの一覧を受け付けるので､
+    /// ここでループするものは何も無い｡*id は 100 件まで* で､そこが X の
+    /// パラメータの上限だ (#112)｡どちらの呼び出し側も上限には届かない:
+    /// 親チェーンの遡りは id を 1 つ送るし､`main::parse_post_ids` はここへ来る
+    /// 前に長すぎる一覧を拒む｡分割は意図してどこでもしていない — 1 回の呼び
+    /// 出しが課金される複数のリクエストになってしまう｡2 つの呼び出し側が
+    /// それに頼っている: `cache::fetch_thread` の親チェーンの遡りは一度に
+    /// ちょうど 1 つの id を渡し (各段の id は前の段が解決して初めて分かる)､
+    /// `main::fetch_post` (#42) は `--fetch-post` のすべての id を 1 回の呼び
+    /// 出しに繋ぐので､5 件の post を引いてもリクエストはちょうど 1 件だ｡返す
+    /// のは､要求した post のうち API が返してきたものに対して
+    /// [`TimelineResponse::into_items`] が生むものだ: 一部が `data` からまるごと
+    /// 欠けている (削除済み､非公開､その他の理由で不在) ときは要求した id の数
+    /// より少ないエントリ (ゼロまで) になる — 親チェーンの遡りはそれをエラー
+    /// ではなくきれいな停止として扱い､`--fetch-post` は即座に失敗せず不足を
+    /// stderr へ報告する｡
     pub(crate) fn tweets_by_id(
         &self,
         paths: &Paths,
@@ -601,31 +585,29 @@ impl XClient {
         Ok(response.into_items())
     }
 
-    /// `POST /2/tweets` (#14, `quote_tweet_id` added by #16) — submit the
-    /// composer's draft as a new post, optionally quoting `quote_tweet_id`.
-    /// Tracked under its own `Endpoint::CreatePost` (#10): X limits posting
-    /// separately from every read endpoint above, so sharing a bucket with
-    /// any of them would corrupt both — and #16 deliberately reuses this
-    /// same endpoint/tracking rather than adding a new `Endpoint` variant,
-    /// since X has no separate quote endpoint to track independently.
-    /// Returns nothing on success — `ui.rs` falls into a normal reload
-    /// afterward (subject to #10's own interval, like any other reload)
-    /// rather than this call handing back the created post's own fields,
-    /// which nothing here currently needs.
+    /// `POST /2/tweets` (#14､`quote_tweet_id` は #16 で追加) — composer の
+    /// draft を新しい post として送る｡`quote_tweet_id` を付ければ quote に
+    /// なる｡専用の `Endpoint::CreatePost` で追跡する (#10): X は投稿を上の
+    /// read エンドポイントとは別に制限するので､どれかとバケツを共有すれば
+    /// 両方が壊れる — そして #16 は､独立に追跡すべき quote 専用エンドポイント
+    /// が X に無い以上､新しい `Endpoint` の variant を足さずこの同じ
+    /// エンドポイントと追跡を意図して再利用している｡成功時は何も返さない —
+    /// この呼び出しが作られた post のフィールドを返すのではなく､`ui.rs` は
+    /// あとで普通のリロードに入る (他のリロードと同じく #10 の間隔に従う)｡
+    /// 今のところそのフィールドを必要とするものは無い｡
     pub(crate) fn create_post(&self, paths: &Paths, draft: Draft<'_>, now: i64) -> Result<()> {
         let url = create_post_url();
         self.post(paths, Endpoint::CreatePost, &url, draft, now)?;
         Ok(())
     }
 
-    /// `POST /2/users/:id/retweets` (#15) — repost `source_tweet_id` as
-    /// `user_id` (the signed-in account's own id, from `/me` — #11).
-    /// Tracked under its own `Endpoint::CreateRepost` (#10): X limits
-    /// creating a repost separately from every other endpoint, so sharing a
-    /// bucket with any of them would corrupt the tracked state for both.
-    /// Returns nothing on success — `repost::create` decides what to
-    /// persist from whether this call succeeded or, on a recognized
-    /// conflict, from `repost::reconcile_from_error`.
+    /// `POST /2/users/:id/retweets` (#15) — `source_tweet_id` を `user_id`
+    /// として repost する (サインイン中のアカウント自身の id｡`/me` から — #11)｡
+    /// 専用の `Endpoint::CreateRepost` で追跡する (#10): X は repost の作成を
+    /// 他のどのエンドポイントとも別に制限するので､どれかとバケツを共有すれば
+    /// 双方の追跡状態が壊れる｡成功時は何も返さない — `repost::create` は
+    /// この呼び出しが成功したかどうか､既知の conflict なら
+    /// `repost::reconcile_from_error` から､何を永続化するかを決める｡
     pub(crate) fn create_repost(
         &self,
         paths: &Paths,
@@ -640,11 +622,10 @@ impl XClient {
         Ok(())
     }
 
-    /// `DELETE /2/users/:id/retweets/:source_tweet_id` (#15) — undo a
-    /// repost. Tracked under its own `Endpoint::DeleteRepost` (#10),
-    /// independent of `CreateRepost`: X limits create and delete
-    /// separately, and #18's usage tracking needs independent counts for
-    /// the same reason.
+    /// `DELETE /2/users/:id/retweets/:source_tweet_id` (#15) — repost を
+    /// 取り消す｡`CreateRepost` とは独立に､専用の `Endpoint::DeleteRepost` で
+    /// 追跡する (#10): X は作成と削除を別々に制限するし､#18 の usage 追跡も
+    /// 同じ理由で独立した件数を要る｡
     pub(crate) fn delete_repost(
         &self,
         paths: &Paths,
@@ -657,13 +638,13 @@ impl XClient {
         Ok(())
     }
 
-    /// `POST /2/users/:id/likes` (#68) — like a post as `user_id`. Tracked
-    /// under its own `Endpoint::CreateLike` (#10, #18) for the same reason
-    /// every other write endpoint is: X limits each on its own schedule,
-    /// and a like is billed exactly like a read, so it has to be counted.
+    /// `POST /2/users/:id/likes` (#68) — `user_id` として post に like する｡
+    /// 他の write エンドポイントと同じ理由で専用の `Endpoint::CreateLike` で
+    /// 追跡する (#10､#18): X はそれぞれを自分のスケジュールで制限するし､
+    /// like は read とまったく同じに課金されるので数えなければならない｡
     ///
-    /// Requires the `like.write` scope; a session without it gets a 403,
-    /// which `ui.rs` heads off before spending the request.
+    /// `like.write` スコープが要る｡持たないセッションは 403 になり､`ui.rs` は
+    /// リクエストを使う前にそれを未然に止める｡
     pub(crate) fn create_like(
         &self,
         paths: &Paths,
@@ -678,22 +659,20 @@ impl XClient {
         Ok(())
     }
 
-    /// `DELETE /2/tweets/:id` (#72) — delete one's own post.
+    /// `DELETE /2/tweets/:id` (#72) — 自分の post を削除する｡
     ///
-    /// Irreversible, so `ui.rs` only calls this behind an explicit
-    /// confirmation. Nothing here enforces that the post is the signed-in
-    /// account's: X rejects deleting someone else's, and `offers_delete`
-    /// already withholds the affordance client-side rather than spending a
-    /// guaranteed-failing request.
+    /// 取り消せないので､`ui.rs` は明示的な確認の後でしかこれを呼ばない｡post が
+    /// サインイン中のアカウントのものであることは､ここでは強制していない: X は
+    /// 他人の post の削除を拒むし､`offers_delete` は必ず失敗するリクエストを
+    /// 使うのではなく､クライアント側ですでに操作の入口を出さずにおく｡
     pub(crate) fn delete_post(&self, paths: &Paths, post_id: &str, now: i64) -> Result<()> {
         let url = delete_post_url(post_id);
         self.delete(paths, Endpoint::DeletePost, &url, now)?;
         Ok(())
     }
 
-    /// `DELETE /2/users/:id/likes/:tweet_id` (#68) — unlike. See
-    /// [`Self::create_like`]; tracked independently under
-    /// `Endpoint::DeleteLike`.
+    /// `DELETE /2/users/:id/likes/:tweet_id` (#68) — like を外す｡
+    /// [`Self::create_like`] を見よ｡`Endpoint::DeleteLike` で独立に追跡する｡
     pub(crate) fn delete_like(
         &self,
         paths: &Paths,
@@ -707,11 +686,11 @@ impl XClient {
     }
 }
 
-/// Whether a status is worth retrying: server-side (5xx) failures only.
-/// Network errors are retried too, but those never reach here as a status
-/// code — they short-circuit `Self::get`'s `Err` arm instead. Never true
-/// for 429 (not in `500..600`): #10's whole point is that neither kind of
-/// 429 is a retry candidate.
+/// そのステータスが retry に値するか: サーバー側 (5xx) の失敗だけだ｡
+/// ネットワークエラーも retry するが､それがステータスコードとしてここへ届く
+/// ことはない — `Self::get` の `Err` の腕へ短絡する｡429 では決して true に
+/// ならない (`500..600` に入らない): どちらの種類の 429 も retry の候補では
+/// ないというのが #10 の眼目だ｡
 fn is_retryable_status(status: u16) -> bool {
     (500..600).contains(&status)
 }
@@ -725,22 +704,21 @@ fn user_lookup_url(username: &str) -> String {
         .build()
 }
 
-/// The author fields every endpoint asks for (#92) — both timeline URLs
-/// and the single-post lookup. One edit, not three.
+/// どのエンドポイントも要求する著者のフィールド (#92) — timeline の URL 2 つ
+/// と単一 post のルックアップだ｡編集は 3 箇所ではなく 1 箇所で済む｡
 ///
-/// A pair rather than a `&user.fields=…` fragment since #165: the `&` and
-/// the `=` are [`Url`]'s to write, and a constant that carried its own
-/// separator could only be spliced into a query in one position.
+/// #165 以降は `&user.fields=…` という断片ではなく組にしてある: `&` と `=` を
+/// 書くのは [`Url`] の役目だし､自前の区切りを抱えた定数はクエリの 1 箇所に
+/// しか差し込めない｡
 const USER_FIELDS: &[(&str, &str)] = &[("user.fields", "name,profile_image_url,username")];
 
-/// The `*.fields` and `expansions` both timeline endpoints request (#92),
-/// previously written out twice, identically. #104 is the cost: the fix
-/// for a repost's images meant pasting one long string into two places,
-/// and doing only one would have left reposts broken on whichever
-/// timeline went unedited.
+/// 2 つの timeline エンドポイントが要求する `*.fields` と `expansions` (#92)｡
+/// 以前は同じものを二度書き出していた｡#104 がその代償だ: repost の画像を直す
+/// には長い文字列 1 本を 2 箇所へ貼る必要があり､片方だけ直せば編集し損ねた
+/// ほうの timeline で repost が壊れたままになっていた｡
 ///
-/// Only the shared part. Path, `max_results`, `since_id` and
-/// `pagination_token` stay with their builders — those are what differ.
+/// 共有する部分だけだ｡パス､`max_results`､`since_id`､`pagination_token` は
+/// それぞれのビルダーに残る — 違うのはそこだからだ｡
 const TIMELINE_FIELDS: &[(&str, &str)] = &[
     (
         "tweet.fields",
@@ -758,29 +736,29 @@ const TIMELINE_FIELDS: &[(&str, &str)] = &[
     ("user.fields", "name,profile_image_url,username"),
 ];
 
-/// `GET /2/users/me` (#11) — resolves the signed-in user's own id and screen
-/// name. Only meaningful with an OAuth user-context credential; an app-only
-/// bearer token gets a 401 here just like the home timeline itself.
+/// `GET /2/users/me` (#11) — サインイン中のユーザー自身の id と screen name を
+/// 解決する｡意味を持つのは OAuth の user-context な資格情報のときだけで､
+/// app-only の bearer token は home timeline 自体と同じくここで 401 になる｡
 fn me_url() -> String {
     Url::api(API_BASE).segment("users").segment("me").build()
 }
 
-/// The home timeline endpoint (#11), with the same expansions as
-/// [`timeline_url`] since it returns the same post shape. `since_id` (an
-/// incremental reload) and `pagination_token` (#11's "Load older") are
-/// mutually exclusive in practice — a reload always starts from the newest
-/// cached post, and "Load older" always resumes from the last response's
-/// `meta.next_token` — but both are accepted here independently so the
-/// pure URL-building logic doesn't need to know which caller it's serving.
+/// home timeline のエンドポイント (#11)｡返る post の形が同じなので
+/// [`timeline_url`] と同じ expansions を付ける｡`since_id` (差分リロード) と
+/// `pagination_token` (#11 の "Load older") は実際上は排他だ — リロードは
+/// つねにキャッシュの最も新しい post から始まり､"Load older" はつねに前の
+/// レスポンスの `meta.next_token` から再開する — が､純粋な URL 組み立ての
+/// ロジックがどの呼び出し側に仕えているかを知らずに済むよう､ここでは両方を
+/// 独立に受け付ける｡
 ///
-/// `referenced_tweets.id.attachments.media_keys` (#104) is what puts a
-/// repost's *original* post into `includes.media`: plain
-/// `attachments.media_keys` only expands the outer post's own attachments,
-/// and a repost has none of its own — the media lives on the original,
-/// reachable only through the `referenced_tweets.id` expansion this
-/// extends. Without it, `model::post_media` had nothing to join against for
-/// a reposted photo/video, even though the repost-join logic itself
-/// (`item.media = post_media(original, media)`) was already correct.
+/// repost の *元の* post を `includes.media` に入れるのは
+/// `referenced_tweets.id.attachments.media_keys` (#104) だ: 素の
+/// `attachments.media_keys` は外側の post 自身の添付しか展開せず､repost は
+/// 自前の添付を持たない — メディアは元の post にあり､これが拡張している
+/// `referenced_tweets.id` の expansion を通ってしか届かない｡これが無いと､
+/// repost の結合ロジック自体 (`item.media = post_media(original, media)`) は
+/// すでに正しかったのに､repost された photo/video に対して
+/// `model::post_media` は結合する相手を持てなかった｡
 fn home_timeline_url(
     user_id: &str,
     max_results: u32,
@@ -799,10 +777,10 @@ fn home_timeline_url(
         .build()
 }
 
-/// The timeline endpoint returns bare post ids unless `expansions` and the
-/// `*.fields` parameters ask for more, so the query string is load-bearing.
-/// See [`home_timeline_url`]'s doc comment for why
-/// `referenced_tweets.id.attachments.media_keys` (#104) is in here too.
+/// timeline のエンドポイントは､`expansions` と `*.fields` のパラメータで
+/// もっと要求しないかぎり素の post id を返すので､クエリ文字列が効いている｡
+/// `referenced_tweets.id.attachments.media_keys` (#104) がここにもある理由は
+/// [`home_timeline_url`] の doc コメントを見よ｡
 fn timeline_url(user_id: &str, max_results: u32, since_id: Option<&str>) -> String {
     Url::api(API_BASE)
         .segment("users")
@@ -814,13 +792,13 @@ fn timeline_url(user_id: &str, max_results: u32, since_id: Option<&str>) -> Stri
         .build()
 }
 
-/// The List timeline endpoint (#161), with the same expansions as
-/// [`home_timeline_url`] since it returns the same post shape — including
-/// #104's `referenced_tweets.id.attachments.media_keys`, so a member's
-/// repost carries the original's media here too.
+/// List の timeline のエンドポイント (#161)｡返る post の形が同じなので
+/// [`home_timeline_url`] と同じ expansions を付ける — #104 の
+/// `referenced_tweets.id.attachments.media_keys` も含むので､メンバーの repost
+/// はここでも元の post のメディアを運ぶ｡
 ///
-/// No `since_id` parameter, and not by omission: the endpoint does not
-/// take one. See [`XClient::list_timeline`] for what that costs.
+/// `since_id` のパラメータは無く､書き忘れではない: エンドポイントがそれを
+/// 取らない｡その代償は [`XClient::list_timeline`] を見よ｡
 fn list_timeline_url(list_id: &str, max_results: u32, pagination_token: Option<&str>) -> String {
     Url::api(API_BASE)
         .segment("lists")
@@ -832,43 +810,41 @@ fn list_timeline_url(list_id: &str, max_results: u32, pagination_token: Option<&
         .build()
 }
 
-/// `GET /2/tweets?ids=` (#12), with the same expansions as the timeline
-/// endpoints so a fetched post's own author (and, if it is itself a reply,
-/// its own parent's id) comes back in the same response. `ids` is inserted
-/// verbatim — a single id for the parent-chain walk (which only learns the
-/// next id after this one resolves, so it never has more than one in hand
-/// at a time), or a comma-separated list for `--fetch-post` (#42), since
-/// X's own query parameter already accepts either without this crate doing
-/// any joining or looping of its own.
+/// `GET /2/tweets?ids=` (#12)｡timeline のエンドポイントと同じ expansions を
+/// 付けるので､取得した post 自身の著者 (それ自体が reply なら親の id も) が
+/// 同じレスポンスで返る｡`ids` はそのまま差し込む — 親チェーンの遡りなら
+/// 単一の id (次の id はこれが解決して初めて分かるので､一度に 2 つ以上手元に
+/// 持つことはない)､`--fetch-post` (#42) ならカンマ区切りの一覧だ｡X の
+/// クエリパラメータ自体がどちらも受け付けるので､このクレートが自前で繋いだり
+/// ループしたりする必要はない｡
 ///
-/// Unlike the timeline builders above, this one does not ask for
-/// `public_metrics` (#67) or `entities` (#70): a walked parent renders as a
-/// [`crate::thread::ThreadItem`], which shows neither counts nor links —
-/// and `--fetch-post`'s JSON output is [`TimelineItem`] as-is, which came
-/// from the very same response shape, so there is no second URL builder to
-/// give those fields to it instead.
+/// 上の timeline のビルダーと違い､こちらは `public_metrics` (#67) も
+/// `entities` (#70) も要求しない: 遡った親は [`crate::thread::ThreadItem`]
+/// として描かれ､件数もリンクも見せないからだ — そして `--fetch-post` の JSON
+/// 出力はそのままの [`TimelineItem`] で､それはまさに同じレスポンスの形から
+/// 来ているので､代わりにそれらのフィールドを与える二つ目の URL ビルダーは
+/// 無い｡
 ///
-/// For the same reason, this deliberately does *not* get #104's
-/// `referenced_tweets.id.attachments.media_keys` (nor even the plain
-/// `attachments.media_keys`/`media.fields` the timeline builders have
-/// always had): the parent-chain walk's result lands in
-/// [`crate::thread::ThreadItem`], which has no `media` field at all, and
-/// `thread_row` (`ui.rs`) never draws one — so media fetched for a walked
-/// parent would be parsed and then silently dropped. Wiring media into
-/// "Show thread" (#12) is a display-layer change (`ThreadItem` gaining a
-/// field, `thread_row` gaining a render path), not an expansions fix, so
-/// it stays out of #104's scope. `--fetch-post` (#42) does keep
-/// [`TimelineItem`]'s `media` field in its JSON output, but giving it media
-/// support would mean adding the *base* `attachments.media_keys`/
-/// `media.fields` pair too, since this builder has never had either —
-/// that is new functionality for a currently-unsupported field, not the
-/// repost-specific expansions gap #104 fixes for the timeline endpoints.
+/// 同じ理由で､#104 の `referenced_tweets.id.attachments.media_keys` も意図して
+/// *与えていない* (timeline のビルダーがずっと持っている素の
+/// `attachments.media_keys`/`media.fields` すら与えていない): 親チェーンの
+/// 遡りの結果は [`crate::thread::ThreadItem`] に着地するが､そこには `media`
+/// フィールドがそもそも無く､`thread_row` (`ui.rs`) は一度も描かない — 遡った
+/// 親のために取得したメディアは､パースされてから黙って捨てられることになる｡
+/// "Show thread" (#12) にメディアを通すのは表示層の変更であって
+/// (`ThreadItem` にフィールドが増え､`thread_row` に描画の経路が増える)､
+/// expansions の修正ではないので､#104 のスコープの外に置く｡`--fetch-post`
+/// (#42) は JSON 出力に [`TimelineItem`] の `media` フィールドを残してはいる
+/// が､メディアに対応させるなら *素の* `attachments.media_keys`/`media.fields`
+/// の組も足すことになる｡このビルダーはどちらも持ったことがないからだ — それは
+/// 今サポートしていないフィールドのための新機能であって､#104 が timeline の
+/// エンドポイントに対して直す repost 固有の expansions の穴ではない｡
 fn tweets_by_id_url(ids: &str) -> String {
     Url::api(API_BASE)
         .segment("tweets")
         .param("ids", ids)
-        // Its own pairs rather than [`TIMELINE_FIELDS`], for the reasons
-        // above: this endpoint deliberately asks for less.
+        // 上の理由により [`TIMELINE_FIELDS`] ではなく自前の組を使う:
+        // このエンドポイントは意図して要求を減らしている｡
         .params(&[
             ("tweet.fields", "created_at,referenced_tweets"),
             (
@@ -880,23 +856,23 @@ fn tweets_by_id_url(ids: &str) -> String {
         .build()
 }
 
-/// The page size #163's two paged reads request.
+/// #163 の 2 つのページ読み取りが要求するページサイズ｡
 ///
-/// **Spec-derived.** docs.x.com gives both `/2/users/:id/following` and
-/// `/2/lists/:id/members` a `max_results` of 1..=100; nothing here has been
-/// measured. The maximum is the right end of that range to sit on because
-/// reads bill per returned resource (`x-api-budget`), not per request: a
-/// smaller page buys nothing and spends more of the endpoint's rate limit
-/// to read the same accounts.
+/// **spec 由来｡** docs.x.com は `/2/users/:id/following` と
+/// `/2/lists/:id/members` のどちらにも 1..=100 の `max_results` を与えている｡
+/// ここでは何も計測していない｡この範囲の端として最大値に座るのが正しいのは､
+/// read がリクエストごとではなく返った resource ごとに課金されるからだ
+/// (`x-api-budget`): 小さいページは何も得をせず､同じアカウントを読むのに
+/// エンドポイントの rate limit をより多く使う｡
 const USER_PAGE_SIZE: u32 = 100;
 
-/// The `user.fields` both paged reads request. Only what the dry-run's
-/// report needs to name an account — asking for avatars or metrics here
-/// would be fields nothing prints.
+/// 2 つのページ読み取りが要求する `user.fields`｡dry-run の報告がアカウントを
+/// 名指すのに要るものだけだ — ここでアバターや metrics を要求しても､何も
+/// 出力しないフィールドになる｡
 const SYNC_USER_FIELDS: &[(&str, &str)] = &[("user.fields", "name,username")];
 
-/// `GET /2/users/:id/following` (#163) — one page of the accounts this app
-/// follows.
+/// `GET /2/users/:id/following` (#163) — このアプリがフォローしている
+/// アカウントの 1 ページ｡
 fn following_url(user_id: &str, pagination_token: Option<&str>) -> String {
     Url::api(API_BASE)
         .segment("users")
@@ -908,7 +884,7 @@ fn following_url(user_id: &str, pagination_token: Option<&str>) -> String {
         .build()
 }
 
-/// `GET /2/lists/:id/members` (#163) — one page of a list's members.
+/// `GET /2/lists/:id/members` (#163) — list のメンバーの 1 ページ｡
 fn list_members_url(list_id: &str, pagination_token: Option<&str>) -> String {
     Url::api(API_BASE)
         .segment("lists")
@@ -920,14 +896,13 @@ fn list_members_url(list_id: &str, pagination_token: Option<&str>) -> String {
         .build()
 }
 
-/// `GET /2/users/:id/owned_lists` (#164) — one page of the lists the
-/// account owns.
+/// `GET /2/users/:id/owned_lists` (#164) — アカウントが所有する list の
+/// 1 ページ｡
 ///
-/// **Spec-derived**, like [`USER_PAGE_SIZE`]: docs.x.com gives this read a
-/// `max_results` of 1..=100 defaulting to 100, and nothing here has been
-/// measured beyond the first live fetch through the picker. No
-/// `list.fields`: `id` and `name` are the default fields and all the
-/// picker draws.
+/// [`USER_PAGE_SIZE`] と同じく **spec 由来** だ: docs.x.com はこの read に
+/// 既定 100 の 1..=100 の `max_results` を与えていて､picker 経由の最初の実
+/// 取得より先は何も計測していない｡`list.fields` は無い: `id` と `name` が
+/// 既定のフィールドであり､picker が描くのはそれだけだ｡
 fn owned_lists_url(user_id: &str, pagination_token: Option<&str>) -> String {
     Url::api(API_BASE)
         .segment("users")
@@ -938,8 +913,8 @@ fn owned_lists_url(user_id: &str, pagination_token: Option<&str>) -> String {
         .build()
 }
 
-/// `POST /2/lists/:id/members` (#163) — the added account's id travels in
-/// the JSON body ([`UserIdRequest`]), not the URL.
+/// `POST /2/lists/:id/members` (#163) — 追加するアカウントの id は URL では
+/// なく JSON ボディ ([`UserIdRequest`]) に乗る｡
 fn list_members_write_url(list_id: &str) -> String {
     Url::api(API_BASE)
         .segment("lists")
@@ -948,8 +923,8 @@ fn list_members_write_url(list_id: &str) -> String {
         .build()
 }
 
-/// `DELETE /2/lists/:id/members/:user_id` (#163) — here the acted-on id is
-/// a path segment, mirroring [`delete_repost_url`].
+/// `DELETE /2/lists/:id/members/:user_id` (#163) — ここでは操作対象の id が
+/// パスセグメントで､[`delete_repost_url`] と同じ形だ｡
 fn remove_list_member_url(list_id: &str, member_user_id: &str) -> String {
     Url::api(API_BASE)
         .segment("lists")
@@ -959,10 +934,10 @@ fn remove_list_member_url(list_id: &str, member_user_id: &str) -> String {
         .build()
 }
 
-/// Parse one page of users from either of #163's paged reads. `what` names
-/// which one, so a parse failure says whether the follow list or the member
-/// list was unreadable — the two are read in the same loop and the error
-/// would otherwise be indistinguishable.
+/// #163 の 2 つのページ読み取りのどちらかから､ユーザーの 1 ページをパース
+/// する｡`what` がどちらかを名指すので､パース失敗はフォロー一覧とメンバー
+/// 一覧のどちらが読めなかったかを言える — 2 つは同じループで読まれるので､
+/// そうでなければエラーは見分けが付かない｡
 fn parse_user_page(body: &str, what: &str) -> Result<(Vec<User>, Option<String>)> {
     let response: UserPageResponse = serde_json::from_str(body)
         .with_context(|| format!("could not parse the {what} response"))?;
@@ -970,7 +945,7 @@ fn parse_user_page(body: &str, what: &str) -> Result<(Vec<User>, Option<String>)
     Ok((response.data, next_token))
 }
 
-/// Parse one page of lists from `GET /2/users/:id/owned_lists` (#164).
+/// `GET /2/users/:id/owned_lists` から list の 1 ページをパースする (#164)｡
 fn parse_list_page(body: &str) -> Result<(Vec<ListSummary>, Option<String>)> {
     let response: ListPageResponse =
         serde_json::from_str(body).context("could not parse the owned lists response")?;
@@ -978,14 +953,14 @@ fn parse_list_page(body: &str) -> Result<(Vec<ListSummary>, Option<String>)> {
     Ok((response.data, next_token))
 }
 
-/// `POST /2/tweets` (#14) — no query string, unlike every `GET` above.
+/// `POST /2/tweets` (#14) — 上のどの `GET` とも違い､クエリ文字列は無い｡
 fn create_post_url() -> String {
     Url::api(API_BASE).segment("tweets").build()
 }
 
-/// `POST /2/users/:id/retweets` (#15) — `user_id` is the signed-in
-/// account's own id (`/me`, #11); the target post's id travels in the JSON
-/// body ([`TweetIdRequest`]), not the URL.
+/// `POST /2/users/:id/retweets` (#15) — `user_id` はサインイン中のアカウント
+/// 自身の id (`/me`､#11)｡対象の post の id は URL ではなく JSON ボディ
+/// ([`TweetIdRequest`]) に乗る｡
 fn create_repost_url(user_id: &str) -> String {
     Url::api(API_BASE)
         .segment("users")
@@ -994,9 +969,9 @@ fn create_repost_url(user_id: &str) -> String {
         .build()
 }
 
-/// `DELETE /2/users/:id/retweets/:source_tweet_id` (#15) — the only
-/// endpoint in this crate where the *acted-on* resource's own id is a URL
-/// path segment rather than a query parameter or JSON body field.
+/// `DELETE /2/users/:id/retweets/:source_tweet_id` (#15) — このクレートで
+/// *操作対象* の resource 自身の id が､クエリパラメータでも JSON ボディの
+/// フィールドでもなく URL のパスセグメントになる唯一のエンドポイントだ｡
 fn delete_repost_url(user_id: &str, source_tweet_id: &str) -> String {
     Url::api(API_BASE)
         .segment("users")
@@ -1006,9 +981,9 @@ fn delete_repost_url(user_id: &str, source_tweet_id: &str) -> String {
         .build()
 }
 
-/// `DELETE /2/tweets/:id` (#72) — unlike every other write endpoint here,
-/// this one names no user: X infers the account from the credential and
-/// rejects a post that is not its own.
+/// `DELETE /2/tweets/:id` (#72) — ここの他のどの write エンドポイントとも違い､
+/// これはユーザーを名指さない: X は資格情報からアカウントを推し量り､自分の
+/// ものでない post を拒む｡
 fn delete_post_url(post_id: &str) -> String {
     Url::api(API_BASE)
         .segment("tweets")
@@ -1016,9 +991,9 @@ fn delete_post_url(post_id: &str) -> String {
         .build()
 }
 
-/// `POST /2/users/:id/likes` (#68) — `user_id` is the signed-in account's
-/// own id (`/me`, #11); the target post's id travels in the JSON body
-/// ([`TweetIdRequest`]), not the URL, exactly as for a repost.
+/// `POST /2/users/:id/likes` (#68) — `user_id` はサインイン中のアカウント自身
+/// の id (`/me`､#11)｡対象の post の id は repost とまったく同じく､URL ではなく
+/// JSON ボディ ([`TweetIdRequest`]) に乗る｡
 fn create_like_url(user_id: &str) -> String {
     Url::api(API_BASE)
         .segment("users")
@@ -1027,8 +1002,8 @@ fn create_like_url(user_id: &str) -> String {
         .build()
 }
 
-/// `DELETE /2/users/:id/likes/:tweet_id` (#68) — the acted-on post's id is
-/// a URL path segment here, mirroring [`delete_repost_url`].
+/// `DELETE /2/users/:id/likes/:tweet_id` (#68) — ここでは操作対象の post の id
+/// が URL のパスセグメントで､[`delete_repost_url`] と同じ形だ｡
 fn delete_like_url(user_id: &str, tweet_id: &str) -> String {
     Url::api(API_BASE)
         .segment("users")
@@ -1038,20 +1013,20 @@ fn delete_like_url(user_id: &str, tweet_id: &str) -> String {
         .build()
 }
 
-/// Pull the API's own error text out of a response body, if it has any.
+/// レスポンスボディに API 自身のエラーテキストがあれば取り出す｡
 fn describe_problem(body: &str) -> Option<String> {
     serde_json::from_str::<ApiProblem>(body)
         .ok()
         .and_then(|problem| problem.message())
 }
 
-/// Leave a record of a 429 (#199): which endpoint, what the window headers
-/// said, and the start of the body. Before this, an opaque refusal
-/// (`remaining` 299 of 300 and still refused) left nothing behind but a
-/// mtime that stopped moving, and the cap it came from is still
-/// unidentified — this line is what a later reading of the log has to go
-/// on. The body is capped because error bodies echo request parameters
-/// (`x-api-endpoints`), and it goes through `log::redact` like every line.
+/// 429 の記録を残す (#199): どのエンドポイントか､ウィンドウのヘッダが何と
+/// 言っていたか､そしてボディの先頭だ｡これ以前は､不透明な拒否 (300 のうち
+/// `remaining` 299 なのに拒まれる) が動かなくなった mtime しか残さず､それが
+/// どの上限から来たのかは今も特定できていない — 後からログを読むときに頼れる
+/// のがこの行だ｡エラーボディはリクエストパラメータをそのまま返すので
+/// (`x-api-endpoints`) ボディは上限を切ってあり､他の行と同じく `log::redact`
+/// を通る｡
 fn log_429(endpoint: Endpoint, state: RateLimitState, refusal: rate_limit::Refusal, body: &str) {
     let snippet: String = body.chars().take(400).collect();
     let kind = match refusal {
@@ -1067,19 +1042,19 @@ fn log_429(endpoint: Endpoint, state: RateLimitState, refusal: rate_limit::Refus
     ));
 }
 
-/// Validate a response status, translating a non-2xx into an error.
+/// レスポンスのステータスを検証し､2xx でないものをエラーへ変換する｡
 ///
-/// `refusal` is which limit an ordinary 429 came from, already reconciled
-/// against the window state by [`rate_limit::Refusal::classify`] rather
-/// than read off the raw `x-rate-limit-reset` header, so a 429 from a
-/// limit these headers do not describe carries a conservative backoff
-/// rather than the wrong window's clock — and says so, which is what lets
-/// `sync` back away from it further each time. Ignored for every status
-/// but an ordinary 429. 401/403/404/other statuses keep the plain-text
-/// `anyhow` errors this crate already used before #10; only 429 changed,
-/// per #10's design: the two kinds of 429 become distinct types
-/// ([`rate_limit::UsageCapExceeded`], [`rate_limit::RateLimited`]) via
-/// [`rate_limit::classify_429`], rather than a string comparison here.
+/// `refusal` は普通の 429 がどの limit から来たかで､生の
+/// `x-rate-limit-reset` ヘッダを読むのではなく
+/// [`rate_limit::Refusal::classify`] がすでにウィンドウの状態と突き合わせて
+/// いる｡だからこれらのヘッダが説明しない limit からの 429 は､誤ったウィンドウ
+/// の時計ではなく保守的な backoff を持ち — しかもそう明言するので､`sync` は
+/// 毎回さらに退がれる｡普通の 429 以外のステータスでは無視する｡
+/// 401/403/404/その他のステータスは､#10 より前からこのクレートが使っていた
+/// 平文の `anyhow` エラーのままだ｡#10 の設計により変わったのは 429 だけで:
+/// 2 種類の 429 はここでの文字列比較ではなく [`rate_limit::classify_429`] を
+/// 通じて別々の型 ([`rate_limit::UsageCapExceeded`]､
+/// [`rate_limit::RateLimited`]) になる｡
 fn check_status(status: u16, body: &str, refusal: rate_limit::Refusal, now: i64) -> Result<()> {
     if (200..300).contains(&status) {
         return Ok(());
@@ -1126,30 +1101,29 @@ mod tests {
         );
     }
 
-    // --- #165: reading a built URL back apart ---
+    // --- #165: 組み立てた URL を読み解く ---
     //
-    // The tests below used to be one long literal each, and #161 is what
-    // they cost: adding a single scope meant editing several of them by
-    // hand, character by character, with nothing but eyesight standing
-    // between a typo and a green run.
+    // 下のテストはかつてどれも 1 本の長いリテラルで､#161 がその代償だった:
+    // スコープを 1 つ足すのに､いくつものテストを手で 1 文字ずつ編集する
+    // ことになり､タイプミスと緑の実行の間に立つのは目視だけだった｡
     //
-    // So a test now says what it is actually about — "this one adds
-    // `since_id` and nothing else", "these two ask for the same fields" —
-    // and the field list it does not care about stays out of it.
+    // そこで今はテストが実際に何についてのものかを言う — "これは `since_id`
+    // を足すだけで他は何も変えない"､"この 2 つは同じフィールドを要求する" —
+    // 関心の無いフィールド一覧はテストの外に置く｡
     //
-    // Two full-URL pins survive on purpose, one per escaping policy:
-    // `builds_the_home_timeline_url_with_every_expansion` here and
-    // `build_authorize_url_includes_every_required_parameter` in
-    // `oauth::pkce`. Between them every byte this crate puts on the wire
-    // is still fixed somewhere, which is what makes the rest safe to
-    // loosen.
+    // URL 全体を固定するテストは､エスケープの方針ごとに 1 本ずつ意図して
+    // 残してある: ここの
+    // `builds_the_home_timeline_url_with_every_expansion` と､`oauth::pkce`
+    // の `build_authorize_url_includes_every_required_parameter` だ｡
+    // 両者を合わせれば､このクレートがワイヤに出すバイトはどれもどこかで
+    // 固定されたままで､だから残りは緩めても安全だ｡
 
-    /// The path of `url`, without the query string.
+    /// クエリ文字列を除いた `url` のパス｡
     fn path_of(url: &str) -> &str {
         url.split_once('?').map_or(url, |(path, _)| path)
     }
 
-    /// The query parameters of `url`, in the order they appear.
+    /// `url` のクエリパラメータを､現れる順に返す｡
     fn query_of(url: &str) -> Vec<(&str, &str)> {
         let Some((_, query)) = url.split_once('?') else {
             return Vec::new();
@@ -1160,11 +1134,11 @@ mod tests {
             .collect()
     }
 
-    /// What `later` adds to `earlier`, in order.
+    /// `later` が `earlier` に足したものを､順に返す｡
     ///
-    /// Every optional-parameter test is really this assertion: the cursor
-    /// arrived, and nothing else moved. Written as a difference so the
-    /// long shared prefix never has to be restated.
+    /// 任意パラメータのテストはどれも実のところこの assertion だ: カーソルが
+    /// 届き､他は何も動かなかった｡長い共通の前置きを言い直さずに済むよう､
+    /// 差分として書いてある｡
     fn added<'a>(earlier: &str, later: &'a str) -> Vec<(&'a str, &'a str)> {
         let before = query_of(earlier);
         query_of(later)
@@ -1175,10 +1149,10 @@ mod tests {
 
     #[test]
     fn the_single_user_timeline_asks_for_the_same_fields_as_the_home_one() {
-        // #92 pulled the field set into `TIMELINE_FIELDS` precisely so
-        // these two could not drift; this is the assertion that says so,
-        // rather than two copies of the same long literal that drift in
-        // step only if someone remembers to edit both.
+        // #92 がフィールドの集合を `TIMELINE_FIELDS` へ括り出したのは､まさに
+        // この 2 つがずれないようにするためだ｡これがそれを言う assertion で
+        // あって､誰かが両方を編集するのを覚えていたときだけ歩調の揃う､同じ
+        // 長いリテラルの 2 つのコピーではない｡
         let url = timeline_url("2244994945", 20, None);
         assert_eq!(path_of(&url), "https://api.x.com/2/users/2244994945/tweets");
         assert_eq!(
@@ -1189,11 +1163,11 @@ mod tests {
 
     #[test]
     fn builds_the_tweets_by_id_url_asking_for_less_than_a_timeline_does() {
-        // #12: the parent-chain walk fetches one id per level. It asks for
-        // *fewer* fields than the timeline endpoints — no metrics, no
-        // entities, no media (see `tweets_by_id_url`'s doc for why each is
-        // deliberate) — so this asserts the difference rather than
-        // restating either list.
+        // #12: 親チェーンの遡りは 1 段につき id を 1 つ取得する｡timeline の
+        // エンドポイントより *少ない* フィールドしか要求しない — metrics も
+        // entities もメディアも無い (それぞれが意図的である理由は
+        // `tweets_by_id_url` の doc を見よ) — ので､どちらの一覧も言い直さず
+        // 差分を assert する｡
         let url = tweets_by_id_url("1700000000000000001");
         assert_eq!(path_of(&url), "https://api.x.com/2/tweets");
 
@@ -1213,12 +1187,12 @@ mod tests {
 
     #[test]
     fn builds_the_tweets_by_id_url_with_a_comma_joined_id_list() {
-        // #42: `--fetch-post` joins every requested id with commas before
-        // calling `tweets_by_id`, relying on `ids` landing in the query
-        // string verbatim rather than this builder looping over it — X's
-        // own `ids=` parameter already accepts a comma-separated list, so
-        // three ids still cost exactly one request. Since #165 that also
-        // pins `Escaping::Api`'s one rule: the commas stay raw.
+        // #42: `--fetch-post` は `tweets_by_id` を呼ぶ前に要求されたすべての
+        // id をカンマで繋ぐ｡このビルダーがループするのではなく､`ids` が
+        // そのままクエリ文字列に載ることに頼っている — X の `ids=` パラメータ
+        // 自体がカンマ区切りの一覧を受け付けるので､id が 3 つでもリクエストは
+        // ちょうど 1 件だ｡#165 以降はこれが `Escaping::Api` の唯一の規則も
+        // 固定している: カンマは生のままだ｡
         assert_eq!(
             query_of(&tweets_by_id_url("1,2,3")).first(),
             Some(&("ids", "1,2,3"))
@@ -1227,8 +1201,8 @@ mod tests {
 
     #[test]
     fn builds_the_create_post_url_with_no_query_string() {
-        // #14: unlike every GET above, POST /2/tweets takes no query
-        // parameters — the post text travels in the JSON body instead.
+        // #14: 上のどの GET とも違い､POST /2/tweets はクエリパラメータを
+        // 取らない — post の本文は代わりに JSON ボディに乗る｡
         assert_eq!(create_post_url(), "https://api.x.com/2/tweets");
     }
 
@@ -1298,8 +1272,8 @@ mod tests {
 
     #[test]
     fn home_timeline_url_appends_pagination_token_for_load_older() {
-        // #11: "Load older" resends `meta.next_token` from the previous
-        // response as `pagination_token`.
+        // #11: "Load older" は前のレスポンスの `meta.next_token` を
+        // `pagination_token` として送り直す｡
         assert_eq!(
             added(
                 &home_timeline_url("2244994945", 20, None, None),
@@ -1311,10 +1285,10 @@ mod tests {
 
     #[test]
     fn builds_the_list_timeline_url_with_every_expansion() {
-        // #161: the same field set as the home timeline, so a list row and
-        // a home row parse into the same `TimelineItem`. Compared against
-        // the home builder rather than against a literal, because "the
-        // same as the home timeline" is the whole claim.
+        // #161: home timeline と同じフィールドの集合なので､list の行も home
+        // の行も同じ `TimelineItem` にパースされる｡リテラルではなく home の
+        // ビルダーと比べているのは､"home timeline と同じ" ということ自体が
+        // 主張の全部だからだ｡
         let url = list_timeline_url("2091351590695588200", 20, None);
         assert_eq!(
             path_of(&url),
@@ -1339,11 +1313,11 @@ mod tests {
 
     #[test]
     fn the_list_timeline_url_carries_no_since_id() {
-        // The endpoint takes no `since_id` (see `XClient::list_timeline`),
-        // so sending one would be a parameter the API does not know. This
-        // asserts the absence rather than trusting the builder's shape:
-        // the field list is long enough that an accidental paste from
-        // `home_timeline_url` would not stand out in review.
+        // このエンドポイントは `since_id` を取らない
+        // (`XClient::list_timeline` を見よ) ので､送れば API の知らない
+        // パラメータになる｡ビルダーの形を信じるのではなく不在を assert する:
+        // フィールド一覧は十分に長く､`home_timeline_url` からの誤った貼り付け
+        // はレビューで目立たない｡
         assert!(!list_timeline_url("2091351590695588200", 20, None).contains("since_id"));
     }
 
@@ -1354,17 +1328,17 @@ mod tests {
             path_of(&url),
             "https://api.x.com/2/users/2244994945/following"
         );
-        // The page size is what this costs — reads bill per account
-        // returned — so it is pinned; the field list is not, since #163's
-        // two reads share `SYNC_USER_FIELDS` and the test next door
-        // already says they must match.
+        // 費用を決めるのはページサイズだ — read は返ったアカウントごとに課金
+        // される — ので固定する｡フィールド一覧は固定しない｡#163 の 2 つの
+        // read は `SYNC_USER_FIELDS` を共有していて､隣のテストがすでに両者は
+        // 一致すべきだと言っているからだ｡
         assert_eq!(query_of(&url).first(), Some(&("max_results", "100")));
     }
 
     #[test]
     fn following_url_appends_the_pagination_token() {
-        // #163 pages this until the cursor runs out; a dropped token would
-        // re-read page one forever and never finish the diff.
+        // #163 はカーソルが尽きるまでこれをページ送りする｡token を落とせば
+        // 1 ページ目を永遠に読み直し､diff は終わらない｡
         assert_eq!(
             added(
                 &following_url("2244994945", None),
@@ -1386,9 +1360,9 @@ mod tests {
 
     #[test]
     fn both_of_the_sync_reads_ask_for_the_same_user_fields() {
-        // #163 reads the follow list and the list members and diffs them.
-        // Asking the two sides for different fields would make one side's
-        // accounts unprintable in the report the other side's fill in.
+        // #163 はフォロー一覧と list のメンバーを読んで差分を取る｡両側に違う
+        // フィールドを要求すれば､片側のアカウントは､もう片側が埋める報告に
+        // 出せなくなる｡
         assert_eq!(
             query_of(&following_url("2244994945", None)),
             query_of(&list_members_url("2091351590695588200", None))
@@ -1408,9 +1382,8 @@ mod tests {
 
     #[test]
     fn the_read_and_write_list_member_urls_differ_by_more_than_the_method() {
-        // Adding posts to the collection; removing names the member in the
-        // path. Sending a DELETE to the collection URL would remove nothing
-        // and still be billed.
+        // 追加はコレクションへ POST し､削除はパスでメンバーを名指す｡
+        // コレクションの URL へ DELETE を送っても何も外れず､課金だけされる｡
         assert_eq!(
             list_members_write_url("2091351590695588200"),
             "https://api.x.com/2/lists/2091351590695588200/members"
@@ -1434,10 +1407,10 @@ mod tests {
 
     #[test]
     fn the_owned_lists_url_reads_one_full_page_of_the_users_own_lists() {
-        // #164: the picker names what it switches between, so it needs
-        // every list the account owns in one read. 100 is the spec's
-        // ceiling; reads bill per returned list, not per request, so a
-        // smaller page would only cost a second request.
+        // #164: picker は切り替え先に名前を付けるので､アカウントが持つ list
+        // すべてを 1 回の read で要る｡100 は spec の上限だ｡read はリクエスト
+        // ごとではなく返った list ごとに課金されるので､小さいページは 2 回目の
+        // リクエストを増やすだけだ｡
         let url = owned_lists_url("5685672", None);
         assert_eq!(
             path_of(&url),
@@ -1464,8 +1437,8 @@ mod tests {
 
     #[test]
     fn an_owned_lists_page_with_no_data_is_empty_not_an_error() {
-        // An account that owns no lists gets `meta.result_count: 0` and no
-        // `data` key at all — the same shape `TimelineResponse` tolerates.
+        // list を 1 つも持たないアカウントには `meta.result_count: 0` が返り､
+        // `data` キーはまったく無い — `TimelineResponse` が許容するのと同じ形だ｡
         let (lists, next) = parse_list_page(r#"{"meta":{"result_count":0}}"#).unwrap();
         assert!(lists.is_empty());
         assert!(next.is_none());
@@ -1479,8 +1452,8 @@ mod tests {
 
     #[test]
     fn a_user_page_parse_failure_names_which_read_it_was() {
-        // Both reads go through the same loop; without this the error says
-        // only that some page was unreadable.
+        // どちらの read も同じループを通る｡これが無ければエラーは､どれかの
+        // ページが読めなかったとしか言わない｡
         let error = parse_user_page("not json", "list members")
             .unwrap_err()
             .to_string();
@@ -1489,9 +1462,8 @@ mod tests {
 
     #[test]
     fn appends_since_id_when_given() {
-        // #9: an incremental reload passes the newest cached post id so the
-        // API returns only what's new, keeping both the response and the
-        // credit cost down.
+        // #9: 差分リロードはキャッシュ内で最も新しい post の id を渡すので､
+        // API は新しいものだけを返し､レスポンスもクレジットの費用も抑えられる｡
         assert_eq!(
             added(
                 &timeline_url("2244994945", 20, None),
@@ -1514,9 +1486,9 @@ mod tests {
 
     #[test]
     fn a_usage_cap_429_downcasts_to_the_typed_error() {
-        // #10: the distinction must be a type, not a string comparison at
-        // the call site — this is what lets `ui.rs` (or any other caller)
-        // match on it instead of grepping the message.
+        // #10: この区別は呼び出し側での文字列比較ではなく型でなければならない
+        // — だからこそ `ui.rs` (や他のどの呼び出し側) もメッセージを grep せず
+        // match できる｡
         let body =
             r#"{"title":"UsageCapExceeded","detail":"Usage cap exceeded: Monthly product cap"}"#;
         let error =
@@ -1529,9 +1501,9 @@ mod tests {
 
     #[test]
     fn an_ordinary_rate_limit_429_downcasts_to_the_typed_error_carrying_the_retry_time() {
-        // `check_status` carries whatever refusal it is handed — the
-        // reconciliation against the window state lives in
-        // `rate_limit::Refusal::classify`, tested there.
+        // `check_status` は渡された refusal をそのまま運ぶ — ウィンドウの状態
+        // との突き合わせは `rate_limit::Refusal::classify` にあり､テストも
+        // そこにある｡
         let body = r#"{"title":"TooManyRequests","detail":"Rate limit exceeded"}"#;
         let refusal = rate_limit::Refusal::Window {
             reset_at: 1_700_000_000,
@@ -1544,9 +1516,8 @@ mod tests {
 
     #[test]
     fn an_opaque_429_downcasts_to_a_typed_error_that_says_so() {
-        // #197: the sync escalates its backoff on this flag, so the client
-        // must carry it through rather than flatten both kinds into a
-        // retry time.
+        // #197: sync はこのフラグを見て backoff を強めるので､client は 2 種類
+        // を retry 時刻へ潰さず､そのまま通さなければならない｡
         let body = r#"{"title":"Too Many Requests","detail":"Too Many Requests"}"#;
         let error = check_status(429, body, rate_limit::Refusal::Opaque, 1_000).unwrap_err();
         let typed = error.downcast_ref::<rate_limit::RateLimited>().unwrap();

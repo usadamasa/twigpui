@@ -1,22 +1,20 @@
 #!/usr/bin/env bash
-# Assemble twigpui.app: a release build, an Info.plist, an optional icon, and
-# an ad-hoc code signature (#40). No new Rust dependency (no cargo-bundle) —
-# a .app is just a directory layout, and building it in ~100 lines of shell
-# keeps the whole thing legible.
+# twigpui.app を組み立てる: release ビルド､Info.plist､任意のアイコン､そして
+# ad-hoc の署名 (#40)｡Rust の依存は増やさない (cargo-bundle は使わない) —
+# .app はディレクトリの配置にすぎず､100 行ほどの shell で組めば全体が読める
+# ままになる｡
 #
-# With `--dev` (#169) it assembles twigpui-dev.app instead: a *debug* build,
-# a bundle id of its own, and a desaturated icon. Debug is not an aesthetic
-# choice — `Profile::current` reads `debug_assertions`, so a debug build is
-# exactly what addresses the development XDG directories and the development
-# OAuth callback port. Building the dev bundle with `--release` would produce
-# an app that looks like the development one and writes to the real
-# installation's files.
+# `--dev` (#169) を付けると代わりに twigpui-dev.app を組む: *debug* ビルド､
+# 専用の bundle id､彩度を落としたアイコン｡debug なのは見た目の都合ではない —
+# `Profile::current` は `debug_assertions` を読むので､開発用の XDG ディレクトリと
+# 開発用の OAuth callback port を指すのはまさに debug ビルドだ｡dev の bundle を
+# `--release` で組むと､見た目は開発用なのに本番インストールのファイルへ書き込む
+# アプリができてしまう｡
 #
-# Ad-hoc signing (`codesign -s -`) only, per the project's non-goals: this is
-# a development-only, single-machine build. It is not notarized and is not
-# meant to be distributed. Ad-hoc signing is still required, though — an
-# entirely unsigned bundle is refused outright by Gatekeeper on a freshly
-# built binary.
+# 署名は ad-hoc (`codesign -s -`) のみ｡プロジェクトの non-goals に従う: これは
+# 開発専用､単一マシン向けのビルドだ｡notarize もしないし配布も想定していない｡
+# ただし ad-hoc 署名だけは必要だ — まったく署名されていない bundle は､
+# ビルドしたてのバイナリに対して Gatekeeper が即座に拒否する｡
 set -euo pipefail
 
 log() {
@@ -30,7 +28,7 @@ require_cmd() {
   fi
 }
 
-# Fail loudly up front rather than partway through assembling the bundle.
+# bundle の組み立て途中ではなく､最初に大きな音で失敗させる｡
 for cmd in cargo jq plutil codesign; do
   require_cmd "$cmd"
 done
@@ -38,15 +36,15 @@ done
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
 
-# The cargo package, which does not change with the profile — it names both
-# the metadata entry read below and the binary cargo drops in target/.
+# cargo のパッケージ名｡プロファイルによって変わらない — 下で読む metadata の
+# エントリと､cargo が target/ に置くバイナリの両方の名前になる｡
 CRATE_NAME="twigpui"
 
-# --- profile selection (#169) ---
+# --- プロファイルの選択 (#169) ---
 #
-# Rejecting an unrecognized argument rather than ignoring it is the point: a
-# mistyped `--dev` that silently built the real bundle would put the wrong
-# app in dist/ under the right-looking name.
+# 認識できない引数を無視せず拒否するのが要点だ: `--dev` の打ち間違いが黙って
+# 本番の bundle を組んでしまうと､正しく見える名前で誤ったアプリが dist/ に
+# 置かれることになる｡
 DEV=0
 for arg in "$@"; do
   case "$arg" in
@@ -79,10 +77,10 @@ ICON_NAME="AppIcon.icns"
 ICON_ICNS_SRC="$REPO_ROOT/assets/AppIcon.icns"
 ICON_PNG_SRC="$REPO_ROOT/assets/AppIcon.png"
 
-# --- version, read from Cargo.toml via `cargo metadata` rather than a
-# second hand-maintained copy, and without adding a parsing dependency
-# (`cargo metadata` already ships with cargo; jq is a common CLI tool, not a
-# crate this binary links against). ---
+# --- バージョン｡手で保守する二つ目のコピーを持たず Cargo.toml から
+# `cargo metadata` 経由で読む｡パース用の依存も足さない (`cargo metadata` は
+# 最初から cargo に付いてくるし､jq はありふれた CLI ツールであって､この
+# バイナリがリンクする crate ではない)｡ ---
 metadata=$(cargo metadata --no-deps --format-version=1 --manifest-path "$REPO_ROOT/Cargo.toml")
 if ! err=$(printf '%s' "$metadata" | jq empty 2>&1); then
   log "ERROR: cargo metadata did not produce valid JSON: $err"
@@ -96,11 +94,11 @@ if [ -z "$version" ]; then
 fi
 log "twigpui version: $version"
 
-# --- build ---
+# --- ビルド ---
 log "building the $CARGO_PROFILE_DIR binary..."
-# Spelled out per branch rather than through an array of extra arguments:
-# an empty array expanded under `set -u` is an "unbound variable" error on
-# the bash 3.2 that ships with macOS, which is the shell this runs under.
+# 追加引数の配列を使わず分岐ごとに書き下している: 空の配列を `set -u` の下で
+# 展開すると､macOS に付属する bash 3.2 では "unbound variable" エラーになる｡
+# このスクリプトが動くのはその shell だ｡
 if [ "$DEV" -eq 1 ]; then
   (cd "$REPO_ROOT" && cargo build)
 else
@@ -112,31 +110,29 @@ if [ ! -x "$BIN_PATH" ]; then
   exit 1
 fi
 
-# --- bundle skeleton ---
+# --- bundle の骨組み ---
 log "assembling $APP_NAME.app..."
 rm -rf "$APP_BUNDLE"
 mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
 cp "$BIN_PATH" "$MACOS_DIR/$APP_NAME"
 chmod +x "$MACOS_DIR/$APP_NAME"
 
-# --- icon (optional) ---
+# --- アイコン (任意) ---
 #
-# This is a deliberate exception to "fail loudly instead of warning and
-# skipping": a missing icon is not a missing prerequisite, it is an
-# explicitly optional asset (see README.md and the twigpui #40 report for
-# why no real artwork was produced in the session that wrote this script).
-# The failure mode being guarded against here is a *dangling* reference —
-# CFBundleIconFile pointing at a file that was never copied in — not the
-# absence of the key itself, which macOS handles by falling back to the
-# generic app icon.
+# ここは「警告してスキップせず大きな音で失敗させる」への意図的な例外だ:
+# アイコンが無いのは前提条件の欠落ではなく､明示的に任意の asset である
+# (このスクリプトを書いたセッションで実際の絵が用意されなかった理由は
+# README.md と twigpui #40 のレポートにある)｡ここで防ごうとしている失敗は
+# *dangling* な参照 — コピーされていないファイルを CFBundleIconFile が
+# 指している状態 — であって､キーそのものの不在ではない｡後者は macOS が
+# 汎用のアプリアイコンにフォールバックして処理する｡
 #
-# `--dev` (#169) desaturates the same artwork rather than taking a second
-# hand-drawn file: one source of truth stays one source of truth, and a
-# gray icon next to the color one reads as "the same app, the development
-# copy" at Dock size. That derivation needs pixels, so the dev bundle takes
-# the PNG path even when a prebuilt .icns is sitting there — an .icns is
-# what the release bundle ships, and reusing it would put the real app's
-# icon on the development one.
+# `--dev` (#169) は二つ目の手描きファイルを持たず､同じ絵の彩度を落とす:
+# 単一の source of truth を単一のまま保てるし､色付きの隣に並ぶ灰色のアイコンは
+# Dock のサイズで「同じアプリの開発用コピー」と読める｡この派生にはピクセルが
+# 要るので､ビルド済みの .icns がそこにあっても dev の bundle は PNG の経路を
+# 通る — .icns は release の bundle が同梱するものであり､使い回せば本番の
+# アプリのアイコンが開発用に付いてしまう｡
 have_icon=0
 if [ "$DEV" -eq 0 ] && [ -f "$ICON_ICNS_SRC" ]; then
   log "using existing icon: $ICON_ICNS_SRC"
@@ -154,12 +150,11 @@ elif [ -f "$ICON_PNG_SRC" ]; then
   icon_source="$ICON_PNG_SRC"
   if [ "$DEV" -eq 1 ]; then
     log "desaturating the icon for the development bundle..."
-    # Two passes on purpose, into two files rather than in place. The first
-    # drops the color by matching the image to a gray ColorSync profile; the
-    # second brings it back to RGB, because `iconutil` wants ordinary RGBA
-    # PNGs and a one-channel gray PNG is not that. The result is an RGB
-    # image whose channels happen to be equal — visibly gray, structurally
-    # what iconutil expects.
+    # 意図して 2 パスに分け､in place ではなく 2 つのファイルへ書く｡1 回目は
+    # 画像を gray の ColorSync プロファイルに合わせて色を落とす｡2 回目は
+    # RGB へ戻す｡`iconutil` が求めるのは普通の RGBA PNG で､1 チャンネルの
+    # gray PNG はそれではないからだ｡結果はチャンネルがたまたま等しい RGB
+    # 画像になる — 見た目は灰色で､構造は iconutil が期待するものだ｡
     sips -m "/System/Library/ColorSync/Profiles/Generic Gray Profile.icc" \
       "$ICON_PNG_SRC" --out "$iconset_dir/AppIcon-gray.png" >/dev/null
     sips -m "/System/Library/ColorSync/Profiles/sRGB Profile.icc" \
@@ -167,8 +162,8 @@ elif [ -f "$ICON_PNG_SRC" ]; then
     icon_source="$iconset_dir/AppIcon-dev.png"
   fi
 
-  # size:label pairs iconutil requires — see `iconutil --help` / the
-  # Apple Human Interface Guidelines icon size table.
+  # iconutil が要求する size:label の組 — `iconutil --help` と Apple Human
+  # Interface Guidelines のアイコンサイズ表を参照｡
   for spec in \
     16:icon_16x16 32:icon_16x16@2x \
     32:icon_32x32 64:icon_32x32@2x \
@@ -192,9 +187,9 @@ else
     "See README.md for how to add one."
 fi
 
-# --- Info.plist, built with plutil rather than a hand-written XML template
-# so every value goes through plutil's own escaping instead of ad hoc string
-# substitution. ---
+# --- Info.plist｡手書きの XML テンプレートではなく plutil で組み立てる｡
+# その場しのぎの文字列置換ではなく､すべての値が plutil 自身のエスケープを
+# 通るようにするためだ｡ ---
 plutil -create xml1 "$PLIST"
 plutil -insert CFBundleIdentifier -string "$BUNDLE_ID" "$PLIST"
 plutil -insert CFBundleName -string "$APP_NAME" "$PLIST"
@@ -209,7 +204,7 @@ if [ "$have_icon" -eq 1 ]; then
 fi
 plutil -lint "$PLIST" >/dev/null
 
-# --- ad-hoc signature ---
+# --- ad-hoc 署名 ---
 log "signing (ad-hoc)..."
 codesign --force -s - "$APP_BUNDLE"
 if ! codesign --verify --strict "$APP_BUNDLE"; then

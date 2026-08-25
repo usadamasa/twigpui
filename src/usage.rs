@@ -1,47 +1,48 @@
-//! Request-count usage tracking (#18): what each tracked endpoint has cost,
-//! cumulatively and today, persisted across restarts under `state_dir`.
+//! リクエスト数による使用量の追跡 (#18): 追跡対象の各エンドポイントが
+//! いくら費やしたかを､累計と今日の分について､`state_dir` の下に再起動を
+//! またいで永続化する｡
 //!
-//! Reuses `rate_limit::Endpoint` — X limits (and this module counts) the
-//! same five endpoints separately, so a parallel enum here would just be
-//! `Endpoint` with the serial numbers filed off. [`Endpoint::ALL`] lets this
-//! module (and `main.rs`'s `--usage`) iterate every tracked endpoint without
-//! duplicating the list.
+//! `rate_limit::Endpoint` を再利用する — X は同じ 5 つのエンドポイントを
+//! 別々に制限し (このモジュールも別々に数え)､ここに並行した enum を置いても
+//! `Endpoint` の刻印を削り落としただけのものになる｡[`Endpoint::ALL`] が
+//! あるので､このモジュール (と `main.rs` の `--usage`) は一覧を重複させずに
+//! 追跡対象のエンドポイントをすべて回れる｡
 //!
-//! Four pure seams, mirroring `rate_limit.rs`'s own convention: [`record`]
-//! (a stored count + an injected `now` -> the next count, including the
-//! "today" bucket's rollover), [`today_count`] (a stored count + `now` ->
-//! what "today" reads as *right now*, without mutating anything — covers
-//! reading the file after midnight but before the next request writes to
-//! it), [`estimated_amount`] (a request count + an optional configured
-//! price -> an optional amount, `None` whenever no price is configured —
-//! never a guessed number in its place), and [`budget_status`] (today's
-//! total + an optional configured budget -> which of three severities the
-//! header should render). [`build_report`] composes all four into the same
-//! shape both the header and `--usage` show, so there is exactly one place
-//! that decides what "the usage numbers" means. Only [`load`]/[`save`]
-//! (disk) and `x_api::client::XClient::get` (network, via
-//! [`record_request`]) touch anything outside memory.
+//! `rate_limit.rs` 自身の慣習に倣った 4 つの純粋な継ぎ目: [`record`]
+//! (保存済みの数 + 注入した `now` -> 次の数｡"today" バケツのロールオーバーを
+//! 含む)､[`today_count`] (保存済みの数 + `now` -> 何も変更せずに "today" が
+//! *今この瞬間* どう読めるか — 深夜を過ぎてから次のリクエストが書き込む前に
+//! ファイルを読む場合を扱う)､[`estimated_amount`] (リクエスト数 + 設定
+//! された価格 (任意) -> 金額 (任意)｡価格が設定されていなければ常に `None`
+//! で､その代わりに推測した数を置くことは決してない)､そして
+//! [`budget_status`] (今日の合計 + 設定された予算 (任意) -> ヘッダが描く
+//! べき 3 段階の深刻度のどれか)｡[`build_report`] はこの 4 つを合成して､
+//! ヘッダと `--usage` の両方が見せるのと同じ形にする｡だから「使用量の
+//! 数字」が何を意味するかを決める場所はちょうど 1 つだ｡メモリの外に触れる
+//! のは [`load`]/[`save`] (ディスク) と `x_api::client::XClient::get`
+//! (ネットワーク｡[`record_request`] 経由) だけだ｡
 //!
-//! ## Day boundary: UTC, not local time
+//! ## 日付の境界: ローカル時刻ではなく UTC
 //!
-//! "Today" resets at UTC midnight, not the machine's local midnight. Two
-//! reasons:
+//! "Today" はマシンのローカルの深夜ではなく UTC の深夜にリセットされる｡
+//! 理由は 2 つ:
 //!
-//! 1. The X API itself reports `created_at` in UTC (see
-//!    `ui::format_timestamp`'s doc comment) — X's own notion of "a day" for
-//!    this account's data is already UTC, so tracking spend against the same
-//!    boundary keeps "today" meaning one consistent thing everywhere in this
-//!    app, rather than two different clocks for two kinds of "today".
-//! 2. Rust's standard library has no reliable way to read the local UTC
-//!    offset without a date/time crate (`chrono`, `time`, ...), and this
-//!    crate does not currently depend on one. UTC needs none: a day
-//!    boundary is exactly `unix_seconds.div_euclid(86_400)`, computed on the
-//!    same `i64` Unix timestamp `oauth::unix_now()` already hands every
-//!    other module here. No new dependency was needed for this issue.
+//! 1. X API 自身が `created_at` を UTC で報告する (`ui::format_timestamp`
+//!    の doc comment を見よ) — このアカウントのデータについて X が持つ
+//!    「1 日」の概念はすでに UTC なので､同じ境界に対して支出を追えば
+//!    "today" はこのアプリのどこでも一貫した 1 つの意味を保つ｡2 種類の
+//!    "today" のために 2 つの異なる時計を持たずに済む｡
+//! 2. Rust の標準ライブラリには､日付/時刻の crate (`chrono`, `time`, ...)
+//!    無しにローカルの UTC オフセットを確実に読む手段が無いし､この crate
+//!    は今のところそれに依存していない｡UTC なら何も要らない: 日の境界は
+//!    ちょうど `unix_seconds.div_euclid(86_400)` で､`oauth::unix_now()` が
+//!    すでにここの他のモジュールすべてに渡しているのと同じ `i64` の Unix
+//!    タイムスタンプの上で計算する｡この issue のために新しい依存は要らな
+//!    かった｡
 //!
-//! The tradeoff this accepts: someone west of UTC sees "today" roll over
-//! mid-afternoon local time, not at their own midnight. Documented here and
-//! in the README rather than left implicit.
+//! ここで受け入れているトレードオフ: UTC より西にいる人には､"today" が
+//! 自分の深夜ではなくローカルの午後の途中でロールオーバーするように見える｡
+//! 暗黙に任せず､ここと README に書いてある｡
 
 use std::collections::HashMap;
 
@@ -51,42 +52,42 @@ use serde::{Deserialize, Serialize};
 use crate::paths::Paths;
 use crate::rate_limit::Endpoint;
 
-/// Seconds in a day — the unit [`epoch_day`] buckets Unix timestamps into.
+/// 1 日の秒数 — [`epoch_day`] が Unix タイムスタンプを振り分ける単位だ｡
 const SECONDS_PER_DAY: i64 = 24 * 60 * 60;
 
-/// Fraction of a configured budget at which [`budget_status`] starts
-/// warning rather than waiting for the budget to be fully exhausted — the
-/// whole point of a budget setting is to see it coming, not to find out
-/// only at the moment it's crossed.
+/// 設定された予算のうち､[`budget_status`] が予算を使い切るのを待たずに
+/// 警告を始める割合 — 予算設定の要点は近づいているのが見えることであって､
+/// 越えた瞬間に初めて知ることではない｡
 const NEAR_BUDGET_RATIO: f64 = 0.8;
 
-/// One endpoint's tracked request counts: all-time, and the current UTC
-/// day's — see the module doc for why UTC. Every field defaults to zero so
-/// an endpoint with no entry on file yet (or a file from an older version
-/// missing a field) reads as "never called" rather than failing to parse.
+/// 1 つのエンドポイントについて追跡しているリクエスト数: 全期間分と､
+/// 現在の UTC 日の分 — なぜ UTC かはモジュール doc を見よ｡全フィールドの
+/// 既定値がゼロなので､まだファイルに項目の無いエンドポイント (や､
+/// フィールドの欠けた古いバージョンのファイル) はパース失敗ではなく
+/// 「一度も呼ばれていない」と読める｡
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct EndpointUsage {
     #[serde(default)]
     pub total: u64,
     #[serde(default)]
     pub today: u64,
-    /// The UTC epoch day (see [`epoch_day`]) that `today` was last reset
-    /// for. Compared against the current epoch day, not stored as a literal
-    /// date, so no date-formatting or parsing is ever needed.
+    /// `today` を最後にリセットした対象の UTC epoch day ([`epoch_day`] を
+    /// 見よ)｡日付リテラルとして保存せず現在の epoch day と比較するので､
+    /// 日付の整形もパースも一切要らない｡
     #[serde(default)]
     pub today_epoch_day: i64,
 }
 
-/// The UTC epoch day `now` (Unix seconds) falls in. Two timestamps map to
-/// the same day exactly when a UTC midnight does not separate them.
+/// `now` (Unix 秒) が属する UTC epoch day｡2 つのタイムスタンプが同じ日に
+/// 写るのは､UTC の深夜がその間に挟まらないときちょうどそのときだ｡
 pub(crate) fn epoch_day(now: i64) -> i64 {
     now.div_euclid(SECONDS_PER_DAY)
 }
 
-/// What `entry.today` reads as *right now*, without mutating anything: the
-/// stored count while `now` is still within the UTC day it was last reset
-/// for, else zero — covers reading the file after midnight but before the
-/// next [`record`] call would actually perform the reset on disk.
+/// 何も変更せずに `entry.today` が *今この瞬間* どう読めるか: `now` が
+/// 最後のリセット対象の UTC 日の中にまだあれば保存済みの数､そうでなければ
+/// ゼロ — 深夜を過ぎてから､次の [`record`] 呼び出しが実際にディスク上で
+/// リセットする前にファイルを読む場合を扱う｡
 pub(crate) fn today_count(entry: EndpointUsage, now: i64) -> u64 {
     if epoch_day(now) == entry.today_epoch_day {
         entry.today
@@ -95,12 +96,12 @@ pub(crate) fn today_count(entry: EndpointUsage, now: i64) -> u64 {
     }
 }
 
-/// Record one more request against `entry` at `now`: `total` always
-/// increments; `today` increments from zero if `now` has crossed into a new
-/// UTC day since `entry.today_epoch_day`, or from its current value
-/// otherwise. `saturating_add` rather than a bare `+`: a `u64` overflowing
-/// is astronomically unlikely for a request counter, but silently wrapping
-/// to zero would be a worse failure mode than saturating.
+/// `now` の時点で `entry` にリクエストを 1 つ記録する: `total` は常に
+/// 増える｡`today` は､`entry.today_epoch_day` から見て `now` が新しい UTC
+/// 日に入っていればゼロから､そうでなければ現在の値から増える｡素の `+` では
+/// なく `saturating_add` なのは､リクエストカウンタで `u64` が overflow する
+/// のは天文学的にありえないとはいえ､黙ってゼロに巻き戻るほうが saturate
+/// より悪い失敗モードだからだ｡
 pub(crate) fn record(entry: EndpointUsage, now: i64) -> EndpointUsage {
     EndpointUsage {
         total: entry.total.saturating_add(1),
@@ -109,37 +110,36 @@ pub(crate) fn record(entry: EndpointUsage, now: i64) -> EndpointUsage {
     }
 }
 
-/// Turn `count` into an estimated amount, in whatever unit
-/// `price_per_request` is denominated in (the app never assumes a
-/// currency) — `None` unless a price is configured. This is the one rule
-/// #18 exists to enforce: a plausible-looking but wrong number is worse
-/// than no number at all, so there is no built-in default price anywhere in
-/// this crate.
+/// `count` を推定金額に変える｡単位は `price_per_request` が何で表されて
+/// いようとそれに従う (このアプリは通貨を決めつけない) — 価格が設定されて
+/// いなければ `None`｡これは #18 が強制するために存在する唯一の規則だ:
+/// もっともらしいが誤った数は数が無いより悪いので､この crate のどこにも
+/// 組み込みの既定価格は無い｡
 pub(crate) fn estimated_amount(count: u64, price_per_request: Option<f64>) -> Option<f64> {
-    // A request count large enough to lose precision as f64 (2^53) is not
-    // realistic for this app.
+    // f64 として精度を失うほど (2^53) 大きいリクエスト数は､このアプリでは
+    // 現実的でない｡
     #[allow(clippy::cast_precision_loss)]
     price_per_request.map(|price| price * count as f64)
 }
 
-/// Which of three severities today's usage falls into, relative to an
-/// optional configured daily budget. `Ok` whenever no budget is configured
-/// at all — there is nothing to warn against.
+/// 設定された日次予算 (任意) に対して､今日の使用量が 3 段階の深刻度の
+/// どれに当たるか｡予算がまったく設定されていなければ常に `Ok` だ — 警告
+/// すべき相手が無い｡
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BudgetStatus {
-    /// No budget configured, or today's count is comfortably under it.
+    /// 予算が未設定か､今日の数が余裕をもって予算を下回っている｡
     Ok,
-    /// Today's count has reached [`NEAR_BUDGET_RATIO`] of the budget but not
-    /// yet the budget itself.
+    /// 今日の数が予算の [`NEAR_BUDGET_RATIO`] に達したが､予算そのものには
+    /// まだ達していない｡
     Near,
-    /// Today's count has reached or passed the budget.
+    /// 今日の数が予算に達したか､それを越えた｡
     Exceeded,
 }
 
-/// Classify `today_total` against `daily_budget` — see [`BudgetStatus`].
-/// `budget == 0` is treated as already exceeded by any non-negative count,
-/// rather than dividing by zero (which would otherwise produce `NaN` for
-/// `today_total == 0` and fail every comparison below).
+/// `today_total` を `daily_budget` に対して分類する — [`BudgetStatus`] を
+/// 見よ｡`budget == 0` はゼロ除算にせず (そうすると `today_total == 0` で
+/// `NaN` が出て以下の比較がすべて偽になる)､非負のどんな数でもすでに超過
+/// しているものとして扱う｡
 pub(crate) fn budget_status(today_total: u64, daily_budget: Option<u32>) -> BudgetStatus {
     let Some(budget) = daily_budget else {
         return BudgetStatus::Ok;
@@ -159,19 +159,19 @@ pub(crate) fn budget_status(today_total: u64, daily_budget: Option<u32>) -> Budg
     }
 }
 
-/// The whole contents of [`Paths::usage_file`]: every endpoint's tracked
-/// counts, keyed by [`Endpoint::key`].
+/// [`Paths::usage_file`] の全内容: 全エンドポイントの追跡した数を
+/// [`Endpoint::key`] をキーにして持つ｡
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct UsageFile {
     #[serde(default)]
     endpoints: HashMap<String, EndpointUsage>,
 }
 
-/// Load [`UsageFile`] from disk. A missing file is a clean "nothing tracked
-/// yet"; a corrupt or differently-shaped file is *also* a clean miss rather
-/// than an error, mirroring `rate_limit::load_file` and
-/// `cache::load_json`'s shared rule — losing this file costs at most the
-/// cumulative counter, never a startup failure.
+/// [`UsageFile`] をディスクから読む｡ファイルが無いのは「まだ何も追跡して
+/// いない」という綺麗なケースだ｡壊れたファイルや形の違うファイルも *同様に*
+/// エラーではなく綺麗なミスとして扱う｡`rate_limit::load_file` と
+/// `cache::load_json` が共有する規則に倣っている — このファイルを失っても
+/// 代償はせいぜい累計カウンタであって､起動失敗には決してならない｡
 fn load_file(paths: &Paths) -> Result<UsageFile> {
     let path = paths.usage_file();
     let contents = match std::fs::read_to_string(&path) {
@@ -186,8 +186,8 @@ fn load_file(paths: &Paths) -> Result<UsageFile> {
     Ok(serde_json::from_str(&contents).unwrap_or_default())
 }
 
-/// The tracked usage for `endpoint`, or [`EndpointUsage::default`] (all
-/// zero) if there is nothing on file for it yet.
+/// `endpoint` について追跡している使用量｡まだファイルに何も無ければ
+/// [`EndpointUsage::default`] (すべてゼロ) を返す｡
 pub(crate) fn load(paths: &Paths, endpoint: Endpoint) -> Result<EndpointUsage> {
     let file = load_file(paths)?;
     Ok(file
@@ -197,9 +197,9 @@ pub(crate) fn load(paths: &Paths, endpoint: Endpoint) -> Result<EndpointUsage> {
         .unwrap_or_default())
 }
 
-/// The tracked usage for every endpoint in [`Endpoint::ALL`], reading the
-/// file once rather than once per endpoint — used by the header refresh and
-/// `--usage`, both of which always want every endpoint at once.
+/// [`Endpoint::ALL`] の全エンドポイントについて追跡している使用量｡
+/// エンドポイントごとにではなくファイルを一度だけ読む — ヘッダの更新と
+/// `--usage` が使い､どちらも常に全エンドポイントを一度に欲しがる｡
 pub(crate) fn load_all(paths: &Paths) -> Result<HashMap<Endpoint, EndpointUsage>> {
     let file = load_file(paths)?;
     Ok(Endpoint::ALL
@@ -215,10 +215,10 @@ pub(crate) fn load_all(paths: &Paths) -> Result<HashMap<Endpoint, EndpointUsage>
         .collect())
 }
 
-/// Persist `usage` for `endpoint`, alongside whatever other endpoints were
-/// already on file — a genuine I/O error reading the existing file (as
-/// opposed to it being merely absent or corrupt) still propagates, the same
-/// distinction `rate_limit::save` and `cache.rs` draw.
+/// `endpoint` の `usage` を､すでにファイルにあった他のエンドポイントと
+/// 並べて永続化する — 既存ファイルを読む際の本物の I/O エラー (単に
+/// 無いとか壊れているのとは違う) は依然として伝播する｡`rate_limit::save`
+/// と `cache.rs` が引いているのと同じ区別だ｡
 pub(crate) fn save(paths: &Paths, endpoint: Endpoint, usage: EndpointUsage) -> Result<()> {
     let path = paths.usage_file();
     let mut file = load_file(paths)?;
@@ -229,22 +229,23 @@ pub(crate) fn save(paths: &Paths, endpoint: Endpoint, usage: EndpointUsage) -> R
     std::fs::write(&path, json).with_context(|| format!("could not write {}", path.display()))
 }
 
-/// Record one request against `endpoint` at `now`, touching disk — the one
-/// non-pure function in this module's counting seam, called once per actual
-/// HTTP send from `x_api::client::XClient::get` (including retries, since
-/// each is separately billed — see that function's own doc comment).
+/// `now` の時点で `endpoint` にリクエストを 1 つ記録する｡ディスクに触る —
+/// このモジュールの計数の継ぎ目で唯一純粋でない関数で､
+/// `x_api::client::XClient::get` から実際の HTTP 送信 1 回につき 1 度
+/// 呼ばれる (リトライも含む｡それぞれ別に課金されるからだ — その関数自身の
+/// doc comment を見よ)｡
 pub(crate) fn record_request(paths: &Paths, endpoint: Endpoint, now: i64) -> Result<()> {
     let current = load(paths, endpoint)?;
     let updated = record(current, now);
     save(paths, endpoint, updated)
 }
 
-/// Summed counts across every tracked endpoint — what the header and
-/// `--usage` both show as "the" usage number, rather than five separate
-/// per-endpoint figures nobody asked for at a glance. `today` applies
-/// [`today_count`]'s rollover per entry before summing, so a summary read
-/// right after UTC midnight (before the next request writes anything) shows
-/// zero rather than yesterday's stale count.
+/// 追跡対象の全エンドポイントを合計した数 — ヘッダと `--usage` の両方が
+/// 「その」使用量の数字として見せるもので､一目では誰も求めていない
+/// エンドポイント別の 5 つの数字ではない｡`today` は合計する前に項目ごとに
+/// [`today_count`] のロールオーバーを適用するので､UTC の深夜直後に
+/// (次のリクエストが何か書き込む前に) 読んだ要約は､昨日の古い数ではなく
+/// ゼロを見せる｡
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct Totals {
     pub total: u64,
@@ -260,17 +261,17 @@ pub(crate) fn totals(entries: &HashMap<Endpoint, EndpointUsage>, now: i64) -> To
         })
 }
 
-/// One endpoint's counts, as shown in [`UsageReport`] — `today` already has
-/// [`today_count`]'s rollover applied.
+/// [`UsageReport`] に見せる 1 つのエンドポイントの数 — `today` には
+/// [`today_count`] のロールオーバーが適用済みだ｡
 #[derive(Debug, Serialize)]
 pub(crate) struct EndpointReport {
     pub total: u64,
     pub today: u64,
 }
 
-/// The aggregate figures in [`UsageReport`]: totals across every endpoint,
-/// plus whatever `estimated_amount`/`budget_status` derive from them and
-/// the caller's configured price/budget.
+/// [`UsageReport`] の集計値: 全エンドポイントを通した合計と､そこから
+/// `estimated_amount`/`budget_status` が呼び出し元の設定した価格/予算と
+/// 合わせて導くものだ｡
 #[derive(Debug, Serialize)]
 pub(crate) struct TotalsReport {
     pub total_requests: u64,
@@ -282,20 +283,20 @@ pub(crate) struct TotalsReport {
     pub budget_status: &'static str,
 }
 
-/// The full machine-readable usage report (#18): what `--usage` prints as
-/// JSON, and the same numbers the header renders — one function producing
-/// both, so there is no way for the two to drift apart.
+/// 機械可読な使用量レポート一式 (#18): `--usage` が JSON として印字する
+/// ものであり､ヘッダが描くのと同じ数字だ — 1 つの関数が両方を作るので､
+/// 2 つが離れていく余地は無い｡
 #[derive(Debug, Serialize)]
 pub(crate) struct UsageReport {
     pub endpoints: HashMap<String, EndpointReport>,
     pub total: TotalsReport,
 }
 
-/// Compose [`UsageReport`] from every tracked endpoint's stored counts, an
-/// injected `now`, and the caller's configured price/budget (both entirely
-/// optional — see the module doc). Pure: takes the already-loaded `entries`
-/// rather than reading `paths` itself, so it's testable without touching
-/// disk, matching this module's other three seams.
+/// 追跡対象の各エンドポイントの保存済みの数､注入した `now`､呼び出し元の
+/// 設定した価格/予算 (どちらも完全に任意 — モジュール doc を見よ) から
+/// [`UsageReport`] を組み立てる｡純粋だ: `paths` を自分で読まず読み込み済みの
+/// `entries` を受け取るので､ディスクに触れずにテストできる｡このモジュールの
+/// 他の 3 つの継ぎ目に揃えてある｡
 pub(crate) fn build_report(
     entries: &HashMap<Endpoint, EndpointUsage>,
     now: i64,
@@ -352,10 +353,10 @@ mod tests {
         root
     }
 
-    /// Float equality without tripping `clippy::float_cmp` at the call
-    /// site — every value compared here is chosen to be exactly
-    /// representable, so this is a belt-and-braces epsilon rather than a
-    /// tolerance that could mask a real bug.
+    /// 呼び出し側で `clippy::float_cmp` に引っかからない浮動小数の等値
+    /// 比較 — ここで比較する値はすべて正確に表現できるものを選んである
+    /// ので､これは本物のバグを覆い隠しうる許容誤差ではなく､念のための
+    /// epsilon だ｡
     fn approx_eq(a: f64, b: f64) -> bool {
         (a - b).abs() < 1e-9
     }
@@ -377,7 +378,7 @@ mod tests {
         assert_eq!(epoch_day(86_400), epoch_day(0) + 1);
     }
 
-    // --- today_count (rollover, read-only) ---
+    // --- today_count (ロールオーバー､読み取り専用) ---
 
     #[test]
     fn today_count_reads_the_stored_value_within_the_same_utc_day() {
@@ -391,9 +392,8 @@ mod tests {
 
     #[test]
     fn today_count_reads_zero_once_a_new_utc_day_has_started() {
-        // The file hasn't been written since the day rolled over, but a
-        // reader (the header, `--usage`) still must not show yesterday's
-        // stale count.
+        // 日が変わってからファイルは書かれていないが､読み手 (ヘッダや
+        // `--usage`) が昨日の古い数を見せてはならない｡
         let entry = EndpointUsage {
             total: 10,
             today: 3,
@@ -432,9 +432,9 @@ mod tests {
 
     #[test]
     fn record_pins_the_exact_boundary_second() {
-        // 86_399 is still "day 0" (23:59:59 UTC); 86_400 is "day 1"
-        // (00:00:00 UTC) — the rollover must land on exactly this second,
-        // not one either side of it.
+        // 86_399 はまだ "day 0" (23:59:59 UTC) で､86_400 が "day 1"
+        // (00:00:00 UTC) だ — ロールオーバーはちょうどこの秒に当たらねば
+        // ならず､その前後の秒ではいけない｡
         let entry = EndpointUsage {
             total: 0,
             today: 0,
@@ -459,8 +459,8 @@ mod tests {
 
     #[test]
     fn estimated_amount_is_none_without_a_configured_price() {
-        // #18's core rule: no price configured means no amount shown,
-        // ever — never a guessed number.
+        // #18 の中核の規則: 価格が未設定なら金額は決して表示しない —
+        // 推測した数を出すことは決してない｡
         assert_eq!(estimated_amount(42, None), None);
     }
 
@@ -490,7 +490,7 @@ mod tests {
 
     #[test]
     fn budget_status_is_near_at_the_warning_threshold() {
-        // 8/10 = 0.8 = NEAR_BUDGET_RATIO exactly.
+        // 8/10 = 0.8 でちょうど NEAR_BUDGET_RATIO と一致する｡
         assert_eq!(budget_status(8, Some(10)), BudgetStatus::Near);
     }
 
@@ -634,8 +634,8 @@ mod tests {
         let root = temp_root("io-error");
         let paths = test_paths(&root);
         paths.ensure_dirs().unwrap();
-        // A directory where a file is expected is a real I/O error, not
-        // corruption — it must surface rather than being swallowed.
+        // ファイルがあるべき場所のディレクトリは破損ではなく本物の I/O
+        // エラーだ — 握り潰さず表に出さねばならない｡
         std::fs::create_dir(paths.usage_file()).unwrap();
 
         assert!(load(&paths, Endpoint::Timeline).is_err());
@@ -643,7 +643,7 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
     }
 
-    // --- record_request (the thin I/O wrapper) ---
+    // --- record_request (薄い I/O ラッパー) ---
 
     #[test]
     fn record_request_persists_an_incremented_count() {
@@ -716,8 +716,8 @@ mod tests {
             },
         );
 
-        // Read from the next UTC day: `today` must roll over to zero even
-        // though nothing has been recorded since.
+        // 次の UTC 日から読む: それ以降何も記録されていなくても `today` は
+        // ゼロへロールオーバーせねばならない｡
         let totals = totals(&entries, 86_400);
         assert_eq!(totals.total, 3);
         assert_eq!(totals.today, 0);

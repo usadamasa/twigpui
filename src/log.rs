@@ -1,29 +1,28 @@
-//! Diagnostic logging to a file (#49).
+//! ファイルへの診断ログ (#49)｡
 //!
-//! ## Why this exists
+//! ## なぜこれがあるか
 //!
-//! Everything this app knew how to say went to stderr, and a `.app`
-//! launched from Finder has no stderr for anyone to read (#40, #45). The
-//! startup alert dialog covers exactly one case — "it did not start" —
-//! leaving nothing at all for a session that starts fine and then
-//! misbehaves.
+//! このアプリが言えることはすべて stderr へ行っていたが､Finder から
+//! 起動した `.app` には誰にも読める stderr が無い (#40, #45)｡起動時の
+//! アラートダイアログが覆うのはちょうど 1 つの場合 — 「起動しなかった」
+//! — だけで､問題なく起動してからおかしくなるセッションには何も残らない｡
 //!
-//! ## Why not `tracing` or `log`
+//! ## なぜ `tracing` や `log` でないか
 //!
-//! #46 is an open issue about build time, and this needs a line with a
-//! level, a timestamp, and a size cap. `tracing` plus a subscriber and an
-//! appender is a large tree to compile on every build for that. The same
-//! reasoning already produced this crate's own JSON persistence and rate
-//! limit tracking rather than a framework.
+//! #46 はビルド時間についての open な issue で､ここで要るのはレベルと
+//! タイムスタンプの付いた 1 行と､サイズの上限だ｡そのために `tracing` と
+//! subscriber と appender をビルドのたびにコンパイルするのは大きな木すぎる｡
+//! この crate 自身の JSON 永続化とレートリミット追跡をフレームワークでは
+//! なく手書きにしたのも､すでに同じ理屈による｡
 //!
-//! ## The rule that matters most
+//! ## 最も重要な規則
 //!
-//! **A token must never reach the file.** This app holds an OAuth access
-//! token, a refresh token, and possibly an app-only bearer token; the token
-//! file itself is `0600` (#7), which buys nothing if the same value lands
-//! in a world-readable log. Every message goes through [`redact`], the log
-//! file is created `0600` too, and the tests below are the actual guarantee
-//! rather than the care of whoever writes the next call site.
+//! **トークンがファイルに届いてはならない｡** このアプリは OAuth の access
+//! token と refresh token､場合によっては app-only の bearer token を持つ｡
+//! トークンファイル自体は `0600` だが (#7)､同じ値が誰でも読めるログに
+//! 落ちるならそれは何の役にも立たない｡すべてのメッセージは [`redact`] を
+//! 通り､ログファイルも `0600` で作られる｡そして実際の保証は､次の
+//! 呼び出し箇所を書く人の注意深さではなく､以下のテストだ｡
 
 use std::fmt::Write as _;
 use std::io::{IsTerminal as _, Write as _};
@@ -32,18 +31,17 @@ use std::sync::{Mutex, OnceLock};
 
 use crate::paths::Paths;
 
-/// Rotate once the file passes this. `~/.local/state` is not swept by
-/// macOS, so an unbounded log is a slow leak — the same reasoning behind
-/// #9's cache cap.
+/// ファイルがこれを超えたら rotate する｡`~/.local/state` は macOS に
+/// 掃除されないので､上限の無いログはゆっくりした漏れになる — #9 の
+/// キャッシュ上限の裏にあるのと同じ理屈だ｡
 const MAX_BYTES: u64 = 1024 * 1024;
 
-/// How much detail reaches the log.
+/// どれだけの詳細さがログに届くか｡
 ///
-/// Ordered, so a configured level admits everything at or above it — see
-/// [`write`]'s `level > sink.level` check, which is what this ordering is
-/// for. There is deliberately no `Off`: the quietest useful setting is
-/// `error`, and a log that records nothing at all is indistinguishable
-/// from the state #49 exists to end.
+/// 順序付きなので､設定したレベルはそれ以上のものをすべて通す — [`write()`] の
+/// `level > sink.level` の判定を見よ｡この順序はそのためにある｡`Off` は
+/// 意図的に無い: 最も静かで有用な設定は `error` であり､何も記録しないログは
+/// #49 が終わらせるために存在する状態と見分けが付かないからだ｡
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub(crate) enum Level {
     Error,
@@ -54,9 +52,9 @@ pub(crate) enum Level {
 }
 
 impl Level {
-    /// Parse a configured level, case-insensitively. `None` for anything
-    /// unrecognized — callers fall back to the default rather than failing
-    /// startup, matching how `config.rs` treats an unknown theme.
+    /// 設定されたレベルを大文字小文字を区別せずパースする｡認識できない
+    /// ものは `None` — 呼び出し元は起動を失敗させず既定値へ fallback する｡
+    /// `config.rs` が未知のテーマを扱うのと同じだ｡
     pub(crate) fn parse(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
             "error" => Some(Self::Error),
@@ -77,26 +75,25 @@ impl Level {
     }
 }
 
-/// Everything the writer needs, set once at startup by [`init`].
+/// writer が必要とするものすべて｡起動時に [`init`] が一度だけ設定する｡
 struct Sink {
     path: PathBuf,
     level: Level,
-    /// Whether stderr is a terminal. When it is, messages go to both — the
-    /// issue's "don't break the `cargo run` experience" requirement — and
-    /// when it isn't (a `.app` from Finder), the file is the only record.
+    /// stderr が端末かどうか｡端末ならメッセージは両方へ行く — issue の
+    /// 「`cargo run` の体験を壊すな」という要求だ — 端末でなければ
+    /// (Finder からの `.app`)､ファイルが唯一の記録になる｡
     echo_to_stderr: bool,
-    /// Serializes writes. One process, several gpui background tasks.
+    /// 書き込みを直列化する｡プロセスは 1 つ､gpui の background task は複数｡
     file: Mutex<()>,
 }
 
 static SINK: OnceLock<Sink> = OnceLock::new();
 
-/// Point logging at `paths`' log file at `level`. Called once at startup.
+/// ログを `paths` のログファイルへ `level` で向ける｡起動時に一度呼ぶ｡
 ///
-/// Failing to create the directory is not fatal and not reported: an app
-/// that refuses to start because it could not open its *log* has the
-/// priorities backwards. Logging simply stays off, and stderr — if there is
-/// one — still shows everything.
+/// ディレクトリの作成に失敗しても致命的ではないし報告もしない: *ログ* を
+/// 開けなかったせいで起動を拒むアプリは優先順位が逆だ｡ログは単に切れた
+/// ままになり､stderr が — あるなら — 引き続きすべてを見せる｡
 pub(crate) fn init(paths: &Paths, level: Level) {
     let dir = paths.log_dir();
     if std::fs::create_dir_all(&dir).is_err() {
@@ -110,17 +107,16 @@ pub(crate) fn init(paths: &Paths, level: Level) {
     });
 }
 
-/// Write one line at `level`.
+/// `level` で 1 行書く｡
 ///
-/// Both the message and — before it — the file are handled defensively: a
-/// log that cannot be written must never take the app down with it, so
-/// every failure here is swallowed. The one thing that is not optional is
-/// [`redact`].
+/// メッセージも､その前にファイルも防御的に扱う: 書けないログがアプリを
+/// 道連れにしてはならないので､ここでの失敗はすべて握り潰す｡任意でない
+/// 唯一のものが [`redact`] だ｡
 pub(crate) fn write(level: Level, message: &str) {
     let safe = redact(message);
 
     let Some(sink) = SINK.get() else {
-        // Before `init`, or after it failed: stderr is all there is.
+        // `init` の前か､それが失敗した後: stderr しか無い｡
         eprintln!("{} {safe}", level.label());
         return;
     };
@@ -140,11 +136,11 @@ pub(crate) fn write(level: Level, message: &str) {
     let _ = append(&sink.path, &line);
 }
 
-/// Append one line, creating the file `0600` if it isn't there.
+/// 1 行追記する｡ファイルが無ければ `0600` で作る｡
 ///
-/// `0600` because the token file is (#7): redaction is the first line of
-/// defence and the mode is the second, and two cheap defences against
-/// leaking a credential are worth more than one.
+/// `0600` なのはトークンファイルがそうだからだ (#7): 第一の防御線が
+/// redaction で､第二がモードであり､認証情報の漏洩に対する安価な防御は
+/// 1 つより 2 つのほうが値打ちがある｡
 fn append(path: &Path, line: &str) -> std::io::Result<()> {
     let mut options = std::fs::OpenOptions::new();
     options.create(true).append(true);
@@ -156,13 +152,12 @@ fn append(path: &Path, line: &str) -> std::io::Result<()> {
     file.write_all(line.as_bytes())
 }
 
-/// Move the log aside once it passes [`MAX_BYTES`], keeping exactly one
-/// previous generation.
+/// ログが [`MAX_BYTES`] を超えたら脇へ寄せ､前の世代をちょうど 1 つ残す｡
 ///
-/// One generation, not several: the point is to bound the disk, and a
-/// second file already covers "the thing I want to read just scrolled out
-/// of the current one". Every failure is ignored — losing rotation is
-/// better than losing the app.
+/// 複数ではなく 1 世代なのは､目的がディスクを抑えることであり､
+/// 「読みたいものが今のファイルから流れ出てしまった」は 2 つめのファイルで
+/// すでに賄えるからだ｡失敗はすべて無視する — rotate を失うほうがアプリを
+/// 失うよりましだ｡
 fn rotate_if_needed(path: &Path) {
     let Ok(metadata) = std::fs::metadata(path) else {
         return;
@@ -175,25 +170,26 @@ fn rotate_if_needed(path: &Path) {
     let _ = std::fs::rename(path, previous);
 }
 
-/// Whether a log of `len` bytes has outgrown `cap`. Split out so the
-/// threshold is testable without writing a megabyte to disk.
+/// `len` バイトのログが `cap` を超えたかどうか｡ディスクに 1 メガバイト
+/// 書かずに閾値をテストできるよう切り出してある｡
 fn should_rotate(len: u64, cap: u64) -> bool {
     len >= cap
 }
 
-/// Remove anything that looks like a credential.
+/// 認証情報らしきものをすべて取り除く｡
 ///
-/// Deliberately blunt. It rewrites, in order:
+/// 意図的に大雑把だ｡次の順で書き換える:
 ///
-/// - `Bearer <token>` — the exact shape an `Authorization` header takes.
-/// - any `access_token` / `refresh_token` / `client_secret` / `code` /
-///   `token` key followed by `=` or `":"`, as they appear in a token
-///   endpoint's JSON response and in a redirect URL's query string.
+/// - `Bearer <token>` — `Authorization` ヘッダが取るそのままの形｡
+/// - `access_token` / `refresh_token` / `client_secret` / `code` /
+///   `token` のいずれかのキーに `=` か `":"` が続くもの｡token
+///   エンドポイントの JSON レスポンスや redirect URL のクエリ文字列に
+///   現れる形だ｡
 ///
-/// Blunt is the right trade here: a redactor that misses is worse than one
-/// that over-redacts a message into uselessness, because the failure is
-/// silent and permanent — the credential is already on disk by the time
-/// anyone notices.
+/// ここでは大雑把なほうを取るのが正しい: 取りこぼす redactor は､
+/// メッセージを使いものにならないほど消しすぎる redactor より悪い｡失敗が
+/// 静かで永続的だからだ — 誰かが気づく頃には認証情報はもうディスクの上に
+/// ある｡
 pub(crate) fn redact(message: &str) -> String {
     let mut out = String::with_capacity(message.len());
     let mut rest = message;
@@ -206,7 +202,7 @@ pub(crate) fn redact(message: &str) -> String {
         let (before, from) = rest.split_at(at);
         out.push_str(before);
         out.push_str(keyword);
-        // Everything from here to the next delimiter is the value.
+        // ここから次の区切りまでがすべて値だ｡
         let after_keyword = from.get(keyword.len()..).unwrap_or_default();
         let value_end = after_keyword
             .find(|c: char| c.is_whitespace() || c == '&' || c == '"' || c == ',' || c == '}')
@@ -218,8 +214,8 @@ pub(crate) fn redact(message: &str) -> String {
     out
 }
 
-/// The next credential-introducing token in `haystack`: what to keep, and
-/// where it starts. Everything after it up to a delimiter is the secret.
+/// `haystack` の中で次に認証情報を導くトークン: 何を残すかと､どこから
+/// 始まるか｡その後ろから区切りまでがすべて秘密の値だ｡
 fn next_secret(haystack: &str) -> Option<(&'static str, usize)> {
     const KEYWORDS: [&str; 8] = [
         "Bearer ",
@@ -245,20 +241,19 @@ fn next_secret(haystack: &str) -> Option<(&'static str, usize)> {
         .min_by_key(|(_, at)| *at)
 }
 
-/// Seconds since the Unix epoch, or 0 if the clock is before it.
+/// Unix epoch からの秒数｡時計がそれより前なら 0｡
 fn now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(0))
 }
 
-/// Render `unix_seconds` as `2026-08-19T00:31:04Z`.
+/// `unix_seconds` を `2026-08-19T00:31:04Z` として描く｡
 ///
-/// Hand-rolled rather than pulling in a date crate for one line format —
-/// the same reasoning as the module doc's. Uses Howard Hinnant's
-/// `civil_from_days`, which is exact for the proleptic Gregorian calendar
-/// and needs no table. A log whose timestamps are raw epoch seconds is a
-/// log nobody reads, so this is worth the twenty lines.
+/// 1 行の書式のために日付 crate を引き込まず手書きにした — モジュール doc と
+/// 同じ理屈だ｡Howard Hinnant の `civil_from_days` を使う｡先発グレゴリオ暦に
+/// 対して正確で､表も要らない｡タイムスタンプが生の epoch 秒であるログは
+/// 誰も読まないログなので､この 20 行は値打ちがある｡
 fn format_utc(unix_seconds: i64) -> String {
     let days = unix_seconds.div_euclid(86_400);
     let seconds_of_day = unix_seconds.rem_euclid(86_400);
@@ -268,7 +263,7 @@ fn format_utc(unix_seconds: i64) -> String {
     let second = seconds_of_day.rem_euclid(60);
 
     let mut out = String::with_capacity(20);
-    // Infallible: writing to a String never fails.
+    // 失敗しない: String への書き込みは決して失敗しない｡
     let _ = write!(
         out,
         "{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z"
@@ -276,7 +271,7 @@ fn format_utc(unix_seconds: i64) -> String {
     out
 }
 
-/// Days since 1970-01-01 to a civil `(year, month, day)`.
+/// 1970-01-01 からの日数を暦上の `(year, month, day)` へ変える｡
 #[expect(
     clippy::arithmetic_side_effects,
     reason = "civil_from_days is exact arithmetic over a bounded range; \
@@ -301,17 +296,17 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
     )
 }
 
-/// Log at `Level::Info`.
+/// `Level::Info` でログする｡
 pub(crate) fn info(message: &str) {
     write(Level::Info, message);
 }
 
-/// Log at `Level::Warn`.
+/// `Level::Warn` でログする｡
 pub(crate) fn warn(message: &str) {
     write(Level::Warn, message);
 }
 
-/// Log at `Level::Error`.
+/// `Level::Error` でログする｡
 pub(crate) fn error(message: &str) {
     write(Level::Error, message);
 }
@@ -320,7 +315,7 @@ pub(crate) fn error(message: &str) {
 mod tests {
     use super::*;
 
-    // --- redact: the tests that matter ---
+    // --- redact: 重要なテスト ---
 
     #[test]
     fn a_bearer_header_never_survives() {
@@ -360,8 +355,8 @@ mod tests {
 
     #[test]
     fn an_ordinary_message_is_left_alone() {
-        // Over-redaction is the safe direction, but a redactor that eats
-        // every message is a log nobody can use.
+        // 消しすぎるほうが安全な方向だが､あらゆるメッセージを食う
+        // redactor は誰にも使えないログになる｡
         let message = "reload: 20 posts, cache hit, 1 request";
         assert_eq!(redact(message), message);
     }
@@ -388,14 +383,14 @@ mod tests {
 
     #[test]
     fn levels_order_from_least_to_most_verbose() {
-        // `write` compares with `>`, so this ordering is what decides
-        // whether a message is admitted.
+        // `write` は `>` で比較するので､メッセージを通すかどうかを決めて
+        // いるのはこの順序だ｡
         assert!(Level::Error < Level::Warn);
         assert!(Level::Warn < Level::Info);
         assert!(Level::Info < Level::Debug);
     }
 
-    // --- rotation ---
+    // --- ローテーション ---
 
     #[test]
     fn rotation_triggers_at_the_cap_not_past_it() {
@@ -404,13 +399,12 @@ mod tests {
         assert!(should_rotate(1001, 1000));
     }
 
-    // --- the file itself ---
+    // --- ファイルそのもの ---
 
     #[test]
     fn the_log_file_is_created_owner_only() {
-        // The token file is 0600 (#7); a log holding the same values at
-        // 0644 would undo that. Redaction is the first defence, this is the
-        // second.
+        // トークンファイルは 0600 だ (#7)｡同じ値を持つログが 0644 なら
+        // それを台無しにする｡redaction が第一の防御で､これが第二だ｡
         use std::os::unix::fs::PermissionsExt as _;
 
         let dir = std::env::temp_dir().join(format!("twigpui-test-log-{}", std::process::id()));
@@ -460,7 +454,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    // --- timestamps ---
+    // --- タイムスタンプ ---
 
     #[test]
     fn the_epoch_renders_as_itself() {
@@ -475,14 +469,14 @@ mod tests {
 
     #[test]
     fn a_leap_day_renders_correctly() {
-        // 2024-02-29T12:00:00Z — the case a hand-rolled calendar gets wrong.
+        // 2024-02-29T12:00:00Z — 手書きの暦が間違えるケースだ｡
         assert_eq!(format_utc(1_709_208_000), "2024-02-29T12:00:00Z");
     }
 
     #[test]
     fn a_time_before_the_epoch_does_not_panic() {
-        // `now()` clamps, but `format_utc` must not be the thing that
-        // panics if it ever stops.
+        // `now()` は clamp するが､それが止んだとき panic するのが
+        // `format_utc` であってはならない｡
         assert_eq!(format_utc(-1), "1969-12-31T23:59:59Z");
     }
 }

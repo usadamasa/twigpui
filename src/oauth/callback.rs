@@ -1,11 +1,11 @@
-//! The loopback listener that catches X's OAuth redirect, and the raw-request
-//! parsing behind it.
+//! X の OAuth リダイレクトを受けるループバックリスナと､その背後にある生の
+//! リクエストのパース｡
 //!
-//! The parsing (`parse_request_line`, its query helpers, `interpret_query`)
-//! is pure over `&str`/`&HashMap`, tested with canned HTTP request bytes —
-//! no socket. The listener itself (`await_authorization_code`) is the one
-//! piece here that touches a real `TcpListener`; it stays untested directly,
-//! same as `x_api::client::XClient`'s network calls.
+//! パース (`parse_request_line`, そのクエリ補助関数, `interpret_query`) は
+//! `&str`/`&HashMap` に対して純粋で､既製の HTTP リクエストのバイト列で
+//! テストする — ソケットは使わない｡リスナ自体 (`await_authorization_code`)
+//! はここで唯一実際の `TcpListener` に触れる部分で､`x_api::client::XClient`
+//! のネットワーク呼び出しと同じく直接のテストはしないままだ｡
 
 use std::collections::HashMap;
 use std::io::{BufRead as _, BufReader, Write as _};
@@ -17,36 +17,35 @@ use gpui::BackgroundExecutor;
 
 use crate::profile::Profile;
 
-/// How long the loopback listener waits for the browser to complete the
-/// consent flow before giving up.
+/// ループバックリスナが､諦めるまでにブラウザの同意フロー完了を待つ時間｡
 const CALLBACK_TIMEOUT: Duration = Duration::from_mins(2);
 
-/// How often the accept loop polls the non-blocking listener. Awaiting this
-/// timer (rather than a blocking `std::thread::sleep`) is what lets dropping
-/// the enclosing `Task` actually stop the loop mid-wait and close the
-/// socket, per #7's design notes.
+/// accept ループがノンブロッキングのリスナをポーリングする間隔｡ブロックする
+/// `std::thread::sleep` ではなくこのタイマーを await するからこそ､外側の
+/// `Task` を drop すれば待ちの途中でもループが実際に止まりソケットが閉じる｡
+/// #7 の設計メモに従う｡
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
 
-/// How many header lines a single request is allowed before this gives up
-/// on it as malformed or stalled, so one bad connection can't hang the loop
-/// past its own read timeout.
+/// 1 つのリクエストに許すヘッダー行の数｡これを超えたら不正か停滞として
+/// 諦める｡1 本の悪い接続が､自身の読み取りタイムアウトを超えてループを
+/// 止め続けられないようにするためだ｡
 const MAX_HEADER_LINES: usize = 100;
 
-/// How long a single accepted connection is given to send its request and
-/// receive the response before this treats it as a spurious connection
-/// (favicon probe, prefetch) and moves on.
+/// accept した 1 本の接続に､リクエストを送りレスポンスを受け取るまでに
+/// 与える時間｡これを超えたら偽の接続 (favicon の探り､プリフェッチ) と
+/// みなして先へ進む｡
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// The redirect URI registered with X's Developer Portal for `profile` —
-/// one registration per profile (#169), each carrying this string verbatim.
-/// Derived from [`Profile::loopback_port`] so the URI sent to X and the port
-/// [`await_authorization_code`] binds can never drift apart in code.
+/// `profile` 向けに X の Developer Portal へ登録した redirect URI —
+/// profile ごとに 1 つ登録し (#169)､どれもこの文字列をそのまま持つ｡
+/// [`Profile::loopback_port`] から導くので､X へ送る URI と
+/// [`await_authorization_code`] が bind する port がコード上でずれようがない｡
 pub(crate) fn redirect_uri(profile: Profile) -> String {
     format!("http://127.0.0.1:{}/callback", profile.loopback_port())
 }
 
-/// One parsed HTTP request line: method, path, and decoded query
-/// parameters.
+/// パース済みの HTTP リクエスト行 1 つ: method､path､デコード済みのクエリ
+/// パラメータ｡
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RequestLine {
     pub method: String,
@@ -54,15 +53,15 @@ pub(crate) struct RequestLine {
     pub query: HashMap<String, String>,
 }
 
-/// Parse an HTTP request line — the first line of a request, e.g.
-/// `GET /callback?code=abc&state=xyz HTTP/1.1` — plus its query string.
-/// Pure over `&str` so it's testable with canned request bytes.
+/// HTTP のリクエスト行 — リクエストの最初の行､たとえば
+/// `GET /callback?code=abc&state=xyz HTTP/1.1` — とそのクエリ文字列を
+/// パースする｡`&str` に対して純粋なので既製のバイト列でテストできる｡
 pub(crate) fn parse_request_line(raw: &str) -> Option<RequestLine> {
     let first_line = raw.lines().next()?;
     let mut parts = first_line.split_whitespace();
     let method = parts.next()?.to_string();
     let target = parts.next()?;
-    parts.next()?; // HTTP version — required for a well-formed request line.
+    parts.next()?; // HTTP のバージョン — 整形式のリクエスト行には必須｡
 
     let (path, query_str) = target.split_once('?').unwrap_or((target, ""));
     Some(RequestLine {
@@ -83,10 +82,10 @@ fn parse_query(raw: &str) -> HashMap<String, String> {
 }
 
 fn hex_digit(byte: u8) -> Option<u8> {
-    // Each arm's subtraction is bounded by the pattern that selected it,
-    // so `wrapping_sub` and `wrapping_add` cannot actually wrap here — but
-    // stating it beats relying on a debug-only overflow check to notice if
-    // a range is ever edited (#47).
+    // 各腕の減算はそれを選んだパターンで押さえられているので､`wrapping_sub`
+    // と `wrapping_add` はここで実際には wrap しない — が､範囲が編集された
+    // ときに気づく手立てを debug 限定のオーバーフロー検査に頼るより､そう
+    // 明記するほうがよい (#47)｡
     match byte {
         b'0'..=b'9' => Some(byte.wrapping_sub(b'0')),
         b'a'..=b'f' => Some(byte.wrapping_sub(b'a').wrapping_add(10)),
@@ -95,20 +94,20 @@ fn hex_digit(byte: u8) -> Option<u8> {
     }
 }
 
-/// Decode `%XX` escapes. Query values from X are base64url or opaque codes,
-/// so this is the only escaping this parser needs to undo — no `+`-as-space
-/// handling, which is an `application/x-www-form-urlencoded` convention, not
-/// a query-string one (RFC 3986). Works byte-by-byte rather than slicing the
-/// `&str` so a stray `%` near a multi-byte character can't panic on a
-/// non-char-boundary slice.
+/// `%XX` のエスケープをデコードする｡X から来るクエリ値は base64url か
+/// 不透明な code なので､このパーサが戻す必要のあるエスケープはこれだけだ —
+/// `+` を空白として扱う処理は無い｡それは `application/x-www-form-urlencoded`
+/// の慣習であってクエリ文字列のものではない (RFC 3986)｡`&str` をスライス
+/// せずバイト単位で動くので､多バイト文字の近くに紛れた `%` が文字境界外の
+/// スライスで panic することはない｡
 fn percent_decode(value: &str) -> String {
     let bytes = value.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
-    // Indexed through `get` rather than `bytes[i]` (#47,
-    // `clippy::indexing_slicing`): the bounds here are already correct, but
-    // stating them as `Option`s means a future edit to the loop cannot turn
-    // this into a panic on a malformed redirect — which is remote input.
+    // `bytes[i]` ではなく `get` で添字を引く (#47,
+    // `clippy::indexing_slicing`): ここの境界はすでに正しいが､`Option` と
+    // して表しておけば､将来ループを編集しても､不正なリダイレクト — これは
+    // リモート入力だ — で panic に変わることはない｡
     while let Some(&byte) = bytes.get(i) {
         if byte == b'%'
             && let (Some(Some(hi)), Some(Some(lo))) = (
@@ -116,9 +115,9 @@ fn percent_decode(value: &str) -> String {
                 bytes.get(i.saturating_add(2)).copied().map(hex_digit),
             )
         {
-            // Both nibbles are 0..=15 by `hex_digit`'s construction, so
-            // this fits a `u8` — `wrapping_*` says so without a
-            // debug-only check being the thing that would catch a change.
+            // `hex_digit` の作りから両ニブルとも 0..=15 なので `u8` に収まる
+            // — `wrapping_*` はそれを明示する｡変更を捕まえるのが debug 限定
+            // の検査だけ､という状態にしない｡
             out.push(hi.wrapping_mul(16).wrapping_add(lo));
             i = i.saturating_add(3);
             continue;
@@ -129,24 +128,24 @@ fn percent_decode(value: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-/// The outcome of interpreting a `/callback` request's query parameters.
+/// `/callback` リクエストのクエリパラメータを解釈した結果｡
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Authorization {
     pub code: String,
     pub state: String,
 }
 
-/// Why a `/callback` request didn't yield an authorization.
+/// `/callback` リクエストが authorization にならなかった理由｡
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CallbackError {
-    /// The user pressed "Cancel" on X's consent screen — RFC 6749 §4.1.2.1's
-    /// `access_denied`, called out as its own outcome per #7's design notes.
+    /// ユーザーが X の同意画面で "Cancel" を押した — RFC 6749 §4.1.2.1 の
+    /// `access_denied`｡#7 の設計メモに従い独立した結果として扱う｡
     AccessDenied,
-    /// X reported some other OAuth error (`invalid_scope`, `server_error`, ...).
+    /// X が他の OAuth エラーを返した (`invalid_scope`, `server_error`, ...)｡
     Provider(String),
-    /// A `/callback` request with no `code` — malformed or spoofed.
+    /// `code` の無い `/callback` リクエスト — 不正か偽装だ｡
     MissingCode,
-    /// A `/callback` request with no `state` — malformed or spoofed.
+    /// `state` の無い `/callback` リクエスト — 不正か偽装だ｡
     MissingState,
 }
 
@@ -163,8 +162,8 @@ impl std::fmt::Display for CallbackError {
 
 impl std::error::Error for CallbackError {}
 
-/// Turn a `/callback` request's query parameters into an authorization, or
-/// the specific reason it isn't one.
+/// `/callback` リクエストのクエリパラメータを authorization に変える｡
+/// あるいはそうならない具体的な理由に｡
 pub(crate) fn interpret_query(
     query: &HashMap<String, String>,
 ) -> Result<Authorization, CallbackError> {
@@ -196,9 +195,9 @@ fn error_body(message: &str) -> String {
     format!("Sign-in failed: {message}. You can close this tab.")
 }
 
-/// Build a minimal HTTP response so the browser sees something readable
-/// rather than a connection reset — a status line, a couple of headers, and
-/// a plain-text body.
+/// 最小の HTTP レスポンスを組み立てる｡ブラウザが接続リセットではなく
+/// 読めるものを見るようにするためだ — ステータス行､いくつかのヘッダー､
+/// そしてプレーンテキストの body｡
 pub(crate) fn http_response(status_line: &str, body: &str) -> String {
     format!(
         "{status_line}\r\n\
@@ -211,17 +210,17 @@ pub(crate) fn http_response(status_line: &str, body: &str) -> String {
     )
 }
 
-/// Block (asynchronously) until the browser redirects back with an
-/// authorization code, or the deadline passes.
+/// ブラウザが authorization code を持って戻ってくるか期限が過ぎるまで
+/// (非同期に) ブロックする｡
 ///
-/// Filters every accepted connection on `/callback`: browsers routinely open
-/// extra connections against a loopback listener (favicon, prefetch,
-/// connection probing) and none of those are the redirect, so the first
-/// connection accepted is never treated as authoritative.
+/// accept した接続はすべて `/callback` で絞る: ブラウザはループバックの
+/// リスナに対して日常的に余分な接続を開く (favicon､プリフェッチ､接続の
+/// 探り) し､そのどれもリダイレクトではないので､最初に accept した接続を
+/// 権威あるものとして扱うことは決してない｡
 ///
-/// Binds `profile`'s own port (#169), which is what lets a development
-/// sign-in and a real one be in flight at the same time without either
-/// listener catching the other's redirect.
+/// `profile` 自身の port を bind する (#169)｡これにより development の
+/// サインインと本番のサインインが同時に飛んでいても､どちらのリスナも
+/// 相手のリダイレクトを捕まえない｡
 pub(crate) async fn await_authorization_code(
     executor: &BackgroundExecutor,
     expected_state: &str,
@@ -234,9 +233,9 @@ pub(crate) async fn await_authorization_code(
         .set_nonblocking(true)
         .context("could not set the loopback listener to non-blocking")?;
 
-    // `checked_add`, falling back to `now` (#47): a clock far enough
-    // ahead to overflow an `Instant` should make the wait expire
-    // immediately rather than panic in the middle of a sign-in.
+    // `checked_add` で､失敗したら `now` へ落とす (#47): `Instant` を
+    // オーバーフローさせるほど先へ進んだ時計では､サインインの途中で panic
+    // するのではなく待ちが即座に期限切れになるべきだ｡
     let deadline = executor
         .now()
         .checked_add(CALLBACK_TIMEOUT)
@@ -247,8 +246,8 @@ pub(crate) async fn await_authorization_code(
                 if let Some(authorization) = handle_connection(stream, expected_state)? {
                     return Ok(authorization.code);
                 }
-                // Not `/callback` (or unparseable) — a spurious connection.
-                // Keep listening rather than treating it as authoritative.
+                // `/callback` でない (かパースできない) — 偽の接続だ｡
+                // 権威あるものとして扱わず listen を続ける｡
             }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                 if executor.now() >= deadline {
@@ -264,14 +263,14 @@ pub(crate) async fn await_authorization_code(
     }
 }
 
-/// Read one HTTP request off `stream`, answer it, and return the parsed
-/// authorization if the request was for `/callback`. Returns `Ok(None)` for
-/// any other path, or for a connection that doesn't look like a real
-/// browser request, so the caller keeps accepting.
+/// `stream` から HTTP リクエストを 1 つ読んで応答し､それが `/callback` 宛
+/// だったならパースした authorization を返す｡他のパス､あるいは本物の
+/// ブラウザのリクエストに見えない接続には `Ok(None)` を返し､呼び出し側は
+/// accept を続ける｡
 ///
-/// The CSRF `state` check happens here rather than in the caller so the page
-/// the browser renders matches the outcome: a mismatched `state` must not
-/// leave the user reading "Signed in with X" while the flow aborts.
+/// CSRF の `state` 検査を呼び出し側ではなくここで行うのは､ブラウザが描く
+/// ページを結果に合わせるためだ: `state` が食い違ったとき､フローが中断する
+/// 一方でユーザーが "Signed in with X" を読んでいる状態にしてはならない｡
 fn handle_connection(mut stream: TcpStream, expected_state: &str) -> Result<Option<Authorization>> {
     if stream.set_nonblocking(false).is_err() {
         return Ok(None);
@@ -289,10 +288,10 @@ fn handle_connection(mut stream: TcpStream, expected_state: &str) -> Result<Opti
         return Ok(None);
     }
 
-    // Drain the remaining headers so the browser's request is fully read
-    // before this end writes and closes. A stalled or malicious peer is
-    // bounded by `MAX_HEADER_LINES` and the read timeout above, not by
-    // trusting the request to be well-formed.
+    // 残りのヘッダーを読み捨てて､こちら側が書いて閉じる前にブラウザの
+    // リクエストを最後まで読み切る｡停滞した相手や悪意ある相手は
+    // `MAX_HEADER_LINES` と上の読み取りタイムアウトで押さえる｡リクエストが
+    // 整形式だと信じることでは押さえない｡
     let mut line = String::new();
     for _ in 0..MAX_HEADER_LINES {
         line.clear();
@@ -360,9 +359,8 @@ mod tests {
 
     #[test]
     fn the_dev_profile_redirects_to_its_own_port() {
-        // Registered verbatim against the development X app (#169) — X
-        // rejects the authorization request outright if these disagree by
-        // so much as a character.
+        // development 用の X アプリにこのまま登録してある (#169) — 1 文字
+        // でも食い違えば X は認可リクエストをきっぱり拒否する｡
         assert_eq!(redirect_uri(Profile::Dev), "http://127.0.0.1:8734/callback");
     }
 

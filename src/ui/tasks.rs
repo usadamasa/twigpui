@@ -1,51 +1,48 @@
-//! The side of `TimelineView` that spends: every method that holds a
-//! `cx.spawn` and reaches the network or the disk (#137).
+//! `TimelineView` のうち金を使う側｡`cx.spawn` を握り､ネットワークか
+//! ディスクへ手を伸ばすメソッドをすべて集めた (#137)｡
 //!
-//! # The decision this file is
+//! # このファイルが体現している判断
 //!
-//! #137 asked whether to split `impl TimelineView` and, if so, where. The
-//! options it listed were (a) the rendering methods, (b) the async task
-//! methods, (c) the composer's input handling, or (d) keep raising the
-//! ceiling. This is (b).
+//! #137 は `impl TimelineView` を分割するか､するならどこでかを問うた｡
+//! 挙がっていた選択肢は (a) 描画メソッド､(b) 非同期タスクのメソッド､
+//! (c) composer の入力処理､(d) 天井を上げつづける､だった｡これは (b)｡
 //!
-//! (a) is the larger pile, and that is the argument against it: "the
-//! methods that build elements" is most of a UI file by volume and says
-//! nothing about what the seam is *for*. The seam here is one anybody can
-//! state in a sentence — **this file is where the money goes** — and it is
-//! not a new one. [`super::reload_policy`] already holds the decisions
-//! about whether a request may go out; this is where the ones that
-//! survived that decision are actually sent. The pair reads as one idea
-//! split across a judgement and its execution.
+//! (a) の方が山としては大きく､それこそが反対する理由になる｡「要素を
+//! 組み立てるメソッド」は UI ファイルの体積の大半を占めるのに､その継ぎ目が
+//! *何のため* にあるのかを何も語らない｡ここの継ぎ目は誰でも一文で言える —
+//! **このファイルは金の出ていく場所だ** — し､新しいものでもない｡
+//! [`super::reload_policy`] がリクエストを出してよいかの判断をすでに
+//! 抱えていて､ここはその判断を生き延びたものが実際に送られる場所だ｡
+//! 対にして読めば､一つの考えが判断とその実行へ分かれたものに見える｡
 //!
-//! It is also the pile with no tests to move. Nothing here is unit
-//! tested, for `sync/run.rs`'s reason: every branch is an HTTP request or
-//! a file a request's result is written to. `ui/mod.rs`'s test module
-//! stayed exactly where it was, which is how "this was a pure move" was
-//! checked — the same evidence #126 used.
+//! テストを動かす必要のない山でもある｡ここには何一つ unit test が無い｡
+//! `sync/run.rs` と同じ理由で､どの分岐も HTTP リクエストか､その結果が
+//! 書かれるファイルだからだ｡`ui/mod.rs` のテストモジュールは元の場所に
+//! そのまま残っていて､それが「これは純粋な移動だった」の確認になっている
+//! — #126 が使ったのと同じ証拠だ｡
 //!
-//! # What this is not
+//! # これが何でないか
 //!
-//! Not the pattern [`super::auto_refresh`] and [`super::list_sync`] use.
-//! Those two group one *feature* each — a timer, its state, and the
-//! button that drives it — and each was written that way from the start
-//! rather than carved out afterwards. This file groups one *kind*, and
-//! the two conventions are meant to coexist: a new mechanism that is
-//! wholly its own gets its own file, and the spending half of the
-//! window's existing behaviour lives here.
+//! [`super::auto_refresh`] と [`super::list_sync`] が採る型ではない｡
+//! あの二つはそれぞれ一つの *機能* — タイマー､その状態､それを駆動する
+//! ボタン — をまとめたもので､後から切り出したのではなく最初からそう
+//! 書かれている｡このファイルがまとめているのは一つの *種類* であり､
+//! 二つの流儀は共存させるつもりでいる｡まるごと自前の機構は自前のファイル
+//! を持ち､ウィンドウの既存のふるまいのうち金を使う側はここに住む｡
 
-// `super::*` rather than a list, matching [`super::render`] and
-// [`super::auto_refresh`]: this is the largest of `ui`'s children and
-// reaches almost everything the parent imports.
+// 列挙ではなく `super::*` にしているのは [`super::render`] と
+// [`super::auto_refresh`] に合わせたもの｡ここは `ui` の子の中で最大で､
+// 親が import しているもののほとんどに手を伸ばす｡
 use super::*;
 
 impl TimelineView {
-    /// Resolve a credential (stored OAuth session, refreshing if stale, else
-    /// the bearer token) before the very first fetch, and — since #9 — try
-    /// to render straight from the local cache instead of always reloading.
-    /// A cache hit means startup spends no API request at all; a miss falls
-    /// through to [`Self::reload`], which does. Runs on the background
-    /// executor because it can touch disk and, on a token refresh or cache
-    /// miss, the network.
+    /// 最初の fetch より前に credential (保存済みの OAuth セッション､古け
+    /// れば refresh し､無ければ bearer token) を解決し､さらに #9 以降は
+    /// 常に reload するのではなくローカルキャッシュからそのまま描画する｡
+    /// キャッシュに当たれば起動は API リクエストを一切使わない; 外れたら
+    /// [`Self::reload`] へ落ち､そちらは使う｡ディスクに触れ､token の
+    /// refresh やキャッシュミスではネットワークにも触れるので background
+    /// executor で動かす｡
     pub(super) fn start(&mut self, cx: &mut Context<'_, Self>) {
         self.state = TimelineState::Loading;
 
@@ -58,22 +55,21 @@ impl TimelineView {
                 .background_executor()
                 .spawn(async move {
                     let resolution = oauth::resolve_credential(&config, &paths, oauth::unix_now())?;
-                    // #54: rendered as a persistent banner regardless of what
-                    // `credential` below turns out to be — a demoted session
-                    // and "never signed in" can resolve to the exact same
-                    // credential, but only one of them is worth telling the
-                    // user about.
+                    // #54: 下の `credential` が何になろうと､常設のバナー
+                    // として描画する — demote されたセッションと「一度も
+                    // sign in していない」はまったく同じ credential に
+                    // 解決されうるが､ユーザーに伝える価値があるのはその
+                    // うち片方だけだ｡
                     let session_notice = resolution.demotion.as_ref().map(oauth::describe_demotion);
                     let Some(credential) = resolution.credential else {
                         return anyhow::Ok(StartOutcome::NotAuthenticated { session_notice });
                     };
-                    // #161: which timeline this is comes from
-                    // `config.list_id`, resolved into `self.source` at
-                    // construction. #33 had removed the branch entirely
-                    // (the app-only bearer token, the one thing that used
-                    // to decide it, was gone); #157 put one back, because
-                    // the home timeline stopped carrying followed authors'
-                    // posts and a List is the way to read them now.
+                    // #161: どの timeline かは `config.list_id` が決め､
+                    // 構築時に `self.source` へ解決される｡#33 は分岐を
+                    // まるごと消していた (それを決めていた唯一のもの､
+                    // app-only の bearer token が無くなったため); #157 が
+                    // 一つ戻した｡home timeline が follow 先の post を運ば
+                    // なくなり､それを読む手段が List になったからだ｡
                     let cached = cache::startup_primary(&paths, &source, oauth::unix_now())?;
                     anyhow::Ok(StartOutcome::Home {
                         credential,
@@ -89,11 +85,11 @@ impl TimelineView {
                 this.refresh_liked_ids(cx);
                 match result {
                     Ok(StartOutcome::NotAuthenticated { session_notice }) => {
-                        // Both lines exist because of 2026-08-24: a session
-                        // X refused to renew left "starting twigpui" as the
-                        // log's whole account of a window that could do
-                        // nothing. The banner said why on screen; the file
-                        // said nothing (#199's rule, applied to auth).
+                        // どちらの行も 2026-08-24 に由来する: X が更新を
+                        // 拒んだセッションのせいで､何もできないウィンドウ
+                        // についてログが語るのは "starting twigpui" だけ
+                        // だった｡バナーは画面で理由を言ったが､ファイルは
+                        // 何も言わなかった (#199 の規則を auth に適用)｡
                         match &session_notice {
                             Some(notice) => log::warn(notice),
                             None => log::info("no stored session"),
@@ -108,9 +104,9 @@ impl TimelineView {
                         cached,
                         session_notice,
                     }) => {
-                        // A demotion that still resolved a credential (the
-                        // bearer fallback) is the quiet kind — worth a line
-                        // for the same reason as the arm above.
+                        // credential が解決できた上での demotion (bearer
+                        // への fallback) は静かな方だ — 上の arm と同じ
+                        // 理由で 1 行残す価値がある｡
                         if let Some(notice) = &session_notice {
                             log::warn(notice);
                         }
@@ -118,9 +114,9 @@ impl TimelineView {
                         this.signed_in_with_oauth = true;
                         this.oauth_scope.clone_from(&credential.scope);
                         this.client = Some(XClient::new(credential.token));
-                        // After `client` and `oauth_scope`, which it gates
-                        // on and borrows from; before the fetch below,
-                        // which it does not depend on either way.
+                        // `client` と `oauth_scope` の後に置く｡これらを
+                        // 条件にし､借りるからだ; 下の fetch より前に置く｡
+                        // どちらにせよ依存していないからだ｡
                         this.start_sync(SyncTrigger::Scheduled, cx);
                         match cached {
                             Some((me, items)) => {
@@ -129,16 +125,15 @@ impl TimelineView {
                                 this.state = TimelineState::Loaded(items);
                                 cx.notify();
                             }
-                            // Same reasoning as `SingleUser` above.
+                            // 上の `SingleUser` と同じ理由｡
                             None => this.reload(ReloadTrigger::Polling, cx),
                         }
-                        // #21: after the `cached` match, never before it.
-                        // The miss arm calls `reload`, which sets
-                        // `last_reload_at` — the anchor the first poll is
-                        // measured from. Started first, the loop would
-                        // anchor on the window opening instead and buy a
-                        // poll an interval after a fetch that had only
-                        // just landed.
+                        // #21: `cached` の match の後に置く｡決して前では
+                        // ない｡miss の arm は `reload` を呼び､それが
+                        // `last_reload_at` — 最初の poll を測る起点 — を
+                        // 立てる｡先に始めるとループはウィンドウが開いた
+                        // 時刻を起点にしてしまい､着いたばかりの fetch の
+                        // 1 間隔後に poll を 1 回買うことになる｡
                         this.start_auto_refresh(cx);
                     }
                     Err(error) => {
@@ -146,15 +141,14 @@ impl TimelineView {
                         cx.notify();
                     }
                 }
-                // #120: after the match, never before it. `refresh_images`
-                // reads `self.state` to decide which avatars and media are
-                // missing, so calling it first hands it the *previous*
-                // state — `Loading` on startup, which fetches nothing at
-                // all, and the outgoing item list on a reload, which
-                // fetches the images the last batch wanted. That is why
-                // avatars only appeared one reload late. Its siblings above
-                // read from disk rather than `state`, so their position
-                // does not matter; this one's does.
+                // #120: match の後に置く｡決して前ではない｡`refresh_images`
+                // はどの avatar と media が欠けているかを決めるのに
+                // `self.state` を読むので､先に呼ぶと *前の* state を
+                // 渡すことになる — 起動時なら `Loading` で何も取らず､
+                // reload なら出ていく側の item 一覧で､前のバッチが欲し
+                // がった画像を取る｡avatar が reload 1 回分遅れて現れて
+                // いたのはこれが理由だ｡上にある兄弟たちは `state` では
+                // なくディスクから読むので位置は関係ない; これは関係する｡
                 this.refresh_images(cx);
             });
         }));
@@ -162,30 +156,29 @@ impl TimelineView {
         cx.notify();
     }
 
-    /// Every reload spends API credits, so this only runs on explicit action.
-    /// A no-op (falls back to [`TimelineState::NotAuthenticated`]) if called
-    /// without a client — the "Reload" button isn't shown in that state, but
-    /// this guards against it anyway rather than assuming the caller got it
-    /// right. Goes through [`cache::reload`] rather than a bare fetch: a
-    /// cached user id turns this into one request instead of two, and the
-    /// result is merged into (and persisted to) the local cache rather than
-    /// replacing it outright.
+    /// reload は毎回 API のクレジットを使うので､明示的な操作でしか走らな
+    /// い｡client 無しで呼ばれたら何もしない ([`TimelineState::NotAuthenticated`]
+    /// へ落ちる) — その状態で "Reload" ボタンは出ないが､呼び出し側が
+    /// 正しくやったと決めてかからずここでも守る｡素の fetch ではなく
+    /// [`cache::reload`] を通す: user id がキャッシュされていればリクエスト
+    /// は 2 回でなく 1 回になり､結果はローカルキャッシュを丸ごと置き換え
+    /// るのではなくそこへ merge (して永続化) される｡
     ///
-    /// Also enforces `config.min_fetch_interval_seconds` (#10) before
-    /// spawning anything, unless `trigger` is [`ReloadTrigger::UserAction`]
-    /// (#57) — see that variant's doc for why some callers must bypass it.
-    /// When it does apply, [`reload_cooldown`] is a client-side throttle on
-    /// the button itself, checked without touching the network, on top of
-    /// (not instead of) whatever the tracked API rate-limit state says once
-    /// a request actually goes out.
+    /// さらに､何かを spawn する前に `config.min_fetch_interval_seconds`
+    /// (#10) を課す｡ただし `trigger` が [`ReloadTrigger::UserAction`] (#57)
+    /// のときは除く — なぜ一部の呼び出し側がこれを迂回しなければならない
+    /// かはその variant の doc を見よ｡課される場合､[`reload_cooldown`] は
+    /// ネットワークに触れずに判定するボタン自身へのクライアント側の絞りで
+    /// あり､実際にリクエストが出たときに追跡している API の rate-limit
+    /// 状態が言うことの代わりではなく､その上に乗る｡
     ///
-    /// Neither a cooldown nor a failed fetch touches `state` while it
-    /// already holds posts (#57): [`reload_start_state`] and
-    /// [`reload_failure_outcome`] are the pure functions that decide this,
-    /// and `reload_notice` carries the cooldown/failure text independently —
-    /// see [`ReloadNotice`]'s doc. A reload that hasn't loaded anything yet
-    /// still falls back to `TimelineState::Loading`/`RateLimited`/`Failed`,
-    /// since there is nothing else the body could render in that case.
+    /// cooldown も失敗した fetch も､`state` がすでに post を持っている
+    /// 間はそれに触れない (#57): これを決める純粋関数が
+    /// [`reload_start_state`] と [`reload_failure_outcome`] で､
+    /// cooldown/失敗の文言は `reload_notice` が独立に運ぶ —
+    /// [`ReloadNotice`] の doc を見よ｡まだ何も読み込めていない reload は
+    /// `TimelineState::Loading`/`RateLimited`/`Failed` へ落ちる｡その場合
+    /// body が描けるものは他に無いからだ｡
     pub(super) fn reload(&mut self, trigger: ReloadTrigger, cx: &mut Context<'_, Self>) {
         let Some(client) = self.client.clone() else {
             self.state = TimelineState::NotAuthenticated;
@@ -200,16 +193,16 @@ impl TimelineView {
             self.config.min_fetch_interval_seconds,
             now,
         ) {
-            // #57: the cooldown blocked the request before it was even
-            // sent, so whatever is already on screen is untouched — this is
-            // a notice, not a state change.
+            // #57: cooldown はリクエストが送られる前に止めているので､
+            // すでに画面にあるものはそのままだ — これは notice であって
+            // state の変更ではない｡
             self.reload_notice = Some(ReloadNotice::Cooldown {
                 reset_at,
                 cooldown: Cooldown::LocalInterval,
             });
-            // #57 item 3: without this the banner's countdown freezes at
-            // whatever second it happened to render on — see
-            // `start_cooldown_ticker`'s doc.
+            // #57 の項目 3: これが無いとバナーのカウントダウンは描画され
+            // た瞬間の秒で止まったままになる — `start_cooldown_ticker` の
+            // doc を見よ｡
             self.start_cooldown_ticker(cx);
             cx.notify();
             return;
@@ -217,10 +210,10 @@ impl TimelineView {
         self.last_reload_at = Some(now);
 
         self.reload_notice = None;
-        // A fresh reload actually going out supersedes whatever cooldown
-        // was being counted down (there is nothing left to wait for once
-        // the request is in flight) — stop it explicitly rather than
-        // leaving it to notice on its next tick, up to a second later.
+        // 新しい reload が実際に出ていくなら､カウントダウン中だった
+        // cooldown は用済みになる (リクエストが飛んでしまえば待つものは
+        // 何も残らない) — 次の tick で気づくのに任せて最大 1 秒放置する
+        // のではなく､明示的に止める｡
         self.cooldown_ticker = None;
         self.reloading = true;
         self.state = reload_start_state(std::mem::replace(&mut self.state, TimelineState::Loading));
@@ -229,9 +222,9 @@ impl TimelineView {
         let max_results = self.config.max_results;
         let source = self.source.clone();
 
-        // #161: `source` decides which endpoint this spends its request on
-        // and which cache file the result lands in. The single-user
-        // endpoint and its cache stay out of it, for `--fetch-only`.
+        // #161: どの endpoint にリクエストを使い､結果がどのキャッシュ
+        // ファイルへ落ちるかは `source` が決める｡single-user の endpoint
+        // とそのキャッシュは､`--fetch-only` のために対象外のままにする｡
         self.fetch = Some(cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
@@ -251,26 +244,25 @@ impl TimelineView {
                         this.home_username = Some(reloaded.me.username);
                         this.next_page_token = reloaded.next_token;
                         this.keep_the_reader_in_place(&reloaded.items);
-                        // #141: worked out before `state` is replaced,
-                        // for the same reason the scroll target is — it
-                        // takes both lists.
+                        // #141: scroll の目標と同じ理由で､`state` が
+                        // 置き換わる前に求める — 両方の一覧が要る｡
                         let outcome = this.reload_outcome(&reloaded.items);
                         this.state = TimelineState::Loaded(reloaded.items);
                         this.reload_notice = Some(ReloadNotice::Outcome(outcome.into()));
-                        // Same reasoning as the single-user branch above.
+                        // 上の single-user の分岐と同じ理由｡
                         this.cooldown_ticker = None;
-                        // #21: this fetch is strictly fresher than
-                        // whatever a poll buffered, and it has already put
-                        // the new posts on screen — so the pill would be
-                        // offering posts that are visible behind it.
+                        // #21: この fetch は poll が溜めたものより厳密に
+                        // 新しく､新しい post をすでに画面へ出している —
+                        // だから pill は､その背後に見えている post を
+                        // 差し出すことになってしまう｡
                         this.clear_pending();
                     }
                     Err(error) => this.apply_reload_failure(&error, cx),
                 }
-                // After the match, for the reason spelled out in `start`
-                // (#120): before it, this fetched the images the *outgoing*
-                // item list wanted, leaving every newly arrived row on its
-                // placeholder until the reload after this one.
+                // match の後に置く｡理由は `start` (#120) に書いたとおり:
+                // 前に置くと *出ていく側* の item 一覧が欲しがった画像を
+                // 取ってしまい､新しく着いた行はすべて次の reload まで
+                // placeholder のままになる｡
                 this.refresh_images(cx);
                 cx.notify();
             });
@@ -279,14 +271,14 @@ impl TimelineView {
         cx.notify();
     }
 
-    /// What the finished reload should say for itself (#141).
+    /// 終わった reload が自分について何と言うべきか (#141)｡
     ///
-    /// Called with the incoming list before `state` is replaced, like
-    /// [`Self::keep_the_reader_in_place`] and for the same reason: the
-    /// count is the difference between the two lists.
+    /// [`Self::keep_the_reader_in_place`] と同じく､`state` が置き換わる
+    /// 前に届いた一覧を渡して呼ぶ｡理由も同じで､件数は二つの一覧の差だ
+    /// からだ｡
     ///
-    /// A first load has no previous list to compare against, so everything
-    /// in it counts as new — which is what it is.
+    /// 最初の読み込みには比べる前の一覧が無いので､その中身はすべて新着
+    /// として数える — 実際そのとおりだ｡
     fn reload_outcome(&self, incoming: &[TimelineItem]) -> String {
         let previous: Vec<&str> = match &self.state {
             TimelineState::Loaded(items) => items.iter().map(|item| item.id.as_str()).collect(),
@@ -296,13 +288,13 @@ impl TimelineView {
         reload_outcome_label(newly_arrived(&previous, &new_ids))
     }
 
-    /// Undo the shove a reload gives a scrolled reader (#22).
+    /// scroll している読み手を reload が突き飛ばすのを取り消す (#22)｡
     ///
-    /// Called with the incoming list *before* `state` is replaced, since
-    /// working out how many posts arrived needs both lists. Delegates the
-    /// decision to [`preserved_scroll_target`] and does nothing when it
-    /// declines — the reader is at the top, where new posts arriving above
-    /// nothing is the behaviour they want.
+    /// `state` が置き換わる *前* に､届いた一覧を渡して呼ぶ｡何件届いたか
+    /// を求めるのに両方の一覧が要るからだ｡判断は
+    /// [`preserved_scroll_target`] に委ね､断られたら何もしない — 読み手
+    /// は先頭にいて､何も無いところの上へ新着が来るのは望みどおりの
+    /// ふるまいだ｡
     fn keep_the_reader_in_place(&self, incoming: &[TimelineItem]) {
         let TimelineState::Loaded(previous) = &self.state else {
             return;
@@ -316,35 +308,35 @@ impl TimelineView {
         }
     }
 
-    /// Shared `Err` handling for both of [`Self::reload`]'s fetch branches
-    /// and [`Self::load_older`] (#57): existing posts survive a failed
-    /// fetch via [`reload_failure_outcome`] — pulled into its own method
-    /// partly to keep `reload` itself under clippy's line-count lint, partly
-    /// so all three call sites apply the exact same `Option<ReloadNotice>`
-    /// (and, since #57's item 3, ticker) handling below rather than three
-    /// copies that could drift.
+    /// [`Self::reload`] の二つの fetch 分岐と [`Self::load_older`] で共有
+    /// する `Err` 処理 (#57): 既存の post は [`reload_failure_outcome`] を
+    /// 通して失敗した fetch を生き延びる — 独立したメソッドに切り出したの
+    /// は､半分は `reload` 自体を clippy の行数 lint の下に収めるため､
+    /// 半分は下の `Option<ReloadNotice>` (と #57 の項目 3 以降は ticker) の
+    /// 扱いを､ずれうる 3 つの写しではなく 3 箇所すべてでまったく同じに
+    /// するためだ｡
     fn apply_reload_failure(&mut self, error: &anyhow::Error, cx: &mut Context<'_, Self>) {
-        // #49: a `.app` launched from Finder has no stderr, so without this
-        // a failed reload leaves nothing behind but a banner the user
-        // dismissed. `log::redact` runs on the way out — an API error can
-        // quote the request that produced it.
+        // #49: Finder から起動した `.app` に stderr は無いので､これが
+        // 無いと失敗した reload は､ユーザーが閉じたバナーのほかに何も
+        // 残さない｡出ていく途中で `log::redact` が走る — API のエラーは
+        // それを生んだリクエストを引用しうる｡
         log::error(&format!("reload failed: {error:#}"));
         let (state, notice) = reload_failure_outcome(
             std::mem::replace(&mut self.state, TimelineState::Loading),
             error,
         );
         self.state = state;
-        // #57: `reload_failure_outcome` already returns `None` when `state`
-        // itself now tells the failure story (`Failed`/`RateLimited`) — see
-        // its doc. Passing that straight through, rather than wrapping in
-        // `Some`, is what stops the same failure from showing twice.
+        // #57: `state` 自身が失敗を語るようになった場合
+        // (`Failed`/`RateLimited`)､`reload_failure_outcome` はすでに
+        // `None` を返す — その doc を見よ｡それを `Some` で包まずそのまま
+        // 通すことが､同じ失敗が二度表示されるのを止めている｡
         self.reload_notice = notice;
-        // A rate-limited failure raises a fresh `Cooldown` notice (X's own
-        // window, not #10's local one, but the countdown still needs to
-        // tick the same way) — start/replace the ticker for it. Any other
-        // outcome (`Failed`, or no notice at all) has nothing left to count
-        // down, so stop whatever ticker might still be running rather than
-        // let it keep polling a notice it no longer applies to.
+        // rate limit による失敗は新しい `Cooldown` notice を立てる
+        // (#10 のローカルなものではなく X 自身の window だが､カウント
+        // ダウンは同じように刻む必要がある) — そのために ticker を開始/
+        // 置換する｡それ以外の結末 (`Failed`､あるいは notice 無し) には
+        // 数え下げるものが残っていないので､もう当てはまらない notice を
+        // 見つづけさせるのではなく､走っているかもしれない ticker を止める｡
         if matches!(self.reload_notice, Some(ReloadNotice::Cooldown { .. })) {
             self.start_cooldown_ticker(cx);
         } else {
@@ -352,24 +344,23 @@ impl TimelineView {
         }
     }
 
-    /// Ticks `reload_notice`'s countdown once a second (#57's item 3) —
-    /// see [`cooldown_ticker`](Self::cooldown_ticker)'s doc for why this
-    /// exists at all. Started only when `reload_notice` is actually set to
-    /// `ReloadNotice::Cooldown` (there is nothing to count down for a
-    /// `Failed` notice), from [`Self::reload`]'s cooldown-gate branch and
-    /// from [`Self::apply_reload_failure`].
+    /// `reload_notice` のカウントダウンを 1 秒ごとに刻む (#57 の項目 3) —
+    /// そもそもなぜこれが在るのかは
+    /// [`cooldown_ticker`](Self::cooldown_ticker) の doc を見よ｡開始する
+    /// のは `reload_notice` が実際に `ReloadNotice::Cooldown` になって
+    /// いるときだけで (`Failed` の notice には数え下げるものが無い)､
+    /// [`Self::reload`] の cooldown 判定の分岐と
+    /// [`Self::apply_reload_failure`] から呼ばれる｡
     ///
-    /// The loop re-checks [`cooldown_tick`] against the *current*
-    /// `reload_notice` on every wake-up rather than trusting `reset_at`
-    /// captured at start time: `reload_notice` can change out from under a
-    /// running ticker (a reload succeeds and clears it, or a later failure
-    /// replaces it with `Failed`) without anyone reaching back in to cancel
-    /// this specific loop, and re-checking is what makes that safe — the
-    /// loop simply stops the next time it wakes rather than clobbering
-    /// whatever is there by then. It also always terminates: either
-    /// `cooldown_tick` returns `NotTicking`/`Elapsed`, or `this.update`
-    /// returns `Err` because the view itself has been dropped — there is no
-    /// path that loops forever.
+    /// ループは開始時に捉えた `reset_at` を信じるのではなく､起きるたび
+    /// *その時点の* `reload_notice` に対して [`cooldown_tick`] を引き直
+    /// す: `reload_notice` は､誰かがこのループを名指しで cancel しに来
+    /// なくても､走っている ticker の足元で変わりうる (reload が成功して
+    /// 消える､後の失敗が `Failed` で置き換える)｡引き直すことがそれを
+    /// 安全にしている — ループはその時点で在るものを踏み潰すのではなく､
+    /// 次に起きたときにただ止まる｡必ず終わりもする: `cooldown_tick` が
+    /// `NotTicking`/`Elapsed` を返すか､view 自体が drop されて
+    /// `this.update` が `Err` を返すかのどちらかで､永久に回る経路は無い｡
     fn start_cooldown_ticker(&mut self, cx: &mut Context<'_, Self>) {
         self.cooldown_ticker = Some(cx.spawn(async move |this, cx| {
             loop {
@@ -389,7 +380,7 @@ impl TimelineView {
                         CooldownTick::NotTicking => false,
                     }
                 }) else {
-                    // The view has been dropped — nothing left to tick.
+                    // view が drop された — 刻むものは何も残っていない｡
                     return;
                 };
 
@@ -400,25 +391,25 @@ impl TimelineView {
         }));
     }
 
-    /// Fetch the page behind `next_page_token` and append it after what's
-    /// already shown (#11's "Load older") — only ever meaningful in
-    /// `TimelineSource::Home`, since `SingleUser` mode never sets a token in
-    /// the first place. A no-op if any of the three prerequisites (a client,
-    /// a known home user id, a token to resume from) is missing.
+    /// `next_page_token` の先のページを取り､すでに表示されているものの
+    /// 後ろへ足す (#11 の "Load older") — 意味を持つのは
+    /// `TimelineSource::Home` のときだけだ｡`SingleUser` モードはそもそも
+    /// token を立てない｡三つの前提 (client､判明済みの home user id､
+    /// 再開するための token) のどれかが欠けていたら何もしない｡
     ///
-    /// Shares [`Self::reload`]'s "don't evict what's already on screen"
-    /// fix (#57) via the same pure functions, [`reload_start_state`] and
-    /// [`reload_failure_outcome`] — arguably *more* important here than for
-    /// a plain reload: this only ever runs once something is already
-    /// `Loaded` (see [`offers_load_older`]'s gate), and it's paging
-    /// *backwards* from what's currently shown, so losing it mid-request
-    /// would be strictly worse than a failed reload starting from nothing.
-    /// Reuses `self.reloading` for the busy indicator rather than a
-    /// dedicated flag — the header's "Loading…" label is an accurate
-    /// description of either fetch, and #57 only asked this call site to
-    /// stop discarding posts, not to grow "Load older"-specific chrome (the
-    /// row itself carries no separate busy/disabled styling, unchanged from
-    /// before this fix).
+    /// [`Self::reload`] の「すでに画面にあるものを追い出さない」修正
+    /// (#57) を､同じ純粋関数 [`reload_start_state`] と
+    /// [`reload_failure_outcome`] を通して共有する — ここでは素の reload
+    /// より *もっと* 重要だとも言える: これは何かがすでに `Loaded` に
+    /// なってからしか走らず ([`offers_load_older`] の条件を見よ)､いま
+    /// 表示されているものから *遡って* ページを繰っているので､リクエスト
+    /// の途中でそれを失うのは､何も無いところから始めた reload が失敗する
+    /// より厳密に悪い｡busy 表示には専用のフラグではなく `self.reloading`
+    /// を使い回す — ヘッダの "Loading…" というラベルはどちらの fetch の
+    /// 説明としても正確だし､#57 がこの呼び出し箇所に求めたのは post を
+    /// 捨てるのをやめることであって､"Load older" 専用の装飾を生やすこと
+    /// ではない (行そのものは busy/disabled の別スタイルを持たず､この
+    /// 修正の前から変わっていない)｡
     pub(super) fn load_older(&mut self, cx: &mut Context<'_, Self>) {
         let (Some(client), Some(user_id), Some(token)) = (
             self.client.clone(),
@@ -429,9 +420,9 @@ impl TimelineView {
         };
 
         self.reload_notice = None;
-        // Same reasoning as `reload`'s own gate-passed branch: a fetch is
-        // about to go out, so any cooldown countdown still ticking (from an
-        // unrelated blocked reload) no longer describes anything current.
+        // `reload` の判定を通った分岐と同じ理由: fetch がこれから出て
+        // いくので､まだ刻んでいる cooldown のカウントダウン (無関係な
+        // ブロックされた reload によるもの) はもう現在を説明していない｡
         self.cooldown_ticker = None;
         self.reloading = true;
         self.state = reload_start_state(std::mem::replace(&mut self.state, TimelineState::Loading));
@@ -466,17 +457,17 @@ impl TimelineView {
                         this.next_page_token = next_token;
                         this.state = TimelineState::Loaded(items);
                         this.reload_notice = None;
-                        // Same reasoning as `reload`'s success branches above.
+                        // 上の `reload` の成功分岐と同じ理由｡
                         this.cooldown_ticker = None;
-                        // #21: a buffer fetched before this page was
-                        // appended does not contain it, so applying one
-                        // afterwards would silently undo the click.
+                        // #21: このページが足される前に取られた buffer は
+                        // それを含まないので､後から適用するとクリックを
+                        // 黙って取り消してしまう｡
                         this.clear_pending();
                     }
                     Err(error) => this.apply_reload_failure(&error, cx),
                 }
-                // After the match (#120), same as `start` and `reload`: the
-                // page just appended is the one whose images are missing.
+                // match の後に置く (#120)｡`start` や `reload` と同じで､
+                // 画像が欠けているのはいま足したページだ｡
                 this.refresh_images(cx);
                 cx.notify();
             });
@@ -485,15 +476,15 @@ impl TimelineView {
         cx.notify();
     }
 
-    /// Spend "Show thread"'s credits for one reply (#12): walk its parent
-    /// chain (from cache if already fetched, else the network, up to
-    /// `thread::MAX_THREAD_DEPTH` requests) and render the result. A no-op
-    /// without a client — the toggle isn't shown in that state, but this
-    /// guards against it anyway, matching [`Self::reload`]'s convention.
+    /// 一つの reply のために "Show thread" のクレジットを使う (#12): 親の
+    /// chain を辿り (取得済みならキャッシュから､でなければネットワーク
+    /// から､最大 `thread::MAX_THREAD_DEPTH` リクエスト)､結果を描画する｡
+    /// client 無しでは何もしない — その状態で toggle は出ないが､
+    /// [`Self::reload`] の流儀に合わせてここでも守る｡
     ///
-    /// `reply_post_id` is the reply being expanded (the cache/state key);
-    /// `first_parent_id` is its immediate parent's id — `TimelineItem::replied_to`'s
-    /// `post_id`, already known for free — where the walk starts.
+    /// `reply_post_id` は展開される側の reply (キャッシュ/状態のキー);
+    /// `first_parent_id` はその直接の親の id — ただで判明している
+    /// `TimelineItem::replied_to` の `post_id` — で､そこから辿り始める｡
     pub(super) fn show_thread(
         &mut self,
         reply_post_id: String,
@@ -539,14 +530,13 @@ impl TimelineView {
         self.thread_fetches.insert(fetch_key, task);
     }
 
-    /// Refresh the header's usage summary from disk (#18), independent of
-    /// whatever triggered it — every fetch path (a reload, "Load older", a
-    /// "Show thread" walk) can have moved the tracked counts, since
-    /// `x_api::client::XClient::get` records every actual HTTP send
-    /// regardless of whether the request itself succeeded. Spawned on its
-    /// own rather than folded into the fetch that triggered it: if reading
-    /// `usage.json` fails, the header just keeps showing whatever it showed
-    /// before, rather than failing the fetch along with it.
+    /// ヘッダの usage 要約をディスクから読み直す (#18)｡何が引き金だった
+    /// かとは独立だ — どの fetch 経路 (reload､"Load older"､"Show thread"
+    /// の探索) も追跡している件数を動かしうる｡`x_api::client::XClient::get`
+    /// がリクエスト自体の成否によらず実際の HTTP 送信をすべて記録する
+    /// からだ｡引き金になった fetch に畳み込まず単独で spawn する:
+    /// `usage.json` の読み取りが失敗しても､fetch もろとも失敗させるので
+    /// はなく､ヘッダは前に出していたものをそのまま出しつづける｡
     pub(super) fn refresh_usage(&mut self, cx: &mut Context<'_, Self>) {
         let paths = self.paths.clone();
         self.usage_refresh = Some(cx.spawn(async move |this, cx| {
@@ -567,16 +557,16 @@ impl TimelineView {
         }));
     }
 
-    /// Refresh `self.reposted_ids` from the local repost record (#15)
-    /// whenever the visible timeline changes — mirrors
-    /// [`Self::refresh_usage`]'s pattern exactly: read on the background
-    /// executor so a slow disk read never blocks rendering, and a read that
-    /// fails just leaves whatever was already shown rather than failing the
-    /// fetch it rode in on. This file is the project's only source for "did
-    /// I repost this" (#15's whole reason for existing — the X API itself
-    /// carries no such field), so a stale or lost read here can only ever
-    /// under- or over-report *this app's own* reposts, never one made from
-    /// another client, which this issue accepts as out of scope regardless.
+    /// 見えている timeline が変わるたび､ローカルの repost 記録から
+    /// `self.reposted_ids` を読み直す (#15) — [`Self::refresh_usage`] の
+    /// 型をそのまま写したものだ: 遅いディスク読み取りが描画を止めないよう
+    /// background executor で読み､失敗した読み取りは､乗ってきた fetch
+    /// もろとも失敗させるのではなくすでに出ているものを残す｡「これを
+    /// repost したか」の出所はプロジェクト内でこのファイルだけなので
+    /// (#15 が存在する理由そのもの — X API 自体にそんなフィールドは無い)､
+    /// ここでの読み取りが古くても失われても､過小・過大に報告できるのは
+    /// *このアプリ自身の* repost だけだ｡他の client からのものは決して
+    /// 含まないが､この issue はそれをいずれにせよ対象外としている｡
     fn refresh_reposted_ids(&mut self, cx: &mut Context<'_, Self>) {
         let paths = self.paths.clone();
         self.reposted_ids_refresh = Some(cx.spawn(async move |this, cx| {
@@ -594,11 +584,11 @@ impl TimelineView {
         }));
     }
 
-    /// Refresh `self.liked_ids` from the local like record (#68) — the
-    /// like-side twin of [`Self::refresh_reposted_ids`], with the same
-    /// read-off-the-main-thread and failure-is-not-fatal contract. Called
-    /// from exactly the same places, so a row's like button and its repost
-    /// button are never seeded from different points in time.
+    /// ローカルの like 記録から `self.liked_ids` を読み直す (#68) —
+    /// [`Self::refresh_reposted_ids`] の like 側の双子で､メインスレッド
+    /// の外で読む点も失敗を致命的にしない点も同じ契約だ｡呼ばれる場所も
+    /// まったく同じなので､ある行の like ボタンと repost ボタンが別々の
+    /// 時点から種を得ることは決してない｡
     fn refresh_liked_ids(&mut self, cx: &mut Context<'_, Self>) {
         let paths = self.paths.clone();
         self.liked_ids_refresh = Some(cx.spawn(async move |this, cx| {
@@ -616,16 +606,16 @@ impl TimelineView {
         }));
     }
 
-    /// Toggle one post's like state (#68) — the like-side twin of
-    /// [`Self::toggle_repost`], down to the optimistic flip, the background
-    /// request, and folding the result (including `like::create`/
-    /// `like::remove`'s own reconciliation) back onto the same per-post
-    /// state.
+    /// 一つの post の like 状態を切り替える (#68) — [`Self::toggle_repost`]
+    /// の like 側の双子で､楽観的な反転､background でのリクエスト､
+    /// 結果 (`like::create`/`like::remove` 自身の辻褄合わせを含む) を
+    /// 同じ post ごとの状態へ畳み戻すところまで同じだ｡
     ///
-    /// The scope checked here is `like.write`, not `tweet.write`: X grants
-    /// them separately, so a session authorized before #68 can post and
-    /// repost but not like. It reuses #14's "Re-authorize" affordance all
-    /// the same, since re-running the flow requests every scope at once.
+    /// ここで確認する scope は `tweet.write` ではなく `like.write` だ: X は
+    /// これらを別々に許可するので､#68 より前に認可されたセッションは
+    /// post も repost もできるが like はできない｡それでも #14 の
+    /// "Re-authorize" の導線を使い回す｡flow をやり直せば全 scope をまとめ
+    /// て要求するからだ｡
     pub(super) fn toggle_like(&mut self, post_id: String, cx: &mut Context<'_, Self>) {
         let Some(client) = self.client.clone() else {
             return;
@@ -684,20 +674,19 @@ impl TimelineView {
         self.like_tasks.insert(task_key, task);
     }
 
-    /// Download whatever avatars the visible timeline needs and don't have
-    /// yet (#64).
+    /// 見えている timeline が必要としていて､まだ持っていない avatar を
+    /// 落としてくる (#64)｡
     ///
-    /// Called wherever [`Self::refresh_reposted_ids`] is, so a row's avatar
-    /// and its buttons come from the same point in time. Fetching happens on
-    /// the background executor one URL at a time, updating the map (and so
-    /// the view) after each — an avatar appearing as it arrives beats the
-    /// whole timeline waiting for the slowest one. A URL that fails is
-    /// simply left absent, so the row keeps its placeholder and the next
-    /// reload retries it; there is nothing useful to say to the user about
-    /// an avatar that didn't load.
+    /// [`Self::refresh_reposted_ids`] と同じ場所すべてから呼ばれるので､
+    /// ある行の avatar とそのボタンは同じ時点から来る｡取得は background
+    /// executor で URL を 1 本ずつ行い､その都度 map を (ひいては view を)
+    /// 更新する — 着いたそばから avatar が現れる方が､一番遅い 1 枚を
+    /// timeline 全体で待つよりよい｡失敗した URL はただ欠けたままにする｡
+    /// 行は placeholder を保ち､次の reload が取り直す; 読み込めなかった
+    /// avatar についてユーザーに言うべき有益なことは何も無い｡
     ///
-    /// These requests go to `pbs.twimg.com`, not the X API: no quota, no
-    /// credits, nothing for #18's usage tracking to count.
+    /// これらのリクエストは X API ではなく `pbs.twimg.com` へ行く: quota
+    /// も credit も無く､#18 の usage 追跡が数えるものは何も無い｡
     fn refresh_avatars(&mut self, cx: &mut Context<'_, Self>) {
         let TimelineState::Loaded(items) = &self.state else {
             return;
@@ -732,48 +721,45 @@ impl TimelineView {
                             cx.notify();
                         });
                     }
-                    // #49: the row keeps its placeholder either way, but a
-                    // silently missing avatar is exactly the kind of thing
-                    // that is impossible to investigate afterwards without
-                    // a line in the log.
+                    // #49: どちらにせよ行は placeholder を保つが､黙って
+                    // 欠けた avatar は､ログに 1 行無いと後から調べようが
+                    // ない類のものそのものだ｡
                     Err(error) => log::warn(&format!("avatar fetch failed: {error:#}")),
                 }
             }
         }));
     }
 
-    /// Fetch whatever images the visible timeline is missing (#64, #65) —
-    /// author avatars and attached media both.
+    /// 見えている timeline に欠けている画像を取る (#64, #65) — 著者の
+    /// avatar と添付 media の両方だ｡
     ///
-    /// One entry point rather than two calls at every site that changes the
-    /// timeline: the two are wanted at exactly the same moments, and a
-    /// caller that remembered one but not the other would leave half the
-    /// row waiting for the next reload.
+    /// timeline を変える箇所すべてで 2 回呼ぶのではなく入口を一つにする:
+    /// この二つはまったく同じ瞬間に欲しくなるもので､片方だけ覚えていた
+    /// 呼び出し側は行の半分を次の reload まで待たせてしまう｡
     ///
-    /// **Call this after `self.state` has been updated, never before**
-    /// (#120). Both halves read `state` to work out what is missing and do
-    /// nothing at all unless it is `Loaded`, so calling it first asks the
-    /// outgoing item list what it needs: nothing on startup, where `state`
-    /// is still `Loading`, and the previous batch's URLs on a reload. The
-    /// symptom was avatars that only appeared one reload after the rows
-    /// they belonged to. Sibling refreshers at those same call sites
-    /// (`refresh_usage`, `refresh_reposted_ids`, `refresh_liked_ids`) read
-    /// from disk instead and are order-independent, which is what made this
-    /// easy to miss.
+    /// **`self.state` を更新した後に呼ぶこと｡決して前ではない** (#120)｡
+    /// 両方とも何が欠けているかを求めるのに `state` を読み､`Loaded` で
+    /// なければ何もしないので､先に呼ぶと出ていく側の item 一覧に何が要る
+    /// かを尋ねることになる: 起動時は `state` がまだ `Loading` なので何も
+    /// 無く､reload では前のバッチの URL になる｡症状は､属している行より
+    /// reload 1 回分遅れてしか avatar が現れないことだった｡同じ呼び出し
+    /// 箇所にいる兄弟 (`refresh_usage`, `refresh_reposted_ids`,
+    /// `refresh_liked_ids`) は代わりにディスクから読み､順序に依存しない｡
+    /// それがこれを見落としやすくしていた｡
     pub(super) fn refresh_images(&mut self, cx: &mut Context<'_, Self>) {
         self.refresh_avatars(cx);
         self.refresh_media(cx);
     }
 
-    /// Download whatever attached images the visible timeline needs and
-    /// doesn't have yet (#65) — [`Self::refresh_avatars`]'s twin, with the
-    /// same contract: one task for the whole timeline, one URL at a time on
-    /// the background executor, each thumbnail appearing as it lands, and a
-    /// failure left absent so the frame stays and the next reload retries.
+    /// 見えている timeline が必要としていて､まだ持っていない添付画像を
+    /// 落としてくる (#65) — [`Self::refresh_avatars`] の双子で契約も同じ
+    /// だ: timeline 全体で 1 タスク､background executor で URL を 1 本ずつ､
+    /// 各サムネイルは着いたそばから現れ､失敗は欠けたままにするので枠は
+    /// 残り､次の reload が取り直す｡
     ///
-    /// Attached media is larger than an avatar but arrives the same way
-    /// (`pbs.twimg.com`, no API quota, no credits) and is bounded by the
-    /// shared image cache's own size limit.
+    /// 添付 media は avatar より大きいが同じ経路で届き
+    /// (`pbs.twimg.com`､API の quota も credit も無い)､共有の画像
+    /// キャッシュ自身のサイズ上限で抑えられている｡
     fn refresh_media(&mut self, cx: &mut Context<'_, Self>) {
         let TimelineState::Loaded(items) = &self.state else {
             return;
@@ -781,10 +767,10 @@ impl TimelineView {
         let mut wanted: Vec<String> = Vec::new();
         for url in items
             .iter()
-            // #123: a quoted post's images download by the same path as
-            // the row's own. Without this the card renders empty frames
-            // that never fill, which is worse than the text-only card it
-            // replaced.
+            // #123: quote された post の画像も､行自身のものと同じ経路で
+            // 落ちてくる｡これが無いとカードは永久に埋まらない空の枠を
+            // 描くことになり､それが置き換えたテキストだけのカードより
+            // 悪い｡
             .flat_map(|item| {
                 item.media
                     .iter()
@@ -823,20 +809,19 @@ impl TimelineView {
         }));
     }
 
-    /// Toggle one post's repost state (#15): flip the button immediately
-    /// (never waiting on the network — mirrors #14's synchronous
-    /// `start_submitting`), then run the actual create/delete request on
-    /// the background executor and apply whatever it resolves to —
-    /// including any error-reconciliation `repost::create`/`repost::remove`
-    /// already folded into their own `Result<bool>` — back onto the same
-    /// per-post state.
+    /// 一つの post の repost 状態を切り替える (#15): ボタンは即座に反転し
+    /// (ネットワークを待たない — #14 の同期的な `start_submitting` を写し
+    /// たものだ)､その後 background executor で実際の create/delete リク
+    /// エストを走らせ､解決した結果を — `repost::create`/`repost::remove`
+    /// が自分の `Result<bool>` へすでに畳み込んだ辻褄合わせも含めて —
+    /// 同じ post ごとの状態へ適用する｡
     ///
-    /// No-ops without a client or a resolved `home_user_id` — the repost
-    /// endpoints act as *this* account, whose id only `/me` (#11) resolves,
-    /// so there is nothing to call yet if it hasn't. The `tweet.write`
-    /// scope check mirrors `submit_post`'s exactly, reusing #14's own
-    /// "Re-authorize" affordance rather than a parallel check, per #15's
-    /// explicit instruction.
+    /// client か解決済みの `home_user_id` が無ければ何もしない — repost の
+    /// endpoint は *この* アカウントとして振る舞い､その id を解決するのは
+    /// `/me` (#11) だけなので､まだなら呼ぶ先が無い｡`tweet.write` の scope
+    /// 確認は `submit_post` のものをそのまま写しており､#15 の明示的な
+    /// 指示に従って､並立する確認ではなく #14 自身の "Re-authorize" の
+    /// 導線を使い回す｡
     pub(super) fn toggle_repost(&mut self, post_id: String, cx: &mut Context<'_, Self>) {
         let Some(client) = self.client.clone() else {
             return;
@@ -898,16 +883,15 @@ impl TimelineView {
         self.repost_tasks.insert(task_key, task);
     }
 
-    /// Delete `post_id` for real (#72) — the second click.
+    /// `post_id` を本当に削除する (#72) — 2 回目のクリックだ｡
     ///
-    /// On success the post is dropped from the rendered timeline *and* from
-    /// the cache file, and the cache is read back to confirm: a row that
-    /// vanishes now and returns on the next start is exactly the
-    /// looks-like-it-worked failure #54 was about, and the issue calls it
-    /// out by name.
+    /// 成功したら post は描画中の timeline からも *キャッシュファイルから
+    /// も* 落ち､確認のためキャッシュを読み直す: いま消えて次の起動で
+    /// 戻ってくる行は､#54 が扱っていた「うまくいったように見える失敗」
+    /// そのもので､issue はそれを名指ししている｡
     ///
-    /// A failed delete leaves the row in place with the API's own message
-    /// attached, which is the honest outcome — the post still exists.
+    /// 失敗した削除は API 自身のメッセージを添えて行をその場に残す｡それ
+    /// が正直な結末だ — post はまだ存在している｡
     pub(super) fn confirm_delete(&mut self, post_id: String, cx: &mut Context<'_, Self>) {
         let Some(client) = self.client.clone() else {
             return;
@@ -915,8 +899,8 @@ impl TimelineView {
         let Some(user_id) = self.home_user_id.clone() else {
             return;
         };
-        // #161: the cache file a delete has to be removed from is
-        // whichever one the window is rendering.
+        // #161: 削除がどのキャッシュファイルから消さねばならないかは､
+        // ウィンドウが描画しているものによる｡
         let source = self.source.clone();
 
         self.pending_delete = None;
@@ -930,8 +914,8 @@ impl TimelineView {
                 .background_executor()
                 .spawn(async move {
                     client.delete_post(&paths, &request_id, oauth::unix_now())?;
-                    // Only once X has confirmed the deletion: forgetting it
-                    // locally first would hide a post that still exists.
+                    // X が削除を認めてからにする: 先にローカルで忘れると
+                    // まだ存在する post を隠すことになる｡
                     cache::forget_post(&paths, &source, &user_id, &request_id, oauth::unix_now())
                 })
                 .await;
@@ -942,10 +926,10 @@ impl TimelineView {
                     Ok(remaining) => {
                         this.delete_failures.remove(&post_id);
                         this.state = TimelineState::Loaded(remaining);
-                        // #21: a buffer fetched before the delete still
-                        // holds the deleted post. Applying one afterwards
-                        // would put it back on screen — the exact failure
-                        // #72 rewrites the cache file to prevent.
+                        // #21: 削除より前に取られた buffer は削除された
+                        // post をまだ持っている｡後から適用すると画面へ
+                        // 戻してしまう — #72 がキャッシュファイルを書き
+                        // 直してまで防いでいる失敗そのものだ｡
                         this.clear_pending();
                     }
                     Err(error) => {
@@ -958,18 +942,17 @@ impl TimelineView {
         }));
     }
 
-    /// Hand `url` to the system browser (#70).
+    /// `url` をシステムのブラウザへ渡す (#70)｡
     ///
-    /// Runs on the background executor rather than in the click handler:
-    /// spawning a process is a syscall the UI thread has no reason to wait
-    /// on. A refusal or a failure to launch is reported through
-    /// `open_failure`, which the row renders — a click that silently does
-    /// nothing is the one outcome worth avoiding here.
+    /// click handler ではなく background executor で走らせる: プロセスの
+    /// 起動は syscall であり､UI スレッドが待つ理由は無い｡拒否や起動の
+    /// 失敗は `open_failure` を通して報告され､行がそれを描く — クリック
+    /// が黙って何もしないことこそ､ここで避ける価値のある結末だ｡
     ///
-    /// The one method here that spends no API credits. It is here anyway
-    /// because the seam is "holds a `cx.spawn` and reaches outside the
-    /// process", and a browser launch is that — leaving it behind in `ui`
-    /// would make the boundary something nobody could restate.
+    /// ここで唯一 API のクレジットを使わないメソッドだ｡それでもここに
+    /// 在るのは､継ぎ目が「`cx.spawn` を握り､プロセスの外へ手を伸ばす」
+    /// であり､ブラウザの起動がまさにそれだからだ — `ui` に置き去りにす
+    /// れば､境界は誰にも言い直せないものになってしまう｡
     pub(super) fn open_in_browser(&mut self, url: String, cx: &mut Context<'_, Self>) {
         self.open_failure = None;
         self.open_task = Some(cx.spawn(async move |this, cx| {
@@ -987,17 +970,17 @@ impl TimelineView {
         }));
     }
 
-    /// Run the interactive PKCE sign-in flow: open the browser, wait for the
-    /// loopback callback, exchange the code, persist the tokens, then fall
-    /// straight into [`Self::reload`].
+    /// 対話的な PKCE の sign-in flow を走らせる: ブラウザを開き､loopback
+    /// の callback を待ち､code を交換し､token を永続化して､そのまま
+    /// [`Self::reload`] へ落ちる｡
     pub(super) fn sign_in(&mut self, cx: &mut Context<'_, Self>) {
-        // #33: `Config::resolve` refuses to start without one, so there is
-        // nothing to check here any more.
+        // #33: `Config::resolve` がこれ無しでは起動を拒むので､ここで
+        // 確認することはもう無い｡
         let client_id = self.config.oauth_client_id.clone();
 
-        // The flow's start was invisible: success logged "signed in with
-        // OAuth" and failure logged the error, but a click whose browser
-        // never came back left nothing at all.
+        // flow の開始は見えなかった: 成功は "signed in with OAuth" を､
+        // 失敗はエラーをログに残すが､ブラウザが戻ってこなかったクリック
+        // は何一つ残さなかった｡
         log::info("sign-in started — opening the browser and waiting for its callback");
         self.state = TimelineState::SigningIn;
         let paths = self.paths.clone();
@@ -1017,36 +1000,34 @@ impl TimelineView {
                 Ok(tokens) => {
                     log::info("signed in with OAuth");
                     this.signed_in_with_oauth = true;
-                    // #14: the freshly granted scope — this is what makes
-                    // `offers_reauthorize` stop offering the button right
-                    // after a successful re-authorization.
+                    // #14: 新しく許可された scope — 再認可が成功した直後
+                    // に `offers_reauthorize` がボタンを出すのをやめるのは
+                    // これのおかげだ｡
                     this.oauth_scope.clone_from(&tokens.scope);
-                    // #54: a fresh sign-in fixes whatever the banner was
-                    // reporting — an expired session can't stay expired past
-                    // a brand-new one.
+                    // #54: 新しい sign-in はバナーが報じていた何であれ
+                    // 解消する — 期限切れのセッションが真新しいものを
+                    // 越えて期限切れのままではいられない｡
                     this.session_notice = None;
-                    // #11: a stored OAuth session always maps to the home
-                    // timeline — see `TimelineSource::for_credential`.
+                    // #11: 保存された OAuth セッションは常に home timeline
+                    // へ対応する — `TimelineSource::for_credential` を見よ｡
                     this.client = Some(XClient::new(tokens.access_token));
-                    // The other place the sync can start. This is the path
-                    // "Re-authorize" takes, and it is the one that matters
-                    // for a session that was refused for a missing scope:
-                    // the scope it was missing has just been granted, and
-                    // without this the sync would stay off until the app
-                    // was restarted.
+                    // sync が始まりうるもう一方の場所だ｡"Re-authorize" が
+                    // 通る経路であり､scope 不足で断られたセッションに
+                    // とって効くのはこちらだ: 足りなかった scope がいま
+                    // 許可されたところで､これが無いと sync はアプリを
+                    // 再起動するまで止まったままになる｡
                     this.start_sync(SyncTrigger::Scheduled, cx);
-                    // #21: the other place auto-refresh can start, for the
-                    // same reason — until this point there was no client
-                    // for a poll to fetch with. Started before the reload
-                    // below, whose own `last_reload_at` is then what the
-                    // first poll anchors on.
+                    // #21: 同じ理由で auto-refresh が始まりうるもう一方の
+                    // 場所だ — ここまで poll が取得に使う client が無かっ
+                    // た｡下の reload より前に始める｡そうすればその reload
+                    // 自身の `last_reload_at` が最初の poll の起点になる｡
                     this.start_auto_refresh(cx);
-                    // #21: a session change is a fresher source than
-                    // anything a poll left buffered — see `clear_pending`.
+                    // #21: セッションの変化は poll が溜めた何よりも新しい
+                    // 出所だ — `clear_pending` を見よ｡
                     this.clear_pending();
-                    // #57: confirms what the user just did — must not wait
-                    // out #10's interval, which exists to suppress polling,
-                    // not to gate a direct response to a user action.
+                    // #57: ユーザーがいまやったことを確かめる — #10 の
+                    // 間隔を待ってはならない｡あれは poll を抑えるためで
+                    // あり､ユーザー操作への直接の応答を止めるためではない｡
                     this.reload(ReloadTrigger::UserAction, cx);
                 }
                 Err(error) => {
@@ -1060,35 +1041,34 @@ impl TimelineView {
         cx.notify();
     }
 
-    /// Submit the composer's current draft as a new post (#14), quoting
-    /// whatever [`ComposeState::quote`] currently holds, if anything (#16).
+    /// composer のいまの下書きを新しい post として送る (#14)｡
+    /// [`ComposeState::quote`] が何か持っていればそれを quote する (#16)｡
     ///
-    /// Refuses to do anything — without spawning a task or touching the
-    /// network — unless [`ComposeState::can_submit`] says yes. This is
-    /// also what rules out a double submit: `can_submit` depends on
-    /// `compose.status`, and the very next statement below (once every
-    /// guard has passed) sets that status to `Submitting` *synchronously*,
-    /// before this function returns to gpui's event loop or yields to the
-    /// background executor via `cx.spawn`. gpui runs one click handler to
-    /// completion before dispatching the next input event, so a second
-    /// click — however fast — calls `submit_post` again only after this
-    /// one has already returned, by which point `can_submit` is false and
-    /// the function returns immediately at the top. No task is spawned, and
-    /// `submit_task` is never overwritten mid-flight.
+    /// [`ComposeState::can_submit`] が是と言わないかぎり — タスクを spawn
+    /// もせずネットワークにも触れず — 何もしない｡二重送信を排除している
+    /// のもこれだ: `can_submit` は `compose.status` に依存し､すべての
+    /// guard を通った直後の文がその status を *同期的に* `Submitting` へ
+    /// する｡この関数が gpui の event loop へ戻るより前､`cx.spawn` で
+    /// background executor へ譲るより前のことだ｡gpui は次の入力イベントを
+    /// 配る前に一つの click handler を最後まで走らせるので､どれだけ速い
+    /// 2 回目のクリックでも `submit_post` を再び呼ぶのはこれが戻った後で
+    /// あり､その時点で `can_submit` は偽､関数は冒頭で即座に戻る｡タスク
+    /// は spawn されず､`submit_task` が飛行中に上書きされることも無い｡
     ///
-    /// The scope check below is deliberately not part of `ComposeState`:
-    /// that type only knows about the draft *text*, not the session's
-    /// OAuth scope, so a missing `tweet.write` is refused here — before
-    /// spending a request that's guaranteed to 403 — via
-    /// `ComposeState::refuse` rather than `can_submit`. The header's
-    /// "Re-authorize" button (see `offers_reauthorize`) is the actual fix.
+    /// 下の scope 確認を `ComposeState` の一部にしていないのは意図的だ:
+    /// あの型は下書きの *テキスト* しか知らず､セッションの OAuth scope は
+    /// 知らない｡だから `tweet.write` の欠落は — 403 が確定しているリク
+    /// エストを使う前に — `can_submit` ではなく `ComposeState::refuse` で
+    /// ここで断る｡実際の解決策はヘッダの "Re-authorize" ボタンだ
+    /// (`offers_reauthorize` を見よ)｡
     ///
-    /// Takes `window` (unlike most of this file's other actions) because
-    /// #38's success path needs it: clearing `compose_input`'s own buffer —
-    /// see the field's doc — goes through `InputState::set_value`, which
-    /// requires one. `cx.spawn_in`/`WeakEntity::update_in` (rather than the
-    /// plain `cx.spawn`/`update` this struct's other actions use) carry a
-    /// `Window` across the `await` for exactly that.
+    /// このファイルの他のアクションの多くと違い `window` を取るのは､#38
+    /// の成功経路がそれを必要とするからだ: `compose_input` 自身のバッファ
+    /// を空にする処理は — フィールドの doc を見よ — `InputState::set_value`
+    /// を通り､これが `window` を要求する｡この構造体の他のアクションが使う
+    /// 素の `cx.spawn`/`update` ではなく `cx.spawn_in`/
+    /// `WeakEntity::update_in` を使うのは､まさにそのために `Window` を
+    /// `await` を越えて運ぶためだ｡
     pub(super) fn submit_post(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         if !self.compose.can_submit() {
             return;
@@ -1112,12 +1092,12 @@ impl TimelineView {
 
         let paths = self.paths.clone();
         let text = self.compose.text().to_string();
-        // #16: whichever post (if any) "Quote" set as the target — cloned
-        // out before the closure below moves `self.compose` implicitly via
-        // `apply_result`'s mutation, same as `text` above.
+        // #16: "Quote" が対象に据えた post があればそれだ — 上の `text`
+        // と同じく､下の closure が `apply_result` の変更を通して暗黙に
+        // `self.compose` を動かす前に clone しておく｡
         let quote_tweet_id = self.compose.quote().map(|target| target.post_id.clone());
-        // #71: the post this reply answers, if "Reply" set one. Mutually
-        // exclusive with the quote above — see `ComposeState::set_reply`.
+        // #71: "Reply" が据えていれば､この reply が答える post だ｡上の
+        // quote とは排他だ — `ComposeState::set_reply` を見よ｡
         let reply_to_post_id = self.compose.reply().map(|target| target.post_id.clone());
 
         self.submit_task = Some(cx.spawn_in(window, async move |this, cx| {
@@ -1141,18 +1121,18 @@ impl TimelineView {
                 this.compose
                     .apply_result(result.map_err(|error| format!("{error:#}")));
                 if succeeded {
-                    // `apply_result`'s `Ok` branch just cleared the mirror in
-                    // `this.compose`, but `compose_input` is the widget's own,
-                    // entirely separate buffer (#38) — this is what actually
-                    // empties the box the user sees.
+                    // `apply_result` の `Ok` 分岐は `this.compose` 側の
+                    // 写しを消したところだが､`compose_input` は widget
+                    // 自身のまったく別のバッファだ (#38) — ユーザーに見え
+                    // る入力欄を実際に空にするのはこちらだ｡
                     this.compose_input.update(cx, |state, cx| {
                         state.set_value("", window, cx);
                     });
-                    // A successful post changes the timeline, so fall into
-                    // a reload — but #57: this is confirming the result of
-                    // what the user just did (and the post itself already
-                    // spent a request), not polling, so it must bypass
-                    // #10's interval rather than risk being blocked by it.
+                    // 成功した post は timeline を変えるので reload へ
+                    // 落ちる — ただし #57: これは poll ではなくユーザーが
+                    // いまやったことの結果を確かめるもので (post 自体が
+                    // すでにリクエストを 1 回使っている)､#10 の間隔に
+                    // 止められる危険を冒すのではなく迂回せねばならない｡
                     this.reload(ReloadTrigger::UserAction, cx);
                 }
                 cx.notify();

@@ -2,20 +2,20 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-/// A user object as returned under `data` or `includes.users`.
+/// `data` または `includes.users` の下で返されるユーザーオブジェクト｡
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct User {
     pub id: String,
     pub name: String,
     pub username: String,
-    /// The account's avatar (#64), present only because `user.fields` asks
-    /// for `profile_image_url`. `#[serde(default)]` since an account can
-    /// have none, and every fixture that predates #64 omits it.
+    /// アカウントのアバター (#64)｡`user.fields` が `profile_image_url` を
+    /// 要求しているからこそ届く｡アバターを持たないアカウントがあり､#64 以前の
+    /// フィクスチャはどれもこれを省いているので `#[serde(default)]`｡
     #[serde(default)]
     pub profile_image_url: Option<String>,
 }
 
-/// A post object as returned under `data`.
+/// `data` の下で返される post オブジェクト｡
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct Post {
     pub id: String,
@@ -24,57 +24,55 @@ pub(crate) struct Post {
     pub created_at: Option<String>,
     #[serde(default)]
     pub author_id: Option<String>,
-    /// The post(s) this one references — a repost, a quote, a reply, or (per
-    /// X's API) some combination of those in a single post, e.g. quoting a
-    /// tweet from inside a reply thread (#13). `#[serde(default)]` since a
-    /// plain post that references nothing simply omits the field, and every
-    /// timeline fixture that predates #13 does exactly that. See
-    /// [`TimelineResponse::into_items`] for the precedence used when a post
-    /// carries more than one entry.
+    /// この post が参照する post — repost､quote､reply､あるいは (X の API 上)
+    /// それらが 1 つの post に組み合わさったもの｡たとえば reply スレッドの中から
+    /// tweet を quote する場合 (#13)｡何も参照しない素の post はこのフィールドを
+    /// 単に省くし､#13 以前の timeline フィクスチャはどれもそうなっているので
+    /// `#[serde(default)]`｡1 つの post が複数のエントリを持つときの優先順位は
+    /// [`TimelineResponse::into_items`] を見よ｡
     #[serde(default)]
     pub referenced_tweets: Vec<ReferencedTweetRef>,
-    /// Engagement counts (#67), present only because `tweet.fields` asks for
-    /// `public_metrics` — see [`crate::x_api::client`]'s URL builders. `None`
-    /// for a response that predates that (fixtures included) or for a post X
-    /// declines to report counts for.
+    /// エンゲージメントの件数 (#67)｡`tweet.fields` が `public_metrics` を
+    /// 要求しているからこそ届く — [`crate::x_api::client`] の URL ビルダーを
+    /// 見よ｡それ以前のレスポンス (フィクスチャを含む) や､X が件数の報告を
+    /// 拒む post では `None`｡
     #[serde(default)]
     pub public_metrics: Option<PostMetrics>,
-    /// The `entities` object (#70), present only because `tweet.fields`
-    /// asks for it. Its `urls` are the only part this crate reads: a post's
-    /// text carries `t.co` shortlinks, and `expanded_url` is the only way
-    /// to reach the real destination without following a redirect.
+    /// `entities` オブジェクト (#70)｡`tweet.fields` が要求しているからこそ
+    /// 届く｡このクレートが読むのは `urls` だけだ: post の本文は `t.co` の
+    /// 短縮リンクを持っていて､リダイレクトを辿らずに実際の宛先へ至る手段は
+    /// `expanded_url` しかない｡
     #[serde(default)]
     pub entities: Option<Entities>,
-    /// The media attached to this post (#65) — keys only; the media
-    /// objects themselves arrive in `includes.media`, joined by
-    /// [`post_media`] the same way an author is joined from
-    /// `includes.users`.
+    /// この post に添付されたメディア (#65) — キーだけ｡メディアオブジェクト
+    /// 自体は `includes.media` で届き､著者が `includes.users` から結合される
+    /// のと同じやり方で [`post_media`] が結合する｡
     #[serde(default)]
     pub attachments: Option<Attachments>,
 }
 
-/// A post's `attachments` object (#65). Only `media_keys` is read; polls
-/// also live here and are not supported.
+/// post の `attachments` オブジェクト (#65)｡読むのは `media_keys` だけで､
+/// poll もここに入るがサポートしていない｡
 #[derive(Debug, Clone, Default, Deserialize)]
 pub(crate) struct Attachments {
     #[serde(default)]
     pub media_keys: Vec<String>,
 }
 
-/// One entry in `includes.media` (#65), as returned for the `media.fields`
-/// the timeline requests ask for.
+/// `includes.media` の 1 エントリ (#65)｡timeline のリクエストが要求する
+/// `media.fields` に対して返ってくる形だ｡
 ///
-/// Every field but `media_key` is optional on the wire, and deliberately
-/// modelled that way: X omits `url` for a video or animated GIF (only
-/// `preview_image_url` is given), omits `alt_text` unless the author wrote
-/// one, and has been known to omit dimensions. A missing field must degrade
-/// the rendering, never fail the parse — the same rule the rest of this
-/// module follows.
+/// `media_key` 以外のフィールドはすべてワイヤ上で optional であり､意図して
+/// そうモデリングしてある: X は video や animated GIF で `url` を省き
+/// (`preview_image_url` だけが与えられる)､著者が書いていなければ `alt_text`
+/// を省き､寸法を省いた例もある｡欠けたフィールドは描画を劣化させるにとどめ､
+/// パースを失敗させてはならない — このモジュールの他の部分が従うのと同じ規則だ｡
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct Media {
-    /// X spells this `media_key`; renamed on the wire because a field
-    /// called `media_key` on a struct called `Media` says the same word
-    /// twice — clippy's `struct_field_names` objects, and it is right.
+    /// X はこれを `media_key` と綴る｡`Media` という struct の上で
+    /// `media_key` というフィールド名は同じ語を二度言うことになるので､
+    /// ワイヤ上の綴りから改名した — clippy の `struct_field_names` が異議を
+    /// 唱えるし､それは正しい｡
     #[serde(rename = "media_key")]
     pub key: String,
     #[serde(default, rename = "type")]
@@ -91,23 +89,22 @@ pub(crate) struct Media {
     pub alt_text: Option<String>,
 }
 
-/// The subset of X's `entities` object twigpui reads (#70) — just the URLs.
-/// Mentions, hashtags and annotations are also in there; serde drops what
-/// is not listed, so adding them later is additive.
+/// twigpui が読む X の `entities` オブジェクトの部分集合 (#70) — URL だけ｡
+/// mention や hashtag､annotation もそこに入っているが､serde は列挙して
+/// いないものを捨てるので､後から足すのは加算的な変更で済む｡
 #[derive(Debug, Clone, Default, Deserialize)]
 pub(crate) struct Entities {
     #[serde(default)]
     pub urls: Vec<UrlEntity>,
 }
 
-/// One entry in `entities.urls` (#70). `expanded_url` is the destination
-/// the `t.co` shortlink in the post's text stands for; `display_url` is
-/// X's own shortened-for-humans rendering of it (`example.com/a/b…`).
+/// `entities.urls` の 1 エントリ (#70)｡`expanded_url` は post の本文にある
+/// `t.co` 短縮リンクが指す宛先で､`display_url` は X 自身による人間向けの
+/// 短縮表示 (`example.com/a/b…`) だ｡
 ///
-/// Both are optional on the wire: X omits `expanded_url` for some entities
-/// (a media attachment's own `t.co`, notably), and a link with nowhere to
-/// go is dropped rather than rendered as a dead chip — see
-/// [`post_links`].
+/// どちらもワイヤ上では optional だ: X は一部のエンティティ (とくにメディア
+/// 添付自身の `t.co`) で `expanded_url` を省くし､行き先の無いリンクは死んだ
+/// チップとして描かずに捨てる — [`post_links`] を見よ｡
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct UrlEntity {
     #[serde(default)]
@@ -116,24 +113,22 @@ pub(crate) struct UrlEntity {
     pub display_url: Option<String>,
 }
 
-/// A post's reply/repost/like counts (#67).
+/// post の reply/repost/like の件数 (#67)｡
 ///
-/// Deserialized from X's `public_metrics` object and serialized into the
-/// timeline cache file, the same way [`TimelineItem`] itself is. Every
-/// field is renamed on the wire: X spells them `reply_count`,
-/// `retweet_count` and `like_count`, but the crate says "repost" rather
-/// than "retweet" (#15), and the `_count` suffix reads as noise on a type
-/// that holds nothing else. The counts X also sends but this crate ignores
-/// (`quote_count`, `bookmark_count`, `impression_count`) are simply not
-/// listed — serde drops unknown fields.
+/// X の `public_metrics` オブジェクトから deserialize し､[`TimelineItem`]
+/// 自体と同じように timeline のキャッシュファイルへ serialize する｡全フィールド
+/// をワイヤ上の綴りから改名してある: X は `reply_count`､`retweet_count`､
+/// `like_count` と綴るが､このクレートは "retweet" ではなく "repost" と言うし
+/// (#15)､他に何も持たない型では `_count` という接尾辞はノイズに読める｡X が
+/// 送ってくるがこのクレートが無視する件数 (`quote_count`､`bookmark_count`､
+/// `impression_count`) は単に列挙していない — serde は未知のフィールドを捨てる｡
 ///
-/// These are a **snapshot taken when the post was fetched**, and nothing
-/// refreshes them: an incremental reload sends `since_id`, so a post already
-/// on file is never returned again (see `cache::splice`). A row's
-/// counts therefore show what was true when it first arrived. Rendering them
-/// with a per-row "as of" timestamp was considered and dropped — the row is
-/// already dense, and the drift matters less than the counts being visible
-/// at all, which is what #67 is about.
+/// これは **post を取得した時点のスナップショット** であって､何も更新しない:
+/// 差分リロードは `since_id` を送るので､すでに手元にある post が再び返って
+/// くることはない (`cache::splice` を見よ)｡だから行の件数は､それが最初に
+/// 届いたときに真だった値を見せている｡行ごとに "as of" のタイムスタンプを
+/// 添えて描くことは検討して落とした — 行はすでに密だし､ズレよりも件数が
+/// そもそも見えることのほうが重要で､#67 はそこを扱う issue だ｡
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct PostMetrics {
     #[serde(default, rename = "reply_count")]
@@ -144,10 +139,10 @@ pub(crate) struct PostMetrics {
     pub likes: u64,
 }
 
-/// One entry in a post's `referenced_tweets` (#13) — the API's own
-/// "this post is a reply/quote/retweet of that other post" annotation. A
-/// single post can carry more than one, which is why `Post::referenced_tweets`
-/// is a `Vec` rather than an `Option`.
+/// post の `referenced_tweets` の 1 エントリ (#13) — "this post is a
+/// reply/quote/retweet of that other post" という API 自身の注記だ｡1 つの
+/// post が複数持ちうるので､`Post::referenced_tweets` は `Option` ではなく
+/// `Vec` になっている｡
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct ReferencedTweetRef {
     #[serde(rename = "type")]
@@ -155,17 +150,16 @@ pub(crate) struct ReferencedTweetRef {
     pub id: String,
 }
 
-/// The recognized values of `referenced_tweets[].type`.
+/// `referenced_tweets[].type` として認識する値｡
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ReferenceKind {
     Retweeted,
     Quoted,
     RepliedTo,
-    /// Forward compatibility: an unrecognized reference type from a future
-    /// API revision must not fail parsing the whole post, the same way an
-    /// unrecognized cache-file shape is a clean miss rather than an error
-    /// (see `cache::load_json`).
+    /// 前方互換のため: 将来の API 改訂で増えた未知の参照型が､post 全体の
+    /// パースを失敗させてはならない｡未知の形のキャッシュファイルがエラーでは
+    /// なく素直なミスになるのと同じだ (`cache::load_json` を見よ)｡
     #[serde(other)]
     Other,
 }
@@ -174,18 +168,18 @@ pub(crate) enum ReferenceKind {
 pub(crate) struct Includes {
     #[serde(default)]
     pub users: Vec<User>,
-    /// Referenced posts (#13) — a repost's or quote's real content lives
-    /// here, keyed by id, rather than in `data` itself.
+    /// 参照先の post (#13) — repost や quote の実体は `data` ではなく､
+    /// id をキーにしてここに入っている｡
     #[serde(default)]
     pub tweets: Vec<Post>,
-    /// Attached media (#65), keyed by `media_key` — the same
-    /// side-table-plus-keys shape `users` and `tweets` already use.
+    /// 添付メディア (#65)｡`media_key` をキーにする — `users` や `tweets` が
+    /// すでに使っているのと同じ､サイドテーブルとキーの形だ｡
     #[serde(default)]
     pub media: Vec<Media>,
 }
 
-/// The `errors` array X returns alongside partial results, and also the
-/// problem-details body it returns for outright failures.
+/// 部分的な結果と一緒に X が返す `errors` 配列｡完全な失敗のときに返す
+/// problem-details のボディでもある｡
 #[derive(Debug, Clone, Default, Deserialize)]
 pub(crate) struct ApiProblem {
     #[serde(default)]
@@ -199,7 +193,7 @@ pub(crate) struct ApiProblem {
 }
 
 impl ApiProblem {
-    /// Best available human-readable description, flattening nested `errors`.
+    /// 入れ子の `errors` を平坦化した､人間が読める最良の説明｡
     pub(crate) fn message(&self) -> Option<String> {
         if let Some(detail) = &self.detail {
             return Some(match &self.title {
@@ -223,43 +217,42 @@ pub(crate) struct UserLookupResponse {
     pub data: Option<User>,
 }
 
-/// The `POST /2/tweets` request body (#14, extended by #16) — the post text
-/// plus an optional quote target; no reply/poll support yet (see #12).
+/// `POST /2/tweets` のリクエストボディ (#14､#16 で拡張) — post の本文と､
+/// 任意の quote 対象｡reply/poll はまだサポートしていない (#12 を見よ)｡
 ///
-/// `quote_tweet_id` deliberately reuses this same endpoint/struct rather
-/// than a separate quote request type or `Endpoint` variant: X has no
-/// dedicated quote endpoint, and splitting the rate-limit tracking for what
-/// X treats as one endpoint would only create a second, incorrect window.
-/// `skip_serializing_if` keeps it entirely absent (not `null`) for an
-/// ordinary post — X may reject a stray null outright.
+/// `quote_tweet_id` は､専用の quote リクエスト型や `Endpoint` の variant を
+/// 増やすのではなく､意図して同じエンドポイント/struct を再利用している: X に
+/// quote 専用のエンドポイントは無く､X が 1 つのエンドポイントとして扱うものの
+/// rate limit の追跡を分ければ､二つ目の誤ったウィンドウを作るだけだからだ｡
+/// 普通の post では `skip_serializing_if` がこれを (`null` ですらなく) 完全に
+/// 消す — X は迷い込んだ null をそのまま拒否することがある｡
 #[derive(Debug, Serialize)]
 pub(crate) struct PostTweetRequest<'a> {
     pub text: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub quote_tweet_id: Option<&'a str>,
-    /// #71: what makes this post a reply. Nested rather than flat because
-    /// that is the shape X specifies, and `skip_serializing_if` keeps it
-    /// entirely absent for an ordinary post — the same treatment
-    /// `quote_tweet_id` gets, for the same reason.
+    /// #71: この post を reply たらしめるもの｡X が指定する形がそうなので
+    /// フラットではなく入れ子にしてある｡普通の post では
+    /// `skip_serializing_if` がこれを完全に消す — `quote_tweet_id` と同じ
+    /// 扱いで､理由も同じだ｡
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reply: Option<ReplyRequest<'a>>,
 }
 
-/// The `reply` object inside [`PostTweetRequest`] (#71).
+/// [`PostTweetRequest`] の中の `reply` オブジェクト (#71)｡
 #[derive(Debug, Serialize)]
 pub(crate) struct ReplyRequest<'a> {
     pub in_reply_to_tweet_id: &'a str,
 }
 
-/// What `POST /2/tweets` is being asked to publish (#71): the text plus
-/// whichever optional target the composer had.
+/// `POST /2/tweets` に publish を頼む中身 (#71): 本文と､composer が持って
+/// いた任意の対象だ｡
 ///
-/// A struct rather than three positional `Option` parameters threaded
-/// through `XClient::create_post` → `post` → `send_post_once`: at three
-/// arguments the call sites stop being readable, and two of them are
-/// `Option<&str>` that would silently swap without a type error — a
-/// mix-up that turns a quote into a reply under someone else's
-/// conversation.
+/// `XClient::create_post` → `post` → `send_post_once` と 3 つの位置引数の
+/// `Option` を通すのではなく struct にした: 引数が 3 つになると呼び出し側が
+/// 読めなくなるし､そのうち 2 つは `Option<&str>` で､型エラーも出ないまま
+/// 黙って入れ替わりうる — 取り違えれば quote が他人の会話にぶら下がる reply
+/// になる｡
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Draft<'a> {
     pub text: &'a str,
@@ -268,7 +261,7 @@ pub(crate) struct Draft<'a> {
 }
 
 impl<'a> Draft<'a> {
-    /// The request body for this draft.
+    /// この draft のリクエストボディ｡
     pub(crate) fn to_request(self) -> PostTweetRequest<'a> {
         PostTweetRequest {
             text: self.text,
@@ -280,38 +273,37 @@ impl<'a> Draft<'a> {
     }
 }
 
-/// The request body shared by `POST /2/users/:id/retweets` (#15) and
-/// `POST /2/users/:id/likes` (#68) — the id of the post being acted on;
-/// `user_id` (whose repost or like is being created) travels in the URL,
-/// not here. One type rather than two identical ones: X specifies the same
-/// single-field body for both, so a second copy could only ever drift.
+/// `POST /2/users/:id/retweets` (#15) と `POST /2/users/:id/likes` (#68) が
+/// 共有するリクエストボディ — 操作対象の post の id だ｡`user_id` (誰の repost
+/// や like を作るのか) はここではなく URL に乗る｡同一の型を 2 つ持たず 1 つに
+/// した: X はどちらにも同じ 1 フィールドのボディを指定しているので､二つ目の
+/// コピーはずれる余地にしかならない｡
 #[derive(Debug, Serialize)]
 pub(crate) struct TweetIdRequest<'a> {
     pub tweet_id: &'a str,
 }
 
-/// The request body `POST /2/lists/:id/members` (#163) takes — the id of
-/// the account being added; the list's own id travels in the URL. Shaped
-/// like [`TweetIdRequest`] and separate for the same reason that one is
-/// shared: a different field name is a different body.
+/// `POST /2/lists/:id/members` (#163) が取るリクエストボディ — 追加する
+/// アカウントの id だ｡list 自身の id は URL に乗る｡[`TweetIdRequest`] と
+/// 同じ形だが別の型なのは､あちらが共有されているのと同じ理由による:
+/// フィールド名が違えば別のボディだ｡
 ///
-/// **Spec-derived, unverified.** #163 was built without spending a request
-/// on `/2/lists/:id/members`, so this field name comes from docs.x.com, not
-/// from a 200. `x-api-endpoints` is explicit that the two disagree often
-/// enough to plan for.
+/// **spec 由来､未検証｡** #163 は `/2/lists/:id/members` にリクエストを 1 つも
+/// 使わずに作ったので､このフィールド名は 200 ではなく docs.x.com から来ている｡
+/// `x-api-endpoints` は､両者が食い違うことは織り込んでおくべきほど多いと
+/// はっきり書いている｡
 #[derive(Debug, Serialize)]
 pub(crate) struct UserIdRequest<'a> {
     pub user_id: &'a str,
 }
 
-/// One page of users, as `GET /2/users/:id/following` and
-/// `GET /2/lists/:id/members` return one (#163): the accounts themselves
-/// plus the cursor for the next page.
+/// ユーザーの 1 ページ｡`GET /2/users/:id/following` と
+/// `GET /2/lists/:id/members` が返す形だ (#163): アカウントそのものと､次の
+/// ページへのカーソル｡
 ///
-/// `data` is `#[serde(default)]` because both endpoints omit it entirely on
-/// an empty page rather than sending `[]` — an account that follows nobody,
-/// or a list with no members, which is exactly the state a first sync
-/// starts from.
+/// `data` が `#[serde(default)]` なのは､空のページでどちらのエンドポイントも
+/// `[]` を送らずフィールドごと省くからだ — 誰もフォローしていないアカウント､
+/// メンバーのいない list であり､最初の sync はまさにその状態から始まる｡
 #[derive(Debug, Clone, Default, Deserialize)]
 pub(crate) struct UserPageResponse {
     #[serde(default)]
@@ -321,21 +313,21 @@ pub(crate) struct UserPageResponse {
 }
 
 impl UserPageResponse {
-    /// The cursor for the page after this one, or `None` at the end.
+    /// この次のページへのカーソル｡末尾では `None`｡
     pub(crate) fn next_token(&self) -> Option<&str> {
         self.meta.next_token.as_deref()
     }
 }
 
-/// One List as `GET /2/users/:id/owned_lists` returns it (#164): what the
-/// picker needs to name a segment and nothing more. `Serialize` too,
-/// because the cache and a fixture both write these back out.
+/// `GET /2/users/:id/owned_lists` が返す 1 件の List (#164): picker が
+/// セグメントに名前を付けるのに要るものだけだ｡キャッシュもフィクスチャもこれを
+/// 書き出すので `Serialize` も付けてある｡
 ///
-/// `name` defaults rather than being required: the spec lists it among the
-/// default fields, but `x-api-endpoints` is a record of the spec and the
-/// API disagreeing, and a picker that fails to parse over one nameless
-/// list would take every other list down with it. The renderer falls back
-/// to the id (`ui::list_picker::segment_label`).
+/// `name` を必須にせず default にしてある: spec はこれを既定フィールドに
+/// 挙げているが､`x-api-endpoints` は spec と API が食い違ってきた記録であり､
+/// 名前の無い list 1 件でパースに失敗する picker は他のすべての list を
+/// 道連れにするからだ｡描画側は id にフォールバックする
+/// (`ui::list_picker::segment_label`)｡
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub(crate) struct ListSummary {
     pub id: String,
@@ -343,9 +335,9 @@ pub(crate) struct ListSummary {
     pub name: String,
 }
 
-/// The whole response of `GET /2/users/:id/owned_lists` (#164). `data`
-/// is absent, not empty, for an account that owns no lists — the same
-/// shape [`TimelineResponse`] already tolerates.
+/// `GET /2/users/:id/owned_lists` のレスポンス全体 (#164)｡list を 1 つも
+/// 持たないアカウントでは `data` は空ではなく不在になる — [`TimelineResponse`]
+/// がすでに許容しているのと同じ形だ｡
 #[derive(Debug, Default, Deserialize)]
 pub(crate) struct ListPageResponse {
     #[serde(default)]
@@ -355,16 +347,16 @@ pub(crate) struct ListPageResponse {
 }
 
 impl ListPageResponse {
-    /// The cursor for the page after this one, or `None` at the end.
+    /// この次のページへのカーソル｡末尾では `None`｡
     pub(crate) fn next_token(&self) -> Option<&str> {
         self.meta.next_token.as_deref()
     }
 }
 
-/// Pagination info returned alongside `data`. Only `next_token` matters to
-/// this crate — it's the cursor `x_api::client::home_timeline_url` sends back
-/// as `pagination_token` to fetch the next (older) page, driving #11's "Load
-/// older" button.
+/// `data` と一緒に返るページネーション情報｡このクレートに関わるのは
+/// `next_token` だけだ — `x_api::client::home_timeline_url` が次の (より古い)
+/// ページを取るために `pagination_token` として送り返すカーソルであり､#11 の
+/// "Load older" ボタンを動かしている｡
 #[derive(Debug, Clone, Default, Deserialize)]
 pub(crate) struct Meta {
     #[serde(default)]
@@ -381,10 +373,10 @@ pub(crate) struct TimelineResponse {
     pub meta: Meta,
 }
 
-/// A post flattened with its author, ready for rendering.
+/// 著者と一緒に平坦化し､そのまま描画できる形にした post｡
 ///
-/// `Serialize`/`Deserialize` since #9: this is the exact shape persisted to
-/// the timeline cache file, so no separate cache-only type is needed.
+/// #9 以降 `Serialize`/`Deserialize` を付けている: これが timeline のキャッシュ
+/// ファイルへ永続化される形そのものなので､キャッシュ専用の型は要らない｡
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct TimelineItem {
     pub id: String,
@@ -392,92 +384,88 @@ pub(crate) struct TimelineItem {
     pub created_at: Option<String>,
     pub author_name: String,
     pub author_username: String,
-    /// Set only for a repost (#13): the screen name of whoever's timeline
-    /// surfaced it, meant to be shown as a small line above the body —
-    /// which, unlike the four fields above, describes the *original* post
-    /// once this is `Some`. `#[serde(default)]` so cache files written
-    /// before #13 deserialize cleanly with this simply absent (`None`).
+    /// repost のときだけ入る (#13): それを timeline に浮かせた人の screen
+    /// name であり､本文の上の小さな行として出す前提だ — 上の 4 つの
+    /// フィールドと違い､ここが `Some` になると本文は *元の* post を指す｡
+    /// #13 以前に書かれたキャッシュファイルがこれを単に欠いたまま (`None`)
+    /// きれいに deserialize できるよう `#[serde(default)]`｡
     #[serde(default)]
     pub reposted_by: Option<String>,
-    /// Set for a quote — including a repost of a quote, per the precedence
-    /// documented on [`TimelineResponse::into_items`] (#13): the quoted
-    /// post, meant to be rendered as a card under the body.
-    /// `#[serde(default)]` for the same cache-compatibility reason as
-    /// `reposted_by`.
+    /// quote のときに入る — [`TimelineResponse::into_items`] に書いた優先順位
+    /// により､quote の repost も含む (#13): quote された post であり､本文の
+    /// 下にカードとして描く前提だ｡`reposted_by` と同じキャッシュ互換の理由で
+    /// `#[serde(default)]`｡
     #[serde(default)]
     pub quoted: Option<QuotedPost>,
-    /// Set for a reply (#12): who this post replies to, and that parent's
-    /// own post id — the anchor `ui.rs`'s "Show thread" walk starts from.
-    /// Populated at zero extra request cost, since the parent (and, when
-    /// expanded, its author) is already in `includes` per #13's
-    /// `referenced_tweets.id`/`.author_id` expansions. `#[serde(default)]`
-    /// for the same cache-compatibility reason as `reposted_by`/`quoted`.
+    /// reply のときに入る (#12): この post が誰に返信しているかと､その親の
+    /// post id — `ui.rs` の "Show thread" の遡りが起点にするアンカーだ｡
+    /// 親は (展開されていればその著者も) #13 の
+    /// `referenced_tweets.id`/`.author_id` の expansion によりすでに
+    /// `includes` にあるので､追加のリクエスト費用ゼロで埋まる｡
+    /// `reposted_by`/`quoted` と同じキャッシュ互換の理由で `#[serde(default)]`｡
     #[serde(default)]
     pub replied_to: Option<RepliedTo>,
-    /// The counts shown under the body (#67), for whichever post the body
-    /// actually holds — the original, not the outer post, once this row is
-    /// a repost. `None` when the response carried none, and — like
-    /// `reposted_by`/`quoted`/`replied_to` — `#[serde(default)]` so cache
-    /// files written before #67 deserialize cleanly.
+    /// 本文の下に出す件数 (#67)｡本文が実際に抱えているほうの post のもので､
+    /// この行が repost なら外側の post ではなく元の post のものだ｡
+    /// レスポンスが持っていなければ `None`｡`reposted_by`/`quoted`/`replied_to`
+    /// と同じく､#67 以前に書かれたキャッシュファイルがきれいに deserialize
+    /// できるよう `#[serde(default)]`｡
     #[serde(default)]
     pub metrics: Option<PostMetrics>,
-    /// The links in this post's text (#70), expanded out of the `t.co`
-    /// shortlinks the text itself carries — for whichever post the body
-    /// actually holds, so a repost gets the original's. Empty for a post
-    /// with no links, and `#[serde(default)]` so cache files written before
-    /// #70 deserialize cleanly, exactly like `metrics` above.
+    /// この post の本文にあるリンク (#70)｡本文が持つ `t.co` の短縮リンクを
+    /// 展開したもので､本文が実際に抱えているほうの post のもの — repost なら
+    /// 元の post のリンクになる｡リンクの無い post では空だ｡上の `metrics` と
+    /// 同じく､#70 以前に書かれたキャッシュファイルがきれいに deserialize
+    /// できるよう `#[serde(default)]`｡
     #[serde(default)]
     pub links: Vec<PostLink>,
-    /// The avatar URL for whoever's post the body holds (#64) — the
-    /// original's for a repost, matching `author_name`/`author_username`.
-    /// `None` when the author never expanded or has no avatar.
-    /// `#[serde(default)]` for the same cache-compatibility reason as
-    /// `links` above.
+    /// 本文が抱えている post の著者のアバター URL (#64) — repost なら元の
+    /// post の著者のもので､`author_name`/`author_username` と揃う｡著者が
+    /// 展開されなかったか､アバターを持たない場合は `None`｡上の `links` と
+    /// 同じキャッシュ互換の理由で `#[serde(default)]`｡
     #[serde(default)]
     pub author_avatar_url: Option<String>,
-    /// For a repost row (#52): the id of the *original* post, the one whose
-    /// text and author this row already displays.
+    /// repost の行のとき (#52): この行がすでに表示している本文と著者の持ち主､
+    /// つまり *元の* post の id｡
     ///
-    /// `id` above stays the retweet activity's own id — it is what keys the
-    /// row, the cache, and `replied_to`'s thread walk — but every write
-    /// endpoint (`POST /2/users/:id/retweets`, `POST /2/tweets`'s
-    /// `quote_tweet_id`, `POST /2/users/:id/likes`) acts on the original.
-    /// Without this field #15, #16 and #68 all had to withhold their
-    /// buttons on a repost row rather than risk sending the wrong id; see
-    /// [`action_post_id`]. Populated from the `retweeted` entry in
-    /// `referenced_tweets`, which #13's join already has in hand — no extra
-    /// request. `None` for every post that is not a repost.
+    /// 上の `id` は retweet というアクティビティ自身の id のままだ — 行と
+    /// キャッシュ､`replied_to` のスレッド遡りのキーがそれだからだ — が､
+    /// write のエンドポイント (`POST /2/users/:id/retweets`､`POST /2/tweets`
+    /// の `quote_tweet_id`､`POST /2/users/:id/likes`) はどれも元の post に
+    /// 作用する｡このフィールドが無いあいだ #15､#16､#68 はどれも､誤った id を
+    /// 送る危険を冒すより repost の行でボタンを出さずにいるほかなかった;
+    /// [`action_post_id`] を見よ｡値は `referenced_tweets` の `retweeted`
+    /// エントリから埋める｡#13 の結合がすでに手にしているので追加のリクエストは
+    /// 要らない｡repost でない post ではすべて `None`｡
     ///
-    /// `#[serde(default)]` for the usual reason: `cache::load_json` treats
-    /// a parse failure as a silent miss, so a missing attribute here would
-    /// quietly discard every user's cache and re-fetch it at their expense.
+    /// `#[serde(default)]` はいつもの理由による: `cache::load_json` はパース
+    /// 失敗を黙ったミスとして扱うので､ここで属性が欠けると全ユーザーの
+    /// キャッシュを黙って捨て､その費用で取り直すことになる｡
     #[serde(default)]
     pub original_post_id: Option<String>,
-    /// The media attached to whichever post the body holds (#65) — the
-    /// original's for a repost, matching its text. Empty for a post with
-    /// no attachments, and `#[serde(default)]` so cache files written
-    /// before #65 deserialize cleanly.
+    /// 本文が抱えているほうの post に添付されたメディア (#65) — repost なら
+    /// 元の post のもので､その本文と揃う｡添付の無い post では空だ｡#65 以前に
+    /// 書かれたキャッシュファイルがきれいに deserialize できるよう
+    /// `#[serde(default)]`｡
     #[serde(default)]
     pub media: Vec<PostMedia>,
 }
 
-/// One attached image, video thumbnail or GIF thumbnail, flattened for
-/// rendering (#65).
+/// 添付された画像 1 枚､あるいは video や GIF のサムネイルを､描画のために
+/// 平坦化したもの (#65)｡
 ///
-/// `url` is whatever is actually displayable: the image itself for a photo,
-/// the `preview_image_url` still for a video or animated GIF — neither of
-/// which this app plays (that is deliberately out of scope; the row shows
-/// the thumbnail and a badge saying what it is). An entry with nothing
-/// displayable at all is dropped by [`post_media`] rather than rendered as
-/// a hole.
+/// `url` は実際に表示できるものだ: photo なら画像そのもの､video や
+/// animated GIF なら静止画の `preview_image_url` — どちらもこのアプリは
+/// 再生しない (意図してスコープ外にしてある｡行はサムネイルと､それが何かを
+/// 言うバッジを出す)｡表示できるものが何も無いエントリは､穴として描かずに
+/// [`post_media`] が捨てる｡
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct PostMedia {
     pub url: String,
-    /// X's own `type` string, kept verbatim (`photo`, `video`,
-    /// `animated_gif`, or something newer). Not parsed into an enum: the
-    /// only decision it drives is which badge to show, and an unrecognized
-    /// value should show no badge rather than fail to parse a whole
-    /// timeline.
+    /// X 自身の `type` 文字列をそのまま持つ (`photo`､`video`､
+    /// `animated_gif`､あるいはもっと新しい何か)｡enum にはパースしない:
+    /// これが決めるのはどのバッジを出すかだけで､未知の値は timeline 全体の
+    /// パースを失敗させるのではなくバッジを出さないのが正しい｡
     #[serde(default)]
     pub kind: Option<String>,
     #[serde(default)]
@@ -488,33 +476,32 @@ pub(crate) struct PostMedia {
     pub alt_text: Option<String>,
 }
 
-/// The id of the post a write endpoint should act on for `item` (#52): the
-/// original for a repost row, the row's own id otherwise.
+/// `item` に対して write のエンドポイントが作用すべき post の id (#52):
+/// repost の行なら元の post､そうでなければ行自身の id だ｡
 ///
-/// One function rather than the same `unwrap_or` at four call sites, so
-/// "which id does a repost act on" has exactly one answer in the codebase.
-/// Nested references need no special case: `original_post_id` is set from
-/// the `retweeted` reference, and a repost *of a quote* is still a repost
-/// of that quote post — acting on it is acting on the thing the row shows.
+/// 同じ `unwrap_or` を 4 箇所の呼び出し側に書かず関数 1 つにしたので､
+/// "repost はどの id に作用するのか" の答えはコードベースにちょうど 1 つある｡
+/// 入れ子の参照に特別扱いは要らない: `original_post_id` は `retweeted` の
+/// 参照から入るし､*quote の* repost もその quote post の repost であって､
+/// それに作用することは行が見せているものに作用することだ｡
 pub(crate) fn action_post_id(item: &TimelineItem) -> &str {
     item.original_post_id.as_deref().unwrap_or(&item.id)
 }
 
-/// One openable link from a post's text (#70), flattened out of
-/// [`UrlEntity`] with both halves resolved: `url` is where it actually
-/// goes, `label` is what to show for it.
+/// post の本文から開けるリンク 1 件 (#70)｡[`UrlEntity`] を平坦化し､両側を
+/// 解決してある: `url` は実際の行き先､`label` はそれに対して見せるものだ｡
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct PostLink {
     pub url: String,
     pub label: String,
 }
 
-/// Who a reply is replying to (#12), joined from `includes` the same way a
-/// repost's or quote's original is. `author_name`/`author_username` are
-/// empty (never the whole field `None`) when the parent's author wasn't
-/// resolvable — deleted, protected, or simply not expanded — mirroring
-/// [`build_item`]'s existing convention for a missing repost original,
-/// rather than hiding the reply context entirely.
+/// reply が誰に返信しているか (#12)｡repost や quote の元 post と同じやり方で
+/// `includes` から結合する｡親の著者が解決できなかったとき — 削除済み､
+/// 非公開､あるいは単に展開されていない — は､reply の文脈をまるごと隠すのでは
+/// なく､元 post を欠いた repost に対する [`build_item`] の既存の作法に倣って
+/// `author_name`/`author_username` を空にする (フィールドごと `None` には
+/// しない)｡
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct RepliedTo {
     pub post_id: String,
@@ -522,51 +509,46 @@ pub(crate) struct RepliedTo {
     pub author_username: String,
 }
 
-/// A quoted post, flattened with its author, embedded in a [`TimelineItem`]
-/// as the source of a quote (#13).
+/// quote された post｡著者と一緒に平坦化し､quote の出どころとして
+/// [`TimelineItem`] に埋め込む (#13)｡
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct QuotedPost {
     pub author_name: String,
     pub author_username: String,
     pub text: String,
-    /// The quoted post's own attached media (#123), joined the same way a
-    /// repost's is — the quote card had text only until then, so an image
-    /// that *was* the point of the quote did not appear at all.
-    /// `#[serde(default)]` for the same cache-compatibility reason as
-    /// every other field added after #9.
+    /// quote された post 自身の添付メディア (#123)｡repost のものと同じやり方
+    /// で結合する — それまで quote のカードは本文だけで､画像こそが quote の
+    /// 眼目だった場合にそれがまったく出なかった｡#9 より後に足した他の
+    /// フィールドと同じキャッシュ互換の理由で `#[serde(default)]`｡
     #[serde(default)]
     pub media: Vec<PostMedia>,
 }
 
 impl TimelineResponse {
-    /// `meta.next_token`, if the response carried one — the cursor for
-    /// fetching the next (older) page (#11). Reads `&self` rather than
-    /// consuming it so callers can check this before [`Self::into_items`]
-    /// takes ownership.
+    /// レスポンスが持っていれば `meta.next_token` — 次の (より古い) ページを
+    /// 取るためのカーソル (#11)｡[`Self::into_items`] が所有権を取る前に
+    /// 呼び出し側が確認できるよう､消費せず `&self` で読む｡
     pub(crate) fn next_token(&self) -> Option<&str> {
         self.meta.next_token.as_deref()
     }
 
-    /// Join each post with its author from `includes.users`, and — #13 —
-    /// with whatever it references from `includes.tweets`.
+    /// 各 post を `includes.users` の著者と結合し､さらに — #13 —
+    /// `includes.tweets` から参照先とも結合する｡
     ///
-    /// Precedence when a post's `referenced_tweets` carries more than one
-    /// entry (X allows this — e.g. quoting a tweet from inside a reply
-    /// thread produces both a `quoted` and a `replied_to` entry on the same
-    /// post): `retweeted` wins over `quoted`, which wins over `replied_to`.
-    /// A repost fully replaces the rendered body with the original post, so
-    /// it takes priority over a quote card, which only adds to the body
-    /// rather than replacing it; a bare reply reference carries no
-    /// rendering of its own yet (thread display is #12), so it never wins
-    /// against either. See [`build_item`] and [`quote_of`] for where this
-    /// is applied.
+    /// post の `referenced_tweets` が複数のエントリを持つときの優先順位
+    /// (X はこれを許す — たとえば reply スレッドの中から tweet を quote すると
+    /// 同じ post に `quoted` と `replied_to` の両方が付く): `retweeted` が
+    /// `quoted` に勝ち､`quoted` が `replied_to` に勝つ｡repost は描画される
+    /// 本文を元の post で丸ごと置き換えるので､本文を置き換えず足すだけの
+    /// quote カードより優先する｡素の reply 参照はまだ自前の描画を持たない
+    /// (スレッド表示は #12) ので､どちらにも勝たない｡これがどこで適用されるかは
+    /// [`build_item`] と [`quote_of`] を見よ｡
     ///
-    /// Posts whose author is absent from the expansion still render, with
-    /// the author fields left empty — dropping them would silently hide
-    /// content. The same is true of a repost whose original is missing from
-    /// `includes` (deleted, protected, or simply not expanded): rather than
-    /// an empty row, it falls back to the outer post's own — possibly
-    /// truncated — text.
+    /// 著者が expansion に無い post もそのまま描画し､著者のフィールドは空に
+    /// する — 落とせば内容を黙って隠すことになる｡元の post が `includes` に
+    /// 無い repost (削除済み､非公開､あるいは単に展開されていない) も同じで､
+    /// 空の行にするのではなく､外側の post 自身の — 切り詰められているかも
+    /// しれない — 本文にフォールバックする｡
     pub(crate) fn into_items(self) -> Vec<TimelineItem> {
         let users: HashMap<&str, &User> = self
             .includes
@@ -581,7 +563,7 @@ impl TimelineResponse {
             .map(|post| (post.id.as_str(), post))
             .collect();
 
-        // #65: the media side table, keyed the same way as the two above.
+        // #65: メディアのサイドテーブル｡上の 2 つと同じやり方でキーを張る｡
         let media: HashMap<&str, &Media> = self
             .includes
             .media
@@ -596,9 +578,9 @@ impl TimelineResponse {
     }
 }
 
-/// A post's author name/username from `includes.users`, or a pair of empty
-/// strings when the author id is absent or wasn't expanded — the shared
-/// lookup behind every author field [`build_item`] and [`quote_of`] fill in.
+/// `includes.users` から取る post の著者の name/username｡著者 id が無いか
+/// 展開されていなければ空文字の組になる — [`build_item`] と [`quote_of`] が
+/// 埋める著者フィールドすべての背後にある共通のルックアップだ｡
 fn author_fields(post: &Post, users: &HashMap<&str, &User>) -> (String, String, Option<String>) {
     let author = post
         .author_id
@@ -611,9 +593,9 @@ fn author_fields(post: &Post, users: &HashMap<&str, &User>) -> (String, String, 
     )
 }
 
-/// Join one post with its author, and — if it references another post —
-/// with that reference too, per the precedence documented on
-/// [`TimelineResponse::into_items`].
+/// post 1 件を著者と結合し､他の post を参照していれば —
+/// [`TimelineResponse::into_items`] に書いた優先順位に従って — その参照先とも
+/// 結合する｡
 fn build_item(
     post: &Post,
     users: &HashMap<&str, &User>,
@@ -642,12 +624,12 @@ fn build_item(
         .iter()
         .find(|r| r.kind == ReferenceKind::Retweeted)
     {
-        // The outer post's own author is whoever reposted — captured before
-        // it's overwritten below with the original's author.
+        // 外側の post 自身の著者は repost した人 — 下で元の post の著者に
+        // 上書きされる前に捕まえておく｡
         item.reposted_by = Some(item.author_username.clone());
-        // #52: the id every write endpoint needs, available here at no
-        // extra cost — set whether or not the original itself expanded,
-        // since the id is what was referenced, not what came back.
+        // #52: write のエンドポイントすべてが要る id｡ここでは追加費用なしに
+        // 手に入る — 参照されたのは id であって返ってきたものではない以上､
+        // 元の post 自体が展開されたかどうかに関わらず入れる｡
         item.original_post_id = Some(retweet_ref.id.clone());
 
         if let Some(original) = referenced.get(retweet_ref.id.as_str()).copied() {
@@ -656,29 +638,29 @@ fn build_item(
             item.author_name = author_name;
             item.author_username = author_username;
             item.author_avatar_url = avatar;
-            // A repost of a quote — or of a reply — carries context that
-            // belongs to the original post now shown as the body, not to
-            // the (already-consumed) retweet reference on the outer post.
+            // quote の repost — あるいは reply の repost — が持つ文脈は､
+            // 本文として今表示されている元の post のものであって､外側の post
+            // にある (すでに消費した) retweet 参照のものではない｡
             item.quoted = quote_of(original, users, referenced, media);
             item.replied_to = reply_target(original, users, referenced);
-            // #67: the body is the original's, so the counts under it have
-            // to be the original's too — the outer repost carries its own.
+            // #67: 本文が元の post のものなら､その下の件数も元の post の
+            // ものでなければならない — 外側の repost は自前の件数を持つ｡
             item.metrics = original.public_metrics;
-            // #70: the links belong to the body, which is the original's.
+            // #70: リンクは本文に属し､その本文は元の post のものだ｡
             item.links = post_links(original);
-            // #65: and so does the attached media.
+            // #65: 添付メディアも同じだ｡
             item.media = post_media(original, media);
         } else {
-            // Original is gone from `includes` — keep the outer post's own
-            // (possibly truncated `RT @user: …`) text already set above
-            // rather than blanking the row, but drop the author fields the
-            // same way a post whose author never expanded already does: we
-            // know who reposted, not who wrote it.
+            // 元の post が `includes` に無い — 行を空にするのではなく､上で
+            // すでに入れた外側の post 自身の (切り詰められた `RT @user: …` かも
+            // しれない) 本文を残す｡ただし著者フィールドは､著者が展開され
+            // なかった post がすでにそうしているのと同じように落とす: 誰が
+            // repost したかは分かるが､誰が書いたかは分からない｡
             item.author_name = String::new();
             item.author_username = String::new();
             item.author_avatar_url = None;
-            // Blanked for the same reason as the author fields above: the
-            // outer repost's own counts are not the original's (#67).
+            // 上の著者フィールドと同じ理由で空にする: 外側の repost 自身の
+            // 件数は元の post のものではない (#67)｡
             item.metrics = None;
             item.links.clear();
             item.media.clear();
@@ -691,22 +673,22 @@ fn build_item(
         {
             item.quoted = quote_of(post, users, referenced, media);
         }
-        // #12: a reply (with or without an attached quote) shows who it's
-        // replying to, at zero extra request cost — the parent is already
-        // in `includes` per #13's expansions.
+        // #12: reply は (quote が付いていてもいなくても) 誰に返信しているかを
+        // 見せる｡追加のリクエスト費用はゼロだ — 親は #13 の expansion により
+        // すでに `includes` にある｡
         item.replied_to = reply_target(post, users, referenced);
     }
 
     item
 }
 
-/// Who `post` is replying to (#12), if it has a `replied_to` reference —
-/// joined from `includes` the same way [`quote_of`] joins a quote's source.
-/// `None` only when `post` has no `replied_to` reference at all; a reply
-/// whose parent is missing from `includes` (deleted, protected, or simply
-/// not expanded) still returns `Some`, with empty author fields — the id
-/// alone is enough for `ui.rs`'s "Show thread" to start from, and dropping
-/// the reply context entirely would hide something real.
+/// `post` が `replied_to` の参照を持つなら､誰に返信しているか (#12) —
+/// [`quote_of`] が quote の出どころを結合するのと同じやり方で `includes` から
+/// 結合する｡`None` になるのは `post` が `replied_to` 参照をまったく持たない
+/// ときだけだ｡親が `includes` に無い reply (削除済み､非公開､あるいは単に
+/// 展開されていない) でも著者フィールドを空にして `Some` を返す — `ui.rs` の
+/// "Show thread" が起点にするには id だけで足りるし､reply の文脈をまるごと
+/// 落とせば実在するものを隠すことになる｡
 fn reply_target(
     post: &Post,
     users: &HashMap<&str, &User>,
@@ -727,14 +709,13 @@ fn reply_target(
     })
 }
 
-/// The openable links in `post`'s text (#70).
+/// `post` の本文から開けるリンク (#70)｡
 ///
-/// An entity with no `expanded_url` is dropped: without it there is nothing
-/// to open but the `t.co` shortlink already sitting in the text, and a chip
-/// that just re-states the shortlink is worse than no chip. Duplicates are
-/// dropped too — X repeats an entity when the same link appears twice —
-/// keeping the first occurrence, so the order matches the text. The label
-/// falls back to the URL itself when X sends no `display_url`.
+/// `expanded_url` の無いエンティティは捨てる: それが無ければ開けるのは本文に
+/// すでにある `t.co` の短縮リンクだけで､短縮リンクを言い直すだけのチップは
+/// チップが無いより悪い｡重複も捨てる — 同じリンクが二度出ると X はエンティティ
+/// を繰り返す — 最初の 1 件を残すので順序は本文と一致する｡X が `display_url`
+/// を送ってこないとき､ラベルは URL 自体にフォールバックする｡
 fn post_links(post: &Post) -> Vec<PostLink> {
     let mut seen: Vec<PostLink> = Vec::new();
     let Some(entities) = post.entities.as_ref() else {
@@ -755,14 +736,14 @@ fn post_links(post: &Post) -> Vec<PostLink> {
     seen
 }
 
-/// The attached media for `post` (#65), joined from `includes.media` by
-/// the keys the post carries.
+/// `post` の添付メディア (#65)｡post が持つキーで `includes.media` から
+/// 結合する｡
 ///
-/// A key with no matching entry is skipped — X can omit media the caller
-/// is not allowed to see — and so is an entry with nothing displayable:
-/// `url` for a photo, `preview_image_url` for a video or animated GIF
-/// (neither of which this app plays). Order follows the post's own
-/// `media_keys`, which is the order the author attached them in.
+/// 対応するエントリの無いキーは飛ばす — 呼び出し側が見てはいけないメディアを
+/// X が省くことがある — 表示できるものが何も無いエントリも同様だ: photo なら
+/// `url`､video や animated GIF なら `preview_image_url` (どちらもこのアプリは
+/// 再生しない)｡順序は post 自身の `media_keys` に従い､それは著者が添付した
+/// 順序だ｡
 fn post_media(post: &Post, media: &HashMap<&str, &Media>) -> Vec<PostMedia> {
     let Some(attachments) = post.attachments.as_ref() else {
         return Vec::new();
@@ -787,10 +768,11 @@ fn post_media(post: &Post, media: &HashMap<&str, &Media>) -> Vec<PostMedia> {
         .collect()
 }
 
-/// The post `post` quotes, if it has a `quoted` reference and that post is
-/// present in `includes.tweets`. `None` either way is a legitimate outcome
-/// for [`build_item`] to fall back on (no card, not an error) — a quoted
-/// post can be deleted, protected, or simply absent from the expansion.
+/// `post` が `quoted` の参照を持ち､その post が `includes.tweets` にあれば､
+/// quote 先の post｡どちらの理由で `None` になっても [`build_item`] が
+/// フォールバックしてよい正当な結果だ (カードを出さないだけで､エラーではない)
+/// — quote された post は削除済み､非公開､あるいは単に expansion に無いことが
+/// ありうる｡
 fn quote_of(
     post: &Post,
     users: &HashMap<&str, &User>,
@@ -870,7 +852,7 @@ mod tests {
 
     #[test]
     fn next_token_is_read_from_meta() {
-        // #11: this is the cursor "Load older" resends as `pagination_token`.
+        // #11: "Load older" が `pagination_token` として送り直すカーソルだ｡
         let response: TimelineResponse = serde_json::from_str(TIMELINE_JSON).unwrap();
         assert_eq!(response.next_token(), Some("abc123"));
     }
@@ -929,8 +911,8 @@ mod tests {
             Some("client-not-enrolled")
         );
 
-        // A body with none of the three has nothing to report, and the caller
-        // falls back to the raw text instead.
+        // 3 つのどれも無いボディは報告するものが無く､呼び出し側は代わりに
+        // 生のテキストにフォールバックする｡
         let empty: ApiProblem = serde_json::from_str("{}").unwrap();
         assert_eq!(empty.message(), None);
     }
@@ -953,7 +935,7 @@ mod tests {
         assert_eq!(items[0].created_at, None);
     }
 
-    // --- #13: reposts and quotes ---
+    // --- #13: repost と quote ---
 
     const REPOST_JSON: &str = r#"{
       "data": [
@@ -1024,10 +1006,10 @@ mod tests {
       }
     }"#;
 
-    /// A quote whose *quoted* post carries the media (#123). Same shape
-    /// `referenced_tweets.id.attachments.media_keys` produces for a repost
-    /// (#104) — the expansion covers both, since both reach their content
-    /// through `referenced_tweets`.
+    /// *quote された* 側の post がメディアを持つ quote (#123)｡repost に対して
+    /// `referenced_tweets.id.attachments.media_keys` が生む形と同じだ (#104)
+    /// — どちらも `referenced_tweets` を通って内容に届くので､この expansion は
+    /// 両方をカバーする｡
     const QUOTE_WITH_MEDIA_JSON: &str = r#"{
       "data": [
         {
@@ -1067,8 +1049,8 @@ mod tests {
 
     #[test]
     fn a_quoted_post_carries_its_own_media() {
-        // #123: the card showed text only, so an image that *was* the point
-        // of the quote did not appear at all.
+        // #123: カードは本文だけを見せていたので､quote の眼目 *そのもの* で
+        // あった画像がまったく出なかった｡
         let response: TimelineResponse = serde_json::from_str(QUOTE_WITH_MEDIA_JSON).unwrap();
         let items = response.into_items();
 
@@ -1087,8 +1069,8 @@ mod tests {
 
     #[test]
     fn the_quoting_post_does_not_borrow_the_quoted_posts_media() {
-        // The outer post has no attachments of its own here. Its own grid
-        // must stay empty rather than mirroring the card's.
+        // ここでは外側の post は自前の添付を持たない｡自身のグリッドはカードの
+        // ものを写すのではなく空のままでなければならない｡
         let response: TimelineResponse = serde_json::from_str(QUOTE_WITH_MEDIA_JSON).unwrap();
         let items = response.into_items();
 
@@ -1139,15 +1121,14 @@ mod tests {
         let response: TimelineResponse = serde_json::from_str(json).unwrap();
         let items = response.into_items();
 
-        // A reply's own body/author are untouched — unlike a repost, it
-        // never replaces them (#13's precedent, unchanged by #12).
+        // reply 自身の本文と著者はそのままだ — repost と違い､それらを置き換える
+        // ことはない (#13 の先例｡#12 でも変わらない)｡
         assert_eq!(items[0].text, "agreed");
         assert_eq!(items[0].reposted_by, None);
         assert_eq!(items[0].quoted, None);
-        // #12: the reply *is* surfaced, even though the parent itself is
-        // absent from `includes.tweets` here — the id alone (for "Show
-        // thread") is worth keeping, with empty author fields rather than
-        // dropping the context entirely.
+        // #12: ここでは親自体が `includes.tweets` に無いが､reply は *出す* —
+        // ("Show thread" のための) id だけでも残す価値があり､文脈をまるごと
+        // 落とすのではなく著者フィールドを空にする｡
         let replied_to = items[0].replied_to.as_ref().unwrap();
         assert_eq!(replied_to.post_id, "1700000000000000001");
         assert_eq!(replied_to.author_name, "");
@@ -1156,9 +1137,8 @@ mod tests {
 
     #[test]
     fn a_reply_shows_who_it_is_replying_to_when_the_parent_is_expanded() {
-        // #12: the parent's author is already in `includes` thanks to #13's
-        // `referenced_tweets.id.author_id` expansion, so this costs no
-        // extra request.
+        // #12: 親の著者は #13 の `referenced_tweets.id.author_id` expansion の
+        // おかげですでに `includes` にあるので､追加のリクエストは要らない｡
         let json = r#"{
           "data": [
             {
@@ -1202,10 +1182,9 @@ mod tests {
 
     #[test]
     fn a_repost_of_a_reply_carries_the_originals_reply_target() {
-        // Mirrors #13's "repost of a quote" precedent: once the body
-        // becomes the original post's, any reply context worth showing is
-        // the *original's* — the outer retweet reference has been fully
-        // consumed already.
+        // #13 の "repost of a quote" の先例に倣う: 本文が元の post のものに
+        // なった以上､見せる価値のある reply の文脈は *元の post の* ものだ —
+        // 外側の retweet 参照はすでに使い切っている｡
         let json = r#"{
           "data": [
             {
@@ -1252,9 +1231,8 @@ mod tests {
 
     #[test]
     fn a_repost_whose_original_is_missing_from_includes_falls_back_to_its_own_text() {
-        // The referenced post can be deleted, protected, or simply absent
-        // from `includes` — this must render something sensible rather than
-        // an empty row or a panic.
+        // 参照先の post は削除済み､非公開､あるいは単に `includes` に無いことが
+        // ある — 空の行や panic ではなく､意味のあるものを描かなければならない｡
         let json = r#"{
           "data": [
             {
@@ -1318,10 +1296,10 @@ mod tests {
 
     #[test]
     fn a_repost_of_a_quote_carries_the_nested_quote_card() {
-        // #13's precedence: retweeted wins the rendered body, but the quote
-        // the reposted post itself carries is still worth showing — the
-        // card comes from the *reposted* post's own `quoted` reference, not
-        // the top-level post's (which has none).
+        // #13 の優先順位: 描画される本文は retweeted が取るが､repost された
+        // post 自身が持つ quote は見せる価値がある — カードは *repost された*
+        // post 自身の `quoted` 参照から来ていて､トップレベルの post (それは
+        // 参照を持たない) のものではない｡
         let response: TimelineResponse = serde_json::from_str(REPOST_OF_QUOTE_JSON).unwrap();
         let items = response.into_items();
 
@@ -1335,9 +1313,9 @@ mod tests {
 
     #[test]
     fn an_unrecognized_reference_type_does_not_fail_parsing() {
-        // Forward compatibility: a future API revision adding a new
-        // `referenced_tweets[].type` value must not break parsing the whole
-        // response, the same way a corrupt cache file is a clean miss.
+        // 前方互換: 将来の API 改訂が `referenced_tweets[].type` に新しい値を
+        // 足しても､レスポンス全体のパースを壊してはならない｡壊れたキャッシュ
+        // ファイルが素直なミスになるのと同じだ｡
         let json = r#"{
           "data": [
             {
@@ -1357,11 +1335,11 @@ mod tests {
 
     #[test]
     fn a_timeline_item_from_before_13_still_deserializes() {
-        // Pre-#13 cache files on disk have none of the new fields — this
-        // must keep parsing them rather than throwing every user's cache
-        // away (see `cache::load_json`'s doc comment). Deliberately a raw
-        // literal rather than trusting the `#[serde(default)]` attributes at
-        // a glance.
+        // #13 以前のディスク上のキャッシュファイルは新しいフィールドをどれも
+        // 持たない — 全ユーザーのキャッシュを捨てるのではなく､それらをパース
+        // し続けなければならない (`cache::load_json` の doc コメントを見よ)｡
+        // `#[serde(default)]` の属性を一目見て信じるのではなく､意図して生の
+        // リテラルを置いてある｡
         let old_format = r#"{
           "id": "1700000000000000001",
           "text": "hello from the timeline",
@@ -1380,12 +1358,11 @@ mod tests {
 
     #[test]
     fn a_timeline_item_from_before_12_still_deserializes() {
-        // #12 adds `replied_to` on top of #13's `reposted_by`/`quoted`. A
-        // cache file written by a #13-era build has neither key for it —
-        // this must not throw the whole cache away (see
-        // `cache::load_json`'s doc comment). Deliberately a raw literal
-        // rather than trusting `#[serde(default)]` at a glance, mirroring
-        // the sibling test above.
+        // #12 は #13 の `reposted_by`/`quoted` の上に `replied_to` を足す｡
+        // #13 の頃のビルドが書いたキャッシュファイルにはそのキーが無い —
+        // キャッシュ全体を捨ててはならない (`cache::load_json` の doc コメント
+        // を見よ)｡上の兄弟テストに倣い､`#[serde(default)]` を一目見て信じるの
+        // ではなく意図して生のリテラルを置いてある｡
         let pre_12_format = r#"{
           "id": "1800000000000000001",
           "text": "RT @XDevelopers: hello from the timeline",
@@ -1403,10 +1380,10 @@ mod tests {
 
     #[test]
     fn serializes_the_post_tweet_request_body_without_a_quote() {
-        // #14/#16: an ordinary post must omit `quote_tweet_id` entirely
-        // rather than sending it as `null` — X may reject a stray null
-        // outright, so this checks the exact serialized shape, not just
-        // that `quote_tweet_id` deserializes back to `None`.
+        // #14/#16: 普通の post は `quote_tweet_id` を `null` として送るのでは
+        // なく完全に省かなければならない — X は迷い込んだ null をそのまま拒否
+        // することがあるので､`quote_tweet_id` が `None` に deserialize し直せる
+        // かだけでなく､serialize された正確な形を確かめる｡
         let request = Draft {
             text: "hello",
             quote_tweet_id: None,
@@ -1421,9 +1398,9 @@ mod tests {
 
     #[test]
     fn serializes_the_post_tweet_request_body_with_a_reply() {
-        // #71: a reply is the same endpoint with a nested `reply` object —
-        // and the id inside it is what decides which conversation this
-        // lands under, so the exact shape is worth pinning.
+        // #71: reply は同じエンドポイントに `reply` オブジェクトを入れ子で
+        // 付けたものだ — その中の id がこれをどの会話にぶら下げるかを決めるので､
+        // 正確な形を固定する価値がある｡
         let request = Draft {
             text: "hello",
             quote_tweet_id: None,
@@ -1438,9 +1415,8 @@ mod tests {
 
     #[test]
     fn serializes_the_post_tweet_request_body_with_a_quote() {
-        // #16: `POST /2/tweets` gains `quote_tweet_id` rather than a
-        // separate quote endpoint — this is the whole body a quote post
-        // sends.
+        // #16: quote 専用のエンドポイントではなく `POST /2/tweets` が
+        // `quote_tweet_id` を得た — これが quote の post が送るボディの全体だ｡
         let request = Draft {
             text: "hello",
             quote_tweet_id: Some("1700000000000000001"),
@@ -1455,7 +1431,7 @@ mod tests {
 
     #[test]
     fn serializes_the_list_member_request_body() {
-        // #163: the whole body `XClient::add_list_member` sends.
+        // #163: `XClient::add_list_member` が送るボディの全体｡
         let request = UserIdRequest {
             user_id: "2244994945",
         };
@@ -1484,7 +1460,7 @@ mod tests {
 
     #[test]
     fn parses_the_last_page_of_users() {
-        // No `next_token` is how both endpoints say "that was the end".
+        // `next_token` が無いのが､どちらのエンドポイントでも "終わりだ" の合図だ｡
         let page: UserPageResponse =
             serde_json::from_str(r#"{"data": [{"id": "1", "name": "A", "username": "a"}]}"#)
                 .unwrap();
@@ -1493,9 +1469,9 @@ mod tests {
 
     #[test]
     fn parses_an_empty_page_of_users() {
-        // #163: an account following nobody, or a list with no members,
-        // omits `data` rather than sending `[]`. Parsing that as an error
-        // would fail the very first sync.
+        // #163: 誰もフォローしていないアカウントや､メンバーのいない list は
+        // `[]` を送らず `data` を省く｡それをエラーとしてパースすれば最初の
+        // sync からして失敗する｡
         let page: UserPageResponse =
             serde_json::from_str(r#"{"meta": {"result_count": 0}}"#).unwrap();
         assert!(page.data.is_empty());
@@ -1504,8 +1480,8 @@ mod tests {
 
     #[test]
     fn serializes_the_shared_tweet_id_request_body() {
-        // #15: the whole request body `x_api::client::XClient::create_repost`
-        // sends.
+        // #15: `x_api::client::XClient::create_repost` が送るリクエストボディの
+        // 全体｡
         let request = TweetIdRequest {
             tweet_id: "1700000000000000001",
         };
@@ -1557,8 +1533,8 @@ mod tests {
 
     #[test]
     fn reads_public_metrics_into_the_item() {
-        // #67: no extra request — these ride along in the timeline response
-        // once `tweet.fields` asks for `public_metrics`.
+        // #67: 追加のリクエストは要らない — `tweet.fields` が `public_metrics`
+        // を求めれば timeline のレスポンスに相乗りしてくる｡
         let response: TimelineResponse = serde_json::from_str(METRICS_JSON).unwrap();
         let items = response.into_items();
 
@@ -1574,8 +1550,8 @@ mod tests {
 
     #[test]
     fn metrics_are_none_when_the_response_omits_them() {
-        // A response that predates #67's `tweet.fields` change — or a post
-        // X declines to report counts for — must parse, not fail.
+        // #67 の `tweet.fields` 変更より前のレスポンス — あるいは X が件数の
+        // 報告を拒む post — はパースできなければならず､失敗してはならない｡
         let response: TimelineResponse = serde_json::from_str(METRICS_JSON).unwrap();
         let items = response.into_items();
 
@@ -1584,8 +1560,8 @@ mod tests {
 
     #[test]
     fn a_repost_shows_the_originals_metrics() {
-        // The rendered body is the original post (#13), so the counts shown
-        // beneath it have to be the original's too.
+        // 描画される本文は元の post なので (#13)､その下に出す件数も元の post
+        // のものでなければならない｡
         let json = r#"{
           "data": [
             {
@@ -1626,8 +1602,8 @@ mod tests {
 
     #[test]
     fn a_repost_whose_original_is_missing_reports_no_metrics() {
-        // Same reasoning as the author fields `build_item` blanks in this
-        // case: the outer post's own counts are not the original's.
+        // この場合に `build_item` が空にする著者フィールドと同じ理屈だ: 外側の
+        // post 自身の件数は元の post のものではない｡
         let json = r#"{
           "data": [
             {
@@ -1675,8 +1651,8 @@ mod tests {
 
     #[test]
     fn expands_the_links_in_a_posts_text() {
-        // #70: the text carries t.co shortlinks; `expanded_url` is the only
-        // way to the real destination without following a redirect.
+        // #70: 本文は t.co の短縮リンクを持つ｡リダイレクトを辿らずに実際の
+        // 宛先へ至る手段は `expanded_url` しかない｡
         let response: TimelineResponse = serde_json::from_str(LINKS_JSON).unwrap();
         let items = response.into_items();
 
@@ -1720,8 +1696,8 @@ mod tests {
 
     #[test]
     fn a_repost_carries_the_originals_links() {
-        // The body is the original's text, so its t.co links are the ones
-        // the row can actually resolve.
+        // 本文は元の post のテキストなので､行が実際に解決できるのはその t.co
+        // のリンクだ｡
         let json = r#"{
           "data": [
             {
@@ -1784,8 +1760,8 @@ mod tests {
 
     #[test]
     fn reads_the_authors_avatar_url() {
-        // #64: `user.fields=profile_image_url` puts this in `includes.users`,
-        // where the author join already looks.
+        // #64: `user.fields=profile_image_url` がこれを `includes.users` に
+        // 入れる｡著者の結合がすでに見に行っている場所だ｡
         let response: TimelineResponse = serde_json::from_str(TIMELINE_JSON).unwrap();
         let items = response.into_items();
 
@@ -1793,15 +1769,15 @@ mod tests {
             items[0].author_avatar_url.as_deref(),
             Some("https://pbs.twimg.com/profile_images/x.jpg")
         );
-        // The second post's author was never expanded, so there is no
-        // avatar to show either.
+        // 2 件目の post の著者は展開されなかったので､見せるアバターも
+        // 無い｡
         assert_eq!(items[1].author_avatar_url, None);
     }
 
     #[test]
     fn a_repost_shows_the_original_authors_avatar() {
-        // The byline is the original author's (#13), so the face beside it
-        // has to be theirs too.
+        // 署名行は元の著者のものなので (#13)､その横の顔も元の著者のもので
+        // なければならない｡
         let json = r#"{
           "data": [
             {
@@ -1874,7 +1850,7 @@ mod tests {
 
     #[test]
     fn joins_attached_media_by_key_in_the_posts_own_order() {
-        // #65: the same side-table join `users` and `tweets` already use.
+        // #65: `users` と `tweets` がすでに使うのと同じサイドテーブルの結合｡
         let response: TimelineResponse = serde_json::from_str(MEDIA_JSON).unwrap();
         let items = response.into_items();
 
@@ -1889,8 +1865,8 @@ mod tests {
 
     #[test]
     fn a_video_falls_back_to_its_preview_still() {
-        // This app doesn't play video; the still plus a badge is the whole
-        // rendering, so `preview_image_url` is what has to come through.
+        // このアプリは video を再生しない｡静止画とバッジで描画の全部なので､
+        // 通ってこなければならないのは `preview_image_url` だ｡
         let response: TimelineResponse = serde_json::from_str(MEDIA_JSON).unwrap();
         let items = response.into_items();
 
@@ -1903,8 +1879,8 @@ mod tests {
 
     #[test]
     fn media_with_nothing_displayable_is_dropped() {
-        // Neither `url` nor `preview_image_url`: there is nothing to draw,
-        // and a hole in the grid is worse than one fewer thumbnail.
+        // `url` も `preview_image_url` も無い: 描くものが何も無いし､グリッド
+        // の穴はサムネイルが 1 枚減るより悪い｡
         let json = r#"{
           "data": [{ "id": "1", "text": "t", "attachments": { "media_keys": ["k"] } }],
           "includes": { "media": [{ "media_key": "k", "type": "photo" }] }
@@ -1921,8 +1897,8 @@ mod tests {
 
     #[test]
     fn a_repost_carries_the_originals_media() {
-        // The body is the original's text, so the images under it have to
-        // be the original's too.
+        // 本文は元の post のテキストなので､その下の画像も元の post のもので
+        // なければならない｡
         let json = r#"{
           "data": [
             {
@@ -1974,8 +1950,8 @@ mod tests {
 
     #[test]
     fn a_repost_carries_the_original_posts_id() {
-        // #52: `id` stays the retweet activity's, but every write endpoint
-        // needs the original's — which the reference already names.
+        // #52: `id` は retweet アクティビティのものだが､write のエンドポイント
+        // はどれも元の post のものを要る — 参照がすでにそれを名指している｡
         let json = r#"{
           "data": [
             {
@@ -2008,8 +1984,8 @@ mod tests {
 
     #[test]
     fn a_repost_whose_original_is_missing_still_carries_its_id() {
-        // The id comes from the reference, not from the expansion, so a
-        // deleted or unexpanded original does not cost the button.
+        // id は expansion ではなく参照から来るので､元の post が削除済みでも
+        // 未展開でもボタンを失わない｡
         let json = r#"{
           "data": [
             {
@@ -2037,10 +2013,10 @@ mod tests {
 
     #[test]
     fn a_cache_file_written_before_the_original_id_existed_still_loads() {
-        // Raw literal on purpose: `cache::load_json` turns a parse failure
-        // into a *silent* miss, so a missing `#[serde(default)]` would
-        // quietly discard every user's cache and re-fetch it at their
-        // expense. Eyeballing the attribute is not the same as checking.
+        // 意図して生のリテラルを置いてある: `cache::load_json` はパース失敗を
+        // *黙った* ミスに変えるので､`#[serde(default)]` が欠けると全ユーザーの
+        // キャッシュを黙って捨て､その費用で取り直すことになる｡属性を目視する
+        // ことは確かめることと同じではない｡
         let item: TimelineItem = serde_json::from_str(
             r#"{"id":"1","text":"cached","created_at":null,"author_name":"a","author_username":"b","reposted_by":"c"}"#,
         )
@@ -2069,8 +2045,9 @@ mod tests {
 
     #[test]
     fn a_cache_file_written_before_metrics_existed_still_loads() {
-        // #9's cache file is this exact type, so a file on disk from before
-        // #67 must deserialize with the field simply absent.
+        // #9 のキャッシュファイルはまさにこの型なので､#67 より前にディスクへ
+        // 書かれたファイルはフィールドを単に欠いたまま deserialize できなければ
+        // ならない｡
         let item: TimelineItem = serde_json::from_str(
             r#"{"id":"1","text":"cached","created_at":null,"author_name":"a","author_username":"b"}"#,
         )

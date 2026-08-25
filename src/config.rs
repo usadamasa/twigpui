@@ -7,212 +7,204 @@ use crate::paths::Paths;
 use crate::profile::Profile;
 use crate::theme::ThemeMode;
 
-/// Runtime configuration, resolved with environment variable > `config.toml`
-/// > built-in default precedence.
+/// ランタイム設定｡環境変数 > `config.toml` > 組み込みの既定値の優先順位で
+/// 解決する｡
 #[derive(Debug, Clone)]
 pub(crate) struct Config {
-    /// OAuth 2.0 client id for the PKCE sign-in flow (#7). Non-secret — a
-    /// public OAuth client has no client secret — so this may live in
-    /// `config.toml`.
+    /// PKCE のサインインフローに使う OAuth 2.0 の client id (#7)｡秘密では
+    /// ないため — public な OAuth client に client secret は無い —
+    /// `config.toml` に置いてよい｡
     ///
-    /// Required since #33 dropped the app-only bearer token: it is the only
-    /// way to authenticate now, so a missing one is a startup failure
-    /// rather than one of two alternatives.
+    /// #33 が app-only の bearer token を落として以来､必須になった: 今や認証
+    /// 手段はこれしか無いので､欠けていることは 2 択のうちの片方ではなく起動の
+    /// 失敗だ｡
     pub oauth_client_id: String,
-    /// Screen name whose posts are shown, without a leading `@`.
+    /// post を表示する対象の screen name｡先頭の `@` は付けない｡
     pub target_username: String,
-    /// Posts requested per fetch. The X API accepts 5..=100.
+    /// 1 回の fetch で要求する post 数｡X API は 5..=100 を受け付ける｡
     pub max_results: u32,
-    /// Floor on how often a fetch may run, in seconds (#10).
+    /// fetch を走らせてよい頻度の下限｡秒 (#10)｡
     ///
-    /// Read by two things that both had to agree about it, which is why it
-    /// was plumbed through before either existed: `ui::reload_policy::reload_gate`
-    /// refuses a `Polling` reload inside this window, and #21's
-    /// `auto_refresh_interval_seconds` is validated never to fall below it
-    /// — a cadence under this floor would be a timer every tick of which
-    /// is refused before it sends anything.
+    /// これについて一致している必要のある 2 つのものが読む｡どちらが存在する
+    /// より前にここを通してあったのはそのためだ: `ui::reload_policy::reload_gate`
+    /// はこの窓の内側の `Polling` reload を拒み､#21 の
+    /// `auto_refresh_interval_seconds` はこれを下回らないことを検証される
+    /// — この下限より短い周期は､どの tick も何かを送る前に拒まれるタイマーに
+    /// なってしまう｡
     pub min_fetch_interval_seconds: u32,
-    /// Color theme (#19): `light`, `dark`, or `system` (follows the OS
-    /// appearance). Defaults to `light`; an unrecognized value falls back to
-    /// the default rather than failing startup — see [`Config::resolve`].
+    /// カラーテーマ (#19): `light`､`dark`､または `system` (OS の外観に従う)｡
+    /// 既定は `light`｡認識できない値は起動を失敗させるのではなく既定へ落ちる
+    /// — [`Config::resolve`] を見よ｡
     pub theme: ThemeMode,
-    /// How much detail reaches the log file (#49). Defaults to
-    /// [`log::Level::Info`]; an unrecognized value falls back to it rather
-    /// than failing startup, exactly like `theme`.
+    /// ログファイルへどれだけの詳しさが届くか (#49)｡既定は
+    /// [`log::Level::Info`]｡認識できない値は `theme` とまったく同じく､起動を
+    /// 失敗させるのではなくそこへ落ちる｡
     pub log_level: log::Level,
-    /// Price per API request (#18), in whatever unit the operator has in
-    /// mind — this crate never assumes a currency. `None` by default: the
-    /// per-request price depends on the account's plan and there is no way
-    /// to know it from here, so no estimated amount is ever shown unless
-    /// this is explicitly configured. See `usage.rs`'s module doc.
+    /// API request 1 回あたりの価格 (#18)｡単位は運用者が念頭に置くものなら
+    /// 何でもよい — この crate が通貨を仮定することは無い｡既定は `None`:
+    /// request あたりの価格はアカウントのプラン次第で､ここから知る手段は
+    /// 無いので､明示的に設定しない限り見積り額が表示されることは無い｡
+    /// `usage.rs` のモジュール doc を見よ｡
     pub request_price: Option<f64>,
-    /// The list whose timeline fills the window (#161), or `None` to show
-    /// the home timeline as every launch did before it.
+    /// timeline がウィンドウを埋める list (#161)｡`None` なら､それ以前のどの
+    /// 起動もそうだったように home timeline を表示する｡
     ///
-    /// `GET /2/users/:id/timelines/reverse_chronological` stopped returning
-    /// followed authors' posts for this account (#157) and no change here
-    /// can fix that, so a list is how the app reads a following-shaped feed
-    /// at all. Validated to be all ASCII digits by [`Config::resolve`]: the
-    /// value is interpolated into a URL path segment.
+    /// `GET /2/users/:id/timelines/reverse_chronological` はこのアカウントに
+    /// 対してフォロー中の著者の post を返さなくなり (#157)､ここを変えても
+    /// それは直せない｡だから following の形をしたフィードをアプリが読む手段は
+    /// そもそも list しか無い｡[`Config::resolve`] がすべて ASCII の数字である
+    /// ことを検証する: この値は URL のパスセグメントへ埋め込まれる｡
     pub list_id: Option<String>,
-    /// Daily request-count budget (#18): once today's total across every
-    /// tracked endpoint approaches or reaches this, the header's usage line
-    /// switches to a warning/danger color — see `usage::budget_status`.
-    /// Deliberately a request count, not a monetary amount: unlike
-    /// `request_price`, this always has a value to compare against (request
-    /// counts are always known), so it works whether or not a price is
-    /// configured.
+    /// 1 日の request 数の予算 (#18): 追跡しているすべての endpoint にわたる
+    /// 今日の合計がこれに近づくか達すると､ヘッダの使用量行が warning/danger
+    /// の色へ切り替わる — `usage::budget_status` を見よ｡金額ではなく request
+    /// 数なのは意図的だ: `request_price` と違い､こちらは比較する値が常にある
+    /// (request 数は常に判っている)｡だから価格が設定されていてもいなくても
+    /// 機能する｡
     pub daily_request_budget: Option<u32>,
-    /// Whether the window keeps `list_id`'s membership mirroring the
-    /// accounts this app follows while it runs.
+    /// ウィンドウが動いている間､`list_id` のメンバーシップをこのアプリが
+    /// フォローしているアカウントに合わせ続けるかどうか｡
     ///
-    /// On by default, and effective only once a `list_id` is configured and
-    /// the session carries the scopes `sync::missing_scope` asks for — both
-    /// of which are already deliberate acts. Turning it off is how someone
-    /// keeps a configured list under their own hand instead.
+    /// 既定は on｡効くのは `list_id` が設定され､かつセッションが
+    /// `sync::missing_scope` の求める scope を持っているときだけだ — どちらも
+    /// 既に意図的な行為である｡off にするのは､設定済みの list を代わりに自分の
+    /// 手元に置いておくためのやり方だ｡
     ///
-    /// **This spends money on a timer**, which is why the interval below is
-    /// long and why the README says so out loud.
+    /// **これはタイマーで金を使う**｡下の interval が長いのも､README が声に
+    /// 出してそう言っているのもそのためだ｡
     pub auto_sync_list: bool,
-    /// How long the background sync waits between diffs, in seconds.
+    /// background sync が diff と diff の間に待つ長さ｡秒｡
     ///
-    /// Not `min_fetch_interval_seconds`: that one throttles a reload that
-    /// costs a page of posts, this one paces a pair of full reads that cost
-    /// one billed resource per followed account.
+    /// `min_fetch_interval_seconds` ではない: あちらは post 1 ページ分の費用が
+    /// かかる reload を絞るもので､こちらはフォロー中のアカウント 1 件につき
+    /// 1 課金リソースかかる 2 本の全読み取りの歩調を決める｡
     pub sync_interval_seconds: u32,
-    /// The most of the list's membership the background sync may remove
-    /// in one plan, in percent (#176).
+    /// background sync が 1 つの plan で取り除いてよい list メンバーシップの
+    /// 上限｡パーセント (#176)｡
     ///
-    /// A follow read that comes back short with a 200 reads as a mass
-    /// unfollow, and the background sync prunes without asking. Over this
-    /// share the removals are held in the plan file for
-    /// `--sync-list --apply --prune` to confirm — see
-    /// `sync::schedule::prune_allowed`. 0..=100: `100` turns the cap off,
-    /// `0` makes the background sync additive only. The CLI is never
-    /// capped.
+    /// 200 で短く返ってきたフォローの読み取りは大量アンフォローに見え､
+    /// background sync は尋ねずに刈り込む｡この割合を超えると､削除は
+    /// `--sync-list --apply --prune` が確認するために plan ファイルへ
+    /// 留め置かれる — `sync::schedule::prune_allowed` を見よ｡0..=100:
+    /// `100` は上限を off にし､`0` は background sync を追加専用にする｡
+    /// CLI に上限がかかることは決して無い｡
     pub sync_prune_limit_percent: u8,
-    /// How many writes one background-sync tick may send, at one tick a
-    /// minute — the catch-up's sustained pace (#197).
+    /// background sync の 1 tick が送ってよい書き込みの数｡tick は 1 分に
+    /// 1 回なので､これが追いつき処理の持続的な速度になる (#197)｡
     ///
-    /// The default is deliberately slow: the cap that locked #197 out for
-    /// 24 hours followed roughly seven writes a minute, and its size is
-    /// still unmeasured. This knob exists for the measurement's other
-    /// direction — run at the default for a while, see no refusal, raise
-    /// it and watch the log. A refusal is not an accident either way:
-    /// `sync::state`'s backoff ladder absorbs it and the log records what
-    /// the cap said. 1..=[`MAX_SYNC_WRITES_PER_MINUTE`].
+    /// 既定が遅いのは意図的だ: #197 を 24 時間締め出した上限は､およそ 1 分に
+    /// 7 回の書き込みの後に働いた｡その大きさは今も実測されていない｡この
+    /// つまみは実測のもう一方の向きのためにある — しばらく既定で走らせ､拒否が
+    /// 出ないのを見て､上げてログを見る｡どちらに転んでも拒否は事故ではない:
+    /// `sync::state` の backoff の階段がそれを吸収し､上限が何と言ったかは
+    /// ログが記録する｡1..=[`MAX_SYNC_WRITES_PER_MINUTE`]｡
     pub sync_writes_per_minute: u8,
-    /// Whether the window polls its timeline for new posts while it runs
-    /// (#21).
+    /// ウィンドウが動いている間､新しい post を求めて timeline を poll するか
+    /// どうか (#21)｡
     ///
-    /// On by default. Off means the app sends nothing it was not clicked
-    /// into sending — #21's completion condition names that outcome
-    /// specifically, so it is a hard guarantee rather than a tendency: see
-    /// `TimelineView::start_auto_refresh`, which returns before spawning
-    /// anything at all when this is false.
+    /// 既定は on｡off なら､クリックで送らせたもの以外をアプリが送ることは無い
+    /// — #21 の完了条件がその結末を名指ししているので､これは傾向ではなく硬い
+    /// 保証だ: `TimelineView::start_auto_refresh` を見よ｡これが false のとき､
+    /// あの関数は何一つ spawn する前に return する｡
     pub auto_refresh: bool,
-    /// How long auto-refresh waits between polls, in seconds (#21).
+    /// auto-refresh が poll と poll の間に待つ長さ｡秒 (#21)｡
     ///
-    /// Distinct from `min_fetch_interval_seconds` the way
-    /// `sync_interval_seconds` is: that one is a *floor* under any fetch,
-    /// this one is the cadence a poll actually runs at, and it is validated
-    /// never to fall below the floor — see [`resolve_auto_refresh_interval`].
+    /// `sync_interval_seconds` がそうであるのと同じように
+    /// `min_fetch_interval_seconds` とは別物だ: あちらはあらゆる fetch の下に
+    /// 敷かれた *下限* で､こちらは poll が実際に走る周期であり､その下限を
+    /// 下回らないことを検証される — [`resolve_auto_refresh_interval`] を見よ｡
     pub auto_refresh_interval_seconds: u32,
-    /// Whether a poll's new posts flow onto the screen by themselves when
-    /// the reader is already at the top (#22).
+    /// 読み手が既に一番上に居るとき､poll が持ち帰った新しい post が自ずと
+    /// 画面へ流れ込むかどうか (#22)｡
     ///
-    /// On by default — the point of #177's experience is a timeline that
-    /// keeps moving without being asked. Off, and every poll goes through
-    /// the pill instead, whatever the scroll position. Purely
-    /// presentational: this switch never changes what is fetched or when —
-    /// that is `auto_refresh`'s job — only what the window does with a
-    /// fetch that already happened. The seed for
-    /// `TimelineView::follow_new_posts`, which the View menu toggles at
-    /// runtime without writing back here.
+    /// 既定は on — #177 の体験の眼目は､頼まれなくても動き続ける timeline だ｡
+    /// off なら､スクロール位置がどこであれどの poll も代わりに pill を通る｡
+    /// 純粋に表示上のものだ: このスイッチが何をいつ取得するかを変えることは
+    /// 決して無く — それは `auto_refresh` の仕事だ — 既に起きた fetch を
+    /// ウィンドウがどう扱うかだけを変える｡`TimelineView::follow_new_posts` の
+    /// 種であり､View メニューはここへ書き戻さずに実行時それを切り替える｡
     pub follow_new_posts: bool,
 }
 
 const DEFAULT_USERNAME: &str = "XDevelopers";
 const DEFAULT_MAX_RESULTS: u32 = 20;
 const MAX_RESULTS_RANGE: std::ops::RangeInclusive<u32> = 5..=100;
-/// 60s: comfortably above the per-window cost of a single reload (one or
-/// two requests) against even X's tighter per-endpoint rate-limit windows,
-/// while still being responsive to a human clicking the reload button.
+/// 60 秒: X の endpoint ごとの厳しめな rate limit の窓に対してさえ､reload
+/// 1 回 (request 1 ないし 2 回) の窓あたり費用を余裕をもって上回りつつ､
+/// reload ボタンを押す人間に対しては反応良くいられる長さだ｡
 const DEFAULT_MIN_FETCH_INTERVAL_SECONDS: u32 = 60;
 
-/// 6 hours between diffs.
+/// diff と diff の間は 6 時間｡
 ///
-/// Both sides of the diff bill per returned resource, so one diff of a
-/// few thousand follows is dollars. X documents that resources are
-/// deduplicated within a 24-hour UTC day, which would make every diff
-/// after the day's first nearly free — but `x-api-budget` has that
-/// measured for Posts only, not for Users or Owned Reads. This interval is
-/// picked so the unverified half cannot cost much either way: four diffs a
-/// day is roughly $2 per thousand follows if dedup holds and roughly $8 if
-/// it does not.
+/// diff の両側とも返ってきたリソース単位で課金されるので､数千フォローの
+/// diff 1 回はドル単位になる｡X はリソースが UTC の 24 時間以内で重複除去
+/// されると文書化しており､それならその日の最初以降の diff はほぼ無料になる
+/// — が､`x-api-budget` がそれを実測しているのは Posts だけで､Users や
+/// Owned Reads については実測していない｡この interval は､検証できていない側
+/// がどちらに転んでも大した費用にならないよう選んである: 1 日 4 回の diff は､
+/// 重複除去が効けば千フォローあたりおよそ $2､効かなければおよそ $8 だ｡
 const DEFAULT_SYNC_INTERVAL_SECONDS: u32 = 21_600;
 
-/// The shortest interval the sync will accept.
+/// sync が受け付ける最短の interval｡
 ///
-/// A floor rather than a warning, because the failure it prevents is not
-/// recoverable by noticing it later: `X_SYNC_INTERVAL_SECONDS=60` typed
-/// where `6000` was meant would, if dedup turns out not to apply to Users,
-/// buy both full reads sixty times an hour against a prepaid balance. 15
-/// minutes is far below any cadence this feature has a use for and still
-/// two orders of magnitude away from that.
+/// 警告ではなく下限にしてあるのは､これが防ぐ失敗が後から気づいて取り返せる
+/// 類のものではないからだ: `6000` のつもりで打った
+/// `X_SYNC_INTERVAL_SECONDS=60` は､重複除去が Users には適用されないと判明
+/// した場合､プリペイド残高に対して 2 本の全読み取りを 1 時間に 60 回買う｡
+/// 15 分はこの機能が使い道を持つどの周期よりはるかに下で､それでいてなお
+/// そこから 2 桁離れている｡
 const MIN_SYNC_INTERVAL_SECONDS: u32 = 900;
 
-/// 10%: the background sync may delete a tenth of the list per plan (#176).
+/// 10%: background sync は 1 plan につき list の 10 分の 1 まで削除できる (#176)｡
 ///
-/// Conservative on purpose. A real mass unfollow is rare and has the CLI to
-/// fall back on; a follow read that comes back short is the failure nobody
-/// sees until the list is empty. Small lists feel it more — 1 of 15 is over
-/// the line — and that is accepted rather than patched with an absolute
-/// floor: a false hold costs one CLI command, a false pass costs the list.
+/// 意図して保守的にしてある｡本物の大量アンフォローは稀で､CLI という逃げ道が
+/// ある｡短く返ってくるフォローの読み取りの方は､list が空になるまで誰にも
+/// 見えない失敗だ｡小さい list ほどこれを強く受ける — 15 件中 1 件でもう線を
+/// 越える — が､絶対値の下限を当てて塞ぐのではなくそれを受け入れている:
+/// 誤って留め置く代償は CLI コマンド 1 回､誤って通す代償は list そのものだ｡
 const DEFAULT_SYNC_PRUNE_LIMIT_PERCENT: u8 = 10;
 
-/// 2 writes a minute: the background sync's default catch-up pace (#197).
+/// 1 分に 2 回の書き込み: background sync の既定の追いつき速度 (#197)｡
 ///
-/// Chosen from the one measurement there is — a hidden cap on
-/// `POST /2/lists/:id/members` engaged after roughly seven writes a minute
-/// and stayed down for 24 hours — to be the pace that does not trip it,
-/// not the fastest pace it allows. Raising it is what
-/// `sync_writes_per_minute` is for, once a run at this default has shown
-/// no refusals.
+/// たった一つある実測から選んだ — `POST /2/lists/:id/members` の隠れた上限が
+/// およそ 1 分に 7 回の書き込みの後に働き､24 時間下りたままだった — それを
+/// 踏まない速度であって､それが許す最速の速度ではない｡上げるためにあるのが
+/// `sync_writes_per_minute` で､この既定での走行が拒否を出さないと示してから
+/// 使う｡
 const DEFAULT_SYNC_WRITES_PER_MINUTE: u8 = 2;
 
-/// The most `sync_writes_per_minute` accepts: 20/min is X's *documented*
-/// write window (300 per 15 minutes) spread evenly. Above it the tracked
-/// rate-limit window would start refusing sends anyway, so a larger value
-/// only buys refusals — `25` typed where `2` was meant should be an error
-/// with the key named, not a burst.
+/// `sync_writes_per_minute` が受け付ける最大値: 1 分 20 回は X の *文書化
+/// された* 書き込みの窓 (15 分で 300 回) を均等にならしたものだ｡それを超えると
+/// どのみち追跡している rate limit の窓が送信を拒み始めるので､大きな値は拒否
+/// を買うだけになる — `2` のつもりで打った `25` は､バーストではなくキー名を
+/// 挙げた error になるべきだ｡
 const MAX_SYNC_WRITES_PER_MINUTE: u8 = 20;
 
-/// 3 minutes between auto-refresh polls (#21).
+/// auto-refresh の poll と poll の間は 3 分 (#21)｡
 ///
-/// Chosen from what a poll actually bills rather than from how fresh a
-/// timeline could theoretically be. A poll re-reads the head page —
-/// `GET /2/lists/:id/tweets` takes no `since_id`, so there is no cheaper
-/// request to send — and reads bill per returned resource, deduplicated
-/// within a UTC day. So in steady state a day's polling costs the posts
-/// that were genuinely new that day, which is what reading them costs
-/// however they arrive; the only repeated charge is the head page once
-/// after each UTC midnight, bounded by `max_results`.
+/// timeline が理論上どれだけ新鮮でありうるかではなく､poll が実際に何を課金
+/// されるかから選んだ｡poll は先頭ページを読み直す —
+/// `GET /2/lists/:id/tweets` は `since_id` を取らないので､これより安い
+/// request は送りようが無い — そして読み取りは返ってきたリソース単位で課金
+/// され､UTC の 1 日以内で重複除去される｡だから定常状態では 1 日の poll の
+/// 費用はその日に本当に新しかった post の分になり､それはどう届こうとそれらを
+/// 読む費用そのものだ｡繰り返し課金されるのは UTC の深夜 0 時ごとに 1 回の
+/// 先頭ページだけで､それは `max_results` で頭打ちになる｡
 ///
-/// That makes the interval a responsiveness knob rather than a spending
-/// one. It started at 5 minutes; #22's stick-to-top follow made the
-/// timeline something watched rather than glanced at, and 3 minutes is
-/// where the flow feels alive without the window sending a request every
-/// time someone looks over. What tightening it does spend is requests —
-/// 480 a day at this cadence, up from 288 — not resources.
+/// そのため､この interval は出費のつまみではなく反応の良さのつまみになる｡
+/// 最初は 5 分だった｡#22 の一番上へ貼り付く follow が timeline を､ちらと
+/// 見るものではなく眺めるものに変え､3 分は､誰かが目をやるたびにウィンドウが
+/// request を送ることなく流れが生きて感じられる点だ｡詰めることで実際に使う
+/// のは request であって — この周期なら 1 日 480 回で､288 回から増える —
+/// リソースではない｡
 const DEFAULT_AUTO_REFRESH_INTERVAL_SECONDS: u32 = 180;
 
-/// The file-level settings loaded from `config.toml`.
+/// `config.toml` から読み込むファイルレベルの設定｡
 ///
-/// Every field is `Option` and `#[serde(default)]` applies, and the struct
-/// deliberately does not use `deny_unknown_fields`: future issues (#19's
-/// theme, #24's layout) add keys incrementally, and an older binary reading
-/// a newer file must not choke on keys it doesn't know about yet.
+/// どのフィールドも `Option` で `#[serde(default)]` が効いており､この struct
+/// は意図的に `deny_unknown_fields` を使わない: 将来の issue (#19 の theme､
+/// #24 の layout) がキーを少しずつ足していくので､古いバイナリが新しい
+/// ファイルを読んだとき､まだ知らないキーで詰まってはならない｡
 #[derive(Debug, Default, Deserialize)]
 struct FileSettings {
     #[serde(default)]
@@ -221,78 +213,76 @@ struct FileSettings {
     max_results: Option<u32>,
     #[serde(default)]
     min_fetch_interval_seconds: Option<u32>,
-    /// Non-secret (see [`Config::oauth_client_id`]), so — unlike
-    /// this key is allowed in `config.toml`.
+    /// 秘密ではない ([`Config::oauth_client_id`] を見よ)｡だから — と違って
+    /// このキーは `config.toml` に置いてよい｡
     #[serde(default)]
     oauth_client_id: Option<String>,
-    /// Raw `theme` value (#19), parsed by [`Config::resolve`] rather than
-    /// here so an unrecognized value can fall back to the default instead of
-    /// failing the whole file load.
+    /// 生の `theme` 値 (#19)｡ここではなく [`Config::resolve`] がパースする｡
+    /// 認識できない値がファイル読み込み全体を失敗させるのではなく､既定へ
+    /// 落ちられるようにするためだ｡
     #[serde(default)]
     theme: Option<String>,
-    /// Raw `log_level` value (#49), parsed the same way and for the same
-    /// reason as `theme`. This is the setting that matters for a `.app`
-    /// launched from Finder, where no environment variable set in a shell
-    /// is visible (#40).
+    /// 生の `log_level` 値 (#49)｡`theme` と同じやり方で､同じ理由でパースする｡
+    /// Finder から起動した `.app` にとって効いてくるのはこの設定だ｡そこでは
+    /// shell で設定した環境変数は一切見えない (#40)｡
     #[serde(default)]
     log_level: Option<String>,
-    /// Non-secret (see [`Config::request_price`]'s doc), so this key is
-    /// allowed in `config.toml` like `oauth_client_id` above.
+    /// 秘密ではない ([`Config::request_price`] の doc を見よ)｡だから上の
+    /// `oauth_client_id` と同じくこのキーは `config.toml` に置いてよい｡
     #[serde(default)]
     request_price: Option<f64>,
-    /// Non-secret, same reasoning as `request_price`.
+    /// 秘密ではない｡`request_price` と同じ理由だ｡
     #[serde(default)]
     daily_request_budget: Option<u32>,
-    /// Non-secret, same reasoning as `request_price`. This is the key that
-    /// matters for a `.app` launched from Finder, where no shell variable
-    /// is visible (#40) — the same reason `log_level` belongs here.
+    /// 秘密ではない｡`request_price` と同じ理由だ｡Finder から起動した `.app`
+    /// にとって効いてくるのはこのキーで､そこでは shell の変数は見えない
+    /// (#40) — `log_level` がここにあるのと同じ理由だ｡
     #[serde(default)]
     auto_sync_list: Option<bool>,
-    /// Non-secret, same reasoning as `request_price`.
+    /// 秘密ではない｡`request_price` と同じ理由だ｡
     #[serde(default)]
     sync_interval_seconds: Option<u32>,
-    /// Non-secret, same reasoning as `request_price`. `u32` rather than
-    /// `u8` so a `300` in the file is refused by `resolve` with the key
-    /// named, not by serde with a type error.
+    /// 秘密ではない｡`request_price` と同じ理由だ｡`u8` ではなく `u32` なのは､
+    /// ファイル中の `300` を serde が型 error で弾くのではなく､`resolve` が
+    /// キー名を挙げて拒めるようにするためだ｡
     #[serde(default)]
     sync_prune_limit_percent: Option<u32>,
-    /// Non-secret, same reasoning as `request_price`. `u32` for
-    /// `sync_prune_limit_percent`'s reason.
+    /// 秘密ではない｡`request_price` と同じ理由だ｡`u32` なのは
+    /// `sync_prune_limit_percent` と同じ理由による｡
     #[serde(default)]
     sync_writes_per_minute: Option<u32>,
-    /// Non-secret, same reasoning as `request_price`. Like `auto_sync_list`
-    /// above, this is the key that matters for a `.app` launched from
-    /// Finder, where no shell variable is visible (#40) — and it is the one
-    /// switch that makes the window stop sending anything on its own.
+    /// 秘密ではない｡`request_price` と同じ理由だ｡上の `auto_sync_list` と
+    /// 同じく､Finder から起動した `.app` にとって効いてくるのはこのキーで､
+    /// そこでは shell の変数は見えない (#40) — そしてこれは､ウィンドウが自ら
+    /// 何かを送るのをやめさせる唯一のスイッチだ｡
     #[serde(default)]
     auto_refresh: Option<bool>,
-    /// Non-secret, same reasoning as `request_price`.
+    /// 秘密ではない｡`request_price` と同じ理由だ｡
     #[serde(default)]
     auto_refresh_interval_seconds: Option<u32>,
-    /// Non-secret, same reasoning as `request_price`.
+    /// 秘密ではない｡`request_price` と同じ理由だ｡
     #[serde(default)]
     follow_new_posts: Option<bool>,
-    /// Raw `list_id` value (#161). Non-secret — a list id is visible in the
-    /// list's own URL on x.com — so it belongs in `config.toml` like every
-    /// key above. Validated by [`Config::resolve`] rather than here, so the
-    /// error can name whichever of the two sources it came from.
+    /// 生の `list_id` 値 (#161)｡秘密ではない — list id は x.com 上でその list
+    /// 自身の URL に見えている — ので､上のどのキーとも同じく `config.toml` に
+    /// 置くべきものだ｡ここではなく [`Config::resolve`] が検証する｡2 つのうち
+    /// どちらのソースから来た値かを error が名指しできるようにするためだ｡
     #[serde(default)]
     list_id: Option<String>,
-    /// Present only so [`Config::resolve`] can reject a file that still
-    /// carries one. It was a credential that must never sit in a
-    /// dotfiles-repo file; since #33 it is not a credential at all, and
-    /// silently ignoring it would leave someone believing they are
-    /// configured when they are not. Kept as an untyped `toml::Value` so
-    /// any shape under this key still triggers the check instead of failing
-    /// with a deserialize error.
+    /// [`Config::resolve`] が､これをまだ抱えているファイルを拒めるようにする
+    /// ためだけに置いてある｡かつては dotfiles リポジトリのファイルに決して
+    /// 置いてはならない credential だった｡#33 以降そもそも credential では
+    /// なくなり､黙って無視すれば､設定できていないのに設定できていると信じた
+    /// ままの人が残る｡型の無い `toml::Value` のままにしてあるのは､このキーの
+    /// 下がどんな形でも deserialize error で落ちず検査が走るようにするためだ｡
     #[serde(default)]
     bearer_token: Option<toml::Value>,
 }
 
 impl FileSettings {
-    /// Load settings from `path`. A missing file is not an error — it just
-    /// means there are no file-level settings yet. A malformed file is an
-    /// error whose message names `path`.
+    /// `path` から設定を読み込む｡ファイルが無いのは error ではない — まだ
+    /// ファイルレベルの設定が無いというだけだ｡壊れたファイルは error で､
+    /// そのメッセージは `path` を名指しする｡
     fn load(path: &Path) -> Result<Self> {
         let contents = match std::fs::read_to_string(path) {
             Ok(contents) => contents,
@@ -309,11 +299,11 @@ impl FileSettings {
 
 impl Config {
     pub(crate) fn from_env() -> Result<Self> {
-        // A missing .env is fine — the variables may come from the real environment.
+        // .env が無くてもよい — 変数は本物の環境から来るかもしれない｡
         let _ = dotenvy::dotenv();
         let paths = Paths::from_env()?;
-        // This is the real startup path, and the only place the one-time
-        // Time Machine exclusion is worth its ~1s subprocess.
+        // ここが本物の起動経路で､一度きりの Time Machine 除外がおよそ 1 秒の
+        // サブプロセスに見合う唯一の場所だ｡
         if paths.ensure_dirs()? {
             paths.exclude_cache_from_backups();
         }
@@ -321,32 +311,32 @@ impl Config {
         Self::resolve(|key| std::env::var(key).ok(), file)
     }
 
-    /// Parse and validate the settings from an arbitrary variable lookup and
-    /// already-loaded file settings.
+    /// 任意の変数引き当てと､既に読み込んだファイル設定から設定をパースして
+    /// 検証する｡
     ///
-    /// Split out from [`Config::from_env`] so the rules below can be tested
-    /// without `set_var`, which is `unsafe` and races the other test threads.
+    /// [`Config::from_env`] から切り出したのは､下の規則を `set_var` 無しで
+    /// テストできるようにするためだ｡`set_var` は `unsafe` で､他のテスト
+    /// スレッドと競合する｡
     ///
-    /// Resolves against the profile this binary was compiled as, which is
-    /// what every caller outside the tests wants. The tests that care about
-    /// a specific profile's defaults (#169) use
-    /// [`Config::resolve_for_profile`] instead.
+    /// このバイナリがコンパイルされたときの profile に対して解決する｡テスト
+    /// 以外のどの呼び出し側もそれを望んでいる｡特定の profile の既定値を気に
+    /// するテスト (#169) は代わりに [`Config::resolve_for_profile`] を使う｡
     fn resolve(var: impl Fn(&str) -> Option<String>, file: FileSettings) -> Result<Self> {
         Self::resolve_for_profile(var, file, Profile::current())
     }
 
-    /// [`Config::resolve`] against an arbitrary profile (#169), mirroring
-    /// the seam [`Paths::for_profile`] uses for the same reason: a default
-    /// that differs per profile can only be pinned by naming one.
+    /// 任意の profile に対する [`Config::resolve`] (#169)｡[`Paths::for_profile`]
+    /// が同じ理由で使っている継ぎ目を写している: profile ごとに異なる既定値は､
+    /// profile を名指しすることでしか固定できない｡
     fn resolve_for_profile(
         var: impl Fn(&str) -> Option<String>,
         file: FileSettings,
         profile: Profile,
     ) -> Result<Self> {
-        // #33 removed the app-only bearer token. Someone upgrading still has
-        // the key in their file, and ignoring it would leave them believing
-        // they are configured when nothing reads it — so say what happened
-        // and what to do instead.
+        // #33 が app-only の bearer token を取り除いた｡更新した人のファイルに
+        // はまだキーが残っていて､無視すれば､誰もそれを読まないのに設定できて
+        // いると信じたままになる — だから何が起きたのか､代わりに何をすべきか
+        // を言う｡
         if file.bearer_token.is_some() {
             bail!(
                 "bearer_token is no longer supported (#33): app-only access could not read \
@@ -365,8 +355,8 @@ impl Config {
                     .filter(|c| !c.is_empty())
             });
 
-        // The only credential there is since #33, so a missing one is a
-        // startup failure rather than one of two alternatives.
+        // #33 以降これが唯一の credential なので､欠けていることは 2 択のうち
+        // の片方ではなく起動の失敗だ｡
         let Some(oauth_client_id) = oauth_client_id else {
             bail!(
                 "no oauth_client_id is configured. Set X_OAUTH_CLIENT_ID, or add \
@@ -434,8 +424,8 @@ impl Config {
 
         let auto_refresh = resolve_switch("X_AUTO_REFRESH", &var, file.auto_refresh)?;
         let follow_new_posts = resolve_switch("X_FOLLOW_NEW_POSTS", &var, file.follow_new_posts)?;
-        // Takes `min_fetch_interval_seconds` because the floor it enforces
-        // is that one — see [`resolve_auto_refresh_interval`].
+        // `min_fetch_interval_seconds` を取るのは､これが強制する下限がそれ
+        // だからだ — [`resolve_auto_refresh_interval`] を見よ｡
         let auto_refresh_interval_seconds = resolve_auto_refresh_interval(
             &var,
             file.auto_refresh_interval_seconds,
@@ -463,23 +453,22 @@ impl Config {
     }
 }
 
-/// Resolve `list_id` (#161): env > file > the profile's own default (#169),
-/// the same layering as everything else, with a blank value on either side
-/// treated as unset — an `X_LIST_ID=` left behind in a shell should mean
-/// "fall through", not a request to `/2/lists//tweets`.
+/// `list_id` を解決する (#161): env > file > profile 自身の既定値 (#169)
+/// という､他のすべてと同じ層構造だ｡どちら側でも空の値は未設定として扱う —
+/// shell に置き去りにされた `X_LIST_ID=` は「素通し」を意味すべきで､
+/// `/2/lists//tweets` へのリクエストではない｡
 ///
-/// The profile default is where a development build picks up its throwaway
-/// list without anything being configured; the release profile has none, so
-/// there it still resolves to "no list, read the home timeline". See
-/// [`Profile::default_list_id`].
+/// profile の既定値は､何も設定しなくても development ビルドが使い捨ての
+/// list を拾う場所だ; release の profile には無いので､そちらでは今も
+/// 「list 無し､home timeline を読む」に解決される｡
+/// [`Profile::default_list_id`] を見よ｡
 ///
-/// A non-empty value that is not all ASCII digits is a startup failure
-/// rather than a warn-and-ignore (unlike `theme` and `log_level`): those
-/// two are cosmetic, whereas this one decides which timeline is fetched,
-/// and silently falling back to the home timeline would leave someone
-/// believing they are reading their list when they are reading the feed
-/// #157 found empty. The error names whichever source the value came from,
-/// so it points at the thing to edit.
+/// 空でなく ASCII 数字だけでもない値は､(`theme` や `log_level` と違い)
+/// 警告して無視ではなく起動の失敗にする: あの二つは見た目の話だが､これは
+/// どの timeline を取るかを決めるもので､黙って home timeline へ落ちると､
+/// #157 が空だと見つけたフィードを読んでいるのに自分の list を読んでいると
+/// 思わせてしまう｡エラーは値がどの出所から来たかを名指すので､直すべきもの
+/// を指す｡
 fn resolve_list_id(
     var: impl Fn(&str) -> Option<String>,
     file_value: Option<String>,
@@ -495,9 +484,9 @@ fn resolve_list_id(
             .filter(|value| !value.is_empty())
         {
             Some(value) => (value, "list_id in config.toml"),
-            // Not run through the digit check below: it is a literal in
-            // this crate, pinned by `profile.rs`'s own tests, not
-            // something a user typed.
+            // 下の数字チェックには通さない: これはこの crate 内の
+            // リテラルで､`profile.rs` 自身のテストが押さえており､
+            // ユーザーが打ったものではない｡
             None => return Ok(profile.default_list_id().map(str::to_string)),
         },
     };
@@ -508,14 +497,14 @@ fn resolve_list_id(
     Ok(Some(raw))
 }
 
-/// Resolve one of the on-by-default boolean switches: env > file > on.
+/// 既定で on の boolean スイッチを解決する: env > file > on｡
 ///
-/// Rejects an unrecognized value rather than falling back the way `theme`
-/// does. A typo'd theme is cosmetic; a typo'd `X_AUTO_SYNC_LIST=flase` read
-/// as the default would leave a paid background loop running for someone
-/// who was trying to switch it off. `X_FOLLOW_NEW_POSTS` costs nothing
-/// either way, but reading `flase` as "on" would still silently ignore
-/// what the person wrote.
+/// `theme` のようにフォールバックせず､認識できない値は拒否する｡theme の
+/// 打ち間違いは見た目の話だが､`X_AUTO_SYNC_LIST=flase` の打ち間違いを
+/// 既定として読めば､切ろうとしていた人のために課金される background の
+/// loop が回り続けることになる｡`X_FOLLOW_NEW_POSTS` はどちらでも費用は
+/// かからないが､`flase` を「on」と読めばやはりその人が書いたものを黙って
+/// 無視することになる｡
 fn resolve_switch(
     key: &str,
     var: impl Fn(&str) -> Option<String>,
@@ -534,12 +523,13 @@ fn resolve_switch(
     }
 }
 
-/// Resolve `sync_interval_seconds`: env > file > [`DEFAULT_SYNC_INTERVAL_SECONDS`],
-/// refusing anything under [`MIN_SYNC_INTERVAL_SECONDS`].
+/// `sync_interval_seconds` を解決する: env > file >
+/// [`DEFAULT_SYNC_INTERVAL_SECONDS`]｡[`MIN_SYNC_INTERVAL_SECONDS`] 未満は
+/// 拒否する｡
 ///
-/// The floor's error names what the number buys rather than just the
-/// bound, because the mistake it catches is a decimal point, and "must be
-/// at least 900" does not tell someone why 60 was a bad idea.
+/// 下限のエラーは境界だけでなくその数字が何を買うのかを述べる｡捕まえる
+/// 間違いが小数点だからであり､「must be at least 900」では 60 がなぜ
+/// まずいのかが伝わらないからだ｡
 fn resolve_sync_interval(
     var: impl Fn(&str) -> Option<String>,
     file_value: Option<u32>,
@@ -570,12 +560,12 @@ fn resolve_sync_interval(
     Ok(seconds)
 }
 
-/// Resolve `sync_prune_limit_percent` (#176): env > file >
-/// [`DEFAULT_SYNC_PRUNE_LIMIT_PERCENT`], refusing anything over 100.
+/// `sync_prune_limit_percent` を解決する (#176): env > file >
+/// [`DEFAULT_SYNC_PRUNE_LIMIT_PERCENT`]｡100 を超えるものは拒否する｡
 ///
-/// A ceiling rather than a clamp: `150` is not "off", it is a number that
-/// was meant to be something else, and reading it as 100 would turn the
-/// cap off for the one person who was trying to set it.
+/// 丸め込みではなく上限だ: `150` は「off」ではなく､別の何かのつもりで
+/// あった数字であり､それを 100 と読めば､まさに上限を設定しようとしていた
+/// 当の人のために上限を切ってしまう｡
 fn resolve_sync_prune_limit(
     var: impl Fn(&str) -> Option<String>,
     file_value: Option<u32>,
@@ -603,15 +593,15 @@ fn resolve_sync_prune_limit(
         })
 }
 
-/// Resolve `sync_writes_per_minute` (#197): env > file >
-/// [`DEFAULT_SYNC_WRITES_PER_MINUTE`], refusing 0 and anything over
-/// [`MAX_SYNC_WRITES_PER_MINUTE`].
+/// `sync_writes_per_minute` を解決する (#197): env > file >
+/// [`DEFAULT_SYNC_WRITES_PER_MINUTE`]｡0 と
+/// [`MAX_SYNC_WRITES_PER_MINUTE`] を超えるものは拒否する｡
 ///
-/// 0 is refused rather than read as "off" — `auto_sync_list` is the switch
-/// for that, and a pace of zero would be a sync that claims to run while
-/// never draining its plan. The ceiling is a ceiling for
-/// [`MAX_SYNC_WRITES_PER_MINUTE`]'s reason: beyond it only the refusals
-/// get faster.
+/// 0 は「off」と読まずに拒否する — そのためのスイッチは `auto_sync_list`
+/// であり､ペース 0 は走っていると称しながら plan を決して流し切らない
+/// sync になるからだ｡上限が上限であるのは
+/// [`MAX_SYNC_WRITES_PER_MINUTE`] の理由による: それを越えても速くなるのは
+/// refusal だけだ｡
 fn resolve_sync_writes_per_minute(
     var: impl Fn(&str) -> Option<String>,
     file_value: Option<u32>,
@@ -642,22 +632,21 @@ fn resolve_sync_writes_per_minute(
         })
 }
 
-/// Resolve `auto_refresh_interval_seconds` (#21): env > file >
-/// [`DEFAULT_AUTO_REFRESH_INTERVAL_SECONDS`], refusing anything below
-/// `min_fetch_interval_seconds`.
+/// `auto_refresh_interval_seconds` を解決する (#21): env > file >
+/// [`DEFAULT_AUTO_REFRESH_INTERVAL_SECONDS`]｡
+/// `min_fetch_interval_seconds` を下回るものは拒否する｡
 ///
-/// The floor is not about money — [`DEFAULT_AUTO_REFRESH_INTERVAL_SECONDS`]
-/// explains why a poll is nearly free — but about the loop working at all.
-/// Every poll goes through `ui::reload_policy::reload_gate` as
-/// `ReloadTrigger::Polling`, which refuses a fetch within
-/// `min_fetch_interval_seconds` of the last one. Set the cadence below that
-/// floor and every single tick is refused before it sends anything: the
-/// window would be running a timer that can never do its job, and nothing
-/// on screen would say so. Rejecting it at startup is the only place that
-/// mismatch is visible.
+/// 下限は金の話ではなく — poll がほぼ無料である理由は
+/// [`DEFAULT_AUTO_REFRESH_INTERVAL_SECONDS`] が説明する — loop がそもそも
+/// 動くかどうかの話だ｡どの poll も `ReloadTrigger::Polling` として
+/// `ui::reload_policy::reload_gate` を通り､それは前回から
+/// `min_fetch_interval_seconds` 以内の fetch を拒否する｡その下限より短い
+/// 間隔にすれば､どの tick も何かを送る前に残らず拒否される: ウィンドウは
+/// 決して仕事のできないタイマーを回すことになり､画面にはそう告げるものが
+/// 何も無い｡起動時に拒否することが､その食い違いの見える唯一の場所だ｡
 ///
-/// Equal to the floor is accepted — a poll scheduled exactly when the gate
-/// reopens is the tightest cadence that still works.
+/// 下限ちょうどは受け入れる — gate が開き直すのとまさに同時に組まれた
+/// poll が､なお動く最も詰めた間隔だ｡
 fn resolve_auto_refresh_interval(
     var: &impl Fn(&str) -> Option<String>,
     file_value: Option<u32>,
@@ -689,28 +678,27 @@ fn resolve_auto_refresh_interval(
     Ok(seconds)
 }
 
-/// Resolve `request_price` (#18): env > file > unset, the same precedence
-/// every other setting in [`Config::resolve`] uses — split out from there
-/// only to keep that function under clippy's line-count lint, not because
-/// the logic itself is reused elsewhere.
+/// `request_price` を解決する (#18): env > file > 未設定｡[`Config::resolve`]
+/// の他のどの設定とも同じ優先順位で — そこから切り出してあるのは､あの
+/// 関数を clippy の行数 lint の下に収めるためだけであって､ロジック自体を
+/// 他所で再利用しているからではない｡
 ///
-/// Unlike every numeric setting `Config::resolve` handles inline, a
-/// *missing* value here is the normal case, not something to default away
-/// — see [`Config::request_price`]'s doc for why there is no built-in
-/// default. Still validated when present, from either source: a negative
-/// or non-finite price would silently corrupt every estimated amount
-/// downstream.
-/// Resolve `theme` (#19): env > file > default.
+/// `Config::resolve` がインラインで扱うどの数値設定とも違い､ここでは値が
+/// *無い* ことが通常であって､既定値で片付けるものではない — 組み込みの
+/// 既定値が無い理由は [`Config::request_price`] の doc を見よ｡ただし値が
+/// あればどちらの source からでも検証する: 負や非有限の価格は､下流の
+/// 見積り額をすべて黙って壊す｡
+/// `theme` を解決する (#19): env > file > 既定値｡
 ///
-/// Unlike the numeric settings, an unrecognized value here must not
-/// `bail!` — a typo'd theme is cosmetic, not a reason to block startup —
-/// so it falls back to the default and warns via `eprintln!`, the
-/// project's established pattern for non-fatal notices (see `main.rs`).
-/// [`resolve_log_level`] below does the same thing for the same reason.
+/// 数値の設定とは違い､ここで認識できない値に `bail!` してはならない —
+/// theme の打ち間違いは見た目の話であって､起動を止める理由ではない — ので
+/// 既定値へフォールバックし､`eprintln!` で警告する｡致命的でない通知に
+/// ついてこのプロジェクトが定着させたやり方だ (`main.rs` を見よ)｡下の
+/// [`resolve_log_level`] も同じ理由で同じことをする｡
 ///
-/// A free function rather than inline in [`Config::resolve_for_profile`]
-/// only to keep that one under clippy's line-count lint, like every other
-/// `resolve_*` here.
+/// [`Config::resolve_for_profile`] のインラインではなく自由関数にして
+/// あるのは､ここの他の `resolve_*` と同じく､あの関数を clippy の行数
+/// lint の下に収めるためだけだ｡
 fn resolve_theme(var: &impl Fn(&str) -> Option<String>, file_value: Option<String>) -> ThemeMode {
     var("X_THEME")
         .map(|t| t.trim().to_string())
@@ -733,17 +721,16 @@ fn resolve_theme(var: &impl Fn(&str) -> Option<String>, file_value: Option<Strin
         .unwrap_or_default()
 }
 
-/// Resolve the log level (#49): `TWIGPUI_LOG` wins over `config.toml`'s
-/// `log_level`, and an unrecognized value warns and falls back to the
-/// default rather than blocking startup — the same shape as `theme` (#19),
-/// for the same reason: neither is worth refusing to run over.
+/// log level を解決する (#49): `TWIGPUI_LOG` が `config.toml` の
+/// `log_level` に勝ち､認識できない値は起動を止めずに警告して既定値へ
+/// フォールバックする — `theme` (#19) と同じ形､同じ理由だ: どちらも
+/// 実行を拒むほどのものではない｡
 ///
-/// The warning goes to stderr rather than the log, because this runs
-/// *before* `log::init` — the level it produces is what `init` is waiting
-/// for. In a `.app` launched from Finder nobody sees it, which is also the
-/// case where a bad value is least likely to be a surprise: environment
-/// variables set in a shell are not visible there, so it came from
-/// `config.toml`, which the user just edited.
+/// 警告は log ではなく stderr へ出す｡これが `log::init` より *前* に
+/// 走るからで — それが produce する level こそ `init` が待っているものだ｡
+/// Finder から起動した `.app` では誰も見ないが､そこは悪い値が驚きに
+/// なりにくい場合でもある: shell で設定した環境変数はそこからは見えない
+/// ので､値の出どころはユーザーが今しがた編集した `config.toml` だ｡
 fn resolve_log_level(
     var: &impl Fn(&str) -> Option<String>,
     file_value: Option<String>,
@@ -789,10 +776,10 @@ fn resolve_request_price(
     Ok(value)
 }
 
-/// Resolve `daily_request_budget` (#18): env > file > unset. Split out for
-/// the same reason as [`resolve_request_price`]. No validation beyond
-/// parsing as `u32`: every value in that range (including zero) is
-/// meaningful to `usage::budget_status`.
+/// `daily_request_budget` を解決する (#18): env > file > 未設定｡切り出した
+/// 理由は [`resolve_request_price`] と同じ｡`u32` として parse する以上の
+/// 検証はしない: その範囲のどの値も (0 を含めて) `usage::budget_status` に
+/// とって意味がある｡
 fn resolve_daily_request_budget(
     var: &impl Fn(&str) -> Option<String>,
     file_value: Option<u32>,
@@ -811,7 +798,7 @@ mod tests {
     use crate::profile::Profile;
     use crate::theme::ThemeMode;
 
-    /// Build a lookup over a fixed `(key, value)` table.
+    /// 固定の `(key, value)` 表を引く lookup を作る｡
     fn vars(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> + use<> {
         let pairs: Vec<(String, String)> = pairs
             .iter()
@@ -838,8 +825,8 @@ mod tests {
         assert_eq!(config.theme, ThemeMode::default());
     }
 
-    // #33 made the client id the only credential, so this is a hard
-    // failure again — as it was before #7 introduced the second one.
+    // #33 が client id を唯一の credential にしたので､これはまた強い失敗に
+    // なった — #7 が 2 つ目を持ち込む前がそうだったように｡
     #[test]
     fn rejects_when_no_client_id_is_configured() {
         let error = Config::resolve(vars(&[]), FileSettings::default())
@@ -852,9 +839,9 @@ mod tests {
         );
     }
 
-    // A blank token must still count as "not configured" rather than being
-    // used verbatim — but with an oauth_client_id present, that no longer
-    // --- #49: log level ---
+    // 空白だけの token は､そのまま使われるのではなく "not configured" として
+    // 数えられなければならない — が oauth_client_id があるので､それはもう
+    // --- #49: ログレベル ---
 
     #[test]
     fn the_log_level_defaults_to_info() {
@@ -897,8 +884,8 @@ mod tests {
 
     #[test]
     fn the_files_log_level_is_used_when_the_environment_is_silent() {
-        // The case that actually matters: a `.app` launched from Finder
-        // sees no environment variable set in a shell (#40).
+        // 実際に効いてくる場合: Finder から起動した `.app` には､シェルで
+        // 設定された環境変数が見えない (#40)｡
         let config = Config::resolve(
             vars(&[("X_OAUTH_CLIENT_ID", "client-123")]),
             FileSettings {
@@ -933,8 +920,8 @@ mod tests {
 
     #[test]
     fn trims_the_client_id() {
-        // A value pasted into .env often carries a trailing newline, and it
-        // goes into the authorize URL verbatim.
+        // .env に貼り付けた値は末尾に改行を抱えていることが多く､それが
+        // authorize URL にそのまま入る｡
         let config = Config::resolve(
             vars(&[("X_OAUTH_CLIENT_ID", "  client-123\n")]),
             FileSettings::default(),
@@ -1051,7 +1038,7 @@ mod tests {
         }
     }
 
-    // --- config.toml layering (env > file > default) ---
+    // --- config.toml の重ね順 (env > file > default) ---
 
     #[test]
     fn resolve_reads_target_username_from_the_file_when_env_is_unset() {
@@ -1119,10 +1106,10 @@ mod tests {
 
     #[test]
     fn resolve_rejects_a_bearer_token_left_in_the_file() {
-        // #33: someone upgrading still has the key. Ignoring it would leave
-        // them believing they are configured when nothing reads it, so this
-        // is a hard failure that names the replacement — and, as before,
-        // never echoes the value itself into the message.
+        // #33: アップグレードした人の手元にはまだこのキーが残っている｡黙って
+        // 無視すると､誰も読まないのに設定できていると信じたままにさせるので､
+        // 代わりのものを名指しする強い失敗にする — そして以前と同じく､値
+        // そのものはメッセージに決して出さない｡
         let file = FileSettings {
             bearer_token: Some(toml::Value::String("leaked".to_string())),
             ..FileSettings::default()
@@ -1135,7 +1122,7 @@ mod tests {
         assert!(!error.contains("leaked"), "{error}");
     }
 
-    // --- min_fetch_interval_seconds layering (env > file > default, #10) ---
+    // --- min_fetch_interval_seconds の重ね順 (env > file > default, #10) ---
 
     #[test]
     fn resolve_reads_min_fetch_interval_from_the_file_when_env_is_unset() {
@@ -1192,7 +1179,7 @@ mod tests {
         assert!(error.contains("not a number"), "{error}");
     }
 
-    // --- theme layering (env > file > default, #19) ---
+    // --- theme の重ね順 (env > file > default, #19) ---
 
     #[test]
     fn resolve_parses_the_theme_from_env() {
@@ -1254,8 +1241,8 @@ mod tests {
         assert_eq!(config.theme, ThemeMode::default());
     }
 
-    // An unrecognized theme must not fail startup (#19) — it falls back to
-    // the default. This must hold for both the env and the file source.
+    // 認識できない theme で起動を失敗させてはならない (#19) — 既定へ落ちる｡
+    // これは env と file のどちらの取得元でも成り立たなければならない｡
 
     #[test]
     fn resolve_falls_back_to_the_default_theme_on_an_unrecognized_env_value() {
@@ -1464,15 +1451,15 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
     }
 
-    // --- #161: the list id that selects the window's primary source ---
+    // --- #161: ウィンドウの主たる取得元を選ぶ list id ---
 
     #[test]
     fn no_list_id_is_configured_by_default() {
-        // Absent means "show the home timeline", which is what every launch
-        // did before #161. Nothing about that path changes until a list id
-        // is set on purpose. Named against the release profile because #169
-        // gives the development one a default, and this is the assertion
-        // about the build people install.
+        // 無いことは "home timeline を出す" という意味で､#161 以前はどの
+        // 起動もそうしていた｡意図して list id を設定するまで､その経路は
+        // 何も変わらない｡release プロファイルを名指しするのは､#169 が
+        // development 側に既定を与えたからで､これは人がインストールする
+        // ビルドについての assert だ｡
         let config = Config::resolve_for_profile(
             vars(&[("X_OAUTH_CLIENT_ID", "client-123")]),
             FileSettings::default(),
@@ -1484,9 +1471,9 @@ mod tests {
 
     #[test]
     fn the_dev_profile_defaults_to_its_own_list() {
-        // #169: a development build reads the throwaway list without
-        // anything configured, so `--sync-list` cannot rewrite the real
-        // one just because an export was forgotten.
+        // #169: development ビルドは何も設定しなくても使い捨ての list を
+        // 読む｡export を忘れただけで `--sync-list` が本物の list を
+        // 書き換えてしまうことがないようにするためだ｡
         let config = Config::resolve_for_profile(
             vars(&[("X_OAUTH_CLIENT_ID", "client-123")]),
             FileSettings::default(),
@@ -1526,8 +1513,8 @@ mod tests {
 
     #[test]
     fn resolve_reads_the_list_id_from_the_file_when_env_is_unset() {
-        // The `.app` launched from Finder sees no shell environment (#40),
-        // so the file is the only way to configure this there.
+        // Finder から起動した `.app` にはシェルの環境が見えない (#40) ので､
+        // そこでこれを設定する手立ては file しかない｡
         let file = FileSettings {
             list_id: Some("2091351590695588200".to_string()),
             ..FileSettings::default()
@@ -1552,8 +1539,8 @@ mod tests {
 
     #[test]
     fn a_blank_list_id_is_the_same_as_not_setting_one() {
-        // Otherwise an empty `X_LIST_ID=` left over in a shell would build
-        // `/2/lists//tweets` and spend a request on a 404.
+        // さもないとシェルに残った空の `X_LIST_ID=` が `/2/lists//tweets` を
+        // 組み立て､404 に 1 リクエストを費やす｡
         let config = Config::resolve_for_profile(
             vars(&[("X_OAUTH_CLIENT_ID", "client-123"), ("X_LIST_ID", "   ")]),
             FileSettings::default(),
@@ -1565,8 +1552,8 @@ mod tests {
 
     #[test]
     fn rejects_a_list_id_that_is_not_all_digits() {
-        // This value is interpolated into a URL path segment, so anything
-        // that is not a snowflake id is rejected here rather than sent.
+        // この値は URL のパスセグメントに埋め込まれるので､snowflake id で
+        // ないものは送らずにここで弾く｡
         let error = Config::resolve(
             vars(&[
                 ("X_OAUTH_CLIENT_ID", "client-123"),
@@ -1647,9 +1634,9 @@ mod tests {
 
     #[test]
     fn resolve_rejects_an_auto_sync_list_it_does_not_understand() {
-        // Not a fall-back-to-default like `theme`: a typo'd theme is
-        // cosmetic, whereas a typo here would leave a paid loop running for
-        // someone who was trying to switch it off.
+        // `theme` のように既定へ落とすことはしない: theme の打ち間違いは
+        // 見た目の話だが､ここでの打ち間違いは､切ろうとしていた人の手元で
+        // 課金されるループを回したままにしてしまう｡
         let error = Config::resolve(
             vars(&[
                 ("X_OAUTH_CLIENT_ID", "client-123"),
@@ -1663,7 +1650,7 @@ mod tests {
         assert!(error.contains("flase"), "{error}");
     }
 
-    // --- sync_interval_seconds (env > file > default, with a floor) ---
+    // --- sync_interval_seconds (env > file > default, 下限つき) ---
 
     #[test]
     fn the_sync_interval_defaults_to_six_hours() {
@@ -1704,9 +1691,9 @@ mod tests {
 
     #[test]
     fn resolve_rejects_a_sync_interval_below_the_floor() {
-        // The decimal-point mistake: 60 where 6000 was meant. Both full
-        // reads bill per account returned, so this one is not a typo
-        // anybody gets to find out about later.
+        // 小数点の取り違え: 6000 のつもりで 60 と書く類だ｡どちらの全件読みも
+        // 返ってきたアカウント単位で課金されるので､これは後から気づけばよい
+        // 打ち間違いではない｡
         let error = Config::resolve(
             vars(&[
                 ("X_OAUTH_CLIENT_ID", "client-123"),
@@ -1753,9 +1740,9 @@ mod tests {
 
     #[test]
     fn the_write_pace_defaults_to_two_a_minute() {
-        // The measured basis: a hidden cap engaged at roughly seven writes
-        // a minute and stayed down for 24 hours. The default is the pace
-        // that does not trip it, not the fastest allowed.
+        // 実測にもとづく根拠: 隠れた cap が毎分およそ 7 write で作動し､
+        // 24 時間下がったままだった｡既定はそれを踏まない歩調であって､
+        // 許される最速ではない｡
         let config = Config::resolve(
             vars(&[("X_OAUTH_CLIENT_ID", "client-123")]),
             FileSettings::default(),
@@ -1793,8 +1780,8 @@ mod tests {
 
     #[test]
     fn resolve_rejects_a_write_pace_of_zero() {
-        // 0 is not "off" — `auto_sync_list` is. A pace of zero would be a
-        // sync that claims to run while never draining its plan.
+        // 0 は "off" ではない — off は `auto_sync_list` の役目だ｡歩調が
+        // ゼロの sync は､走ると称しながら計画を永久に捌かないことになる｡
         let error = Config::resolve(
             vars(&[
                 ("X_OAUTH_CLIENT_ID", "client-123"),
@@ -1809,9 +1796,9 @@ mod tests {
 
     #[test]
     fn resolve_rejects_a_write_pace_past_the_documented_window() {
-        // 20/min is 300 per 15 minutes spread evenly — X's documented
-        // window. Above it the tracked window refuses sends anyway, so a
-        // larger value only buys refusals.
+        // 20/min は 15 分あたり 300 を均等にならしたもの — X が文書化して
+        // いる window だ｡それを超えると追跡している window がどのみち送信を
+        // 拒むので､大きい値は拒否を買うだけだ｡
         let error = Config::resolve(
             vars(&[
                 ("X_OAUTH_CLIENT_ID", "client-123"),
@@ -1866,7 +1853,7 @@ mod tests {
         assert!(error.contains("is not a number"), "{error}");
     }
 
-    // --- #176: sync_prune_limit_percent (env > file > 10, at most 100) ---
+    // --- #176: sync_prune_limit_percent (env > file > 10, 最大 100) ---
 
     #[test]
     fn the_prune_limit_defaults_to_ten_percent() {
@@ -2010,8 +1997,8 @@ mod tests {
         assert!(config.auto_refresh);
     }
 
-    // Same reasoning as `X_AUTO_SYNC_LIST`: a typo read as the default
-    // would leave a paid timer running for someone switching it off.
+    // `X_AUTO_SYNC_LIST` と同じ理屈だ: 打ち間違いを既定として読むと､切ろうと
+    // していた人の手元で課金されるタイマーを回したままにしてしまう｡
     #[test]
     fn rejects_an_unrecognized_auto_refresh_value() {
         let error = Config::resolve(
@@ -2054,9 +2041,9 @@ mod tests {
         assert_eq!(config.auto_refresh_interval_seconds, 600);
     }
 
-    // The interval this loop is paced by cannot be shorter than the one
-    // `reload_gate` refuses inside — every tick would be blocked before it
-    // sent anything, and auto-refresh would silently never happen.
+    // このループの歩調を決める間隔は､`reload_gate` がその内側で拒む間隔より
+    // 短くできない — どの tick も何かを送る前に阻まれ､auto-refresh は黙って
+    // 一度も起きないことになる｡
     #[test]
     fn rejects_an_auto_refresh_interval_below_the_fetch_interval() {
         let error = Config::resolve(
@@ -2088,8 +2075,8 @@ mod tests {
         assert_eq!(config.auto_refresh_interval_seconds, 120);
     }
 
-    // The floor names the file key when that is where the value came
-    // from, mirroring `resolve_sync_interval`'s two-source message.
+    // 値が file から来たときは､下限のメッセージが file のキーを名指しする｡
+    // `resolve_sync_interval` の 2 取得元のメッセージに倣っている｡
     #[test]
     fn the_auto_refresh_interval_floor_names_the_file_key() {
         let error = Config::resolve(
@@ -2121,7 +2108,7 @@ mod tests {
         assert!(error.contains("is not a number"), "{error}");
     }
 
-    // --- #22: follow new posts ---
+    // --- #22: 新着 post への追従 ---
 
     #[test]
     fn following_new_posts_is_on_by_default() {
@@ -2179,10 +2166,10 @@ mod tests {
         assert!(config.follow_new_posts);
     }
 
-    // Unlike `X_AUTO_REFRESH`, a typo here costs nothing — the switch is
-    // about presentation, not spending. It is still rejected, for the
-    // plainer reason that reading `flase` as "on" silently ignores what
-    // the person wrote.
+    // `X_AUTO_REFRESH` と違い､ここでの打ち間違いは何の代償も生まない — この
+    // スイッチは見せ方の話で､支出の話ではない｡それでも弾く｡`flase` を "on"
+    // として読むのは､その人が書いたものを黙って無視することだ､という
+    // より素朴な理由からだ｡
     #[test]
     fn rejects_an_unrecognized_follow_new_posts_value() {
         let error = Config::resolve(

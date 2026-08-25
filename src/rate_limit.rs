@@ -1,20 +1,20 @@
-//! Rate-limit tracking and retry backoff (#10).
+//! レートリミットの追跡とリトライのバックオフ (#10)｡
 //!
-//! Four pure seams, mirroring `config.rs`'s injected-`now` convention and
-//! `pkce.rs`'s injected-randomness convention: [`parse_headers`] (header
-//! text -> a typed snapshot), [`decision`] (snapshot + `now` -> send or
-//! refuse), [`classify_429`] (response body -> which kind of 429), and
-//! [`backoff_delay`] (attempt count + injected jitter fraction -> a
-//! `Duration`). None of these read the clock, roll real dice, touch disk, or
-//! touch the network — only [`load`]/[`save`] (disk) and
-//! [`random_jitter_fraction`] (the OS CSPRNG) do, and `x_api::client` is the
-//! only thing in this crate that also touches the network.
+//! 純粋な seam が 4 つ｡`config.rs` の `now` 注入と `pkce.rs` の乱数注入の
+//! 慣習に倣っている: [`parse_headers`] (ヘッダのテキスト -> 型の付いた
+//! スナップショット)､[`decision`] (スナップショット + `now` -> 送るか
+//! 拒むか)､[`classify_429`] (レスポンスボディ -> どの種類の 429 か)､
+//! [`backoff_delay`] (試行回数 + 注入された jitter の割合 -> `Duration`)｡
+//! どれも時計を読まず､実際に乱数を振らず､ディスクにもネットワークにも
+//! 触らない — 触るのは [`load`]/[`save`] (ディスク) と
+//! [`random_jitter_fraction`] (OS の CSPRNG) だけで､ネットワークに触るのは
+//! このクレートでは `x_api::client` だけである｡
 //!
-//! The central rule this module exists to serve: a GUI app must never sleep
-//! a background thread waiting out a reset window that can be up to 15
-//! minutes. [`decision`] is how `x_api::client` decides *before sending*
-//! whether to refuse a request outright and hand back a typed error with the
-//! reset time instead.
+//! このモジュールが存在する理由となる中心の規則: GUI アプリは､最大 15 分に
+//! なりうるリセット窓を待つためにバックグラウンドスレッドを sleep させては
+//! ならない｡[`decision`] は `x_api::client` が *送信前に* リクエストを
+//! きっぱり拒んで､代わりにリセット時刻を持つ型付きのエラーを返すかどうかを
+//! 決めるための仕組みである｡
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -25,27 +25,27 @@ use serde::{Deserialize, Serialize};
 use crate::paths::Paths;
 use crate::x_api::model::ApiProblem;
 
-/// One endpoint's tracked rate-limit window, as reported by `x-rate-limit-*`
-/// response headers. Every field is independently optional: a header can be
-/// missing, or present but garbage, without that meaning "fail the request"
-/// — see [`parse_headers`].
+/// 1 つのエンドポイントについて追跡するレートリミット窓｡`x-rate-limit-*`
+/// レスポンスヘッダが報告する内容そのもの｡各フィールドは独立に optional で､
+/// ヘッダが欠けていても､あってもゴミでも､それが「リクエストを失敗させる」
+/// ことを意味しはしない — [`parse_headers`] を見よ｡
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct RateLimitState {
     #[serde(default)]
     pub limit: Option<u32>,
     #[serde(default)]
     pub remaining: Option<u32>,
-    /// Unix seconds when `remaining` resets to `limit`.
+    /// `remaining` が `limit` に戻る時刻 (unix 秒)｡
     #[serde(default)]
     pub reset_at: Option<i64>,
 }
 
-/// Parse one response's `x-rate-limit-limit` / `-remaining` / `-reset`
-/// headers. Each argument is independently optional (a missing header) and
-/// independently fallible to parse (a present-but-garbage header); either
-/// way the corresponding field comes back `None` rather than failing the
-/// whole parse. An unparseable header means "no information", never "fail
-/// the request".
+/// 1 つのレスポンスの `x-rate-limit-limit` / `-remaining` / `-reset`
+/// ヘッダをパースする｡各引数は独立に optional (ヘッダが無い) であり､パース
+/// も独立に失敗しうる (ヘッダはあるがゴミ)｡どちらの場合も､パース全体を
+/// 失敗させるのではなく対応するフィールドが `None` で返る｡パースできない
+/// ヘッダは「情報が無い」を意味するのであって､「リクエストを失敗させる」
+/// ではない｡
 pub(crate) fn parse_headers(
     limit: Option<&str>,
     remaining: Option<&str>,
@@ -58,22 +58,22 @@ pub(crate) fn parse_headers(
     }
 }
 
-/// Returned by [`decision`] when the tracked window says not to send.
-/// `ui.rs` downcasts an `anyhow::Error` to this to render a countdown
-/// instead of a bare error string.
+/// 追跡している窓が送るなと言うときに [`decision`] が返す型｡`ui.rs` は
+/// `anyhow::Error` をこれに downcast して､素のエラー文字列ではなく
+/// カウントダウンを描画する｡
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct RateLimited {
-    /// Unix seconds when the window is expected to reset, if known. `None`
-    /// only when a live 429 response carried no usable
-    /// `x-rate-limit-reset` — [`decision`] itself only ever refuses with a
-    /// known reset time, since that's part of its trigger condition.
+    /// 窓がリセットされると見込まれる時刻 (unix 秒)｡分かる場合のみ｡`None`
+    /// になるのは､実際の 429 レスポンスが使える `x-rate-limit-reset` を
+    /// 持たなかったときだけ — [`decision`] 自身はリセット時刻が分かって
+    /// いるときしか拒まない｡それが発火条件の一部だからである｡
     pub reset_at: Option<i64>,
-    /// Whether the refusal came from a cap the `x-rate-limit-*` headers do
-    /// not describe (#197) — see [`Refusal::Opaque`]. `false` for a
-    /// refusal the tracked window explains, including [`decision`]'s own
-    /// pre-send one. The distinction is the caller's to act on: a window
-    /// reopens when its header says, whereas an opaque cap has to be
-    /// backed away from, further each time it refuses.
+    /// その拒否が `x-rate-limit-*` ヘッダの説明しない上限から来たかどうか
+    /// (#197) — [`Refusal::Opaque`] を見よ｡追跡している窓で説明のつく拒否
+    /// なら `false`｡[`decision`] 自身による送信前の拒否も含む｡この区別に
+    /// 従って動くのは呼び出し側の責任である: 窓はヘッダの言う時刻に開き
+    /// 直すが､opaque な上限は拒まれるたびにさらに長く間を置いて退く
+    /// しかない｡
     pub opaque: bool,
 }
 
@@ -88,11 +88,11 @@ impl std::fmt::Display for RateLimited {
 
 impl std::error::Error for RateLimited {}
 
-/// The central rule (#10): when the tracked window reports zero remaining
-/// and its reset time is still ahead of `now`, refuse to send and let the
-/// caller decide whether to wait — never sleep the calling thread out. Every
-/// other case is safe to send: remaining above zero, an unknown remaining
-/// count (no information yet), or a reset time that has already passed.
+/// 中心の規則 (#10): 追跡している窓が remaining ゼロを報告し､そのリセット
+/// 時刻がまだ `now` より先なら､送信を拒んで待つかどうかは呼び出し側に
+/// 決めさせる — 呼び出し元のスレッドを sleep させて待たせてはならない｡
+/// それ以外はすべて送って安全である: remaining がゼロより大きい､remaining
+/// が不明 (まだ情報が無い)､リセット時刻がすでに過ぎている｡
 pub(crate) fn decision(state: RateLimitState, now: i64) -> Result<(), RateLimited> {
     match (state.remaining, state.reset_at) {
         (Some(0), Some(reset_at)) if reset_at > now => Err(RateLimited {
@@ -103,41 +103,39 @@ pub(crate) fn decision(state: RateLimitState, now: i64) -> Result<(), RateLimite
     }
 }
 
-/// How long to wait after a 429 that the tracked window cannot explain,
-/// when its `x-rate-limit-reset` header cannot be trusted — see
-/// [`Refusal::Opaque`]. 15 minutes: X's per-endpoint windows run on
-/// that period, so it is long enough not to re-poke a hidden cap every
-/// few seconds and short enough that a genuine window has reopened by the
-/// time it elapses. This is the *first* wait; a caller refused again is
-/// expected to wait longer (`sync::state::opaque_backoff_seconds`).
+/// 追跡している窓では説明のつかない 429 のあと､その `x-rate-limit-reset`
+/// ヘッダが信用できないときに待つ長さ — [`Refusal::Opaque`] を見よ｡15 分:
+/// X のエンドポイントごとの窓はこの周期で動くので､隠れた上限を数秒おきに
+/// 突き直さない程度には長く､かつ経過するころには本物の窓が開き直している
+/// 程度には短い｡これは *最初の* 待ちであり､再度拒まれた呼び出し側はもっと
+/// 長く待つことが期待されている (`sync::state::opaque_backoff_seconds`)｡
 pub(crate) const OPAQUE_LIMIT_BACKOFF_SECONDS: i64 = 900;
 
-/// Which limit a 429 came from, as far as its headers can say.
+/// その 429 がどの上限から来たか､ヘッダから言える範囲で｡
 ///
-/// The header `x-rate-limit-reset` is only the honest answer when the
-/// window it describes is the one that refused the request — that is, when
-/// `remaining` is zero. A 429 that arrives with headroom left
-/// (`remaining > 0`) was refused by a limit X does not expose in these
-/// headers (measured: `POST /2/lists/:id/members` returns 429 with
-/// `remaining` 299 of 300 while a stricter write cap does the refusing —
-/// and kept doing so for over twenty hours, #197). Its reset belongs to the
-/// untouched window and may be seconds away or already in the past, so
-/// trusting it makes the caller re-poke the hidden cap almost immediately.
+/// `x-rate-limit-reset` ヘッダが正直な答えになるのは､それが記述する窓が
+/// リクエストを拒んだ当の窓であるとき — つまり `remaining` がゼロのとき
+/// だけである｡余裕を残したまま届く 429 (`remaining > 0`) は､X がこれらの
+/// ヘッダで公開していない上限に拒まれている (実測: `POST /2/lists/:id/members`
+/// は 300 のうち `remaining` 299 で 429 を返し､より厳しい書き込み上限が
+/// 拒んでいた — しかもそれが 20 時間以上続いた､#197)｡そのリセットは手つかず
+/// の窓のもので､数秒先かもしれないしすでに過去かもしれない｡だから信用すると
+/// 呼び出し側はほとんど即座に隠れた上限を突き直すことになる｡
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Refusal {
-    /// The tracked window is exhausted and says when it reopens.
+    /// 追跡している窓が枯れていて､いつ開き直るかを言っている｡
     Window { reset_at: i64 },
-    /// A cap the headers do not describe. When it lifts is unknown; the
-    /// only honest answer is a conservative backoff from now, and a caller
-    /// that is refused again should back off further (`sync::state`).
+    /// ヘッダが記述していない上限｡いつ解けるかは不明で､正直な答えは今から
+    /// 保守的にバックオフすることだけである｡再度拒まれた呼び出し側は､さらに
+    /// 長く退くべきである (`sync::state`)｡
     Opaque,
 }
 
 impl Refusal {
-    /// Read a 429's window state into which limit refused it. Everything
-    /// but a genuinely exhausted window with a future reset is opaque —
-    /// including a reset already in the past, which is a stale header,
-    /// and no headers at all.
+    /// 429 の窓の状態を読んで､どの上限が拒んだかに落とす｡本当に枯れていて
+    /// リセットが未来にある窓以外はすべて opaque である — すでに過去の
+    /// リセット (古くなったヘッダ) も､ヘッダがまったく無い場合も含めて
+    /// そう扱う｡
     pub(crate) fn classify(state: RateLimitState, now: i64) -> Self {
         match (state.remaining, state.reset_at) {
             (Some(0), Some(reset_at)) if reset_at > now => Self::Window { reset_at },
@@ -145,9 +143,9 @@ impl Refusal {
         }
     }
 
-    /// When the caller may retry, in unix seconds: the window's own reset,
-    /// or [`OPAQUE_LIMIT_BACKOFF_SECONDS`] from `now` — an honest "try
-    /// again later", not a countdown to the wrong clock.
+    /// 呼び出し側がリトライしてよい時刻 (unix 秒): 窓自身のリセットか､
+    /// `now` から [`OPAQUE_LIMIT_BACKOFF_SECONDS`] 後 — 誤った時計への
+    /// カウントダウンではなく､正直な「あとで試せ」である｡
     pub(crate) fn retry_at(self, now: i64) -> i64 {
         match self {
             Self::Window { reset_at } => reset_at,
@@ -155,7 +153,7 @@ impl Refusal {
         }
     }
 
-    /// The typed error a 429 refused by this limit becomes.
+    /// この上限に拒まれた 429 がなる型付きのエラー｡
     pub(crate) fn into_error(self, now: i64) -> RateLimited {
         RateLimited {
             reset_at: Some(self.retry_at(now)),
@@ -164,23 +162,23 @@ impl Refusal {
     }
 }
 
-/// The two distinct kinds of HTTP 429 X can return (#10). A type, not a
-/// string comparison at the call site — `x_api::client::check_status`
-/// matches on this instead of grepping the response body itself.
+/// X が返しうる HTTP 429 の､種類の異なる 2 つ (#10)｡呼び出し側での文字列
+/// 比較ではなく型にしてある — `x_api::client::check_status` はレスポンス
+/// ボディ自体を grep する代わりにこれで match する｡
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RateLimitKind {
-    /// Prepaid credits exhausted (`title: "UsageCapExceeded"`). Retrying
-    /// never helps — the account needs topping up.
+    /// プリペイド残高が尽きた (`title: "UsageCapExceeded"`)｡リトライしても
+    /// 決して助けにならない — アカウントへの入金が要る｡
     UsageCapExceeded,
-    /// An ordinary per-endpoint rate limit. Recovers at the window's reset
-    /// time.
+    /// ふつうのエンドポイントごとのレートリミット｡窓のリセット時刻に回復
+    /// する｡
     RateLimited,
 }
 
-/// Classify a 429 response body. A body that isn't recognizably
-/// `UsageCapExceeded` — including one that fails to parse at all — is
-/// treated as an ordinary rate limit: the safer default, since it's the
-/// kind that recovers on its own rather than the kind that never does.
+/// 429 のレスポンスボディを分類する｡`UsageCapExceeded` と見て取れない
+/// ボディは — まったくパースできないものも含めて — ふつうのレートリミット
+/// として扱う｡こちらのほうが安全な既定である｡決して回復しない側ではなく､
+/// 自力で回復する側だからである｡
 pub(crate) fn classify_429(body: &str) -> RateLimitKind {
     let title = serde_json::from_str::<ApiProblem>(body)
         .ok()
@@ -191,9 +189,9 @@ pub(crate) fn classify_429(body: &str) -> RateLimitKind {
     }
 }
 
-/// Carries the API's own explanation of an exhausted usage cap (#10).
-/// Unlike [`RateLimited`], this never recovers on its own, so it carries no
-/// reset time — nothing should ever offer a countdown for this one.
+/// 使用上限が尽きたことについて､API 自身の説明を運ぶ (#10)｡[`RateLimited`]
+/// と違ってこれは自力では決して回復しないので､リセット時刻を持たない —
+/// これに対してカウントダウンを出してよいものは何も無い｡
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct UsageCapExceeded {
     pub detail: String,
@@ -211,31 +209,31 @@ impl std::fmt::Display for UsageCapExceeded {
 
 impl std::error::Error for UsageCapExceeded {}
 
-/// Retries stop after this many resends (the initial attempt plus this
-/// many), bounding how long one reload can block the background thread on a
-/// flaky network or a struggling upstream.
+/// リトライはこの回数の再送で打ち切る (最初の試行にこの回数を足したもの)｡
+/// ネットワークが不安定なときや上流が苦しいときに､1 回のリロードが
+/// バックグラウンドスレッドを塞ぐ長さを抑える｡
 pub(crate) const MAX_RETRIES: u32 = 4;
 
-/// Delay before the first retry.
+/// 最初のリトライまでの待ち｡
 const BACKOFF_BASE_MILLIS: u64 = 500;
-/// Cap on the pre-jitter ceiling, so a long outage doesn't compound into an
-/// absurd wait between attempts.
+/// jitter を掛ける前の上限の頭打ち｡長い障害が積み上がって､試行の間隔が
+/// 途方もない長さになるのを防ぐ｡
 const BACKOFF_MAX_MILLIS: u64 = 30_000;
 
-/// Exponential backoff with full jitter (AWS's "full jitter" formula) for
-/// network errors and 5xx only (#10) — never for either kind of 429, since
-/// one recovers on its own schedule and the other never recovers at all,
-/// and a retry loop can't fix either.
+/// full jitter 付きの指数バックオフ (AWS の "full jitter" 式)｡ネットワーク
+/// エラーと 5xx にだけ使う (#10) — どちらの種類の 429 にも決して使わない｡
+/// 一方は自分のスケジュールで回復し､もう一方はまったく回復せず､リトライ
+/// ループはそのどちらも直せないからである｡
 ///
-/// `attempt` is 1-based (the first retry). `jitter_fraction` — injected so
-/// the schedule is deterministic in tests, clamped to `0.0..=1.0` — scales
-/// the capped exponential ceiling down to the actual delay; production
-/// draws a fresh fraction from the OS RNG via [`random_jitter_fraction`] on
-/// every call.
+/// `attempt` は 1 始まり (最初のリトライ)｡`jitter_fraction` は — テストで
+/// スケジュールを決定的にするために注入し､`0.0..=1.0` に clamp する —
+/// 頭打ちした指数の上限を実際の待ち時間まで縮める｡本番では
+/// [`random_jitter_fraction`] 経由で､呼び出しのたびに OS の RNG から新しい
+/// 割合を引く｡
 pub(crate) fn backoff_delay(attempt: u32, jitter_fraction: f64) -> Duration {
-    // Capped at 6 (2^6 = 64x base) so the shift below never overflows even
-    // if `MAX_RETRIES` grows later; `BACKOFF_MAX_MILLIS` is the real ceiling
-    // in practice long before that.
+    // 6 で頭打ちにする (2^6 = base の 64 倍)｡あとで `MAX_RETRIES` が増えても
+    // 下のシフトが決してあふれないようにするため｡実際にはそこに届くずっと
+    // 手前で `BACKOFF_MAX_MILLIS` が本当の上限になる｡
     let exponent = attempt.saturating_sub(1).min(6);
     let ceiling_millis = BACKOFF_BASE_MILLIS
         .saturating_mul(1u64 << exponent)
@@ -250,15 +248,14 @@ pub(crate) fn backoff_delay(attempt: u32, jitter_fraction: f64) -> Duration {
     Duration::from_millis(delay_millis)
 }
 
-/// A fresh jitter fraction in `0.0..=1.0`, drawn from the OS CSPRNG via
-/// `getrandom` (already a dependency for `oauth::pkce`). The one non-pure
-/// function in this module's backoff seam — production calls this once per
-/// retry; tests call [`backoff_delay`] directly with a fixed fraction
-/// instead.
+/// `0.0..=1.0` の新しい jitter の割合｡`getrandom` 経由で OS の CSPRNG から
+/// 引く (`oauth::pkce` のためにすでに依存に入っている)｡このモジュールの
+/// バックオフの seam で唯一純粋でない関数である — 本番はリトライごとに
+/// 1 回呼び､テストは代わりに固定の割合で [`backoff_delay`] を直接呼ぶ｡
 pub(crate) fn random_jitter_fraction() -> f64 {
     let mut bytes = [0u8; 8];
-    // Failure here (OS RNG unavailable) is vanishingly rare; falling back to
-    // the full, un-jittered delay is safer than skipping the backoff.
+    // ここでの失敗 (OS の RNG が使えない) はきわめて稀である｡jitter を掛け
+    // ない満額の待ちに落とすほうが､バックオフを飛ばすより安全である｡
     if getrandom::fill(&mut bytes).is_err() {
         return 1.0;
     }
@@ -267,89 +264,87 @@ pub(crate) fn random_jitter_fraction() -> f64 {
     fraction
 }
 
-/// Which tracked endpoint a [`RateLimitState`] belongs to. X's rate limits
-/// are per-endpoint, so the two calls `x_api::client::XClient` makes are
-/// tracked separately rather than sharing one bucket.
+/// [`RateLimitState`] がどの追跡対象エンドポイントのものか｡X のレート
+/// リミットはエンドポイントごとなので､`x_api::client::XClient` が行う 2 つの
+/// 呼び出しは 1 つのバケットを共有せず別々に追跡する｡
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum Endpoint {
     UserLookup,
     Timeline,
-    /// `GET /2/users/me` (#11) — X limits this separately from the
-    /// screen-name lookup above.
+    /// `GET /2/users/me` (#11) — X はこれを上の screen name 引きとは別に
+    /// 制限する｡
     Me,
-    /// `GET /2/users/:id/timelines/reverse_chronological` (#11) — X limits
-    /// the home timeline separately from the single-user `Timeline` fetch.
+    /// `GET /2/users/:id/timelines/reverse_chronological` (#11) — X は home
+    /// timeline を単一ユーザーの `Timeline` 取得とは別に制限する｡
     HomeTimeline,
-    /// `GET /2/lists/:id/tweets` (#161) — the List timeline, which replaces
-    /// the home timeline as the window's primary source once a list id is
-    /// configured. Its own bucket for the usual reason: X limits it on its
-    /// own schedule, and the two are alternatives rather than a pair, so a
-    /// shared bucket would carry state from a source that is not even
-    /// being fetched.
+    /// `GET /2/lists/:id/tweets` (#161) — List のタイムライン｡list id が
+    /// 設定されると､ウィンドウの主たる取得元として home timeline に取って
+    /// 代わる｡自分のバケットを持つのはいつもの理由による: X はこれを独自の
+    /// スケジュールで制限し､しかも 2 つは対ではなく択一なので､バケットを
+    /// 共有すると取得すらしていない取得元の状態を持ち回ることになる｡
     ListTimeline,
-    /// `GET /2/users/:id/following` (#163) — one page of the accounts this
-    /// app follows, read to diff against a list's members. Its own bucket
-    /// like every other endpoint: a full sync pages through this until the
-    /// cursor runs out, so it is the one most likely to hit a limit, and
-    /// borrowing another's tracked window would hide that.
+    /// `GET /2/users/:id/following` (#163) — このアプリがフォローしている
+    /// アカウントの 1 ページ｡list のメンバーと差分を取るために読む｡他の
+    /// エンドポイントと同じく自分のバケットを持つ: full sync は cursor が
+    /// 尽きるまでこれをページングするので､上限に当たる可能性がもっとも
+    /// 高く､他のエンドポイントの追跡窓を借りるとそれが見えなくなる｡
     Following,
-    /// `GET /2/lists/:id/members` (#163) — the other side of that diff.
+    /// `GET /2/lists/:id/members` (#163) — その差分のもう一方の側｡
     ListMembers,
-    /// `POST /2/lists/:id/members` (#163) — add one account to the list.
-    /// Tracked apart from `RemoveListMember` for the reason
-    /// `CreateRepost`/`DeleteRepost` are: X limits create and delete
-    /// separately.
+    /// `POST /2/lists/:id/members` (#163) — list にアカウントを 1 つ足す｡
+    /// `RemoveListMember` と分けて追跡する理由は
+    /// `CreateRepost`/`DeleteRepost` と同じ: X は作成と削除を別々に制限
+    /// する｡
     AddListMember,
-    /// `DELETE /2/lists/:id/members/:user_id` (#163) — remove one account.
-    /// See `AddListMember`.
+    /// `DELETE /2/lists/:id/members/:user_id` (#163) — アカウントを 1 つ
+    /// 外す｡`AddListMember` を見よ｡
     RemoveListMember,
-    /// `GET /2/tweets?ids=` (#12) — the parent-chain walk behind "Show
-    /// thread". Tracked independently: reusing e.g. `Timeline`'s bucket
-    /// would corrupt the tracked state for both, since X limits each
-    /// endpoint on its own schedule.
+    /// `GET /2/tweets?ids=` (#12) — "Show thread" の裏にある親チェーンの
+    /// 辿り｡独立に追跡する: 例えば `Timeline` のバケットを使い回すと両方の
+    /// 追跡状態が壊れる｡X は各エンドポイントを独自のスケジュールで制限する
+    /// からである｡
     TweetById,
-    /// `POST /2/tweets` (#14) — the composer's submit action. X limits
-    /// posting separately from every read endpoint above, so sharing a
-    /// bucket with any of them would corrupt the tracked state for both.
+    /// `POST /2/tweets` (#14) — composer の送信操作｡X は投稿を上のどの読み
+    /// 取りエンドポイントとも別に制限するので､どれかとバケットを共有すると
+    /// 両方の追跡状態が壊れる｡
     CreatePost,
-    /// `POST /2/users/:id/retweets` (#15) — creating a repost. Tracked
-    /// independently of `DeleteRepost`: X limits create and delete
-    /// separately, and reusing either's bucket for the other would corrupt
-    /// the tracked state for both.
+    /// `POST /2/users/:id/retweets` (#15) — repost の作成｡`DeleteRepost`
+    /// とは独立に追跡する: X は作成と削除を別々に制限するので､どちらかの
+    /// バケットをもう一方に使い回すと両方の追跡状態が壊れる｡
     CreateRepost,
-    /// `DELETE /2/users/:id/retweets/:source_tweet_id` (#15) — undoing a
-    /// repost. See `CreateRepost`'s doc for why this needs its own bucket.
+    /// `DELETE /2/users/:id/retweets/:source_tweet_id` (#15) — repost の
+    /// 取り消し｡自分のバケットが要る理由は `CreateRepost` の doc を見よ｡
     DeleteRepost,
-    /// `POST /2/users/:id/likes` (#68) — liking a post. Tracked
-    /// independently of `DeleteLike` for exactly the reason `CreateRepost`
-    /// and `DeleteRepost` are tracked apart.
+    /// `POST /2/users/:id/likes` (#68) — post へのいいね｡`DeleteLike` とは
+    /// 独立に追跡する｡理由は `CreateRepost` と `DeleteRepost` を分けて追跡
+    /// するのとまったく同じである｡
     CreateLike,
-    /// `DELETE /2/users/:id/likes/:tweet_id` (#68) — unliking. See
-    /// `CreateLike`'s doc.
+    /// `DELETE /2/users/:id/likes/:tweet_id` (#68) — いいねの取り消し｡
+    /// `CreateLike` の doc を見よ｡
     DeleteLike,
-    /// `DELETE /2/tweets/:id` (#72) — deleting one's own post. Its own
-    /// bucket for the reason every write endpoint has one: X limits each
-    /// separately, and #18 has to count this as spend like any other.
+    /// `DELETE /2/tweets/:id` (#72) — 自分の post の削除｡どの書き込み
+    /// エンドポイントもそうであるように自分のバケットを持つ: X はそれぞれを
+    /// 別に制限し､#18 はこれも他と同じく支出として数える必要がある｡
     DeletePost,
-    /// `GET /2/users/:id/owned_lists` (#164) — the lists the signed-in
-    /// account owns, read once to name the picker's segments and then
-    /// cached until the picker is asked again. Its own bucket like the
-    /// other list reads: X limits it on its own schedule, and a read that
-    /// happens once per explicit click has no business borrowing the
-    /// window the timeline's polling burns through.
+    /// `GET /2/users/:id/owned_lists` (#164) — サインイン中のアカウントが
+    /// 所有する list｡picker のセグメント名を得るために一度読み､次に picker
+    /// が呼ばれるまでキャッシュする｡他の list 読み取りと同じく自分の
+    /// バケットを持つ: X は独自のスケジュールで制限するし､明示的なクリック
+    /// ごとに 1 回しか起きない読み取りが､timeline のポーリングが焼き尽くす
+    /// 窓を借りる筋合いは無い｡
     OwnedLists,
 }
 
 impl Endpoint {
-    /// Every tracked endpoint, for callers that need to summarize across all
-    /// of them rather than one at a time — `usage`'s `--usage`/header
-    /// totals (#18) is the current user, so the list lives here rather than
-    /// being duplicated wherever it's needed.
-    /// Every write endpoint counts too: a post or a repost is billed exactly
-    /// like a read, so omitting one under-reports spend — which is the one
-    /// failure #18 exists to prevent. `CreatePost` was missing here until
-    /// #50; the test below now fails to compile rather than silently pass if
-    /// a new variant is left out again.
+    /// 追跡しているすべてのエンドポイント｡1 つずつではなく全体を横断して
+    /// 集計する必要がある呼び出し側のためにある — 現在の利用者は `usage` の
+    /// `--usage`/ヘッダの合計 (#18) なので､必要な場所ごとに複製せず一覧を
+    /// ここに置いてある｡
+    /// 書き込みエンドポイントもすべて数える: post も repost も読み取りと
+    /// まったく同じように課金されるので､1 つでも落とすと支出を過少に報告
+    /// する — それこそ #18 が防ぐために存在する唯一の失敗である｡`CreatePost`
+    /// は #50 までここから漏れていた｡新しい variant がまた漏れたら､下の
+    /// テストは黙って通るのではなくコンパイルに失敗する｡
     pub(crate) const ALL: [Self; 17] = [
         Self::UserLookup,
         Self::Timeline,
@@ -370,9 +365,10 @@ impl Endpoint {
         Self::OwnedLists,
     ];
 
-    /// `pub(crate)` rather than private (unlike before #18): `usage.rs`
-    /// keys its own per-endpoint file by this same string, so the two
-    /// modules' on-disk keys for the same endpoint never drift apart.
+    /// private ではなく `pub(crate)` である (#18 以前とは違う): `usage.rs`
+    /// は自分のエンドポイント別ファイルをこれと同じ文字列で引くので､同じ
+    /// エンドポイントに対する 2 つのモジュールのディスク上のキーが食い違う
+    /// ことは決してない｡
     pub(crate) fn key(self) -> &'static str {
         match self {
             Self::UserLookup => "user_lookup",
@@ -396,19 +392,19 @@ impl Endpoint {
     }
 }
 
-/// The whole contents of [`Paths::rate_limit_file`]: every endpoint's most
-/// recently observed state, keyed by [`Endpoint::key`].
+/// [`Paths::rate_limit_file`] の中身すべて: 各エンドポイントで最後に観測した
+/// 状態を､[`Endpoint::key`] をキーにして持つ｡
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct RateLimitFile {
     #[serde(default)]
     endpoints: HashMap<String, RateLimitState>,
 }
 
-/// Load [`RateLimitFile`] from disk. A missing file is a clean "nothing
-/// tracked yet"; a corrupt or differently-shaped file is *also* a clean
-/// miss rather than an error, mirroring `cache::load_json`'s rule — losing
-/// this file costs at most one avoidably-sent request, never a startup
-/// failure.
+/// [`RateLimitFile`] をディスクから読む｡ファイルが無いのは「まだ何も追跡して
+/// いない」というきれいな状態である｡壊れたファイルや形の違うファイルも､
+/// エラーではなく *同じく* きれいな miss として扱う｡`cache::load_json` の
+/// 規則に倣った — このファイルを失って高くつくのは､せいぜい避けられたはず
+/// のリクエスト 1 回で､起動の失敗には決してならない｡
 fn load_file(paths: &Paths) -> Result<RateLimitFile> {
     let path = paths.rate_limit_file();
     let contents = match std::fs::read_to_string(&path) {
@@ -423,9 +419,9 @@ fn load_file(paths: &Paths) -> Result<RateLimitFile> {
     Ok(serde_json::from_str(&contents).unwrap_or_default())
 }
 
-/// The tracked state for `endpoint`, or [`RateLimitState::default`] (all
-/// `None`, which [`decision`] always treats as safe to send) if there is
-/// nothing on file for it yet.
+/// `endpoint` について追跡している状態｡ファイルにまだ何も無ければ
+/// [`RateLimitState::default`] (すべて `None`｡[`decision`] は常に送って安全と
+/// 扱う) を返す｡
 pub(crate) fn load(paths: &Paths, endpoint: Endpoint) -> Result<RateLimitState> {
     let file = load_file(paths)?;
     Ok(file
@@ -435,10 +431,10 @@ pub(crate) fn load(paths: &Paths, endpoint: Endpoint) -> Result<RateLimitState> 
         .unwrap_or_default())
 }
 
-/// Persist `state` for `endpoint`, alongside whatever other endpoints were
-/// already on file — a genuine I/O error reading the existing file (as
-/// opposed to it being merely absent or corrupt) still propagates, the same
-/// distinction `cache.rs` draws.
+/// `endpoint` の `state` を､すでにファイルにあった他のエンドポイントと並べて
+/// 永続化する — 既存ファイルの読み取りで本物の I/O エラーが起きた場合は
+/// (単に無いだけ､壊れているだけの場合と違って) そのまま伝播する｡`cache.rs`
+/// が引くのと同じ区別である｡
 pub(crate) fn save(paths: &Paths, endpoint: Endpoint, state: RateLimitState) -> Result<()> {
     let path = paths.rate_limit_file();
     let mut file = load_file(paths)?;
@@ -506,7 +502,7 @@ mod tests {
 
     #[test]
     fn a_reset_header_in_the_past_still_parses_cleanly() {
-        // Parsing never judges plausibility — that's decision()'s job.
+        // パースは妥当性を判断しない — それは decision() の仕事である｡
         let state = parse_headers(None, None, Some("0"));
         assert_eq!(state.reset_at, Some(0));
     }
@@ -552,8 +548,8 @@ mod tests {
 
     #[test]
     fn sends_when_remaining_is_zero_but_the_reset_time_is_unknown() {
-        // Without a reset time there's no way to know when it's safe again,
-        // so blocking forever would be worse than an occasional 429.
+        // リセット時刻が無いといつ安全に戻るか知りようがないので､永遠に
+        // 塞ぐほうがたまの 429 より悪い｡
         let state = RateLimitState {
             limit: Some(15),
             remaining: Some(0),
@@ -566,8 +562,8 @@ mod tests {
 
     #[test]
     fn an_exhausted_window_is_trusted_to_reset_when_its_header_says() {
-        // remaining 0 means this window really is the one that refused the
-        // request, so its own reset is the honest answer.
+        // remaining 0 は､この窓が本当にリクエストを拒んだ当の窓だという
+        // ことなので､その窓自身のリセットが正直な答えになる｡
         let state = RateLimitState {
             limit: Some(300),
             remaining: Some(0),
@@ -580,11 +576,10 @@ mod tests {
 
     #[test]
     fn a_429_with_headroom_left_ignores_the_window_reset() {
-        // The measured failure (POST /2/lists/:id/members, 2026-08-24): X
-        // returned 429 with remaining 299 of 300 and a reset ~14 minutes
-        // out belonging to that untouched window. Trusting it would have
-        // the caller wait on the wrong clock; the conservative floor is
-        // used instead.
+        // 実測した失敗 (POST /2/lists/:id/members, 2026-08-24): X は 300 の
+        // うち remaining 299 で 429 を返し､リセットは手つかずのその窓の
+        // もので約 14 分先だった｡信用すると呼び出し側は誤った時計で待つ
+        // ことになるので､代わりに保守的な下限を使う｡
         let state = RateLimitState {
             limit: Some(300),
             remaining: Some(299),
@@ -600,8 +595,8 @@ mod tests {
 
     #[test]
     fn a_429_whose_window_reset_is_already_past_is_opaque() {
-        // The other measured sample: the reset header was ~now. Honoring it
-        // would re-poke the hidden cap within seconds.
+        // もう 1 つの実測サンプル: リセットヘッダはほぼ現在時刻だった｡
+        // 尊重すると数秒のうちに隠れた上限を突き直すことになる｡
         let state = RateLimitState {
             limit: Some(300),
             remaining: Some(299),
@@ -612,8 +607,8 @@ mod tests {
 
     #[test]
     fn an_exhausted_window_whose_reset_already_passed_is_opaque() {
-        // remaining 0 but the reset is behind us, yet X still 429'd — the
-        // header is stale, so fall back rather than retry immediately.
+        // remaining 0 でリセットは過ぎているのに X はなお 429 を返した —
+        // ヘッダが古いので､すぐリトライせずフォールバックする｡
         let state = RateLimitState {
             limit: Some(300),
             remaining: Some(0),
@@ -634,9 +629,9 @@ mod tests {
 
     #[test]
     fn the_error_a_refusal_becomes_says_which_kind_it_was() {
-        // The whole reason the field exists (#197): the sync backs away
-        // from an opaque cap further each time, and must not do that to a
-        // window that reopens on schedule.
+        // そのフィールドが存在する理由そのもの (#197): sync は opaque な
+        // 上限からは毎回さらに長く退くが､予定どおり開き直す窓に対して
+        // それをやってはならない｡
         assert_eq!(
             Refusal::Opaque.into_error(1_000),
             RateLimited {
@@ -655,8 +650,8 @@ mod tests {
 
     #[test]
     fn a_pre_send_refusal_by_the_tracked_window_is_not_opaque() {
-        // `decision` refuses only on a window it can see, so nothing about
-        // that refusal is hidden.
+        // `decision` は見えている窓についてしか拒まないので､その拒否に
+        // 隠れたところは無い｡
         let state = RateLimitState {
             limit: Some(300),
             remaining: Some(0),
@@ -789,9 +784,9 @@ mod tests {
 
     #[test]
     fn me_and_home_timeline_endpoints_are_tracked_independently_of_the_originals() {
-        // #11: X limits `/users/me` and the home timeline separately from
-        // the existing user-lookup and single-user timeline endpoints, so
-        // sharing a key with either would corrupt the tracked state for both.
+        // #11: X は `/users/me` と home timeline を､既存の user-lookup や
+        // 単一ユーザーの timeline エンドポイントとは別に制限するので､
+        // どちらかとキーを共有すると両方の追跡状態が壊れる｡
         let root = temp_root("four-endpoints");
         let paths = test_paths(&root);
         paths.ensure_dirs().unwrap();
@@ -837,8 +832,8 @@ mod tests {
 
     #[test]
     fn tweet_by_id_endpoint_is_tracked_independently_of_the_others() {
-        // #12: `GET /2/tweets?ids=` gets its own bucket — reusing e.g.
-        // `Timeline`'s would corrupt the tracked state for both.
+        // #12: `GET /2/tweets?ids=` は自分のバケットを持つ — 例えば
+        // `Timeline` のを使い回すと両方の追跡状態が壊れる｡
         let root = temp_root("tweet-by-id-endpoint");
         let paths = test_paths(&root);
         paths.ensure_dirs().unwrap();
@@ -867,8 +862,8 @@ mod tests {
 
     #[test]
     fn create_post_endpoint_is_tracked_independently_of_the_others() {
-        // #14: `POST /2/tweets` gets its own bucket — reusing e.g.
-        // `Timeline`'s would corrupt the tracked state for both.
+        // #14: `POST /2/tweets` は自分のバケットを持つ — 例えば
+        // `Timeline` のを使い回すと両方の追跡状態が壊れる｡
         let root = temp_root("create-post-endpoint");
         let paths = test_paths(&root);
         paths.ensure_dirs().unwrap();
@@ -897,9 +892,9 @@ mod tests {
 
     #[test]
     fn create_repost_and_delete_repost_endpoints_are_tracked_independently() {
-        // #15: create and delete each get their own bucket — reusing
-        // either's for the other, or for an existing endpoint, would
-        // corrupt the tracked state for both.
+        // #15: 作成と削除はそれぞれ自分のバケットを持つ — どちらかのを
+        // もう一方に､あるいは既存のエンドポイントに使い回すと､両方の
+        // 追跡状態が壊れる｡
         let root = temp_root("repost-endpoints");
         let paths = test_paths(&root);
         paths.ensure_dirs().unwrap();
@@ -971,17 +966,17 @@ mod tests {
 
     #[test]
     fn endpoint_all_lists_every_variant_with_a_unique_key() {
-        // #18's usage tracker iterates `Endpoint::ALL` to summarize across
-        // every endpoint, so a variant missing from it is silently
-        // under-counted spend. The previous version of this test asserted
-        // only that the keys were unique, which is why `CreatePost` could go
-        // missing for a whole release without anything failing (#50).
+        // #18 の usage tracker は全エンドポイントを横断して集計するために
+        // `Endpoint::ALL` を回すので､そこから漏れた variant は黙って支出を
+        // 過少に数えることになる｡このテストの以前の版はキーが一意なことしか
+        // 検査していなかった｡だから `CreatePost` がリリース 1 本分まるごと
+        // 漏れていても何も落ちなかった (#50)｡
         //
-        // The match below is the actual guard: it is exhaustive, so adding a
-        // variant stops this file compiling until the new arm is written —
-        // and the arm sits directly beside the list that must grow with it.
-        // Uniqueness alone, or a bare length check, would both still pass on
-        // an omission.
+        // 実際のガードは下の match である: 網羅的なので､variant を足すと
+        // 新しい腕を書くまでこのファイルはコンパイルできなくなる — そして
+        // その腕は､一緒に伸びなければならない一覧のすぐ隣にある｡一意性
+        // だけ､あるいは素の長さチェックだけでは､漏れがあっても通って
+        // しまう｡
         let every = [
             Endpoint::UserLookup,
             Endpoint::Timeline,
@@ -1041,8 +1036,8 @@ mod tests {
         let root = temp_root("io-error");
         let paths = test_paths(&root);
         paths.ensure_dirs().unwrap();
-        // A directory where a file is expected is a real I/O error, not
-        // corruption — it must surface rather than being swallowed.
+        // ファイルがあるはずの場所にディレクトリがあるのは､破損ではなく
+        // 本物の I/O エラーである — 握り潰さず表に出す必要がある｡
         std::fs::create_dir(paths.rate_limit_file()).unwrap();
 
         assert!(load(&paths, Endpoint::Timeline).is_err());

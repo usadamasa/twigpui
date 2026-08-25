@@ -1,14 +1,14 @@
-//! Like bookkeeping (#68) — the mirror image of [`crate::repost`].
+//! いいねの記録 (#68) — [`crate::repost`] の鏡像｡
 //!
-//! The local record of post ids and the optimistic-update/rollback button
-//! state both live in [`crate::toggle`], shared with reposts. What is here
-//! is what differs: the `likes` endpoints, [`Paths::liked_posts_file`], and
-//! the error phrasings that mean "the local record is stale".
+//! post id のローカル記録と､楽観更新/ロールバックのボタン状態はどちらも
+//! [`crate::toggle`] にあり､repost と共有している｡ここに置いてあるのは
+//! 違う部分だけだ: `likes` エンドポイント､[`Paths::liked_posts_file`]､
+//! そして「ローカル記録が古い」を意味するエラー文言｡
 //!
-//! **Likes made from any other client are never reflected here**, the same
-//! tradeoff `repost.rs` documents: X API v2's timeline response carries no
-//! "did I like this" field, and checking per-post would cost one request
-//! per visible row.
+//! **他のクライアントから付けたいいねはここに反映されない**｡`repost.rs` が
+//! 書いているのと同じトレードオフだ: X API v2 のタイムラインレスポンスには
+//! 「自分がいいねしたか」を示すフィールドが無く､post ごとに問い合わせると
+//! 表示行 1 つにつき 1 リクエストかかる｡
 //!
 //! [`Paths::liked_posts_file`]: crate::paths::Paths::liked_posts_file
 
@@ -20,28 +20,27 @@ use crate::paths::Paths;
 use crate::toggle;
 use crate::x_api::XClient;
 
-/// Every post id currently recorded as liked — see [`toggle::load_all`].
+/// いいね済みとして記録されている post id の全体 — [`toggle::load_all`] を参照｡
 pub(crate) fn load_all(paths: &Paths) -> Result<HashSet<String>> {
     toggle::load_all(&paths.liked_posts_file())
 }
 
-/// Interpret a failed like/unlike response as a correction to the local
-/// record rather than a genuine failure — `repost::reconcile_from_error`'s
-/// counterpart, matching the phrasings X uses for likes instead of
-/// retweets: `creating: true` recognizes "you have already liked this
-/// Tweet", `creating: false` recognizes "you have not liked this Tweet".
-/// Returns the corrected value to persist when recognized, `None` for every
-/// other failure — callers propagate `None` as an ordinary error.
+/// いいね/いいね解除の失敗レスポンスを､本物の失敗ではなくローカル記録への
+/// 訂正として解釈する — `repost::reconcile_from_error` の対応物で､retweet
+/// ではなく like に対して X が返す文言に合わせてある: `creating: true` は
+/// "you have already liked this Tweet" を､`creating: false` は
+/// "you have not liked this Tweet" を認識する｡認識できたときは永続化すべき
+/// 訂正後の値を返し､それ以外の失敗ではすべて `None` を返す — 呼び出し側は
+/// `None` を通常のエラーとして伝播させる｡
 ///
-/// **Confidence: unverified against the live API**, exactly as for reposts
-/// (see `repost::reconcile_from_error`'s doc for why matching the
-/// human-readable message text is nonetheless the more robust choice than
-/// matching a bare 403).
+/// **確度: 実際の API に対しては未検証**｡repost とまったく同じ状況だ
+/// (人間向けのメッセージ本文に一致させるほうが素の 403 に一致させるより
+/// 頑健だという理由は `repost::reconcile_from_error` の doc にある)｡
 ///
-/// The two directions are deliberately not collapsed into one substring
-/// check: "already liked" and "not liked" are each other's mirror image,
-/// and matching the wrong direction would silently flip the local record to
-/// the wrong value instead of leaving a genuine failure alone.
+/// 2 方向を 1 つの部分文字列チェックにまとめていないのは意図的だ:
+/// "already liked" と "not liked" は互いの鏡像で､逆方向に一致させると
+/// 本物の失敗をそのまま通す代わりに､ローカル記録を黙って誤った値へ
+/// 反転させてしまう｡
 pub(crate) fn reconcile_from_error(creating: bool, message: &str) -> Option<bool> {
     let lower = message.to_lowercase();
     if creating && lower.contains("already liked") {
@@ -53,14 +52,14 @@ pub(crate) fn reconcile_from_error(creating: bool, message: &str) -> Option<bool
     }
 }
 
-/// Like `post_id` as `user_id` (#68): call the API, then persist success.
-/// A recognized "already liked" conflict (see [`reconcile_from_error`])
-/// corrects the local record instead of propagating an error — the caller
-/// (`ui.rs`) treats `Ok` as "here is the now-current state", not
-/// necessarily "the create succeeded".
+/// `user_id` として `post_id` にいいねする (#68): API を呼び､成功したら
+/// 永続化する｡認識できた "already liked" の衝突 ([`reconcile_from_error`]
+/// を参照) はエラーを伝播させる代わりにローカル記録を訂正する — 呼び出し側
+/// (`ui.rs`) は `Ok` を「これが現時点の状態だ」として扱い､必ずしも
+/// 「作成が成功した」とは扱わない｡
 ///
-/// Not unit-tested directly — it makes a real HTTP request through
-/// `client`, mirroring `repost::create`.
+/// 直接のユニットテストは無い — `client` を通じて実際に HTTP リクエストを
+/// 出すためで､`repost::create` と同じだ｡
 pub(crate) fn create(
     paths: &Paths,
     client: &XClient,
@@ -84,8 +83,8 @@ pub(crate) fn create(
     }
 }
 
-/// Unlike `post_id` as `user_id` (#68) — mirrors [`create`] exactly, the
-/// other direction.
+/// `user_id` として `post_id` のいいねを解除する (#68) — [`create`] の
+/// 完全な鏡像で､方向だけが逆｡
 pub(crate) fn remove(
     paths: &Paths,
     client: &XClient,
@@ -158,8 +157,8 @@ mod tests {
 
     #[test]
     fn a_repost_conflict_message_does_not_reconcile_a_like_attempt() {
-        // The two modules read the same stringified error; each must only
-        // recognize its own endpoint's phrasing.
+        // 2 つのモジュールは同じ文字列化されたエラーを読む｡それぞれ自分の
+        // エンドポイントの文言だけを認識しなければならない｡
         assert_eq!(
             reconcile_from_error(true, "you have already retweeted this tweet"),
             None
@@ -176,7 +175,7 @@ mod tests {
 
         toggle::mark(&paths.liked_posts_file(), "1").unwrap();
         assert!(load_all(&paths).unwrap().contains("1"));
-        // The repost record is a different file, so it must stay empty.
+        // repost の記録は別ファイルなので､空のままでなければならない｡
         assert!(crate::repost::load_all(&paths).unwrap().is_empty());
 
         std::fs::remove_dir_all(&root).unwrap();

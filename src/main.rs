@@ -1,19 +1,19 @@
-//! twigpui — a development-only X (Twitter) timeline viewer for macOS,
-//! built with gpui.
+//! twigpui — gpui で書いた macOS 専用､開発用途のみの X (Twitter)
+//! タイムラインビューア｡
 //!
-//! This binary crate is the whole application: `ui` renders the window,
-//! `menu` holds the key bindings and the menu bar, `x_api` talks to X,
-//! `cache`/`usage`/`rate_limit` keep the per-request billing under control,
-//! and this module is the entry point plus the headless `--fetch-only` /
-//! `--fetch-post` / `--usage` paths.
+//! この binary crate がアプリケーション全体である: `ui` がウィンドウを描き､
+//! `menu` がキーバインドとメニューバーを持ち､`x_api` が X と話し､
+//! `cache`/`usage`/`rate_limit` がリクエスト単位の課金を抑え､そしてこの
+//! モジュールがエントリポイントと､headless な `--fetch-only` /
+//! `--fetch-post` / `--usage` の経路を担う｡
 
-// `unwrap` in a test is a legible assertion, not a lurking panic — the strict
-// lints in Cargo.toml are aimed at the code that actually ships. #47 extends
-// the same reasoning to three more: indexing a fixture by a literal index,
-// slicing a literal string, and `panic!` in a `match` arm that must not be
-// reached are all *assertions* in a test. A test that panics is a test that
-// failed, which is the mechanism working — not a lurking crash on remote
-// input, which is what these lints exist to find in `src/`.
+// テストの中の `unwrap` は読める assertion であって潜んだ panic ではない —
+// Cargo.toml の厳しい lint は実際に出荷されるコードに向いている｡#47 は同じ
+// 理屈をもう三つに広げる: fixture をリテラルの index で引くこと､リテラルの
+// 文字列を slice すること､到達してはならない `match` の腕での `panic!` は､
+// テストの中ではどれも *assertion* である｡panic するテストは失敗したテスト
+// であり､それは仕組みが働いている証拠だ — これらの lint が `src/` で見つける
+// ためにある､リモート入力に潜んだクラッシュではない｡
 #![cfg_attr(
     test,
     allow(
@@ -65,9 +65,9 @@ fn main() {
             std::process::exit(1);
         }
     };
-    // `Config::from_env` already resolved and created these directories —
-    // recomputing here (cheap, pure over env vars) avoids threading a
-    // `Paths` through `Config` just for the OAuth token store's sake.
+    // `Config::from_env` がこれらのディレクトリを既に解決して作っている —
+    // ここで計算し直せば (安価で､env var に対して純粋)､OAuth トークン
+    // ストアのためだけに `Paths` を `Config` に通さずに済む｡
     let paths = match paths::Paths::from_env() {
         Ok(paths) => paths,
         Err(error) => {
@@ -76,15 +76,15 @@ fn main() {
         }
     };
 
-    // Headless fetch, for checking credentials and connectivity without a window.
+    // ウィンドウ無しで認証情報と接続性を確かめるための headless な取得｡
     if std::env::args().any(|arg| arg == "--fetch-only") {
         std::process::exit(fetch_only(&config, &paths));
     }
 
-    // Headless single-post lookup (#42): `--fetch-post <id-or-url>[,...]`.
-    // Collected once into a `Vec` (rather than `std::env::args().any(...)`,
-    // like the boolean flags above) since this flag needs the value that
-    // follows it, not just whether it's present.
+    // headless な単一 post の参照 (#42): `--fetch-post <id-or-url>[,...]`｡
+    // このフラグは在るかどうかだけでなく後続の値が要るので､上の boolean な
+    // フラグのような `std::env::args().any(...)` ではなく､一度 `Vec` に
+    // 集めている｡
     let args: Vec<String> = std::env::args().collect();
     match fetch_post_arg(&args, "--fetch-post") {
         FetchPostArg::Absent => {}
@@ -99,12 +99,12 @@ fn main() {
         }
     }
 
-    // #163: `--sync-list` mirrors the accounts this app follows into the
-    // configured List. A dry-run by default — it reads both sides, writes
-    // a plan and prints it — with `--apply` to send the writes and
-    // `--prune` to include removals. Headless like every flag above:
-    // #163's own design says this must never run on a timer, because both
-    // reads are billed per account.
+    // #163: `--sync-list` はこのアプリがフォローしているアカウントを､設定
+    // された List へミラーする｡既定では dry-run で — 両側を読み､plan を
+    // 書いて印字する — `--apply` で書き込みを送り､`--prune` で削除も含める｡
+    // 上のどのフラグとも同じく headless である: 両側の読み取りがアカウント
+    // 単位で課金されるため､これをタイマーで走らせてはならないと #163 自身の
+    // 設計が定めている｡
     if args.iter().any(|arg| arg == "--sync-list") {
         let request = sync::Request {
             apply: args.iter().any(|arg| arg == "--apply"),
@@ -113,17 +113,17 @@ fn main() {
         std::process::exit(sync::run_cli(&config, &paths, request));
     }
 
-    // Print the same usage numbers the header shows, as JSON (#18). Reads
-    // only `usage.json` under `state_dir` — no network call, so this is
-    // safe to run at any time, including while credits are exhausted.
+    // ヘッダが見せるのと同じ usage の数字を JSON で印字する (#18)｡読むのは
+    // `state_dir` 配下の `usage.json` だけで — ネットワーク呼び出しは無い
+    // ので､クレジットが尽きている間を含めていつ走らせても安全である｡
     if std::env::args().any(|arg| arg == "--usage") {
         std::process::exit(usage_only(&config, &paths));
     }
 
-    // #146: `--fixture <path>` fills the window from a file instead of
-    // from an account. Resolved here, before the window opens, so a
-    // missing or malformed fixture fails on the terminal it was typed in
-    // rather than as an empty window with no explanation.
+    // #146: `--fixture <path>` はアカウントではなくファイルからウィンドウを
+    // 埋める｡ウィンドウが開く前のここで解決するので､fixture が無かったり
+    // 壊れていたりしたときは､説明の無い空のウィンドウとしてではなく､打ち
+    // 込んだ端末の上で失敗する｡
     let startup = match fetch_post_arg(&args, "--fixture") {
         FetchPostArg::Absent => ui::Startup::Live,
         FetchPostArg::Value(path) => match fixture::load(std::path::Path::new(path)) {
@@ -139,41 +139,41 @@ fn main() {
         }
     };
 
-    // #49: from here on, anything worth knowing goes to the log file as
-    // well as stderr — which is the only record at all for a `.app`
-    // launched from Finder, where stderr goes nowhere (#40, #45).
+    // #49: ここから先､知る価値のあることは stderr だけでなくログファイルへ
+    // も出す — Finder から起動した `.app` では stderr がどこにも行かないので
+    // (#40, #45)､それが唯一の記録になる｡
     log::init(&paths, config.log_level);
     log::info("starting twigpui");
 
-    // #95: the icons the toolbar draws. gpui resolves an `svg()` path
-    // through this, and without it every icon renders as nothing at all.
+    // #95: ツールバーが描くアイコン｡gpui は `svg()` のパスをこれを通して
+    // 解決するので､これが無いとどのアイコンも何も描かれない｡
     Application::new()
         .with_assets(assets::Assets)
         .run(move |cx| {
-            // #38: registers gpui-component's global keybindings, theme, and
-            // other per-App state (see its own `init`'s doc) — required once,
-            // before any of its widgets (the composer's text input) can be
-            // constructed.
+            // #38: gpui-component のグローバルなキーバインド､テーマ､その他
+            // App 単位の状態を登録する (それ自身の `init` の doc を見よ) —
+            // そのウィジェット (composer のテキスト入力) を構築できるように
+            // なる前に､一度だけ必要である｡
             gpui_component::init(cx);
-            // #58: twigpui's own key bindings, registered alongside
-            // gpui-component's for the same reason — once, before the window
-            // that dispatches to them exists.
+            // #58: twigpui 自身のキーバインドを､同じ理由で gpui-component の
+            // ものと並べて登録する — それらへ dispatch するウィンドウが存在
+            // する前に､一度だけ｡
             menu::init(cx);
-            // #99: the menu bar, and the one action behind it that the window
-            // cannot own. A menu item dispatches into the focused window, so
-            // Reload/New Post/Submit Post reach the timeline's own handlers —
-            // but quitting has to work with no window focused at all, which is
-            // what `App::on_action` registers and a handler on the window's
-            // root would not. Both run before the window opens: an app whose
-            // window fails to open (below) still has a menu bar.
+            // #99: メニューバーと､その裏にあってウィンドウが持てない唯一の
+            // アクション｡メニュー項目はフォーカスのあるウィンドウへ dispatch
+            // するので Reload/New Post/Submit Post は timeline 自身のハンドラ
+            // へ届く｡だが quit はウィンドウが一つもフォーカスされていなくても
+            // 働かねばならず､それを登録するのが `App::on_action` で､root に
+            // 置いたハンドラではそうならない｡どちらもウィンドウが開く前に走る:
+            // 下でウィンドウを開けそこねたアプリにも､メニューバーはある｡
             cx.on_action(|_: &menu::Quit, cx| cx.quit());
             cx.set_menus(menu::menus());
-            // #139: closing the last window ends the app. gpui keeps the
-            // process alive on its own — right for an app you can ask for
-            // another window, wrong for this one, where `cmd-w` left a process
-            // running with nothing on screen and only `cmd-q` able to reach
-            // it. Counted rather than assumed, so a second window would still
-            // have to be the last one out.
+            // #139: 最後のウィンドウを閉じるとアプリが終わる｡gpui は独自に
+            // プロセスを生かし続ける — もう一枚ウィンドウを頼めるアプリには
+            // 正しいが､このアプリには誤りで､`cmd-w` は画面に何も無いまま
+            // プロセスを走らせ､`cmd-q` だけがそこへ届く状態を残していた｡
+            // 決め打ちせず数えているので､二枚目のウィンドウがあっても最後の
+            // 一枚が出るまでは終わらない｡
             cx.on_window_closed(|cx| {
                 if cx.windows().is_empty() {
                     cx.quit();
@@ -182,12 +182,11 @@ fn main() {
             .detach();
 
             let bounds = Bounds::centered(None, size(px(560.0), px(820.0)), cx);
-            // #169: the title names which installation this is, so a
-            // development window and the real one are told apart in the
-            // window list — and so a screenshot can be aimed at one of them
-            // by title. Read off `paths` rather than `Profile::current()`
-            // directly, so the title can never claim one profile while the
-            // files being read belong to the other.
+            // #169: タイトルがどのインストールかを名乗るので､開発用の
+            // ウィンドウと本物がウィンドウ一覧で見分けられる — そして
+            // スクリーンショットをタイトルで狙える｡`Profile::current()` を
+            // 直に呼ばず `paths` から読むので､タイトルが一方のプロファイル
+            // を名乗りながら読んでいるファイルはもう一方､とはなり得ない｡
             let title = paths.profile().window_title();
             let options = WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -201,11 +200,11 @@ fn main() {
             let opened = cx.open_window(options, |window, cx| {
                 let timeline =
                     cx.new(|cx| ui::TimelineView::new(config, paths, startup, window, cx));
-                // #38: gpui-component's widgets reach back up to the window's
-                // root expecting to find its `Root` there — its text input asks
-                // for it on the very first render, and `Root::read` panics
-                // outright if the root view is anything else. Making the
-                // timeline the root directly aborted the app at startup.
+                // #38: gpui-component のウィジェットはウィンドウの root を
+                // 遡り､そこに `Root` があることを期待する — テキスト入力は
+                // 最初の render でそれを尋ね､root view が他の何かなら
+                // `Root::read` はそのまま panic する｡timeline を直に root に
+                // すると､起動時にアプリが落ちた｡
                 cx.new(|cx| gpui_component::Root::new(timeline, window, cx))
             });
             if let Err(error) = opened {
@@ -218,21 +217,21 @@ fn main() {
         });
 }
 
-/// Report a fatal startup error both to stderr and — when there is no
-/// terminal attached to read stderr from — as a native alert dialog.
+/// 致命的な起動エラーを stderr へ､そして — stderr を読む端末が付いて
+/// いないときは — ネイティブのアラートダイアログとしても報告する｡
 ///
-/// A plain `eprintln!` is enough for `cargo run`, but a `.app` launched from
-/// Finder/Spotlight/Dock (#40) has no terminal at all: stderr goes nowhere
-/// anyone will see, so the process would otherwise just vanish with no
-/// visible symptom, which is exactly the "unexplained blank window" failure
-/// #40 calls out. `osascript` is used rather than a `gpui` window because
-/// this runs *before* `Application::new()` — there is no window server
-/// connection yet to hang a `gpui` alert off of, but `osascript` needs
-/// nothing from this process beyond being a normal macOS app.
+/// `cargo run` には素の `eprintln!` で足りるが､Finder/Spotlight/Dock から
+/// 起動した `.app` (#40) には端末が無い: stderr は誰の目にも触れない先へ
+/// 行くので､そうでなければプロセスは目に見える症状も無く消える｡それこそ
+/// #40 が挙げる「説明の無い空白ウィンドウ」の失敗である｡`gpui` のウィンドウ
+/// ではなく `osascript` を使うのは､これが `Application::new()` の *前* に
+/// 走るからだ — `gpui` のアラートを吊るす window server への接続はまだ無い
+/// が､`osascript` は普通の macOS アプリであること以上をこのプロセスに
+/// 求めない｡
 ///
-/// The message always names where `config.toml` belongs, since that's the
-/// concrete fix for the most common cause (no credential configured at
-/// all) — see the README's "Setup" and "`config.toml`" sections.
+/// メッセージは常に `config.toml` の在り処を名指しする｡最も多い原因
+/// (認証情報が何も設定されていない) に対する具体的な直し方がそれだから
+/// である — README の "Setup" と "`config.toml`" の節を見よ｡
 fn report_startup_error(message: &str) {
     let config_hint = paths::Paths::from_env().map_or_else(
         |_| "~/.config/twigpui/config.toml".to_string(),
@@ -247,9 +246,9 @@ fn report_startup_error(message: &str) {
     eprintln!("configuration error: {full_message}");
 
     if std::io::stderr().is_terminal() {
-        // A terminal is attached (a `cargo run` / direct-binary launch) —
-        // the eprintln! above is already visible, so a dialog on top would
-        // just be noise.
+        // 端末が付いている (`cargo run` やバイナリ直起動) — 上の eprintln!
+        // は既に見えているので､その上にダイアログを重ねてもノイズにしか
+        // ならない｡
         return;
     }
 
@@ -257,37 +256,34 @@ fn report_startup_error(message: &str) {
         "display alert \"twigpui\" message {} as critical",
         applescript_quote(&full_message)
     );
-    // Best-effort: if `osascript` itself is missing or fails, there is
-    // nothing more this process can do to surface the error, and it must
-    // still exit non-zero rather than hang waiting on a dialog that can't
-    // appear.
+    // best-effort: `osascript` 自体が無かったり失敗したりしたら､エラーを
+    // 表に出すためにこのプロセスができることはもう無い｡それでも､出せない
+    // ダイアログを待ってぶら下がるのではなく､非ゼロで終了せねばならない｡
     let _ = std::process::Command::new("osascript")
         .arg("-e")
         .arg(script)
         .status();
 }
 
-/// Escape `text` for use as a double-quoted `AppleScript` string literal.
-/// `AppleScript` has no `\n` escape and a raw line break inside a string
-/// literal is a syntax error, so embedded newlines are flattened to spaces
-/// rather than escaped.
+/// `text` を二重引用符で囲む `AppleScript` の文字列リテラル用に escape する｡
+/// `AppleScript` に `\n` の escape は無く､文字列リテラル内の生の改行は構文
+/// エラーになるので､埋め込まれた改行は escape せずスペースへ潰す｡
 fn applescript_quote(text: &str) -> String {
     let flattened = text.replace(['\n', '\r'], " ");
     let escaped = flattened.replace('\\', "\\\\").replace('"', "\\\"");
     format!("\"{escaped}\"")
 }
 
-/// Resolve a token the same way the window does at startup, but without ever
-/// opening a browser — `--fetch-only` is meant to run headless, e.g. in a
-/// script checking whether credentials are still valid.
+/// ウィンドウが起動時にするのと同じやり方でトークンを解決する｡ただし
+/// ブラウザは決して開かない — `--fetch-only` は headless に走らせるための
+/// もので､例えば認証情報がまだ有効かを確かめるスクリプトの中で使う｡
 ///
-/// Unlike opening the window, this always spends at least one API request:
-/// its whole point per the README is checking that the credential and
-/// connectivity actually work, which a cache-only render can't verify. It
-/// still goes through `cache::reload` rather than a bare fetch, so a cached
-/// user id turns that into one request instead of two, and an incremental
-/// `since_id` keeps the response small — see the eprintln! below for which
-/// happened.
+/// ウィンドウを開くのと違い､これは常に最低一回の API リクエストを費やす:
+/// README に言うそのすべての眼目は認証情報と接続性が実際に働くことを確かめ
+/// ることで､キャッシュだけの描画では検証できない｡それでも素の取得ではなく
+/// `cache::reload` を通すので､user id がキャッシュにあれば二回でなく一回の
+/// リクエストで済み､増分の `since_id` がレスポンスを小さく保つ — どちらが
+/// 起きたかは下の eprintln! を見よ｡
 fn fetch_only(config: &config::Config, paths: &paths::Paths) -> i32 {
     let resolution = match oauth::resolve_credential(config, paths, oauth::unix_now()) {
         Ok(resolution) => resolution,
@@ -296,15 +292,15 @@ fn fetch_only(config: &config::Config, paths: &paths::Paths) -> i32 {
             return 1;
         }
     };
-    // #54: a stored session that couldn't be refreshed is worth saying out
-    // loud here too — headless runs have no header banner to show it in
-    // instead.
+    // #54: 更新できなかった保存済みセッションは､ここでも声に出して言う価値
+    // がある — headless な実行には､代わりにそれを見せるヘッダのバナーが
+    // 無い｡
     if let Some(demotion) = &resolution.demotion {
         eprintln!("{}", oauth::describe_demotion(demotion));
     }
     let Some(credential) = resolution.credential else {
-        // #33: signing in is the only way to get a credential now, and it
-        // needs a browser — which a headless run has no business opening.
+        // #33: 今や認証情報を得る道はサインインだけで､それにはブラウザが
+        // 要る — headless な実行が開いてよいものではない｡
         eprintln!(
             "no signed-in session is available. Run twigpui without --fetch-only and click \
              \"Sign in with X\" once; this flag reuses the session that leaves behind."
@@ -353,13 +349,13 @@ fn fetch_only(config: &config::Config, paths: &paths::Paths) -> i32 {
     }
 }
 
-/// The three states looking for `--fetch-post` (#42) in argv can land in:
-/// the flag never appeared, it appeared with nothing after it — e.g.
-/// `twigpui --fetch-post` as the very last argument — or it appeared with a
-/// value. A named enum rather than `Option<Option<&str>>`: clippy's own
-/// `option_option` lint rejects the nested form precisely because three
-/// states read more clearly as three variants than as `None` /
-/// `Some(None)` / `Some(Some(_))`.
+/// argv の中に `--fetch-post` (#42) を探した結果が着地しうる三つの状態:
+/// フラグが現れなかった､現れたが後ろに何も無かった — 例えば
+/// `twigpui --fetch-post` が最後の引数だった場合 — あるいは値を伴って現れた｡
+/// `Option<Option<&str>>` ではなく名前付きの enum にしてある: clippy 自身の
+/// `option_option` lint が入れ子の形を拒むのは､まさに三つの状態は `None` /
+/// `Some(None)` / `Some(Some(_))` よりも三つの variant として読むほうが
+/// 分かりやすいからだ｡
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FetchPostArg<'a> {
     Absent,
@@ -367,33 +363,31 @@ enum FetchPostArg<'a> {
     Value(&'a str),
 }
 
-/// Locate `flag` in `args` and classify what follows it as a
-/// [`FetchPostArg`]. Generic over the flag name only so a test can
-/// exercise it without depending on the literal `--fetch-post` string;
-/// nothing else in this crate calls it with a different flag.
+/// `args` の中に `flag` を見つけ､その後ろに続くものを [`FetchPostArg`] と
+/// して分類する｡フラグ名について総称にしてあるのは､`--fetch-post` という
+/// リテラルの文字列に依存せずテストが動かせるようにするためだけで､この
+/// クレートの他のどこも別のフラグでは呼ばない｡
 fn fetch_post_arg<'a>(args: &'a [String], flag: &str) -> FetchPostArg<'a> {
     let Some(index) = args.iter().position(|arg| arg == flag) else {
         return FetchPostArg::Absent;
     };
-    // `saturating_add` (#47): argv cannot be `usize::MAX` long, but the
-    // saturating form makes that a lookup that finds nothing rather than
-    // an overflow.
+    // `saturating_add` (#47): argv が `usize::MAX` の長さになることはあり
+    // 得ないが､saturating の形にしておけば､それは overflow ではなく何も
+    // 見つからない参照になる｡
     match args.get(index.saturating_add(1)) {
         Some(value) => FetchPostArg::Value(value.as_str()),
         None => FetchPostArg::MissingValue,
     }
 }
 
-/// Pull a post id out of one `--fetch-post` (#42) token: either the id
-/// itself (all-digit, once trimmed), or a status URL's id segment —
-/// `.../status/<id>`, followed by anything that isn't itself a digit
-/// (`/photo/1`, a `?s=...` query string, or nothing). Works for both
-/// `x.com` and `twitter.com` links, since both share the same
-/// `/status/<id>` path shape; the scheme and host are never checked. This
-/// only shapes which token is even worth sending to the API — it doesn't
-/// validate that the id is real, which the request itself is the actual
-/// check for. `None` for anything else, including empty input (e.g. a
-/// stray comma in the argument).
+/// `--fetch-post` (#42) のトークン一つから post id を取り出す: id そのもの
+/// (trim すると全部数字)､あるいは status URL の id 部分 — `.../status/<id>`
+/// に､それ自体が数字でない何かが続く形 (`/photo/1`､`?s=...` のクエリ文字列､
+/// あるいは何も無し)｡`x.com` と `twitter.com` のどちらのリンクでも働く｡
+/// 両者は同じ `/status/<id>` のパス形状を共有しているからで､scheme と host
+/// は一切見ない｡これはどのトークンなら API へ送る価値があるかを整えるだけで
+/// — id が実在するかの検証はしない｡それはリクエスト自体が本当の検査である｡
+/// それ以外は空入力 (例えば引数に紛れたカンマ) も含めて `None`｡
 fn extract_post_id(token: &str) -> Option<String> {
     let trimmed = token.trim();
     if !trimmed.is_empty() && trimmed.chars().all(|c| c.is_ascii_digit()) {
@@ -407,14 +401,13 @@ fn extract_post_id(token: &str) -> Option<String> {
     if id.is_empty() { None } else { Some(id) }
 }
 
-/// Parse `--fetch-post`'s (#42) argument into the post ids it names — a
-/// bare id, a full status URL, or a comma-separated mix of either, per the
-/// issue's own "決めること" table choosing to accept both rather than ids
-/// only (a link is what's actually at hand most of the time). Each token is
-/// resolved by [`extract_post_id`]; the first one that isn't recognizable
-/// fails the whole parse rather than being silently dropped, since a
-/// shorter-than-expected id list would make the single request this fires
-/// off cover fewer posts than asked for, with no indication why.
+/// `--fetch-post` (#42) の引数を､それが名指す post id へ parse する — 裸の
+/// id､完全な status URL､あるいはそのどちらかをカンマで並べた混合｡issue 自身
+/// の "決めること" の表が､id だけでなく両方を受け付けると決めている (実際に
+/// 手元にあるのはたいていリンクだから)｡各トークンは [`extract_post_id`] が
+/// 解決する｡認識できない最初の一つは黙って落とさず parse 全体を失敗させる｡
+/// 想定より短い id の列は､ここが一度だけ撃つリクエストが頼まれたより少ない
+/// post しか対象にしない結果を､理由の手がかり無しに招くからだ｡
 fn parse_post_ids(arg: &str) -> Result<Vec<String>, String> {
     let ids: Vec<String> = arg
         .split(',')
@@ -423,11 +416,11 @@ fn parse_post_ids(arg: &str) -> Result<Vec<String>, String> {
         })
         .collect::<Result<_, _>>()?;
 
-    // #112: refuse here rather than let the API refuse. Over the cap, X
-    // rejects the whole request, so the caller pays nothing either way --
-    // but a 400 arrives as an opaque API error with no hint that the count
-    // is what did it, and the obvious next move (retry) spends a request
-    // to fail the same way. Saying the number is the entire fix.
+    // #112: API に拒ませるのではなく､ここで拒む｡上限を超えると X はリクエ
+    // スト全体を拒否するので､どちらにせよ呼び出し側は何も払わない -- だが
+    // 400 は､件数が原因だという手がかりの無い不透明な API エラーとして届き､
+    // 明らかな次の一手 (リトライ) はリクエストを一つ費やして同じように失敗
+    // する｡数を言うことが直し方のすべてである｡
     if ids.len() > MAX_POST_IDS {
         return Err(format!(
             "{} ids given; `GET /2/tweets?ids=` accepts at most {MAX_POST_IDS} per request. \
@@ -438,20 +431,20 @@ fn parse_post_ids(arg: &str) -> Result<Vec<String>, String> {
     Ok(ids)
 }
 
-/// How many ids `GET /2/tweets?ids=` accepts in one request (#112).
+/// `GET /2/tweets?ids=` が一回のリクエストで受け取る id の数 (#112)｡
 ///
-/// Chunking past this would mean several paid requests for one invocation,
-/// which is a different feature and not one `--fetch-post` needs: it is a
-/// development-time lookup, and nothing in the app asks for more than a
-/// handful at a time. `cache::fetch_thread`'s walk passes one id per call,
-/// so it cannot reach this either.
+/// これを超えて分割すると､一回の起動に対し有料のリクエストが複数になる｡
+/// それは別の機能であって `--fetch-post` が要るものではない: これは開発時の
+/// 参照であり､アプリの中に一度に一握り以上を求めるものは無い｡
+/// `cache::fetch_thread` の walk は呼び出しごとに id を一つ渡すので､
+/// こちらもここへは届かない｡
 const MAX_POST_IDS: usize = 100;
 
-/// Which of `requested` never showed up in `items` — deleted, protected, or
-/// otherwise absent from the API's response — in `requested`'s own order.
-/// Feeds only the "N of M found" line `fetch_post` prints to stderr; stdout
-/// always prints exactly what came back, with no placeholder entries for
-/// the rest.
+/// `requested` のうち `items` に現れなかったものを — 削除された､保護されて
+/// いる､あるいは他の理由で API のレスポンスに無い — `requested` 自身の順で
+/// 返す｡`fetch_post` が stderr へ印字する "N of M found" の行にだけ使われる｡
+/// stdout は常に返ってきたものだけをそのまま印字し､残りにプレースホルダの
+/// 項目は置かない｡
 fn missing_ids(requested: &[String], items: &[x_api::TimelineItem]) -> Vec<String> {
     let present: HashSet<&str> = items.iter().map(|item| item.id.as_str()).collect();
     requested
@@ -461,51 +454,48 @@ fn missing_ids(requested: &[String], items: &[x_api::TimelineItem]) -> Vec<Strin
         .collect()
 }
 
-/// Render fetched posts as pretty-printed JSON for `--fetch-post` (#42)'s
-/// stdout — the only output format; see `fetch_post`'s doc comment for why
-/// no human-readable mode was added alongside it. A thin wrapper around
-/// `serde_json::to_string_pretty`, pulled out on its own so a test can
-/// check the shape of what gets printed without going through
-/// `fetch_post`'s network call, the same reasoning `usage_only` below
-/// already applies to its own JSON output.
+/// 取得した post を `--fetch-post` (#42) の stdout 向けに整形済み JSON と
+/// して描く — 出力形式はこれだけで､人が読む形式を併設しなかった理由は
+/// `fetch_post` の doc コメントを見よ｡`serde_json::to_string_pretty` の薄い
+/// ラッパで､`fetch_post` のネットワーク呼び出しを通さずに印字されるものの形
+/// をテストが確かめられるよう独立させてある｡下の `usage_only` が自身の JSON
+/// 出力に対して既に当てているのと同じ理屈だ｡
 fn render_fetch_post_json(items: &[x_api::TimelineItem]) -> serde_json::Result<String> {
     serde_json::to_string_pretty(items)
 }
 
-/// Fetch one or more posts by id and print them as JSON to stdout, for
-/// `--fetch-post <id-or-url>[,...]` (#42) — e.g. so a Claude Code session
-/// can read a specific post's text without a human pasting it in, since
-/// `x.com` itself returns 402 to `WebFetch` (the issue's own motivation).
+/// `--fetch-post <id-or-url>[,...]` (#42) のために､id で post を一つ以上
+/// 取得して JSON で stdout へ印字する — 例えば `x.com` 自身が `WebFetch` に
+/// 402 を返す (issue 自身の動機) ため､人が貼り付けなくても Claude Code の
+/// セッションが特定の post の本文を読めるようにする｡
 ///
-/// Goes through [`x_api::XClient::tweets_by_id`] — the same call
-/// `cache::fetch_thread`'s parent-chain walk uses (#12) — passed every
-/// requested id joined into one comma-separated `ids=` value rather than
-/// one request per id. `GET /2/tweets?ids=` already accepts a
-/// comma-separated list on the wire, so this reuses that call unmodified:
-/// fetching five ids still costs exactly one request, tracked under the
-/// same `Endpoint::TweetById` (#10) as `cache::fetch_thread` and counted by
-/// #18's usage tracking automatically, since both go through
-/// [`x_api::XClient::get`] the same way every other read does.
+/// [`x_api::XClient::tweets_by_id`] を通す — `cache::fetch_thread` の親
+/// チェーンの walk が使うのと同じ呼び出し (#12) — id ごとに一リクエストでは
+/// なく､要求された id をすべてカンマ区切りの `ids=` 一つに繋いで渡す｡
+/// `GET /2/tweets?ids=` は既にカンマ区切りの列を受け取るので､その呼び出しを
+/// 手を入れずに再利用している: 五つの id の取得でもちょうど一リクエストで､
+/// `cache::fetch_thread` と同じ `Endpoint::TweetById` (#10) の下で追跡され､
+/// #18 の usage 追跡が自動で数える｡どちらも他のあらゆる読み取りと同じように
+/// [`x_api::XClient::get`] を通るからだ｡
 ///
-/// **Deliberately bypasses the timeline cache (#9) entirely — reads
-/// nothing from it, writes nothing to it.** That cache exists to avoid
-/// re-fetching the same account's timeline on every reload, a
-/// repeated-access pattern an arbitrary post id doesn't share: it is
-/// typically looked up once, from wherever it was linked, and never again.
-/// Caching it would mean either a new file keyed by id with no eviction
-/// story, or shoehorning an unrelated post into the per-account timeline
-/// file it has no relationship to. The simplest defensible choice is to
-/// always spend the one request this costs and never persist the result.
+/// **timeline のキャッシュ (#9) は意図的に完全に迂回する — そこから何も
+/// 読まず､そこへ何も書かない｡** あのキャッシュは､リロードのたびに同じ
+/// アカウントの timeline を取り直すのを避けるためにある｡任意の post id は
+/// その繰り返しアクセスの性質を共有しない: たいていリンクされていた場所から
+/// 一度引かれるだけで､二度と引かれない｡キャッシュするなら､eviction の
+/// 筋書きの無い id を鍵とする新しいファイルを作るか､無関係な post を何の
+/// 関係も無いアカウント単位の timeline ファイルへ押し込むかになる｡最も
+/// 擁護しやすい選択は､これが要する一リクエストを常に費やし､結果を決して
+/// 永続化しないことだ｡
 ///
-/// Always spends exactly one request regardless of how many ids are
-/// requested (see the `tweets_by_id` reasoning above), reported on stderr
-/// alongside how many of the requested ids actually came back — mirroring
-/// `fetch_only`'s cache-hit/miss line — so the cost and the yield are never
-/// ambiguous, which is the issue's own completion condition. Only JSON is
-/// printed to stdout: the issue's motivation is a tool reading this output,
-/// not a human at a terminal, the same choice `--usage` already made below
-/// for the same reason, so no separate `--json` flag or human-readable
-/// default was added.
+/// 要求された id が何個であっても常にちょうど一リクエストを費やし (上の
+/// `tweets_by_id` の理屈を見よ)､要求した id のうち実際にいくつ返ってきたか
+/// と並べて stderr へ報告する — `fetch_only` のキャッシュ hit/miss の行に
+/// ならったもので — 費用と収穫が曖昧にならないようにする｡それが issue 自身
+/// の完了条件である｡stdout へ印字するのは JSON だけだ: issue の動機は端末の
+/// 前の人間ではなくこの出力を読むツールであり､下の `--usage` が既に同じ理由
+/// で同じ選択をしている｡だから別の `--json` フラグも､人が読む既定も足して
+/// いない｡
 fn fetch_post(config: &config::Config, paths: &paths::Paths, arg: &str) -> i32 {
     let ids = match parse_post_ids(arg) {
         Ok(ids) => ids,
@@ -522,14 +512,14 @@ fn fetch_post(config: &config::Config, paths: &paths::Paths, arg: &str) -> i32 {
             return 1;
         }
     };
-    // #54: a stored session that couldn't be refreshed is worth saying out
-    // loud here too — headless runs have no header banner to show it in
-    // instead.
+    // #54: 更新できなかった保存済みセッションは､ここでも声に出して言う価値
+    // がある — headless な実行には､代わりにそれを見せるヘッダのバナーが
+    // 無い｡
     if let Some(demotion) = &resolution.demotion {
         eprintln!("{}", oauth::describe_demotion(demotion));
     }
     let Some(credential) = resolution.credential else {
-        // See `fetch_only`'s equivalent: signing in needs a browser (#33).
+        // `fetch_only` の同じ箇所を見よ: サインインにはブラウザが要る (#33)｡
         eprintln!(
             "no signed-in session is available. Run twigpui without --fetch-post and click \
              \"Sign in with X\" once; this flag reuses the session that leaves behind."
@@ -570,13 +560,12 @@ fn fetch_post(config: &config::Config, paths: &paths::Paths, arg: &str) -> i32 {
     }
 }
 
-/// Print `usage::build_report`'s numbers as JSON to stdout (#18) — the
-/// point of persisting request counts under `state_dir` in the first place
-/// is that an external tool can read the same numbers the header shows,
-/// without opening a window. JSON rather than a bespoke text format: the
-/// project already depends on `serde_json` for everything else it
-/// persists, and a machine-readable consumer needs structure to parse
-/// rather than a format it has to scrape.
+/// `usage::build_report` の数字を JSON で stdout へ印字する (#18) — そもそも
+/// リクエスト数を `state_dir` の下に永続化する狙いは､外部のツールがウィンド
+/// ウを開かずにヘッダが見せるのと同じ数字を読めることにある｡独自のテキスト
+/// 形式ではなく JSON なのは､このプロジェクトが永続化する他のすべてで既に
+/// `serde_json` に依存しているからで､機械が読む消費者には scrape せねば
+/// ならない形式ではなく parse できる構造が要るからだ｡
 fn usage_only(config: &config::Config, paths: &paths::Paths) -> i32 {
     let entries = match usage::load_all(paths) {
         Ok(entries) => entries,
@@ -625,7 +614,7 @@ mod tests {
         );
     }
 
-    // --- #42: --fetch-post argument parsing ---
+    // --- #42: --fetch-post の引数の parse ---
 
     #[test]
     fn fetch_post_arg_is_absent_when_the_flag_is_absent() {
@@ -751,9 +740,9 @@ mod tests {
 
     #[test]
     fn parse_post_ids_rejects_more_ids_than_one_request_accepts() {
-        // #112: over the cap X rejects the whole request, so this costs
-        // nothing to get wrong -- but the message has to name the limit,
-        // or the only visible symptom is an opaque 400.
+        // #112: 上限を超えると X はリクエスト全体を拒否するので､間違えても
+        // 費用はかからない -- だがメッセージが上限を名指ししなければ､目に
+        // 見える症状は不透明な 400 だけになる｡
         let arg = (1..=101)
             .map(|n| n.to_string())
             .collect::<Vec<_>>()
