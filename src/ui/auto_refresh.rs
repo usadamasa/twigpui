@@ -274,10 +274,6 @@ const GLIDE_MAX_S: f32 = 5.;
 /// 距離 (#22)｡
 const GLIDE_DONE_PX: f32 = 1.0;
 
-/// glide の 1 フレームの長さ (#22)､秒 — 60Hz のディスプレイに追随する｡
-/// timer の間隔であり､同時に経過時間として足し込む刻みでもある｡
-const GLIDE_FRAME_S: f32 = 0.016;
-
 /// `distance` px を歩く glide にかける時間 (#208)､秒｡距離に比例させ､
 /// [`GLIDE_MIN_S`] と [`GLIDE_MAX_S`] で挟む｡向きは問わない｡
 pub(super) fn glide_duration_s(distance: f32) -> f32 {
@@ -554,7 +550,7 @@ impl TimelineView {
     /// のと同じ譲り方だ｡ホイールの経路 (#175) は glide を drop する
     /// ことでも同じ結果を先に出す; ここの比較はその裏の保険である｡
     ///
-    /// 時刻は壁時計ではなくフレームごとに [`GLIDE_FRAME_S`] を足して
+    /// 時刻は壁時計ではなくフレームごとに [`scroll::FRAME_S`] を足して
     /// 数える (#208)｡テストの executor は timer の時計だけを進めるので､
     /// `Instant` で測ると 1 フレームが数マイクロ秒になり glide が永遠に
     /// 終わらない｡
@@ -566,7 +562,7 @@ impl TimelineView {
         const GRAB_PX: f32 = 1.0;
 
         self.glide = Some(cx.spawn(async move |this, cx| {
-            let frame = Duration::from_secs_f32(GLIDE_FRAME_S);
+            let frame = Duration::from_secs_f32(scroll::FRAME_S);
             for _ in 0..SETTLE_FRAMES {
                 cx.background_executor().timer(frame).await;
                 // `Err` はウィンドウが消えたということ — ここも以下も
@@ -612,7 +608,7 @@ impl TimelineView {
                     return;
                 }
                 cx.background_executor().timer(frame).await;
-                elapsed_s += GLIDE_FRAME_S;
+                elapsed_s += scroll::FRAME_S;
             }
         }));
     }

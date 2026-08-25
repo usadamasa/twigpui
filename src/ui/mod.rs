@@ -467,6 +467,16 @@ pub(crate) struct TimelineView {
     /// 自身も､offset が置いていった場所に無いと分かった瞬間に止まる｡それは
     /// 読み手がホイールを握った合図である｡
     glide: Option<Task<()>>,
+    /// 読み手自身の scroll の状態 (#175): ホイールが向かっている目標と､
+    /// 端を越えて引いた rubber band｡入力は [`Self::on_wheel`] が渡し､
+    /// `body` が band のずれを読む｡純粋なモデルで､なぜ gpui の既定の
+    /// handler に任せないかは [`scroll`] のモジュール doc を見よ｡
+    scroller: scroll::Scroller,
+    /// `scroller` に動くものがあるあいだだけ生きるフレームのループ
+    /// (#175)｡`glide` と同じ契約 — drop すれば止まる — で､`glide` と
+    /// 同時に生きることは無い: 入力は glide を drop してからこちらを
+    /// 始める｡
+    scroll_motion: Option<Task<()>>,
     /// fixture の模擬 poll を生かしておく (#22): ウィンドウが開いてから､
     /// 抑えてあった post が [`Self::present_poll`] を通っていくまでの遅延で､
     /// 課金されるリクエスト無しに follow を手で観察できる｡live の
@@ -642,6 +652,8 @@ impl TimelineView {
             pending: None,
             follow,
             glide: None,
+            scroller: scroll::Scroller::default(),
+            scroll_motion: None,
             fixture_arrival: None,
             reposted_ids: HashSet::new(),
             reposted_ids_refresh: None,
@@ -1696,9 +1708,14 @@ impl TimelineView {
             // ハンドルだ｡これが無ければリロードはビューポートを*ピクセル*の
             // 位置に留めることしかできず､上に行が挿入された後ではそこは
             // 間違った場所になる｡
-            .track_scroll(&self.list_scroll);
+            .track_scroll(&self.list_scroll)
+            // #175: 端を越えて引いたぶんだけ一覧をずらす — 最上部では
+            // 下へ､末尾では上へ｡offset は gpui が prepaint で clamp する
+            // ので､端の向こうは offset ではなく位置で見せるしかない｡
+            .relative()
+            .top(px(self.scroller.shift()));
 
-        match &self.state {
+        let list = match &self.state {
             // ツールバー側のボタンを指す文ではなく､ボタンそのものを置く｡
             // リストのタブが増えるとそのボタンは右端の外へ押し出されるし
             // (#192)､唯一の案内が見えないボタンの名を挙げるだけのサインアウト
@@ -1764,7 +1781,19 @@ impl TimelineView {
                         ))
                     })
             }
-        }
+        };
+
+        // #175: ずれない wrapper｡band で一覧がずれても外へは描かせず､
+        // ホイールを横取りする canvas はここに重ねる — ずれた一覧に
+        // 重ねると､跳ねている最中に露出した端の上で入力が死ぬ｡
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .relative()
+            .overflow_hidden()
+            .child(list)
+            .child(Self::wheel_capture(cx))
     }
 }
 
@@ -1857,8 +1886,11 @@ impl Render for TimelineView {
                 // ことも無い｡ピクセルのオフセットではなく
                 // `scroll_to_top_of_item(0)` にしてあるのは､最新の行そのものへ
                 // 着地させるためだ｡進行中の glide も同じ場所へ歩いている —
-                // ジャンプがそれに取って代わる｡
+                // ジャンプがそれに取って代わる｡ホイールの目標も同じ (#175):
+                // 飛んだ先から古い目標へ引き戻してはいけない｡
                 this.glide = None;
+                this.scroll_motion = None;
+                this.scroller.release();
                 this.list_scroll.scroll_to_top_of_item(0);
                 cx.notify();
             }))
@@ -3649,7 +3681,10 @@ mod tests {
         }
     }
 
-    fn offset_y(cx: &mut gpui::TestAppContext, timeline: &gpui::Entity<super::TimelineView>) -> f32 {
+    fn offset_y(
+        cx: &mut gpui::TestAppContext,
+        timeline: &gpui::Entity<super::TimelineView>,
+    ) -> f32 {
         cx.update(|cx| timeline.read(cx).list_scroll.offset().y.into())
     }
 
@@ -3668,18 +3703,26 @@ mod tests {
             "a tick must not jump in the same frame, offset {right_after}"
         );
 
-        cx.executor().advance_clock(std::time::Duration::from_secs(2));
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(2));
         cx.run_until_parked();
         let one_tick = offset_y(cx, &timeline);
-        assert!(one_tick < -10., "after settling the list has scrolled down, {one_tick}");
+        assert!(
+            one_tick < -10.,
+            "after settling the list has scrolled down, {one_tick}"
+        );
         cx.update(|cx| {
             let view = timeline.read(cx);
-            assert!(view.scroller.is_settled(), "and there is nothing left to animate");
+            assert!(
+                view.scroller.is_settled(),
+                "and there is nothing left to animate"
+            );
             assert!(view.scroll_motion.is_none(), "so the frame loop has let go");
         });
 
         visual.simulate_event(wheel_event(body.center(), -3.));
-        cx.executor().advance_clock(std::time::Duration::from_secs(2));
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(2));
         cx.run_until_parked();
         let two_ticks = offset_y(cx, &timeline);
         assert!(
@@ -3728,10 +3771,19 @@ mod tests {
         visual.simulate_event(pan_event(body.center(), 40., gpui::TouchPhase::Started));
         let (offset, shift) = cx.update(|cx| {
             let view = timeline.read(cx);
-            (f32::from(view.list_scroll.offset().y), view.scroller.shift())
+            (
+                f32::from(view.list_scroll.offset().y),
+                view.scroller.shift(),
+            )
         });
-        assert!(offset.abs() < 1., "the list itself stays at the top, {offset}");
-        assert!(shift > 0. && shift < 40., "40px of pull shows as a smaller shift, {shift}");
+        assert!(
+            offset.abs() < 1.,
+            "the list itself stays at the top, {offset}"
+        );
+        assert!(
+            shift > 0. && shift < 40.,
+            "40px of pull shows as a smaller shift, {shift}"
+        );
 
         visual.update(|window, cx| {
             let _ = window.draw(cx);
@@ -3739,18 +3791,22 @@ mod tests {
         let pulled = visual
             .debug_bounds("timeline")
             .expect("still laid out while pulled");
+        let lowered = f32::from(pulled.top()) - f32::from(body.top());
         assert!(
-            (f32::from(pulled.top() - body.top()) - shift).abs() < 0.5,
-            "the drawn list sits {shift}px lower, was {}",
-            f32::from(pulled.top() - body.top())
+            (lowered - shift).abs() < 0.5,
+            "the drawn list sits {shift}px lower, was {lowered}"
         );
 
         visual.simulate_event(pan_event(body.center(), 0., gpui::TouchPhase::Ended));
-        cx.executor().advance_clock(std::time::Duration::from_secs(2));
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(2));
         cx.run_until_parked();
         cx.update(|cx| {
             let view = timeline.read(cx);
-            assert!(view.scroller.shift().abs() < 0.5, "the band relaxes once the finger lifts");
+            assert!(
+                view.scroller.shift().abs() < 0.5,
+                "the band relaxes once the finger lifts"
+            );
             assert!(view.scroller.is_settled(), "{:?}", view.scroller);
         });
     }
