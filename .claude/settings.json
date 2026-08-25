@@ -19,7 +19,8 @@
   },
   "sandbox": {
     "excludedCommands": [
-      "cargo *"
+      "cargo *",
+      "scripts/coverage.sh"
     ]
   },
   "enabledPlugins": {
