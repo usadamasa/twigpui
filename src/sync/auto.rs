@@ -2,11 +2,16 @@
 //!
 //! [`super::schedule`] が tick の内容を決め､[`super::state`] がその結果を
 //! 覚え､この module があいだで実行する｡分割は `run.rs` と同じ理由による
-//! もので､ここは一つも unit test されていない｡どの分岐も HTTP request か､
-//! その結果を書き込むファイルだからだ｡カバレッジを担っているのは
-//! [`super::schedule::next_step`]､[`super::schedule::next_batch`]､
-//! [`super::schedule::apply_outcome`]､[`super::state::settle`] で､
-//! いずれも純粋関数として隣に置いてある｡
+//! もので､判断は純粋関数として隣にある — [`super::schedule::next_step`]､
+//! [`super::schedule::next_batch`]､[`super::schedule::apply_outcome`]､
+//! [`super::state::settle`]｡
+//!
+//! ここの分岐はどれも request かファイルだが､request の相手は
+//! [`super::api::ListSyncApi`] で､ファイルは `env::temp_dir()` の下に置ける｡
+//! だから tick が何を買い何を書いたかはテストから見える: 期限前に何も
+//! 呼ばないこと､read が失敗しても打刻が残ること､別の list の plan を
+//! 捨てること､保留された plan がファイルに残ることは､どれも assert して
+//! ある｡
 //!
 //! # tick が使ってよい費用
 //!
@@ -431,8 +436,8 @@ mod tests {
         )
         .unwrap();
         let client = FakeApi::new()
-            .following(vec![page(&[("1", "alice")], None)])
-            .members(vec![page(&[], None)]);
+            .following(vec![Ok(page(&[("1", "alice")], None))])
+            .members(vec![Ok(page(&[], None))]);
 
         let tick = tick(
             scratch.paths(),
@@ -457,8 +462,8 @@ mod tests {
     fn a_due_tick_diffs_both_sides_and_writes_the_plan() {
         let scratch = Scratch::new("auto-diff");
         let client = FakeApi::new()
-            .following(vec![page(&[("1", "alice")], None)])
-            .members(vec![page(&[("2", "bob")], None)]);
+            .following(vec![Ok(page(&[("1", "alice")], None))])
+            .members(vec![Ok(page(&[("2", "bob")], None))]);
 
         let tick = tick(
             scratch.paths(),
@@ -526,8 +531,8 @@ mod tests {
             ("25", "m5"),
         ];
         let client = FakeApi::new()
-            .following(vec![page(&[], None)])
-            .members(vec![page(&members, None)]);
+            .following(vec![Ok(page(&[], None))])
+            .members(vec![Ok(page(&members, None))]);
 
         let tick = tick(
             scratch.paths(),
@@ -670,8 +675,8 @@ mod tests {
         )
         .unwrap();
         let client = FakeApi::new()
-            .following(vec![page(&[], None)])
-            .members(vec![page(&[], None)]);
+            .following(vec![Ok(page(&[], None))])
+            .members(vec![Ok(page(&[], None))]);
 
         let tick = tick(
             scratch.paths(),

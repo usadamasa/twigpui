@@ -1,10 +1,12 @@
 //! #163 の sync のうち支払う側の半分: ページングした read､apply の loop､
 //! そして `--sync-list` の入口｡
 //!
-//! ここは一つも unit test されておらず､`mod.rs` の末尾ではなく別ファイルに
-//! してあるのはそのためだ: 以下の関数はどれも `cache` の reload 経路と同じく
-//! 実際の HTTP request を投げる｡テストカバレッジを担っているのは
-//! [`super::plan`] と plan ファイルで､どちらも純粋なまま隣にある｡
+//! `mod.rs` の末尾ではなく別ファイルにしてあるのは､ここが金を使う側だから
+//! だ｡以下の関数はどれも `cache` の reload 経路と同じく実際の request を
+//! 投げる — ただし投げる相手は [`super::api::ListSyncApi`] で､テストは
+//! そこにページと write の結果を仕込む｡だから read の連結も apply の
+//! 中断と再開も HTTP を張らずに確かめられる｡transport の側は
+//! フィクスチャ JSON を通した `x_api::client` のテストが見ている｡
 
 use anyhow::{Context as _, Result};
 
@@ -32,8 +34,8 @@ use crate::x_api::model::User;
 /// following 上限をはるかに超える｡ここに当たったら黙って切り詰めずに
 /// エラーにするのは､ページの失敗と同じ理由による｡
 ///
-/// unit test していない — `fetch_page` を通して実際の HTTP request を
-/// 投げる｡テストカバレッジを担うのは純粋な [`super::plan`] の方だ｡
+/// `fetch_page` が継ぎ目だ｡呼び出し側は [`super::api::ListSyncApi`] の
+/// ページ取得を渡し､テストは仕込んだページの列を渡す｡
 fn read_all(
     what: &str,
     mut fetch_page: impl FnMut(Option<&str>) -> Result<(Vec<User>, Option<String>)>,
@@ -59,8 +61,6 @@ fn read_all(
 /// sync の read 費用をすべて使う: 両側のどのアカウントも課金 resource だ｡
 /// ここでは X に何も書かない — 結果は [`apply`] が消費する [`super::Plan`]
 /// だ｡
-///
-/// unit test していない｡理由は [`read_all`] と同じ｡
 pub(super) fn plan_sync(
     paths: &Paths,
     client: &dyn ListSyncApi,
@@ -88,8 +88,6 @@ pub(super) fn plan_sync(
 /// その月の初回だけ名前ごとに 1 課金 request､以降はゼロで済む｡
 /// [`super::plan`] に届くのは `id` と `username` だけなので､`name` には
 /// 2 回目の lookup 相当の表示名ではなく screen name を入れてある｡
-///
-/// unit test していない｡理由は [`read_all`] と同じ｡
 fn seed_users(
     paths: &Paths,
     client: &dyn ListSyncApi,
@@ -136,8 +134,6 @@ fn seed_users(
 /// 最初の失敗で止めてそれを返し､disk 上の plan には届いたものがすべて
 /// 反映される｡エラーを越えて続ければ､受け付けられないと今しがた証明した
 /// credential や list に対して write を使い続けることになる｡
-///
-/// unit test していない｡理由は [`read_all`] と同じ｡
 fn apply(
     paths: &Paths,
     client: &dyn ListSyncApi,
@@ -165,7 +161,9 @@ fn apply(
 /// removal を交互に混ぜるのはその二つ目の理由による — `limit` は addition
 /// に先に使い切らず､両方の action に振り分ける｡
 ///
-/// unit test していない｡理由は [`read_all`] と同じ｡
+/// write と write のあいだの間は [`super::api::ListSyncApi::pause_between_writes`]
+/// に頼む｡本番はそこで眠り､テストは渡された長さを記録するだけなので､
+/// 「1 件目の前には待たない」を suite を止めずに確かめられる｡
 pub(super) fn apply_some(
     paths: &Paths,
     client: &dyn ListSyncApi,
@@ -449,8 +447,8 @@ mod tests {
     #[test]
     fn every_page_is_joined_in_the_order_it_arrived() {
         let pages = std::cell::RefCell::new(vec![
-            page(&[("1", "a")], Some("next")),
-            page(&[("2", "b")], None),
+            Ok(page(&[("1", "a")], Some("next"))),
+            Ok(page(&[("2", "b")], None)),
         ]);
         let read = read_all("follow list", |_| pages.borrow_mut().remove(0)).unwrap();
         assert_eq!(
@@ -464,8 +462,8 @@ mod tests {
         // ここを取り違えると同じ 1 ページ目を課金しながら読み続ける｡
         let asked = std::cell::RefCell::new(Vec::new());
         let pages = std::cell::RefCell::new(vec![
-            page(&[("1", "a")], Some("cursor-2")),
-            page(&[("2", "b")], None),
+            Ok(page(&[("1", "a")], Some("cursor-2"))),
+            Ok(page(&[("2", "b")], None)),
         ]);
         read_all("follow list", |cursor| {
             asked.borrow_mut().push(cursor.map(str::to_string));
@@ -483,7 +481,7 @@ mod tests {
     fn a_page_that_fails_halfway_fails_the_whole_read() {
         // 半分読めた follow list は小さい答えではなく誤った答えだ｡
         let pages = std::cell::RefCell::new(vec![
-            page(&[("1", "a")], Some("next")),
+            Ok(page(&[("1", "a")], Some("next"))),
             Err(anyhow::anyhow!("the API said 503")),
         ]);
         let error = read_all("follow list", |_| pages.borrow_mut().remove(0))
@@ -494,7 +492,7 @@ mod tests {
 
     #[test]
     fn a_cursor_that_never_ends_is_an_error_rather_than_a_truncated_read() {
-        let error = read_all("follow list", |_| page(&[("1", "a")], Some("forever")))
+        let error = read_all("follow list", |_| Ok(page(&[("1", "a")], Some("forever"))))
             .unwrap_err()
             .to_string();
         assert!(error.contains("did not finish paging"), "{error}");
@@ -508,10 +506,10 @@ mod tests {
         let scratch = Scratch::new("plan-sync");
         let client = FakeApi::new()
             .following(vec![
-                page(&[("1", "alice")], Some("page-2")),
-                page(&[("2", "bob")], None),
+                Ok(page(&[("1", "alice")], Some("page-2"))),
+                Ok(page(&[("2", "bob")], None)),
             ])
-            .members(vec![page(&[("2", "bob"), ("3", "carol")], None)]);
+            .members(vec![Ok(page(&[("2", "bob"), ("3", "carol")], None))]);
 
         let plan = plan_sync(scratch.paths(), &client, "me", "7", 100).unwrap();
 
@@ -553,7 +551,7 @@ mod tests {
                 Ok("13".to_string()),
                 Ok("14".to_string()),
             ])
-            .members(vec![page(&[], None)]);
+            .members(vec![Ok(page(&[], None))]);
 
         let plan = plan_sync(scratch.paths(), &client, "me", "7", 100).unwrap();
 
@@ -580,7 +578,7 @@ mod tests {
                 Ok("13".to_string()),
                 Ok("14".to_string()),
             ])
-            .members(vec![page(&[], None), page(&[], None)]);
+            .members(vec![Ok(page(&[], None)), Ok(page(&[], None))]);
 
         plan_sync(scratch.paths(), &client, "me", "7", 100).unwrap();
         let again = plan_sync(scratch.paths(), &client, "me", "7", 100).unwrap();
@@ -726,8 +724,8 @@ mod tests {
     fn a_dry_run_writes_the_plan_and_says_nothing_was_changed() {
         let scratch = Scratch::new("run-dry");
         let client = FakeApi::new()
-            .following(vec![page(&[("1", "alice")], None)])
-            .members(vec![page(&[], None)]);
+            .following(vec![Ok(page(&[("1", "alice")], None))])
+            .members(vec![Ok(page(&[], None))]);
 
         let report = run(
             scratch.paths(),

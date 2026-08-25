@@ -293,12 +293,16 @@ pub(super) mod fake {
         }
     }
 
-    /// `(id, username)` の並びと次の cursor から 1 ページ｡
-    pub(crate) fn page(users: &[(&str, &str)], next: Option<&str>) -> Page {
-        Ok((
+    /// `(id, username)` の並びと次の cursor から 1 ページ分の中身｡
+    ///
+    /// `Page` ではなく中身を返す｡`Ok` しか作らない関数が `Result` を返すのは
+    /// `clippy::unnecessary_wraps` が咎める形だし､呼び出し側は失敗するページを
+    /// 混ぜるために結局 `Err` を自分で書くので､`Ok` もそちらに揃う｡
+    pub(crate) fn page(users: &[(&str, &str)], next: Option<&str>) -> (Vec<User>, Option<String>) {
+        (
             users.iter().map(|(id, name)| user(id, name)).collect(),
             next.map(str::to_string),
-        ))
+        )
     }
 
     /// 追跡している window が送信前に拒んだ write｡`schedule::apply_outcome`

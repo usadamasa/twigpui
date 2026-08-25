@@ -155,8 +155,7 @@ pub(crate) fn missing_scope(granted: Option<&str>) -> Option<&'static str> {
     .find(|required| !crate::oauth::tokens::has_scope(granted, required))
 }
 
-/// 両側を diff して plan にする (#163 の核心であり､この module のうち
-/// ネットワーク無しでテストできる唯一の部分だ)｡
+/// 両側を diff して plan にする (#163 の核心)｡
 ///
 /// 照合は終始 user id で行う｡screen name は同一性ではない: 二つの read の
 /// あいだに改名したアカウントは､そうしなければ削除して再追加され､何も
