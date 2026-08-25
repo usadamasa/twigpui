@@ -23,8 +23,8 @@
 //!
 //! [`Fixture::lists`] (#164) と [`Fixture::sync`] (#205) は post ではない｡
 //! それでも規則は同じで､どちらもアカウントとその同期の *状態* を書き､
-//! widget を書かない｡「行を出せ」「ボタンを灰色にしろ」とは言えない｡本物の
-//! fetch や tick が通るのと同じ判断が､その状態から画面を決める｡
+//! widget を書かない｡本物の fetch や tick が通るのと同じ判断が､その状態から
+//! 画面を決める｡
 
 use std::path::Path;
 
@@ -80,20 +80,17 @@ pub(crate) struct Fixture {
 
 /// フィクスチャが言う list sync の状態 (#205)｡
 ///
-/// widget ではなく状態を書く — このモジュールの規則どおりだ｡フィクスチャが
-/// 「行を出せ」と言うことはできない｡言えるのは sync が何を負っていて何に
-/// 拒まれているかで､行を出すかどうかも､どんな文言になるかも､本物の tick が
-/// 通るのとまったく同じ判断が決める｡そうでなければ､本物の sync には
-/// ありえない画面をフィクスチャが描けてしまう｡
+/// 書けるのは sync が何を負っていて何に拒まれているかまで｡行を出すかも
+/// 文言も､本物の tick が通るのと同じ判断が決める｡「行を出せ」と書けると､
+/// 本物の sync にはありえない画面をフィクスチャが描ける｡
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub(crate) struct FixtureSync {
     /// ディスク上の計画がまだ負っているメンバーシップ変更の件数｡
     pub pending: usize,
     /// 拒否が明けるまでの秒数｡0 なら拒否されていない｡
     ///
-    /// 絶対時刻ではなく起動からの相対秒だ｡フィクスチャは何度でも同じ画面を
-    /// 出さねばならないが､ファイルに書いた unix 時刻は書いた翌日にはただの
-    /// 過去になる — つまり毎回違う画面になる｡
+    /// 絶対時刻ではなく起動からの相対秒｡ファイルに書いた unix 時刻は翌日には
+    /// 過去になり､毎回違う画面が出てしまう｡
     #[serde(default)]
     pub blocked_for_seconds: i64,
     /// 上限が続けて何回 no と言ったか (#197)｡2 回以上で文言と色が変わる｡
@@ -232,9 +229,8 @@ mod tests {
             "lists for the picker, more than one so the trough has \
              unselected segments beside Home (#164)"
         );
-        // #205: 行を出すいちばん込み入った状態だ｡拒否が続いている追いつきは
-        // 件数も連続回数も JST の解除予定もすべて 1 行に載せるので､22px の
-        // 帯に収まるかを目で確かめられる唯一の case である｡
+        // #205: 行に出せるいちばん込み入った状態｡件数も連続回数も JST の
+        // 解除予定も 1 行に載るので､22px に収まるかを目で確かめられる｡
         let sync = fixture
             .sync
             .as_ref()
@@ -244,12 +240,10 @@ mod tests {
             sync.blocked_for_seconds > 0 && sync.refusals >= 2,
             "the busiest label: a stuck catch-up counting down to a JST hour"
         );
-        // #205: ダイアログが名指す list の名前は所有 list のキャッシュ
-        // (#164) からしか来ない｡フィクスチャはそのキャッシュを丸ごと
-        // 置き換えるので､ミラー先がそこに無ければダイアログは id へ落ちる
-        // — 撮っても確かめたかったものが写らない｡`cargo run --fixture` は
-        // debug ビルド､つまり dev プロファイルなので､突き合わせる相手は
-        // その既定の list である｡
+        // #205: ダイアログの list 名は所有 list のキャッシュ (#164) からしか
+        // 来ない｡フィクスチャはそのキャッシュを丸ごと置き換えるので､ミラー先が
+        // 無いとダイアログが id へ落ちる｡`cargo run --fixture` は debug ビルド
+        // なので､突き合わせる相手は dev プロファイルの既定の list｡
         let mirrored = crate::profile::Profile::Dev
             .default_list_id()
             .expect("the dev profile mirrors into a list");

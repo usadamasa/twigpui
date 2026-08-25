@@ -18,11 +18,9 @@
 //! 同じ — status の enum と､それを書くループと､そのループを始めるボタン
 //! は 1 つの機構だからだ｡
 //!
-//! #205 でその機構の *見せ方* が [`super::sync_row`] へ出た — 行､その
-//! フェード､確認のダイアログ｡機構が 1 つであることは変わっていない｡
-//! 分かれたのは問いのほうだ: ここが答えるのは「sync は何をしているか｡
-//! 今 何を支払ってよいか」で､あちらが答えるのは「それを読み手にどう
-//! 出すか」である｡
+//! #205 でその見せ方が [`super::sync_row`] へ出た — 行､フェード､確認の
+//! ダイアログ｡分かれたのは問いのほうで､ここが答えるのは「sync は何を
+//! しているか｡今 何を支払ってよいか」｡
 //!
 //! # なぜ始めるのに確認が要るのか
 //!
@@ -36,6 +34,9 @@
 // [`super::render`] や [`super::auto_refresh`] のような `use super::*`
 // ではなく書き下す: このモジュールが名指しする `ui` の import は､clippy
 // の `wildcard_imports` が列挙できる程度に少なく､だから glob を通さない｡
+use chrono::DateTime;
+use chrono_tz::Asia::Tokyo;
+
 use super::{Context, Duration, ReloadNotice, Theme, TimelineView, log, oauth, sync};
 
 /// ウィンドウが list sync について今知っていること (#174)｡
@@ -119,12 +120,9 @@ pub(super) fn offers_sync(status: &SyncStatus) -> bool {
 
 /// sync の行が言うこと (#174, #205)｡
 ///
-/// どの文字列も "List sync:" を前に付けて行が自分を名乗るようにする｡
-/// #174 でこれを足した理由 — ステータスバーには他に無記名の数が 2 つ
-/// あり､その隣の裸の "1,204 to go" は 3 つ目になってしまう — は #205 で
-/// 消えた｡行は自分だけの段を持つ｡それでも前置きは残す: 22px の帯に
-/// 数字が 1 つ浮いているだけでは､何の数字かを言う手がかりがどこにも
-/// 無い｡
+/// どの文字列も "List sync:" を前に付けて行が自分を名乗る｡#174 でこれを
+/// 足した理由 (ステータスバーの無記名の数と並ぶ) は #205 で消えたが､前置きは
+/// 残す｡22px の帯に数字が 1 つ浮いていても何の数字か分からない｡
 ///
 /// これを状態名ではなく進捗にしているのは件数だ｡6 時間の "Idle" と､
 /// 1100 件の write が残っている追いつきの最中の "Idle" は､まったく違う
@@ -147,11 +145,8 @@ pub(super) fn sync_status_label(status: &SyncStatus, now: i64) -> String {
         } => {
             let stuck = *refusals >= STUCK_AFTER_REFUSALS;
             let lifts = if *until <= now {
-                // 期限が過ぎている｡過去の時刻をそのまま出すと､もう明けて
-                // いるのにまだ待っているかのように読める｡`until` は API の
-                // ヘッダー由来､`now` は時計由来で､どちらもこのコードが
-                // 信じきってよいものではない — #174 の 0 下限と同じ用心を､
-                // カウントダウンではなく時刻に対して置いたものだ｡
+                // 過去の時刻をそのまま出すと､明けているのにまだ待っている
+                // ように読める｡#174 の 0 下限と同じ用心を時刻に置いたもの｡
                 "resuming".to_string()
             } else if stuck {
                 format!("retry at {} JST", jst_hhmm(*until))
@@ -182,26 +177,18 @@ pub(super) fn sync_confirm_label() -> &'static str {
     "Reads your whole follow list and the whole list, billed per account. Sync anyway?"
 }
 
-/// `unix` の時刻を JST の `HH:MM` で描く (#205)｡
+/// unix 秒を JST の `HH:MM` にする (#205)｡`format_timestamp` (#195) と同じ
+/// 経路｡
 ///
-/// 日付 crate は足さない｡JST は UTC+9 の固定オフセットで DST が無いので､
-/// 必要なのは足し算 1 回と剰余だけだ — `log::format_utc` が同じ理由で
-/// `civil_from_days` を手書きしているのと同じ判断で､あちらより桁違いに
-/// 小さい｡
+/// 日付は出さない｡rate limit の窓は長くても数時間で､22px の行から読める
+/// 文字が減るだけ｡
 ///
-/// 日付を出さないのは､rate limit の窓が長くても数時間だからだ｡日付を
-/// 足しても曖昧さは減らず､22px の行から読める文字だけが減る｡
+/// 変換できない値は `--:--`｡`until` は API のヘッダー由来なので信じきれない｡
 fn jst_hhmm(unix: i64) -> String {
-    /// JST は UTC より 9 時間進んでいる｡DST は無い｡
-    const JST_OFFSET_SECONDS: i64 = 9 * 3_600;
-    const SECONDS_PER_DAY: i64 = 24 * 3_600;
-
-    let seconds_of_day = unix
-        .saturating_add(JST_OFFSET_SECONDS)
-        .rem_euclid(SECONDS_PER_DAY);
-    let hour = seconds_of_day.div_euclid(3_600);
-    let minute = seconds_of_day.div_euclid(60).rem_euclid(60);
-    format!("{hour:02}:{minute:02}")
+    DateTime::from_timestamp(unix, 0).map_or_else(
+        || "--:--".to_string(),
+        |at| at.with_timezone(&Tokyo).format("%H:%M").to_string(),
+    )
 }
 
 /// ステータスバーが rate limit と呼ぶのをやめて stuck と呼び始めるまでの
@@ -505,9 +492,8 @@ impl TimelineView {
     /// 付ける価値はある: `sync_status` への書き込みはすべて `notify` を
     /// 伴わなければならず､4 か所から書くループは忘れる機会が 4 回ある｡
     ///
-    /// #205 以降はフェードもここが起こす｡`sync_status` への書き込みは
-    /// すべてここを通るので､行の出入りが status から取り残されることは
-    /// ない｡
+    /// #205 以降はフェードもここが起こす｡`sync_status` への書き込みがすべて
+    /// ここを通るので､行の出入りが status から取り残されない｡
     pub(super) fn show_sync(&mut self, status: SyncStatus, cx: &mut Context<'_, Self>) {
         self.sync_status = status;
         self.fade_sync_row(cx);
@@ -886,7 +872,7 @@ mod tests {
     // --- #205: JST の解除予定 ---
 
     /// カウントダウンの秒数ではなく時刻を出す｡秒数は数時間続く block では
-    /// 読めない — #197 の "20 時間続く 900s" と同じ読み違いだ｡
+    /// 読めない (#197 の "20 時間続く 900s" と同じ読み違い)｡
     #[test]
     fn a_rate_limit_says_when_it_lifts_in_jst() {
         // unix 0 は UTC の 1970-01-01 00:00､JST では同じ日の 09:00｡
@@ -921,7 +907,7 @@ mod tests {
     }
 
     /// 過ぎた期限を過去の時刻として出すと､明けているのに待っているように
-    /// 読める｡`until` は API のヘッダー由来なので信じきれない｡
+    /// 読める｡
     #[test]
     fn a_deadline_already_passed_reads_as_resuming_rather_than_a_past_hour() {
         let label = sync_status_label(

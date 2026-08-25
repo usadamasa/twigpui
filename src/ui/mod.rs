@@ -404,29 +404,28 @@ pub(crate) struct TimelineView {
     /// sync も､やることの無い sync も､見た目はどれも同じ､つまり何も
     /// 無いのと同じだった｡
     sync_status: SyncStatus,
-    /// 手動 sync の確認ダイアログが開いているかどうか (#174, #205) — この
-    /// ウィンドウで最も高くつくクリックの背後にある確認だ｡#174 では
-    /// `pending_delete` と同じ二段構えのクリックで､#205 でダイアログに
-    /// なった｡`list_sync` のモジュール doc を見よ｡
+    /// 手動 sync の確認ダイアログが開いているかどうか (#174, #205)｡この
+    /// ウィンドウで最も高くつくクリックの背後にある確認｡#174 では
+    /// `pending_delete` と同じ二段構えのクリックで､#205 でダイアログになった｡
     pending_sync: bool,
     /// ダイアログが開いた瞬間にディスクから読んだ､前の実行が残した計画の
     /// 残件数 (#205)｡
     ///
-    /// `sync_status` からは取れない｡あれの `pending` を埋めるのは tick
-    /// 1 回で､その tick こそダイアログが尋ねている当のものだからだ｡
-    /// 毎フレームではなく [`Self::ask_to_sync`] で 1 回読む｡
+    /// `sync_status` からは取れない｡あれの `pending` を埋めるのは tick 1 回で､
+    /// その tick こそダイアログが尋ねている当のもの｡毎フレームではなく
+    /// [`Self::ask_to_sync`] で 1 回読む｡
     sync_plan_pending: usize,
-    /// sync の行が今どれだけ濃いか (#205)｡[`RowFade`] を見よ｡
+    /// sync の行が今どれだけ濃いか (#205)｡[`RowFade`] を参照｡
     ///
-    /// `sync_status` とは別に持つ｡status は「今どうなっているか」で､
-    /// これは「画面がそこへどこまで追いついたか」だ — 消えていく行は
-    /// もう報告するものが無い status を出したまま薄くなる｡
+    /// `sync_status` とは別に持つ｡status は今どうなっているかで､これは画面が
+    /// そこへどこまで追いついたか｡消えていく行は､もう報告するものが無い
+    /// status を出したまま薄くなる｡
     sync_fade: RowFade,
     /// フェードを 1 段ずつ進めるタイマー (#205)｡
     ///
     /// `auto_sync` と同じ drop で取り消す契約｡目的地に着いたら
-    /// [`Self::fade_sync_row`] が外すので､落ち着いた行がフレームを
-    /// 焚き続けることはない｡
+    /// [`Self::fade_sync_row`] が外すので､落ち着いた行がフレームを焚き
+    /// 続けない｡
     sync_fade_task: Option<Task<()>>,
     /// auto-refresh のループを生かしておく (#21) — ウィンドウが開いている間､
     /// timeline に新しい post が無いか polling するタイマーである｡`fetch`
@@ -1382,13 +1381,12 @@ impl TimelineView {
                     .text_color(rgb(usage_color(usage_status, theme)))
                     .child(usage_text),
             )
-            // #174: list sync を 1 回始める手段｡toolbar の側ではなく
-            // リクエスト数の隣に置いたのは､同じ種類の事実だからだ:
-            // timeline についてではなくアプリについての累計である｡
+            // #174: list sync を 1 回始める手段｡toolbar ではなくリクエスト数の
+            // 隣に置くのは､同じ種類の事実 (timeline ではなくアプリについての
+            // 累計) だから｡
             //
-            // #205: sync が何をしているかはここから上の行へ移った｡ここに
-            // 残るのは入口だけで､文言は状態によらず動かない｡動く文字が
-            // footer に常設されていたのが #205 の起票理由だ｡
+            // #205: sync が何をしているかは上の行へ移った｡ここに残るのは
+            // 入口だけで､文言は状態によらず動かない｡
             //
             // この margin は､どう読めようとも行の `gap_3` と重複しては
             // いない｡ここはウィンドウで唯一､裸のテキスト span が二つ兄弟に
@@ -1876,9 +1874,8 @@ impl Render for TimelineView {
             .flex()
             .flex_col()
             .size_full()
-            // #205: 手動 sync のダイアログの覆いが `absolute` で寄る先｡
-            // これが無いと覆いはウィンドウではなく最も近い配置済みの
-            // 祖先を基準にする｡
+            // #205: 手動 sync のダイアログの覆いが `absolute` で寄る先｡無いと
+            // ウィンドウではなく最も近い配置済みの祖先が基準になる｡
             .relative()
             .bg(rgb(theme.bg))
             .text_color(rgb(theme.text))
@@ -1918,16 +1915,14 @@ impl Render for TimelineView {
                 column.child(self.composer(window, cx))
             })
             .child(self.body(cx))
-            // #205: sync が今していることは footer の 1 段上｡出るのは
-            // 読み手が知る必要のあることがあるときだけで､出入りはフェード
-            // する｡`when_some` なので､無いときは行そのものが無い — 高さ 0
-            // の要素を置き続けるのではない｡
+            // #205: sync が今していることは footer の 1 段上｡`when_some` なので
+            // 無いときは行そのものが無い｡高さ 0 の要素を置き続けるのではない｡
             .when_some(self.sync_row(), ParentElement::child)
             // #95: ステータスバー｡ヘッダーがツールバーになった今､累計の
             // リクエスト数が住んでいるのはここだ｡
             .child(self.status_bar(cx))
-            // #205: 手動 sync の確認｡`absolute` なのでこの列の中で場所を
-            // 取らず､ウィンドウ全体を覆う｡最後の子なのは重なり順のためだ｡
+            // #205: 手動 sync の確認｡`absolute` なので列の中で場所を取らず
+            // ウィンドウ全体を覆う｡最後の子なのは重なり順のため｡
             .when_some(self.sync_dialog(cx), ParentElement::child)
     }
 }
@@ -3416,8 +3411,8 @@ mod tests {
         }
     }
 
-    /// list sync が何かを負っている [`fixture_with`] (#205) — sync の行が
-    /// 出ていて､入口が押せる状態のウィンドウだ｡
+    /// list sync が何かを負っている [`fixture_with`] (#205)｡sync の行が出て
+    /// いて､入口が押せる状態のウィンドウ｡
     fn fixture_with_sync(shown: &[&str], pending: usize) -> Fixture {
         Fixture {
             sync: Some(crate::fixture::FixtureSync {
@@ -3432,9 +3427,9 @@ mod tests {
     /// list を設定した [`fixture_window`] (#205)｡
     ///
     /// `smoke_config` の `list_id` は `None` なので､素の fixture のウィンドウは
-    /// `SyncOff::NoList` で止まる — sync の gate のうち手動でも越えられない
-    /// 唯一のものだ｡sync の経路を通るテストは list を持っていなければ
-    /// ならず､その先の gate (`client` が無いこと) が課金を止める｡
+    /// `SyncOff::NoList` で止まる｡手動でも越えられない唯一の gate なので､
+    /// sync の経路を通るテストは list を持つ必要がある｡課金はその先の gate
+    /// (`client` が無いこと) が止める｡
     fn sync_fixture_window(
         cx: &mut gpui::TestAppContext,
         fixture: Fixture,
@@ -4310,19 +4305,17 @@ mod tests {
         });
     }
 
-    /// #174 から #205 へ: sync が止まっているあいだ､ダイアログは支払う道を
-    /// 差し出さない｡
+    /// sync が止まっているあいだ､ダイアログは支払う道を差し出さない
+    /// (#174, #205)｡
     ///
-    /// 整頓のためではなく金のためのガードだ｡確認を押すことは､フォロー一覧と
-    /// list のメンバーシップの両方をまるごと読むことに費やすクリックである｡
-    /// fixture のウィンドウは `SyncOff::NotSignedIn` で止まっているので､
-    /// そこに "Sync" を置けば､sync する資格情報を持たないウィンドウに
-    /// 課金のボタンを置くことになる｡
+    /// 整頓ではなく金のためのガード｡確認を押すとフォロー一覧と list の
+    /// メンバーシップを両方まるごと読む｡fixture のウィンドウは
+    /// `SyncOff::NotSignedIn` で止まっているので､そこに "Sync" を置くと
+    /// 資格情報を持たないウィンドウに課金のボタンが載る｡
     ///
-    /// #174 ではこれを「入口が起動待ちにならない」ことで守っていた｡#205 で
-    /// 入口はどの状態からでも開く — 押しても何も起きないボタンには理由を出す
-    /// 場所が無いからだ — ので､ガードは開いた先へ移った｡`sync-confirm` が
-    /// *存在しない* ことを見るのはそのためで､灰色であることではない｡
+    /// #174 は「入口が起動待ちにならない」ことで守っていた｡#205 で入口は
+    /// どの状態からでも開くので､ガードは開いた先へ移った｡だから見るのは
+    /// `sync-confirm` が灰色であることではなく､*存在しない* こと｡
     #[gpui::test]
     fn a_stopped_sync_opens_a_dialog_that_offers_no_way_to_spend(cx: &mut gpui::TestAppContext) {
         let (window, timeline) = fixture_window(cx, fixture_with(&["1"], &[]));
@@ -4355,9 +4348,9 @@ mod tests {
 
     /// #205: sync の行は footer のちょうど真上に座る｡
     ///
-    /// 「下から 2 段目」が issue の言葉で､これがそれを読み返せる形にした
-    /// ものだ｡上端でも下端でもなく接していることを見る — 順番が入れ替われば
-    /// 離れるし､どちらかが消えれば `debug_bounds` が `None` を返す｡
+    /// issue の「下から 2 段目」を読み返せる形にしたもの｡接していることを
+    /// 見るので､順番が入れ替われば離れ､どちらかが消えれば `debug_bounds` が
+    /// `None` を返す｡
     #[gpui::test]
     fn the_sync_row_sits_directly_above_the_footer(cx: &mut gpui::TestAppContext) {
         let (window, _timeline) = fixture_window(cx, fixture_with_sync(&["2", "1"], 7));
@@ -4386,11 +4379,10 @@ mod tests {
 
     /// #205: フェードの途中でも行の高さは変わらない｡
     ///
-    /// これが「中間状態で timeline を跳ねさせない」の検査だ｡高さも一緒に
-    /// 補間する実装なら､フェードのフレームごとに上の timeline が押し上げ
-    /// られる — 読んでいる行が指の下で滑る｡`sync_fade` を直接歩かせるのは
-    /// タイマーを待たずに中間の段を描かせるためで､段そのものは
-    /// `sync_row` の純粋関数のテストが押さえている｡
+    /// 「中間状態で timeline を跳ねさせない」の検査｡高さも補間する実装なら
+    /// フレームごとに timeline が押し上げられる｡`sync_fade` を直接歩かせるのは
+    /// タイマーを待たずに中間の段を描かせるためで､段そのものは `sync_row` の
+    /// 純粋関数のテストが押さえる｡
     #[gpui::test]
     fn a_fading_row_keeps_its_height_so_the_timeline_does_not_bounce(
         cx: &mut gpui::TestAppContext,
@@ -4432,23 +4424,19 @@ mod tests {
 
     /// #205: 入口はダイアログを開き､cancel は何も支払わずに閉じる｡
     ///
-    /// `simulate_click` なので hit test を通る — テストが座標ではなく名前で
-    /// 押せるのは #184 の `Addressable` のおかげだ｡cancel のあとに status が
-    /// 動いていないことを見るのが金のための assert で､`start_sync` は必ず
-    /// status を書き換える (資格情報の無いこのウィンドウでは gate へ) から
-    /// である｡
+    /// `simulate_click` なので hit test を通る (#184 の `Addressable`)｡
+    /// 金のための assert は cancel のあとに status が動いていないことで､
+    /// `start_sync` は必ず status を書き換える (資格情報の無いこのウィンドウ
+    /// では gate へ)｡
     ///
     /// 閉じたことは `debug_bounds` では見られない｡gpui 0.2.2 の
-    /// `Frame::clear` はあの map を消さない (0.2.2 の `window.rs` で確認)
-    /// ので､一度描かれた名前はウィンドウが生きているかぎり最後の bounds を
-    /// 返し続ける｡`debug_bounds` で言えるのは「一度も描かれていない」まで
-    /// で､「もう描かれていない」ではない｡だから閉じたことは
-    /// `pending_sync` で見る — 描画がそこから決まるものだ｡
+    /// `Frame::clear` はあの map を消さないので､一度描かれた名前は最後の
+    /// bounds を返し続ける｡言えるのは「一度も描かれていない」までなので､
+    /// 閉じたことは `pending_sync` で見る｡
     ///
-    /// この制限は下の
-    /// `a_stopped_sync_opens_a_dialog_that_offers_no_way_to_spend` の
-    /// `sync-confirm` が `None` である assert には掛からない｡あちらの
-    /// ウィンドウはそのボタンを一度も描いていないからだ｡
+    /// 下の `a_stopped_sync_opens_a_dialog_that_offers_no_way_to_spend` が
+    /// `sync-confirm` の `None` を見られるのは､あちらのウィンドウがそのボタンを
+    /// 一度も描いていないから｡
     #[gpui::test]
     fn the_entry_opens_the_dialog_and_cancel_closes_it_without_spending(
         cx: &mut gpui::TestAppContext,
@@ -4500,11 +4488,10 @@ mod tests {
 
     /// #205: confirm だけが手動 sync の経路へ入る｡
     ///
-    /// このウィンドウには `client` が無いので実際のリクエストは 1 本も
-    /// 飛ばない — `start_sync` の gate が先に止め､status を
-    /// `SyncOff::NotSignedIn` に置く｡そこが assert の対象だ: cancel が
-    /// 動かさなかった status を confirm は動かす｡これが 2 つのボタンが
-    /// 別々の経路であることの証拠になる｡
+    /// このウィンドウには `client` が無いのでリクエストは飛ばない｡
+    /// `start_sync` の gate が先に止め､status を `SyncOff::NotSignedIn` へ
+    /// 置く｡そこを見る｡cancel が動かさなかった status を confirm は動かす
+    /// ので､2 つのボタンが別々の経路だと言える｡
     #[gpui::test]
     fn confirming_enters_the_manual_sync_path(cx: &mut gpui::TestAppContext) {
         let (window, timeline) = sync_fixture_window(cx, fixture_with_sync(&["2", "1"], 7));
