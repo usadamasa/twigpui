@@ -28,6 +28,8 @@
 - `--fixture fixtures/timeline.json` でアカウントではなくファイルから
   ウィンドウを開く — 認証情報もリクエストも不要で､毎回同じ画面が出る
   ([docs/operations.md](docs/operations.md) を参照)｡
+- `--fixture ... --perf 60` で自分の RSS と CPU を 1 秒ごとに TSV で流し､
+  要約を出して終了する (同じく docs/operations.md)｡
 
 認証の手段は X でのサインインだけである｡app-only の bearer token は削除した:
 ホームタイムラインを読めず､投稿・repost・引用・いいね・削除もできなかった｡
