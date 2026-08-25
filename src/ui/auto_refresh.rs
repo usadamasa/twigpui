@@ -253,24 +253,51 @@ pub(super) fn follows(mode: FollowMode, loaded: bool, at_top: bool) -> bool {
     mode.is_following() && loaded && at_top
 }
 
-/// glide の 1 フレームのあとに残る､残り距離の割合 (#22)｡固定の速度では
-/// なく乗算にしてあるので､大きなバッチは速く始まり､どの glide も柔らかく
-/// 着地する — そして所要時間は距離に比例せず､距離によらず 1 秒近くに
-/// 留まる｡
-const GLIDE_KEEP: f32 = 0.85;
+/// glide が新しい行を流し込む速さ (#208)､px/s｡
+///
+/// #22 の最初の glide は毎フレーム残り距離の 15% を進んでいた｡画面 1 枚
+/// ぶんが 1 秒足らずで通り過ぎ､流れてくる行を目で追えなかった｡これは
+/// 「読みながら流れる」ための速さで､post 1 件 (150px 前後) が 0.6 秒ほど
+/// かけて視界へ降りてくる｡
+const GLIDE_SPEED_PX_PER_S: f32 = 240.;
+
+/// glide の最短時間 (#208)､秒｡数十 px の小さな到着でも一瞬で済ませず､
+/// 動いたと分かるだけの時間をかける｡
+const GLIDE_MIN_S: f32 = 0.6;
+
+/// glide の最長時間 (#208)､秒｡何十件も一度に来たときに速さの計算どおり
+/// 十数秒も歩かせない — その先は読み手が握って止めるより先に終わるべき
+/// 長さだ｡
+const GLIDE_MAX_S: f32 = 5.;
 
 /// glide をやめて最後の 1 pixel 未満を吸着させてよいだけ最上部に近い
-/// 距離 (#22) — 乗算の減衰はそれ自体ではゼロに届かない｡
+/// 距離 (#22)｡
 const GLIDE_DONE_PX: f32 = 1.0;
 
-/// glide の 1 フレームの長さ (#22) — 16ms は 60Hz のディスプレイに追随する｡
-pub(super) const GLIDE_FRAME_MS: u64 = 16;
+/// `distance` px を歩く glide にかける時間 (#208)､秒｡距離に比例させ､
+/// [`GLIDE_MIN_S`] と [`GLIDE_MAX_S`] で挟む｡向きは問わない｡
+pub(super) fn glide_duration_s(distance: f32) -> f32 {
+    (distance.abs() / GLIDE_SPEED_PX_PER_S).clamp(GLIDE_MIN_S, GLIDE_MAX_S)
+}
 
-/// 最上部へ向かう glide の次の scroll offset､または残りの距離が 1 フレーム
-/// に値しないときは `None` (#22)｡`y` は gpui が持っている scroll offset
-/// で､最上部で 0､読み手が下へ行くほど負の方向に大きくなる｡
-pub(super) fn next_glide_y(y: f32) -> Option<f32> {
-    (y.abs() > GLIDE_DONE_PX).then_some(y * GLIDE_KEEP)
+/// `start` から歩き始めて `elapsed_s` 秒後に glide が置く scroll offset､
+/// または glide が終わっていれば `None` (#22, #208)｡offset は gpui が
+/// 持っているもので､最上部で 0､読み手が下へ行くほど負の方向に大きくなる｡
+///
+/// フレームの回数ではなく経過時間の関数なので､timer が遅れても位置が
+/// 飛ぶだけで終点は変わらない (#175 の「実行環境によって終了位置が
+/// 変わらない」)｡両端を緩める smoothstep で､動き出しも着地も急がない｡
+pub(super) fn glide_y(start: f32, elapsed_s: f32) -> Option<f32> {
+    if start.abs() <= GLIDE_DONE_PX {
+        return None;
+    }
+    let duration = glide_duration_s(start);
+    if elapsed_s >= duration {
+        return None;
+    }
+    let t = elapsed_s / duration;
+    let eased = t * t * (3. - 2. * t);
+    Some(start * (1. - eased))
 }
 
 /// auto-refresh のうち純粋になれない半分: リクエストに支払うループと､
@@ -520,7 +547,13 @@ impl TimelineView {
     /// ところと比べる｡差があれば読み手がホイールを回しているということで､
     /// glide はスクロールバーを取り合うのではなく読み手が置いたところで
     /// 止まる — [`Self::apply_poll`] に置き換えではなくバッファを選ばせた
-    /// のと同じ譲り方だ｡
+    /// のと同じ譲り方だ｡ホイールの経路 (#175) は glide を drop する
+    /// ことでも同じ結果を先に出す; ここの比較はその裏の保険である｡
+    ///
+    /// 時刻は壁時計ではなくフレームごとに [`scroll::FRAME_S`] を足して
+    /// 数える (#208)｡テストの executor は timer の時計だけを進めるので､
+    /// `Instant` で測ると 1 フレームが数マイクロ秒になり glide が永遠に
+    /// 終わらない｡
     fn start_glide(&mut self, cx: &mut Context<'_, Self>) {
         /// 補正が決して着地しないと結論づけるまでに､何フレーム待つか｡
         const SETTLE_FRAMES: u8 = 10;
@@ -529,7 +562,7 @@ impl TimelineView {
         const GRAB_PX: f32 = 1.0;
 
         self.glide = Some(cx.spawn(async move |this, cx| {
-            let frame = Duration::from_millis(GLIDE_FRAME_MS);
+            let frame = Duration::from_secs_f32(scroll::FRAME_S);
             for _ in 0..SETTLE_FRAMES {
                 cx.background_executor().timer(frame).await;
                 // `Err` はウィンドウが消えたということ — ここも以下も
@@ -543,6 +576,11 @@ impl TimelineView {
                     break;
                 }
             }
+            let Ok(start) = this.update(cx, |this, _| f32::from(this.list_scroll.offset().y))
+            else {
+                return;
+            };
+            let mut elapsed_s = 0.0_f32;
             let mut last_set: Option<f32> = None;
             loop {
                 let Ok(done) = this.update(cx, |this, cx| {
@@ -553,7 +591,7 @@ impl TimelineView {
                     {
                         return true;
                     }
-                    if let Some(next) = next_glide_y(y) {
+                    if let Some(next) = glide_y(start, elapsed_s) {
                         this.list_scroll.set_offset(gpui::point(offset.x, px(next)));
                         last_set = Some(next);
                         cx.notify();
@@ -570,6 +608,7 @@ impl TimelineView {
                     return;
                 }
                 cx.background_executor().timer(frame).await;
+                elapsed_s += scroll::FRAME_S;
             }
         }));
     }
@@ -885,31 +924,89 @@ mod tests {
         assert_eq!(FollowMode::Pill.flipped(), FollowMode::Follow);
     }
 
-    #[test]
-    fn a_glide_step_moves_toward_the_top_without_overshooting() {
-        let next = next_glide_y(-1_000.).expect("a screenful away is still gliding");
-        assert!(next > -1_000., "the step must move up, {next}");
-        assert!(next < 0., "the step must not overshoot the top, {next}");
-    }
+    // --- #208: glide の速さ ---
 
+    // glide は時刻の関数で､上へしか動かず､最上部を越えない｡フレームを
+    // 何回刻んだかではなく経過時間で位置が決まるので､timer の揺れは速さを
+    // 乱すだけで終点を動かさない｡
     #[test]
-    fn a_glide_within_a_pixel_of_the_top_is_finished() {
-        assert_eq!(next_glide_y(-0.5), None);
-        assert_eq!(next_glide_y(0.), None);
-    }
-
-    // 乗算の減衰はそれ自体ではゼロに届かない — 終わらせるのは 1 pixel を
-    // 切ったときの `None` だ｡この 2 つが合わさって､画面 1 枚ぶんの glide
-    // を有限のフレーム数で終わらせることをここで固定する｡
-    #[test]
-    fn a_glide_from_a_screenful_away_finishes_within_a_couple_of_seconds() {
-        let mut y = -3_000.0_f32;
-        for _ in 0..120 {
-            match next_glide_y(y) {
-                Some(next) => y = next,
-                None => return,
-            }
+    fn a_glide_moves_monotonically_toward_the_top_without_overshooting() {
+        let start = -1_000.0_f32;
+        let mut previous = start;
+        let mut t = 0.0_f32;
+        while let Some(y) = glide_y(start, t) {
+            assert!(
+                y >= previous,
+                "the glide must not turn back at t={t}: {y} < {previous}"
+            );
+            assert!(
+                y <= 0.,
+                "the glide must not overshoot the top at t={t}: {y}"
+            );
+            previous = y;
+            t += 0.016;
         }
-        unreachable!("120 frames at 16ms is two seconds, and the glide was still going at {y}");
+        assert!(
+            previous > -50.,
+            "by the time the glide reports done it must be nearly at the top, was {previous}"
+        );
+    }
+
+    #[test]
+    fn a_glide_is_finished_once_its_duration_has_passed() {
+        let duration = glide_duration_s(-1_000.);
+        assert!(
+            glide_y(-1_000., duration).is_none(),
+            "at the duration the glide is over"
+        );
+        assert!(
+            glide_y(-1_000., duration * 0.5).is_some(),
+            "halfway through it is still walking"
+        );
+        assert!(glide_y(0., 0.).is_none(), "nothing to walk from the top");
+        assert!(
+            glide_y(-0.5, 0.).is_none(),
+            "half a pixel is not worth a frame"
+        );
+    }
+
+    // 読める速さ (#208): 1 行ぶん (150px 程度) でも一瞬では済ませず､画面
+    // 1 枚ぶんは数秒かけ､どれだけ遠くても上限で打ち切る｡
+    #[test]
+    fn a_glide_paces_itself_by_distance_between_a_floor_and_a_ceiling() {
+        let one_row = glide_duration_s(-150.);
+        let a_screenful = glide_duration_s(-800.);
+        let far = glide_duration_s(-30_000.);
+        assert!(
+            one_row >= 0.5,
+            "one row must not flash past, took {one_row}s"
+        );
+        assert!(
+            a_screenful > one_row && a_screenful >= 2.,
+            "a screenful must take visibly longer than a row, took {a_screenful}s"
+        );
+        assert!(far <= 6., "a huge batch must still end, took {far}s");
+        assert!(
+            (glide_duration_s(-800.) - glide_duration_s(800.)).abs() < f32::EPSILON,
+            "pace depends on distance, not direction"
+        );
+    }
+
+    // #175 の要求でもある: フレーム数や実行環境によって終了位置が変わらない｡
+    // 60Hz と 30Hz で同じ時刻を刻めば同じ場所にいる｡
+    #[test]
+    fn a_glide_is_at_the_same_place_regardless_of_frame_rate() {
+        let start = -1_000.0_f32;
+        let at_60hz = glide_y(start, 0.016 * 30.);
+        let at_30hz = glide_y(start, 0.032 * 15.);
+        match (at_60hz, at_30hz) {
+            (Some(a), Some(b)) => {
+                assert!(
+                    (a - b).abs() < 0.001,
+                    "same elapsed time, same offset: {a} vs {b}"
+                );
+            }
+            other => unreachable!("half a second in, both should still be gliding: {other:?}"),
+        }
     }
 }

@@ -192,8 +192,22 @@ src/toggle.rs	200
 # 帯の `addressable`､fixture の sync 状態の受け口｡行とダイアログとフェード
 # そのものは**ここには無い** — 下の `ui/sync_row.rs` へ行った｡だからこれは
 # 400 ではなく 50 になる｡
-src/ui/mod.rs	1950
+# 1950 -> 2000: #175 の手動 scroll｡`scroller` と `scroll_motion` の 2 つの
+# フィールド､`body` の中の band のずれと､ホイールを横取りする canvas を
+# 重ねる wrapper､`ScrollToTop` が目標を捨てる 2 行｡物理モデルも event の
+# 横取りもフレームのループも**ここには無い** — 下の `ui/scroll.rs` へ
+# 行った｡だからこれは 350 ではなく 50 だ｡
+src/ui/mod.rs	2000
 src/ui/reload_policy.rs	300
+# #175 で新設｡形は `auto_refresh.rs` と同じ — 上半分は読み手の scroll の
+# 純粋なモデル `Scroller` (ホイールの目標､rubber band､誰かが飛ばした
+# ことの検知) とそのテスト､下半分はそれを画面につなぐ `impl TimelineView`
+# (ホイールを capture phase で横取りする canvas と､フレームのループ)｡
+# 340 行のうち実装は 150 行ほどで､残りは doc だ — gpui が macOS の delta を
+# どこまで運んでくるか (`momentumPhase` を読まない､`Lines` は行の高さ倍)
+# と､なぜ係数を重ねないかは､コードのどこにも書かれていなければ誰も復元
+# できない｡
+src/ui/scroll.rs	350
 # #21 で新設｡auto-refresh のすべてを持つ: 純粋な tick/pending の判断と
 # そのテスト､そしてそれらに基づいて動く poll ループの `impl TimelineView`
 # ブロック — `reload_policy` と `render` が純粋な関数だけを持つのに対し､
@@ -208,7 +222,12 @@ src/ui/reload_policy.rs	300
 # cadence の側だけだ — `Situation` の 2 フィールドと､他のすべてに優先する
 # `Away` の早期 return｡ロックの問い合わせも sleep の判定も遷移のログも
 # 上の `src/activity.rs` へ行った｡だからこれは 150 ではなく 50 だ｡
-src/ui/auto_refresh.rs	650
+# 650 -> 700: #208 の glide の速さ｡毎フレーム残りの 15% を進む 1 行から､
+# 距離に比例した時間を smoothstep で歩く `glide_duration_s`/`glide_y` の
+# 対になった｡増えた行の大半は 3 つの定数の doc — なぜ 240px/s か､なぜ
+# 下限と上限があるか､そしてなぜ壁時計ではなくフレームごとに時間を足すか
+# (テストの executor は timer の時計しか進めない)｡
+src/ui/auto_refresh.rs	700
 # #174 で新設｡`ui/mod.rs` がこのために再び上がらずに済んだ理由でもある:
 # `start_auto_sync` が `ui` からここへ移り､`start_sync` として戻ってきた｡
 # 加えてステータスバーが報告する status の enum､2 つのラベル､手動トリガの
