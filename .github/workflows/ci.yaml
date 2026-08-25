@@ -202,6 +202,19 @@ jobs:
       - name: Report code metrics
         run: bash scripts/code-metrics.sh >> "$GITHUB_STEP_SUMMARY"
 
+      # テストのサイズ｡今日のピラミッドは崩れていないので､これは是正では
+      # なく現状を保つための報告とゲートだ｡時間ではなくテストが触っている
+      # ものを見る (理由はスクリプトの先頭コメント)｡cargo を呼ばないので
+      # ビルドを待たない｡
+      - name: Report test sizes
+        run: bash scripts/test-sizes.sh >> "$GITHUB_STEP_SUMMARY"
+
+      # 子プロセス・sleep・ネットワークに触るテストが allowlist の外に
+      # 現れたらここで落ちる｡allowlist は理由つきでスクリプトの中にあり､
+      # sleep とネットワークは構造として置けない｡
+      - name: Check test sizes
+        run: bash scripts/test-sizes.sh --check
+
       # #48 のゲートであり､ゲートである唯一のメトリクスだ｡関数の長さは
       # すでに `clippy::too_many_lines` (`pedantic` 経由で deny､#47) が
       # 強制しているし､認知的複雑度はゲートにするヒットが無い｡ファイル

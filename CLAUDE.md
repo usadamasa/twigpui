@@ -47,6 +47,11 @@ cargo test
 
 `cargo run -- --fetch-only` でウィンドウを開かずに取得結果を標準出力へ流せる。
 
+テストが large (子プロセス・`thread::sleep`・ネットワーク) になると
+`scripts/test-sizes.sh --check` が CI で落ちる。サイズの定義と allowlist
+(理由つき。`thread::sleep` とネットワークは置けない) は同じスクリプトの
+先頭にあり、今日の数字は `docs/test-sizes.md` にある。
+
 ## 実装上の制約
 
 - **`macos-blade` 必須**: gpui の既定ビルドは `xcrun metal` を要求し、これは Command Line
