@@ -8,6 +8,7 @@ description: >-
   確認したいケースをフィクスチャに足すときにも引く。
   間隔・位置・クリックの当たりは撮らずにテストで押さえられるので、
   撮る前にどちらの話かを見分けるときにも使う。
+  画面がロックされたまま (離席中に) 撮りたいとき、撮ったら真っ黒だったときにも引く。
 ---
 
 # fixture-visual-check
@@ -84,6 +85,27 @@ cleanshot-capture window --app twigpui --title "twigpui (dev)" --out ./tmp/shot.
 `list` にウィンドウが出ていれば最初のフレームは描き終わっている。ただし
 **アバターは非同期に届いて隣の行を組み直す**ので、画像まで揃った画面が要るなら
 一度撮って確かめ、まだ来ていなければ撮り直す。
+
+### 画面がロックされていても `--fixture` は撮れる (#220)
+
+`--fixture` の window は画面ロック中に起動しても描く。gpui を fork の patch 版から
+取っていて (`Cargo.toml` の `[patch.crates-io]`)、fixture 起動だけが
+`gpui::set_draw_while_occluded` を入れるからだ。離席中に Claude が見た目を確かめる
+ための仕組みで、撮り方は上の手順と同じ。fork をやめる条件は #221、upstream への報告は
+zed-industries/zed#63217。
+
+**素の `cargo run` と `.app` はロック中に立てると真っ黒になる。** upstream の gpui は
+occluded な window の display link を張らず、ロック中は OS が CVDisplayLink の生成を
+拒む (-6661) ので、ロック中に開いた window は 1 フレームも持たない。本番の見た目を
+撮るならロック前に立てる。ロック前に描いた最後のフレームはロック中も撮れる。
+
+**撮ったら真っ黒だったとき**は、描画の regression と決めつける前に
+`cleanshot-capture area --x 0 --y 0 --width 4 --height 4 --out ./tmp/probe.png` を
+1 回叩く。ロック中なら「ロックを解除してから撮り直してください」と返る。
+それが出て、かつ fixture 起動なのに黒いなら、patch が外れた
+(`[patch.crates-io]` が消えた、`Startup::draws_while_occluded` が false に戻った —
+`only_a_fixture_window_keeps_drawing_while_occluded` が守っている) のを疑う。
+Ghostty のようなロック中も自前で描くアプリが写ることは対照にならない。
 
 ### 終わらせ方
 
