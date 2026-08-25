@@ -885,31 +885,71 @@ mod tests {
         assert_eq!(FollowMode::Pill.flipped(), FollowMode::Follow);
     }
 
-    #[test]
-    fn a_glide_step_moves_toward_the_top_without_overshooting() {
-        let next = next_glide_y(-1_000.).expect("a screenful away is still gliding");
-        assert!(next > -1_000., "the step must move up, {next}");
-        assert!(next < 0., "the step must not overshoot the top, {next}");
-    }
+    // --- #208: glide の速さ ---
 
+    // glide は時刻の関数で､上へしか動かず､最上部を越えない｡フレームを
+    // 何回刻んだかではなく経過時間で位置が決まるので､timer の揺れは速さを
+    // 乱すだけで終点を動かさない｡
     #[test]
-    fn a_glide_within_a_pixel_of_the_top_is_finished() {
-        assert_eq!(next_glide_y(-0.5), None);
-        assert_eq!(next_glide_y(0.), None);
-    }
-
-    // 乗算の減衰はそれ自体ではゼロに届かない — 終わらせるのは 1 pixel を
-    // 切ったときの `None` だ｡この 2 つが合わさって､画面 1 枚ぶんの glide
-    // を有限のフレーム数で終わらせることをここで固定する｡
-    #[test]
-    fn a_glide_from_a_screenful_away_finishes_within_a_couple_of_seconds() {
-        let mut y = -3_000.0_f32;
-        for _ in 0..120 {
-            match next_glide_y(y) {
-                Some(next) => y = next,
-                None => return,
-            }
+    fn a_glide_moves_monotonically_toward_the_top_without_overshooting() {
+        let start = -1_000.0_f32;
+        let mut previous = start;
+        let mut t = 0.0_f32;
+        while let Some(y) = glide_y(start, t) {
+            assert!(y >= previous, "the glide must not turn back at t={t}: {y} < {previous}");
+            assert!(y <= 0., "the glide must not overshoot the top at t={t}: {y}");
+            previous = y;
+            t += 0.016;
         }
-        unreachable!("120 frames at 16ms is two seconds, and the glide was still going at {y}");
+        assert!(
+            previous > -50.,
+            "by the time the glide reports done it must be nearly at the top, was {previous}"
+        );
+    }
+
+    #[test]
+    fn a_glide_is_finished_once_its_duration_has_passed() {
+        let duration = glide_duration_s(-1_000.);
+        assert!(glide_y(-1_000., duration).is_none(), "at the duration the glide is over");
+        assert!(
+            glide_y(-1_000., duration * 0.5).is_some(),
+            "halfway through it is still walking"
+        );
+        assert!(glide_y(0., 0.).is_none(), "nothing to walk from the top");
+        assert!(glide_y(-0.5, 0.).is_none(), "half a pixel is not worth a frame");
+    }
+
+    // 読める速さ (#208): 1 行ぶん (150px 程度) でも一瞬では済ませず､画面
+    // 1 枚ぶんは数秒かけ､どれだけ遠くても上限で打ち切る｡
+    #[test]
+    fn a_glide_paces_itself_by_distance_between_a_floor_and_a_ceiling() {
+        let one_row = glide_duration_s(-150.);
+        let a_screenful = glide_duration_s(-800.);
+        let far = glide_duration_s(-30_000.);
+        assert!(one_row >= 0.5, "one row must not flash past, took {one_row}s");
+        assert!(
+            a_screenful > one_row && a_screenful >= 2.,
+            "a screenful must take visibly longer than a row, took {a_screenful}s"
+        );
+        assert!(far <= 6., "a huge batch must still end, took {far}s");
+        assert!(
+            (glide_duration_s(-800.) - glide_duration_s(800.)).abs() < f32::EPSILON,
+            "pace depends on distance, not direction"
+        );
+    }
+
+    // #175 の要求でもある: フレーム数や実行環境によって終了位置が変わらない｡
+    // 60Hz と 30Hz で同じ時刻を刻めば同じ場所にいる｡
+    #[test]
+    fn a_glide_is_at_the_same_place_regardless_of_frame_rate() {
+        let start = -1_000.0_f32;
+        let at_60hz = glide_y(start, 0.016 * 30.);
+        let at_30hz = glide_y(start, 0.032 * 15.);
+        match (at_60hz, at_30hz) {
+            (Some(a), Some(b)) => {
+                assert!((a - b).abs() < 0.001, "same elapsed time, same offset: {a} vs {b}");
+            }
+            other => unreachable!("half a second in, both should still be gliding: {other:?}"),
+        }
     }
 }
