@@ -40,6 +40,12 @@ pub(crate) struct Situation {
     /// いつまで何も送ってはならないか — [`super::state::SyncState::blocked_until`]､
     /// loop を止めるものが何も無ければ `None`｡
     pub blocked_until: Option<i64>,
+    /// 次の write の batch までの自分に課した間 —
+    /// [`super::state::SyncState::paused_until`]｡
+    ///
+    /// `blocked_until` と別なのは順位が別だから｡あちらは拒否なのであらゆる
+    /// step の前に立つが､こちらはペース配分なので write だけを抑える｡
+    pub paused_until: Option<i64>,
 }
 
 /// 1 回の起床が何をすべきかを決める｡
@@ -52,6 +58,9 @@ pub(crate) struct Situation {
 /// 2. **流し切りが diff のやり直しに優先する｡** plan の entry は､それを
 ///    生んだ diff によって支払われている｡流し切っていない plan の上で
 ///    diff し直せば同じ答えを 2 度買い､既に送ったものの記録を捨てる｡
+///    ただし直前の batch が置いた間 (`paused_until`) はこの枝の *中* で
+///    効く｡枝の中に置いたので順位は 1 つも動かず､送るものが無い loop は
+///    この間をまったく見ない｡
 /// 3. **そのうえで interval｡** 一度も走っていない diff は即座に期限を
 ///    迎える｡そうでなければ最後の試行から `interval_seconds` 後だ｡
 ///
@@ -66,6 +75,11 @@ pub(crate) fn next_step(situation: &Situation, now: i64) -> Step {
         return Step::Wait { until };
     }
     if situation.pending > 0 {
+        if let Some(until) = situation.paused_until
+            && until > now
+        {
+            return Step::Wait { until };
+        }
         return Step::Apply;
     }
     let Some(last) = situation.last_diff_at else {
@@ -248,6 +262,16 @@ pub(crate) fn blocked_for(forced: bool, state: &super::SyncState) -> Option<i64>
     }
 }
 
+/// 手動起動が [`Situation::paused_until`] に何を見るか｡
+///
+/// [`blocked_for`] と違い､強制はこれを常に落とす｡refusal の後退は X が
+/// 言ったことだが､batch と batch の間はこちら側が自分に課したものにすぎず､
+/// しかも課す目的が「機械らしく見えないこと」なので､人間がボタンを押した
+/// 瞬間には守る相手がいない｡
+pub(crate) fn paused_for(forced: bool, state: &super::SyncState) -> Option<i64> {
+    if forced { None } else { state.paused_until }
+}
+
 /// 1 pass だけを求められた実行に､もうすることが残っていないかどうか
 /// (#174)｡
 ///
@@ -399,14 +423,15 @@ mod tests {
             .join(" ")
     }
 
-    /// 落ち着いた loop: diff は走り済み､残件も block も無い｡各テストは
-    /// 自分が扱う 1 フィールドだけを上書きする｡
+    /// 落ち着いた loop: diff は走り済み､残件も block も pause も無い｡
+    /// 各テストは自分が扱う 1 フィールドだけを上書きする｡
     fn idle() -> Situation {
         Situation {
             last_diff_at: Some(1_000),
             interval_seconds: 21_600,
             pending: 0,
             blocked_until: None,
+            paused_until: None,
         }
     }
 
@@ -616,6 +641,7 @@ mod tests {
         let refused = crate::sync::SyncState {
             last_diff_at: Some(1_000),
             blocked_until: Some(5_000),
+            paused_until: None,
             refusals: 1,
         };
         let situation = Situation {
@@ -635,6 +661,7 @@ mod tests {
         let failed = crate::sync::SyncState {
             last_diff_at: Some(1_000),
             blocked_until: Some(22_600),
+            paused_until: None,
             refusals: 0,
         };
         assert_eq!(blocked_for(true, &failed), None);
@@ -651,6 +678,7 @@ mod tests {
         let failed = crate::sync::SyncState {
             last_diff_at: Some(1_000),
             blocked_until: Some(22_600),
+            paused_until: None,
             refusals: 0,
         };
         assert_eq!(blocked_for(false, &failed), Some(22_600));
@@ -662,9 +690,79 @@ mod tests {
         let refused = crate::sync::SyncState {
             last_diff_at: Some(1_000),
             blocked_until: Some(22_600),
+            paused_until: None,
             refusals: 4,
         };
         assert_eq!(blocked_for(true, &refused), Some(22_600));
+    }
+
+    // --- batch と batch のあいだの間 ---
+
+    #[test]
+    fn a_live_pause_holds_the_next_batch() {
+        let situation = Situation {
+            pending: 2_155,
+            paused_until: Some(1_090),
+            ..idle()
+        };
+        assert_eq!(next_step(&situation, 1_030), Step::Wait { until: 1_090 });
+    }
+
+    #[test]
+    fn an_elapsed_pause_lets_the_batch_go() {
+        let situation = Situation {
+            pending: 2_155,
+            paused_until: Some(1_090),
+            ..idle()
+        };
+        assert_eq!(next_step(&situation, 1_090), Step::Apply);
+    }
+
+    #[test]
+    fn a_live_refusal_still_outranks_a_pause() {
+        // 順位は変わっていない｡pause は残件の枝の中にあるので､拒否は
+        // 今までどおり先に勝つ｡
+        let situation = Situation {
+            pending: 2_155,
+            blocked_until: Some(5_000),
+            paused_until: Some(1_090),
+            ..idle()
+        };
+        assert_eq!(next_step(&situation, 1_030), Step::Wait { until: 5_000 });
+    }
+
+    #[test]
+    fn a_pause_left_over_from_a_drained_plan_does_not_hold_back_a_diff() {
+        // pause が抑えるのは write だけ｡送るものが無ければ期限を迎えた
+        // diff は今までどおり走る｡
+        let situation = Situation {
+            last_diff_at: Some(1_000),
+            pending: 0,
+            paused_until: Some(99_999),
+            ..idle()
+        };
+        assert_eq!(next_step(&situation, 22_600), Step::Diff);
+    }
+
+    #[test]
+    fn a_manual_run_cuts_through_the_pause() {
+        // 揺らぎは機械らしく見えないためのもの｡ボタンを押したのは人間
+        // なので､隠す相手がそもそも居ない｡
+        let paced = crate::sync::SyncState {
+            last_diff_at: Some(1_000),
+            blocked_until: None,
+            paused_until: Some(1_090),
+            refusals: 0,
+        };
+        assert_eq!(paused_for(false, &paced), Some(1_090));
+        assert_eq!(paused_for(true, &paced), None);
+
+        let situation = Situation {
+            pending: 2_155,
+            paused_until: paused_for(true, &paced),
+            ..idle()
+        };
+        assert_eq!(next_step(&situation, 1_030), Step::Apply);
     }
 
     #[test]

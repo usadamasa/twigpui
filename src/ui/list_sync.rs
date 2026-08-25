@@ -363,7 +363,7 @@ impl TimelineView {
         let paths = self.paths.clone();
         let interval = self.config.sync_interval_seconds;
         let prune_limit = self.config.sync_prune_limit_percent;
-        let writes_per_minute = self.config.sync_writes_per_minute;
+        let writes_per_batch = self.config.sync_writes_per_batch;
         log::info(&format!(
             "list sync started for {list_id} ({trigger:?}), interval {interval}s"
         ));
@@ -410,7 +410,7 @@ impl TimelineView {
                         });
                         let pacing = sync::Pacing {
                             interval_seconds: interval,
-                            writes_per_minute,
+                            writes_per_batch,
                             forced,
                         };
                         // tick は失敗も含め自分の結果を自分でログに出す｡
@@ -889,6 +889,7 @@ mod tests {
         refused.state = sync::SyncState {
             last_diff_at: Some(500),
             blocked_until: Some(4_600),
+            paused_until: None,
             refusals: 3,
         };
         assert_eq!(
@@ -916,6 +917,7 @@ mod tests {
         idle.state = sync::SyncState {
             last_diff_at: Some(500),
             blocked_until: Some(4_600),
+            paused_until: None,
             refusals: 2,
         };
         assert_eq!(
