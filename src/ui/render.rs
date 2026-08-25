@@ -10,6 +10,9 @@
 //! reload を走らせてよい *かどうか* の判断と､失敗したとき何と言うかは
 //! 代わりに [`super::reload_policy`] に住む｡
 
+use chrono::DateTime;
+use chrono_tz::Asia::Tokyo;
+
 use super::*;
 
 /// 一つの要素に､gpui とテストの双方が使える名前を一つ与える｡
@@ -1058,23 +1061,19 @@ pub(super) fn compact_count(count: u64) -> String {
     }
 }
 
-/// `2026-08-16T09:00:00.000Z` を `2026-08-16 09:00` にする｡
+/// `2026-08-16T09:00:00.000Z` を JST の `2026-08-16 18:00` にする (#195)｡
 ///
-/// API は常に RFC 3339 の UTC を返すので､これほど小さなラベルのために日付
-/// ライブラリを引き込むより切り出すほうがよい｡
+/// パースできない入力は生の文字列のまま返す｡`created_at` は API から来る
+/// 遠隔入力なので､ここで panic させない｡
 pub(super) fn format_timestamp(created_at: Option<&str>) -> String {
     let Some(raw) = created_at else {
         return String::new();
     };
-    // `&time[..5]` ではなく `get` (#47, `clippy::string_slice`): あれは
-    // バイト範囲であり､五バイト目がマルチバイト文字の内側に落ちる `time`
-    // 側は､生の文字列へ落ちるのではなく panic する｡`created_at` は API
-    // から来るので､これは遠隔からの入力だ｡
-    match raw.split_once('T') {
-        Some((date, time)) => match time.get(..5) {
-            Some(hhmm) => format!("{date} {hhmm}"),
-            None => raw.to_string(),
-        },
-        None => raw.to_string(),
+    match DateTime::parse_from_rfc3339(raw) {
+        Ok(at) => at
+            .with_timezone(&Tokyo)
+            .format("%Y-%m-%d %H:%M")
+            .to_string(),
+        Err(_) => raw.to_string(),
     }
 }

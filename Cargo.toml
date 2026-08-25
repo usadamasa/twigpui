@@ -60,6 +60,9 @@ arithmetic_side_effects = "deny"
 anyhow = "1.0.104"
 # PKCE の verifier/challenge 用の URL-safe でパディング無しの base64 (RFC 7636 §4.1-4.2)｡
 base64 = "0.23.1"
+# #195: `created_at` を `Asia/Tokyo` へ直して表示する｡
+chrono = { version = "0.4.45", default-features = false, features = ["alloc"] }
+chrono-tz = { version = "0.10.4", default-features = false }
 dotenvy = "0.15.7"
 # 必要なのは生のランダムバイトの供給源だけで (PKCE の verifier と OAuth の
 # `state`)､`rand` の API 全面 (分布､シード､シャッフル補助) ではない｡
