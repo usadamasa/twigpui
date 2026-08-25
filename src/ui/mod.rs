@@ -228,6 +228,24 @@ pub(crate) enum Startup {
     Fixture(Box<Fixture>),
 }
 
+impl Startup {
+    /// この起動の window が､画面がロックされていても (occluded でも) 描き
+    /// 続けるべきかどうか — fork した gpui の patch (Cargo.toml の
+    /// `[patch.crates-io]`) が読むスイッチの値｡
+    ///
+    /// fixture の window は撮られるためにある｡upstream の gpui はロック中に
+    /// 開いた window を 1 フレームも描かず､capture が真っ黒になる｡live の
+    /// window は入れない: 隠れているあいだ描画を止める upstream の挙動は
+    /// 本番にとって正しい｡
+    ///
+    /// `main` が `open_window` の **前** に `gpui::set_draw_while_occluded`
+    /// へ渡す｡gpui は platform の window を作ってから root view を組むので､
+    /// view の構築中に入れたのでは window 生成時の判定に間に合わない｡
+    pub(crate) fn draws_while_occluded(&self) -> bool {
+        matches!(self, Self::Fixture(_))
+    }
+}
+
 pub(crate) struct TimelineView {
     config: Config,
     paths: Paths,
@@ -3633,6 +3651,22 @@ mod tests {
                 );
             });
         });
+    }
+
+    /// fixture の window はロック中でも描き続け､live の window は upstream
+    /// どおり止まる — fork した gpui の patch が読むスイッチを `main` が
+    /// これで決める｡fixture 側が false に戻ると､ロック中に立てた fixture の
+    /// capture は真っ黒に戻る｡
+    #[test]
+    fn only_a_fixture_window_keeps_drawing_while_occluded() {
+        assert!(
+            Startup::Fixture(Box::new(fixture_with(&["1"], &[]))).draws_while_occluded(),
+            "a fixture window exists to be captured, locked screen or not"
+        );
+        assert!(
+            !Startup::Live.draws_while_occluded(),
+            "a live window keeps upstream's power-saving behavior"
+        );
     }
 
     // --- #175: 手動 scroll ---
