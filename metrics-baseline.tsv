@@ -56,7 +56,7 @@ src/compose.rs	350
 # 発火しないタイマーである理由を載せている｡
 # 700 -> 750: #176 の `sync_prune_limit_percent`｡resolver と既定値の doc
 # 付きで､doc はなぜ 10 分の 1 か､なぜ絶対値の下限を置かないかを載せている｡
-# 750 -> 850: #197 の `sync_writes_per_minute` — フィールド､実測の根拠を
+# 750 -> 850: #197 の `sync_writes_per_batch` — フィールド､実測の根拠を
 # doc に載せた 2 つの定数 (上限は約 7/min で作動し 24h で回復した)､
 # resolver､そしてその 8 本のテスト｡
 src/config.rs	850
@@ -108,7 +108,10 @@ src/sync/mod.rs	300
 # 350 -> 400: `apply_some`｡バックグラウンド同期が plan を捌く上限付きの
 # バッチだ｡`apply` は今やそれを上限無しで呼ぶだけで､それが CLI の挙動を
 # 同一に保っている｡
-src/sync/run.rs	400
+# 400 -> 450: `apply_some` が write のあいだで眠るようになり､CLI の apply が
+# 「数分」から「時間単位」へ移った｡足したのはその sleep と､黙って止まって
+# いるように見えないための最悪ケースの 1 行だ｡
+src/sync/run.rs	450
 # schedule.rs と auto.rs はバックグラウンド同期で､mod.rs と run.rs と同じ
 # 線で分けてある: schedule.rs は tick が何をすべきかを決め､テストをすべて
 # 持つ｡auto.rs はそれを実行し､リクエストを出す｡
@@ -135,7 +138,13 @@ src/sync/auto.rs	350
 # state.rs は #197/#198 で新設: sync の記憶 (`SyncState`) と､それを動かす
 # 唯一の関数 (`settle`)､そして backoff の梯子｡純粋であり､ペース配分の
 # テストが住む場所だ｡
-src/sync/state.rs	250
+# 250 -> 350: batch と batch の間を固定の 60 秒から揺らぎのある範囲へ
+# 変えた｡足したコードは短い (`scaled`､`apply_pause_seconds`､`write_gap`､
+# `Spacing`､`paused_until` で 30 行ほど) が､doc がその倍ある｡毎分 1 件へ
+# 落としても拒否が止まらなかったという実測と､揺らぎが上へしか振れない
+# 理由と､`paused_until` を `blocked_until` に相乗りさせなかった理由は､
+# どれも次に触る人が数字だけからは復元できないものだ｡
+src/sync/state.rs	350
 src/theme.rs	350
 src/thread.rs	100
 src/toggle.rs	200

@@ -15,12 +15,17 @@
 //! ペースを決め､後者は起動をまたいで残るので､アプリを再起動しても同じ
 //! 答えを買い直さずに済む｡
 //!
-//! `Apply` は [`Pacing::writes_per_minute`] 件の write に制限され､loop は
-//! batch のあいだ `state::APPLY_PAUSE_SECONDS` 待つ｡この二つで持続的な
-//! write レートが決まり､その既定値は意図的に低くしてある — #197 が実測した
-//! ロックと､それが何のあとに起きたかは [`super::state`] を､refusal が
-//! 出ない実行のあとに引き上げるためのつまみは
-//! `config::DEFAULT_SYNC_WRITES_PER_MINUTE` を見よ｡
+//! `Apply` は [`Pacing::writes_per_batch`] 件の write に制限され､loop は
+//! batch のあいだ `state::apply_pause_seconds` が引いた長さだけ待つ｡この
+//! 二つで持続的な write レートが決まり､その既定値は意図的に低くしてある
+//! — #197 が実測したロックと､それが何のあとに起きたかは [`super::state`] を､
+//! refusal が出ない実行のあとに引き上げるためのつまみは
+//! `config::DEFAULT_SYNC_WRITES_PER_BATCH` を見よ｡
+//!
+//! 待ちが固定値ではなく範囲なのは､速度を落としても拒否が止まらなかった
+//! ため｡理由と二つの層は [`super::state`] の module doc を見よ｡揺らぎを
+//! 引くのはこの module で､[`super::state::settle`] は引かれた長さしか
+//! 見ない｡
 //!
 //! # tick が消してよいもの
 //!
@@ -53,11 +58,11 @@ use crate::x_api::XClient;
 pub(crate) struct Pacing {
     /// `config.sync_interval_seconds`｡
     pub interval_seconds: u32,
-    /// `config.sync_writes_per_minute` (#197): `Apply` の tick ごとに送る
-    /// write 数で､`state::APPLY_PAUSE_SECONDS` と合わせて持続レートに
-    /// なる｡既定値の根拠と､引き上げが実測を伴う意図的な行為である理由は
-    /// config 側の定数に置いてある｡
-    pub writes_per_minute: u8,
+    /// `config.sync_writes_per_batch` (#197): `Apply` の tick ごとに送る
+    /// write 数で､`state::apply_pause_seconds` が引く間と合わせて持続
+    /// レートになる｡既定値の根拠と､引き上げが実測を伴う意図的な行為で
+    /// ある理由は config 側の定数に置いてある｡
+    pub writes_per_batch: u8,
     /// #174 の手動起動: この 1 tick だけ interval と､失敗した tick が
     /// 得た block を落とす｡
     ///
@@ -124,7 +129,13 @@ pub(crate) fn tick(
         &mut state,
         now,
     );
-    let settled = state::settle(state, outcome.as_ref().ok(), now, pacing.interval_seconds);
+    // 揺らぎを引くのはここ 1 回きり｡settle は渡された長さしか見ないので
+    // 純粋なままでいられる — `rate_limit::backoff_delay` と同じ継ぎ目｡
+    let spacing = state::Spacing {
+        interval_seconds: pacing.interval_seconds,
+        apply_pause_seconds: state::apply_pause_seconds(crate::rate_limit::random_jitter_fraction()),
+    };
+    let settled = state::settle(state, outcome.as_ref().ok(), now, spacing);
     if let Err(error) = save_state(&state_path, &settled.state) {
         crate::log::error(&format!("list sync: could not save its state: {error:#}"));
     }
@@ -171,6 +182,7 @@ fn perform(
         interval_seconds: pacing.interval_seconds,
         pending,
         blocked_until: schedule::blocked_for(pacing.forced, state),
+        paused_until: schedule::paused_for(pacing.forced, state),
     };
 
     match schedule::next_step(&situation, now) {
@@ -198,7 +210,7 @@ fn perform(
                 plan,
                 prune,
                 now,
-                usize::from(pacing.writes_per_minute),
+                usize::from(pacing.writes_per_batch),
             ),
             None => Ok(Outcome::Idle {
                 until: now,
@@ -253,7 +265,7 @@ fn diff(
     })
 }
 
-/// plan に残っている write を最大 `limit` 件 ([`Pacing::writes_per_minute`])
+/// plan に残っている write を最大 `limit` 件 ([`Pacing::writes_per_batch`])
 /// 送る｡
 ///
 /// `prune` は [`schedule::prune_allowed`] から得た [`perform`] の判定だ｡

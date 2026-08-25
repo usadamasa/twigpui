@@ -290,7 +290,7 @@ mod tests {
             auto_sync_list: false,
             sync_interval_seconds: 21_600,
             sync_prune_limit_percent: 10,
-            sync_writes_per_minute: 2,
+            sync_writes_per_batch: 2,
             auto_refresh: false,
             auto_refresh_interval_seconds: 300,
             follow_new_posts: false,

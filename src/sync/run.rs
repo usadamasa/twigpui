@@ -170,6 +170,14 @@ pub(super) fn apply_some(
 ) -> (usize, Result<()>) {
     let mut sent = 0usize;
     for (action, user_id) in super::schedule::next_batch(plan, prune, limit) {
+        // batch の中を散らす｡これが無いと batch は同じ秒のうちに全件を
+        // 投げる — #197 のロックの直前にしていた形｡1 件目の前には置かない｡
+        // tick は既に batch と batch の間を待って来ている｡
+        if sent > 0 {
+            std::thread::sleep(super::state::write_gap(
+                crate::rate_limit::random_jitter_fraction(),
+            ));
+        }
         let result = match action {
             Action::Add => client.add_list_member(paths, &plan.list_id, &user_id, now),
             Action::Remove => client.remove_list_member(paths, &plan.list_id, &user_id, now),
@@ -330,6 +338,25 @@ fn run(
         plan.list_id
     );
 
+    // write と write のあいだが揺らぐようになって､CLI の apply は数分から
+    // 時間単位へ移った｡黙って止まって見えるので最悪ケースを先に出す —
+    // `x-api-budget` の「押す前に最悪ケースを出す」と同じ規則｡
+    let pending = super::schedule::sendable(&plan, request.prune);
+    if pending > 0 {
+        let worst_minutes = pending
+            .saturating_mul(
+                usize::try_from(
+                    super::state::WRITE_GAP_FLOOR_SECONDS + super::state::WRITE_GAP_SPREAD_SECONDS,
+                )
+                .unwrap_or(0),
+            )
+            .saturating_div(60);
+        eprintln!(
+            "note: sending {pending} write(s), pausing 3-20s between each so the run does not \
+             look like a script. Worst case about {worst_minutes} minute(s)."
+        );
+    }
+
     let state_path = paths.sync_state_file();
     let state = load_state(&state_path);
     if state.is_blocked(now) {
@@ -344,7 +371,13 @@ fn run(
     let (sent, result) = apply(paths, client, &mut plan, request.prune, now);
     let remaining = super::schedule::sendable(&plan, request.prune);
     let outcome = super::schedule::apply_outcome(sent, remaining, result);
-    let settled = super::state::settle(state, outcome.as_ref().ok(), now, interval_seconds);
+    let spacing = super::state::Spacing {
+        interval_seconds,
+        apply_pause_seconds: super::state::apply_pause_seconds(
+            crate::rate_limit::random_jitter_fraction(),
+        ),
+    };
+    let settled = super::state::settle(state, outcome.as_ref().ok(), now, spacing);
     save_state(&state_path, &settled.state)?;
 
     let finished = plan.is_complete() || (!request.prune && plan.pending_count(Action::Add) == 0);

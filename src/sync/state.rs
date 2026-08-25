@@ -36,23 +36,60 @@
 //!
 //! #197 のロックは 18 分ほどでおよそ 100〜140 件の addition のあとに来た —
 //! 毎分 7 件､1 秒間隔で 20 件ずつの batch で送っていた｡
-//! [`APPLY_PAUSE_SECONDS`] と `sync_writes_per_minute` (既定 2､上限の
+//! [`APPLY_PAUSE_SECONDS`] と `sync_writes_per_batch` (既定 2､上限の
 //! 24 時間での回復を実測して以来 config のつまみ) が持続レートを抑える｡
 //! 既定値が上限より下かどうかは分かっていない｡狙いは､それが上限を踏む
 //! 当のものにならないことだ｡きれいに走ったあとにつまみを上げるのが上限の
 //! 大きさを探る公認のやり方で — 答えがどちらでも梯子が吸収する｡
+//!
+//! # 速度だけでは足りない
+//!
+//! 毎分 1 件まで落としても拒否は出続けた｡毎分 7 件よりはるかに遅いのに
+//! 止められる以上､残る違いは速度ではなく規則正しさになる｡
+//!
+//! そこで間隔を範囲にした｡二層ある｡
+//!
+//! - batch と batch のあいだ: [`apply_pause_seconds`] が 90〜300 秒を引く｡
+//! - batch の中: [`write_gap`] が write ごとに 3〜20 秒を引く｡
+//!
+//! どちらも上へしか振れない｡`sync_writes_per_batch` は上限なので､揺らぎが
+//! それより速い瞬間を作ってはならない｡
+//!
+//! 継ぎ目は `rate_limit::backoff_delay` に倣う: 長さを決める関数は純粋で
+//! `f64` を受け取り､`getrandom` を触るのは
+//! `rate_limit::random_jitter_fraction` だけ｡持続レートはおよそ
+//! `writes_per_batch / 195 秒`｡
 
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
 
 use super::schedule::Outcome;
 
-/// plan にまだ続きがあるとき､loop が write の batch と次の batch のあいだ
-/// で待つ長さ｡`sync_writes_per_minute` と合わせて持続的な write レートに
-/// なる — 数字の出どころは module doc を見よ｡意図的にこちらを固定側に
-/// してある: つまみが 1 つ (「毎分の write 数」) の方が､batch サイズと
-/// interval の対よりも読み取りやすい｡
-pub(crate) const APPLY_PAUSE_SECONDS: i64 = 60;
+/// batch と batch のあいだに待つ長さの下限｡秒｡実際の待ちは
+/// [`apply_pause_seconds`] が batch ごとに引き直す｡
+///
+/// 60 秒から上げた｡毎分ちょうど 1 件でも拒否は出続けたので､#197 の上限
+/// とは別の何かが効いている｡
+pub(crate) const APPLY_PAUSE_SECONDS: i64 = 90;
+
+/// 揺らぎが [`APPLY_PAUSE_SECONDS`] に足しうる最大の秒数｡間は 90〜300 秒に
+/// 散り､平均は 195 秒｡
+///
+/// 幅が下限の 2 倍を超えるのは意図的｡狭い揺らぎは周期を隠さない — 60±5 秒は
+/// 目盛りの粗い 60 秒周期でしかない｡
+pub(crate) const APPLY_PAUSE_SPREAD_SECONDS: i64 = 210;
+
+/// batch の中で write と write のあいだに空ける最小の長さ｡秒｡
+///
+/// これが無いと batch は同じ秒のうちに全件を投げる｡#197 のロックはまさに
+/// その形 — 1 秒間隔で 20 件ずつ — の後に来た｡
+pub(crate) const WRITE_GAP_FLOOR_SECONDS: u64 = 3;
+
+/// 揺らぎがその間に足しうる最大の秒数｡間は 3〜20 秒に散る｡
+///
+/// pause を伸ばすのとは役目が別｡これがあるので `sync_writes_per_batch` を
+/// 上げても一定間隔の連射にはならず､短いひとかたまりと長い沈黙になる｡
+pub(crate) const WRITE_GAP_SPREAD_SECONDS: u64 = 17;
 
 /// opaque な refusal 1 回で後退する上限: 6 時間｡1 日下がったままの上限が
 /// 96 回ではなく 4 回の request で済むだけ長く､明けた上限に同じ 6 時間の
@@ -76,6 +113,18 @@ pub(crate) struct SyncState {
     /// 再起動でも守られるよう永続化してある (#198)｡
     #[serde(default)]
     pub blocked_until: Option<i64>,
+    /// 次の write の batch まで自分に課した間｡[`apply_pause_seconds`] が
+    /// batch ごとに引き直す｡
+    ///
+    /// これは拒否ではないので `blocked_until` とは分ける｡
+    /// `ui::list_sync::status_of` は block を「rate limited」と読むため､
+    /// 相乗りさせると普通のペース待ちが拒否として表示される｡
+    ///
+    /// 永続化する理由は `blocked_until` と同じ｡追いつきの途中で再起動しても
+    /// 間が消えてはならない (#197 の 20 時間で release build は 8 回起動され､
+    /// どの起動も即座に送っていた)｡
+    #[serde(default)]
+    pub paused_until: Option<i64>,
     /// あいだに write が 1 件も届いていない opaque な refusal の連続回数｡
     /// [`opaque_backoff_seconds`] を駆動し､catch-up が何時間も拒否されて
     /// いるときに status bar が出すのがこれだ (#197)｡
@@ -106,6 +155,49 @@ pub(crate) fn opaque_backoff_seconds(refusals: u32) -> i64 {
     floor
         .saturating_mul(factor)
         .min(OPAQUE_BACKOFF_CEILING_SECONDS)
+}
+
+/// `span` のうち `fraction` が指す長さ｡`fraction` は `0.0..=1.0` へ丸める｡
+/// 供給源が何を返しても揺らぎが下限を割らないようにするため｡
+fn scaled(span: i64, fraction: f64) -> i64 {
+    let fraction = fraction.clamp(0.0, 1.0);
+    // `span` はこのモジュールの定数 (3 桁) なので f64 が正確に表せる｡
+    // 積も同じ桁に留まるため､切り捨てが落とすのは小数部だけ｡
+    #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+    let scaled = (span as f64 * fraction) as i64;
+    scaled
+}
+
+/// 続きのある batch のあと､次の batch まで待つ長さ｡秒｡
+///
+/// [`APPLY_PAUSE_SECONDS`] から [`APPLY_PAUSE_SPREAD_SECONDS`] だけ上へ散る｡
+/// 本番では `rate_limit::random_jitter_fraction` が batch ごとに引き直す｡
+pub(crate) fn apply_pause_seconds(jitter_fraction: f64) -> i64 {
+    APPLY_PAUSE_SECONDS.saturating_add(scaled(APPLY_PAUSE_SPREAD_SECONDS, jitter_fraction))
+}
+
+/// batch の中で write と write のあいだに眠る長さ｡
+///
+/// [`WRITE_GAP_FLOOR_SECONDS`] から [`WRITE_GAP_SPREAD_SECONDS`] だけ上へ
+/// 散る｡引き直すのは write ごと｡同じ間を n 回繰り返せば､それもまた一定
+/// 周期になる｡
+pub(crate) fn write_gap(jitter_fraction: f64) -> std::time::Duration {
+    let spread = i64::try_from(WRITE_GAP_SPREAD_SECONDS).unwrap_or(0);
+    let extra = u64::try_from(scaled(spread, jitter_fraction)).unwrap_or(0);
+    std::time::Duration::from_secs(WRITE_GAP_FLOOR_SECONDS.saturating_add(extra))
+}
+
+/// [`settle`] が待ち時間を決めるのに要る 2 つの長さ｡
+///
+/// 引数として並べずに struct にする｡どちらも秒なので､`now` の隣に置くと
+/// 呼び出し側が黙って取り違える — [`super::schedule::Situation`] と同じ理由｡
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Spacing {
+    /// `config.sync_interval_seconds`｡失敗した tick が得る待ちでもある｡
+    pub interval_seconds: u32,
+    /// 続きのある batch のあとに待つ長さ｡[`apply_pause_seconds`] が
+    /// 呼び出しごとに引く｡
+    pub apply_pause_seconds: i64,
 }
 
 /// [`settle`] が残すもの: 永続化する state と､loop が次に起きるべき時刻｡
@@ -139,18 +231,23 @@ pub(crate) struct Settled {
 /// 少し前に明らかに開いていたので､これは 5 回目ではなく 1 回目の refusal だ｡
 ///
 /// 何かを送れた batch は両方を消し — 上限が write を受け付けた — plan に
-/// 続きがあれば [`APPLY_PAUSE_SECONDS`] 後に戻ってくる｡diff は見つけた
-/// ものを流し切るためにすぐ戻ってくる｡
+/// 続きがあれば [`Spacing::apply_pause_seconds`] 後に戻ってくる｡その間は
+/// `paused_until` にも記録する｡`wake_at` は loop の変数でしかないので､
+/// 再起動がそれを飛ばす｡
+///
+/// diff は見つけたものを流し切るためにすぐ戻ってくる｡そのとき前の plan が
+/// 残した間は消す｡新しい plan の 1 batch 目が､もう存在しない batch の
+/// あとを待つ理由は無い｡
 pub(crate) fn settle(
     state: SyncState,
     outcome: Option<&Outcome>,
     now: i64,
-    interval_seconds: u32,
+    spacing: Spacing,
 ) -> Settled {
     let mut next = state;
     let wake_at = match outcome {
         None => {
-            let until = now.saturating_add(i64::from(interval_seconds));
+            let until = now.saturating_add(i64::from(spacing.interval_seconds));
             next.blocked_until = Some(until);
             until
         }
@@ -179,12 +276,18 @@ pub(crate) fn settle(
                 next.blocked_until = None;
             }
             if *remaining > 0 {
-                now.saturating_add(APPLY_PAUSE_SECONDS)
+                let until = now.saturating_add(spacing.apply_pause_seconds);
+                next.paused_until = Some(until);
+                until
             } else {
+                next.paused_until = None;
                 now
             }
         }
-        Some(Outcome::Diffed { .. }) => now,
+        Some(Outcome::Diffed { .. }) => {
+            next.paused_until = None;
+            now
+        }
     };
     Settled {
         state: next,
@@ -219,13 +322,25 @@ mod tests {
     use crate::sync::schedule::{Situation, Step, next_step};
 
     const INTERVAL: u32 = 21_600;
+    /// テストが引く「揺らぎの目」｡本番は呼び出しごとに引き直すので､
+    /// [`settle`] は待ち時間を渡された長さとしてしか見ない — その一点を
+    /// 固定して読みやすくしてある｡
+    const PAUSE: i64 = 77;
 
-    /// 落ち着いた sync: diff は走り済み､block も refusal も無い｡各テストは
-    /// 自分が扱う 1 フィールドだけを上書きする｡
+    fn spacing() -> Spacing {
+        Spacing {
+            interval_seconds: INTERVAL,
+            apply_pause_seconds: PAUSE,
+        }
+    }
+
+    /// 落ち着いた sync: diff は走り済み､block も pause も refusal も無い｡
+    /// 各テストは自分が扱う 1 フィールドだけを上書きする｡
     fn calm() -> SyncState {
         SyncState {
             last_diff_at: Some(1_000),
             blocked_until: None,
+            paused_until: None,
             refusals: 0,
         }
     }
@@ -274,7 +389,7 @@ mod tests {
 
     #[test]
     fn an_opaque_refusal_starts_a_streak_and_blocks_for_the_floor() {
-        let settled = settle(calm(), Some(&opaque(0)), 1_000, INTERVAL);
+        let settled = settle(calm(), Some(&opaque(0)), 1_000, spacing());
         assert_eq!(settled.state.refusals, 1);
         assert_eq!(
             settled.state.blocked_until,
@@ -291,7 +406,7 @@ mod tests {
             refusals: 1,
             ..calm()
         };
-        let settled = settle(state, Some(&opaque(0)), 10_000, INTERVAL);
+        let settled = settle(state, Some(&opaque(0)), 10_000, spacing());
         assert_eq!(settled.state.refusals, 2);
         assert_eq!(settled.state.blocked_until, Some(10_000 + 1_800));
     }
@@ -304,7 +419,7 @@ mod tests {
             refusals: 5,
             ..calm()
         };
-        let settled = settle(state, Some(&opaque(3)), 10_000, INTERVAL);
+        let settled = settle(state, Some(&opaque(3)), 10_000, spacing());
         assert_eq!(settled.state.refusals, 1);
         assert_eq!(
             settled.state.blocked_until,
@@ -326,7 +441,7 @@ mod tests {
             sent: 0,
             remaining: 40,
         };
-        let settled = settle(state, Some(&outcome), 1_000, INTERVAL);
+        let settled = settle(state, Some(&outcome), 1_000, spacing());
         assert_eq!(settled.state.refusals, 3);
         assert_eq!(settled.state.blocked_until, Some(1_500));
         assert_eq!(settled.wake_at, 1_500);
@@ -345,7 +460,7 @@ mod tests {
             sent: 2,
             remaining: 100,
         };
-        let settled = settle(state, Some(&outcome), 1_000, INTERVAL);
+        let settled = settle(state, Some(&outcome), 1_000, spacing());
         assert_eq!(settled.state.refusals, 0);
         assert_eq!(settled.state.blocked_until, None);
     }
@@ -365,7 +480,7 @@ mod tests {
             members_total: 100,
             held: false,
         };
-        let settled = settle(state, Some(&outcome), 1_000, INTERVAL);
+        let settled = settle(state, Some(&outcome), 1_000, spacing());
         assert_eq!(settled.state.refusals, 4);
         assert_eq!(settled.wake_at, 1_000);
     }
@@ -383,7 +498,51 @@ mod tests {
             sent: 0,
             remaining: 0,
         };
-        assert_eq!(settle(state, Some(&outcome), 1_000, INTERVAL).state, state);
+        assert_eq!(settle(state, Some(&outcome), 1_000, spacing()).state, state);
+    }
+
+    // --- 揺らぎ ---
+
+    #[test]
+    fn the_pause_never_falls_below_its_floor() {
+        // 揺らぎは伸ばす側にしかない｡引きの目が悪くても設定より速く
+        // 送ってはならない｡
+        assert_eq!(apply_pause_seconds(0.0), APPLY_PAUSE_SECONDS);
+    }
+
+    #[test]
+    fn the_pause_stretches_to_the_top_of_its_spread() {
+        assert_eq!(
+            apply_pause_seconds(1.0),
+            APPLY_PAUSE_SECONDS + APPLY_PAUSE_SPREAD_SECONDS
+        );
+    }
+
+    #[test]
+    fn a_fraction_outside_zero_to_one_is_clamped_rather_than_trusted() {
+        // 負の目が pause を floor より下へ引くのは､この機能が防ごうと
+        // しているものそのもの｡
+        assert_eq!(apply_pause_seconds(-1.0), APPLY_PAUSE_SECONDS);
+        assert_eq!(
+            apply_pause_seconds(2.0),
+            APPLY_PAUSE_SECONDS + APPLY_PAUSE_SPREAD_SECONDS
+        );
+    }
+
+    #[test]
+    fn the_gap_between_writes_stays_inside_its_range() {
+        assert_eq!(write_gap(0.0).as_secs(), WRITE_GAP_FLOOR_SECONDS);
+        assert_eq!(
+            write_gap(1.0).as_secs(),
+            WRITE_GAP_FLOOR_SECONDS + WRITE_GAP_SPREAD_SECONDS
+        );
+        // 中間の目も範囲の中にある｡幅そのものではなく境界を押さえる｡
+        let middle = write_gap(0.5).as_secs();
+        assert!(
+            (WRITE_GAP_FLOOR_SECONDS..=WRITE_GAP_FLOOR_SECONDS + WRITE_GAP_SPREAD_SECONDS)
+                .contains(&middle),
+            "a mid-range roll left the gap range: {middle}"
+        );
     }
 
     // --- settle: ペース配分 ---
@@ -395,8 +554,20 @@ mod tests {
             sent: 2,
             remaining: 2_155,
         };
-        let settled = settle(calm(), Some(&outcome), 1_000, INTERVAL);
-        assert_eq!(settled.wake_at, 1_000 + APPLY_PAUSE_SECONDS);
+        let settled = settle(calm(), Some(&outcome), 1_000, spacing());
+        assert_eq!(settled.wake_at, 1_000 + PAUSE);
+    }
+
+    #[test]
+    fn the_pause_is_recorded_so_a_restart_does_not_skip_it() {
+        // #197 が扱う 20 時間で release build は 8 回起動され､どの起動も
+        // 即座に送っていた｡wake_at はループ変数だが､これはファイルに残る｡
+        let outcome = Outcome::Applied {
+            sent: 2,
+            remaining: 2_155,
+        };
+        let settled = settle(calm(), Some(&outcome), 1_000, spacing());
+        assert_eq!(settled.state.paused_until, Some(1_000 + PAUSE));
     }
 
     #[test]
@@ -407,24 +578,28 @@ mod tests {
             sent: 2,
             remaining: 0,
         };
-        assert_eq!(
-            settle(calm(), Some(&outcome), 1_000, INTERVAL).wake_at,
-            1_000
-        );
+        let settled = settle(calm(), Some(&outcome), 1_000, spacing());
+        assert_eq!(settled.wake_at, 1_000);
+        assert_eq!(settled.state.paused_until, None);
     }
 
     #[test]
-    fn a_diff_comes_straight_back_to_drain_what_it_found() {
+    fn a_diff_clears_a_pause_the_previous_plan_left_behind() {
+        // 期限切れの pause がファイルに残っていると､次の plan の 1 batch
+        // 目が理由も無く待たされる｡
+        let state = SyncState {
+            paused_until: Some(1_060),
+            ..calm()
+        };
         let outcome = Outcome::Diffed {
             adds: 3,
             removals: 1,
             members_total: 100,
             held: false,
         };
-        assert_eq!(
-            settle(calm(), Some(&outcome), 1_000, INTERVAL).wake_at,
-            1_000
-        );
+        let settled = settle(state, Some(&outcome), 1_000, spacing());
+        assert_eq!(settled.wake_at, 1_000);
+        assert_eq!(settled.state.paused_until, None);
     }
 
     // --- settle: idle と失敗 ---
@@ -442,7 +617,7 @@ mod tests {
             until: 5_000,
             pending: 2_157,
         };
-        let settled = settle(state, Some(&outcome), 1_060, INTERVAL);
+        let settled = settle(state, Some(&outcome), 1_060, spacing());
         assert_eq!(settled.state, state);
         assert_eq!(settled.wake_at, 5_000);
     }
@@ -451,7 +626,7 @@ mod tests {
     fn a_failed_tick_earns_a_full_interval_and_records_it() {
         // 待つだけでなく記録する: アプリを再起動しても､失効した scope や
         // 削除された list を即座に再試行してはならない｡
-        let settled = settle(calm(), None, 1_000, INTERVAL);
+        let settled = settle(calm(), None, 1_000, spacing());
         assert_eq!(settled.wake_at, 1_000 + i64::from(INTERVAL));
         assert_eq!(
             settled.state.blocked_until,
@@ -467,7 +642,7 @@ mod tests {
     #[test]
     fn a_refusal_still_holds_two_wake_ups_later() {
         let refused_at = 1_000;
-        let first = settle(calm(), Some(&opaque(0)), refused_at, INTERVAL);
+        let first = settle(calm(), Some(&opaque(0)), refused_at, spacing());
         let until = first.state.blocked_until.unwrap();
 
         let situation = |state: SyncState| Situation {
@@ -475,6 +650,7 @@ mod tests {
             interval_seconds: INTERVAL,
             pending: 2_157,
             blocked_until: state.blocked_until,
+            paused_until: state.paused_until,
         };
         let woke_at = refused_at + 60;
         assert_eq!(
@@ -486,7 +662,7 @@ mod tests {
             until,
             pending: 2_157,
         };
-        let second = settle(first.state, Some(&idle), woke_at, INTERVAL);
+        let second = settle(first.state, Some(&idle), woke_at, spacing());
         assert_eq!(
             next_step(&situation(second.state), woke_at + 60),
             Step::Wait { until },
@@ -506,6 +682,7 @@ mod tests {
         let written = SyncState {
             last_diff_at: Some(1_700_000_000),
             blocked_until: Some(1_700_000_900),
+            paused_until: Some(1_700_000_077),
             refusals: 3,
         };
         save_state(&path, &written).unwrap();
@@ -543,6 +720,7 @@ mod tests {
         let state: SyncState = serde_json::from_str(r#"{"last_diff_at":1787470513}"#).unwrap();
         assert_eq!(state.last_diff_at, Some(1_787_470_513));
         assert_eq!(state.blocked_until, None);
+        assert_eq!(state.paused_until, None);
         assert_eq!(state.refusals, 0);
     }
 
