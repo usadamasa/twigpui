@@ -198,6 +198,12 @@ fn main() {
                 ..Default::default()
             };
 
+            // fork した gpui の patch (Cargo.toml の `[patch.crates-io]`):
+            // fixture の window は画面がロックされていても描き続ける｡
+            // `open_window` の前でなければならない理由は
+            // `ui::Startup::draws_while_occluded` を見よ｡
+            gpui::set_draw_while_occluded(startup.draws_while_occluded());
+
             let opened = cx.open_window(options, |window, cx| {
                 let timeline =
                     cx.new(|cx| ui::TimelineView::new(config, paths, startup, window, cx));
