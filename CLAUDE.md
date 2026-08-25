@@ -99,3 +99,10 @@ cargo test
   読み書きできない。認証情報が要るときは環境変数を export してもらう。
   `.env` は cwd で効くのでプロファイルを跨ぐ。dev 専用の設定は
   `~/.config/twigpui-dev/config.toml` に置く。
+- **gpui は `vendor/gpui` の patch 版**: Cargo.toml の `[patch.crates-io]` が
+  crates.io の gpui 0.2.2 に `vendor/gpui.patch` を当てたものを指す。差分は
+  `gpui::set_draw_while_occluded` の 1 機能で、`--fixture` の window を画面ロック中
+  でも描き続けさせる (upstream はロック中に開いた window を 1 フレームも描かず、
+  window capture が真っ黒になる)。off が既定で本番は upstream と同一挙動。
+  gpui を上げるときは `scripts/vendor-gpui.sh <version>` で作り直し、patch が当たらなければ
+  `vendor/gpui.patch` を rebase する。`vendor/` は fmt / clippy / metrics の対象外。

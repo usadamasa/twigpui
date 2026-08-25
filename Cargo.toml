@@ -95,3 +95,16 @@ gpui = { version = "0.2.2", default-features = false, features = [
     "macos-blade",
     "test-support",
 ] }
+
+# `vendor/gpui` は crates.io の gpui 0.2.2 そのものに `vendor/gpui.patch` を
+# 当てたもの｡差分は 1 つの機能に閉じている: `gpui::set_draw_while_occluded`
+# を on にした window は､画面がロックされていても (occluded でも) 描き
+# 続ける｡upstream は occluded な window の display link を止め､ロック中は
+# OS が CVDisplayLink の生成を拒む (-6661) ので､ロック中に開いた window は
+# 1 フレームも描かず､window capture が真っ黒になる｡`--fixture` はこの
+# スイッチを入れる (`ui::TimelineView::show_fixture`)｡off が既定で､その
+# ときの挙動は upstream と同一なので本番の消費電力は変わらない｡
+#
+# gpui を上げるときは `scripts/vendor-gpui.sh <version>` で作り直す｡
+[patch.crates-io]
+gpui = { path = "vendor/gpui" }

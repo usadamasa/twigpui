@@ -198,6 +198,11 @@ fn main() {
                 ..Default::default()
             };
 
+            // `vendor/gpui` の patch: fixture の window は画面がロックされて
+            // いても描き続ける｡`open_window` の前でなければならない理由は
+            // `ui::Startup::draws_while_occluded` を見よ｡
+            gpui::set_draw_while_occluded(startup.draws_while_occluded());
+
             let opened = cx.open_window(options, |window, cx| {
                 let timeline =
                     cx.new(|cx| ui::TimelineView::new(config, paths, startup, window, cx));

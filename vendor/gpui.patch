@@ -1,0 +1,196 @@
+--- a/src/platform.rs
++++ b/src/platform.rs
+@@ -90,6 +90,31 @@
+     current_platform(true).background_executor()
+ }
+ 
++// PATCH (twigpui): keep drawing while occluded.
++//
++// Upstream gpui only drives frames from a CVDisplayLink, and only while the
++// window is `NSWindowOcclusionStateVisible`. A window opened while the screen
++// is locked is occluded from its first moment and the OS refuses to create a
++// display link for a sleeping display (CVDisplayLinkCreateWithActiveCGDisplays
++// returns -6661), so such a window never draws a single frame and a window
++// capture of it is black. That is the wrong trade for a fixture window whose
++// only purpose is to be captured. With this switch on, macOS windows start
++// their display link regardless of occlusion and fall back to a 30Hz timer
++// when no display link can be made. Off (the default) is upstream behavior.
++static DRAW_WHILE_OCCLUDED: std::sync::atomic::AtomicBool =
++    std::sync::atomic::AtomicBool::new(false);
++
++/// PATCH (twigpui): make every macOS window keep drawing while occluded,
++/// including while the screen is locked. See [`draws_while_occluded`].
++pub fn set_draw_while_occluded(enabled: bool) {
++    DRAW_WHILE_OCCLUDED.store(enabled, std::sync::atomic::Ordering::Relaxed);
++}
++
++/// PATCH (twigpui): whether [`set_draw_while_occluded`] has been turned on.
++pub fn draws_while_occluded() -> bool {
++    DRAW_WHILE_OCCLUDED.load(std::sync::atomic::Ordering::Relaxed)
++}
++
+ #[cfg(target_os = "macos")]
+ pub(crate) fn current_platform(headless: bool) -> Rc<dyn Platform> {
+     Rc::new(MacPlatform::new(headless))
+--- a/src/platform/mac/display_link.rs
++++ b/src/platform/mac/display_link.rs
+@@ -14,8 +14,20 @@
+ pub struct DisplayLink {
+     display_link: Option<sys::DisplayLink>,
+     frame_requests: dispatch_source_t,
++    // PATCH (twigpui): a timer thread that stands in for the CVDisplayLink
++    // when the OS refuses to create one (locked screen, sleeping display).
++    // Only ever populated while `crate::draws_while_occluded()`.
++    // See `crate::set_draw_while_occluded`.
++    fallback: Option<(
++        std::sync::Arc<std::sync::atomic::AtomicBool>,
++        std::thread::JoinHandle<()>,
++    )>,
+ }
+ 
++/// PATCH (twigpui): how often the fallback timer asks for a frame. Half the
++/// usual display rate is plenty for a window nobody is looking at.
++const FALLBACK_FRAME: std::time::Duration = std::time::Duration::from_millis(33);
++
+ impl DisplayLink {
+     pub fn new(
+         display_id: CGDirectDisplayID,
+@@ -52,15 +64,26 @@
+             );
+             dispatch_source_set_event_handler_f(frame_requests, Some(callback));
+ 
+-            let display_link = sys::DisplayLink::new(
++            // PATCH (twigpui): without the switch a failure here is an error,
++            // as upstream. With it, `None` means "drive frames from the
++            // fallback timer instead".
++            let display_link = match sys::DisplayLink::new(
+                 display_id,
+                 display_link_callback,
+                 frame_requests as *mut c_void,
+-            )?;
++            ) {
++                Ok(display_link) => Some(display_link),
++                Err(error) if crate::draws_while_occluded() => {
++                    log::info!("no display link ({error:#}); driving frames from a timer");
++                    None
++                }
++                Err(error) => return Err(error),
++            };
+ 
+             Ok(Self {
+-                display_link: Some(display_link),
++                display_link,
+                 frame_requests,
++                fallback: None,
+             })
+         }
+     }
+@@ -70,18 +93,42 @@
+             dispatch_resume(crate::dispatch_sys::dispatch_object_t {
+                 _ds: self.frame_requests,
+             });
+-            self.display_link.as_mut().unwrap().start()?;
+         }
++        if let Some(display_link) = self.display_link.as_mut() {
++            unsafe { display_link.start()? };
++        } else if self.fallback.is_none() {
++            // PATCH (twigpui): merge into the same dispatch source the
++            // CVDisplayLink callback would, so the frame still runs on the
++            // main queue exactly as it does upstream.
++            let running = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
++            let flag = running.clone();
++            let frame_requests = self.frame_requests as usize;
++            let thread = std::thread::spawn(move || {
++                while flag.load(std::sync::atomic::Ordering::Relaxed) {
++                    std::thread::sleep(FALLBACK_FRAME);
++                    unsafe { dispatch_source_merge_data(frame_requests as dispatch_source_t, 1) };
++                }
++            });
++            self.fallback = Some((running, thread));
++        }
+         Ok(())
+     }
+ 
+     pub fn stop(&mut self) -> Result<()> {
++        if let Some((running, thread)) = self.fallback.take() {
++            // Joined so the thread can never touch a dispatch source that
++            // `Drop` has already cancelled.
++            running.store(false, std::sync::atomic::Ordering::Relaxed);
++            let _ = thread.join();
++        }
+         unsafe {
+             dispatch_suspend(crate::dispatch_sys::dispatch_object_t {
+                 _ds: self.frame_requests,
+             });
+-            self.display_link.as_mut().unwrap().stop()?;
+         }
++        if let Some(display_link) = self.display_link.as_mut() {
++            unsafe { display_link.stop()? };
++        }
+         Ok(())
+     }
+ }
+--- a/src/platform/mac/window.rs
++++ b/src/platform/mac/window.rs
+@@ -475,13 +475,16 @@
+ 
+     fn start_display_link(&mut self) {
+         self.stop_display_link();
+-        unsafe {
+-            if !self
+-                .native_window
+-                .occlusionState()
+-                .contains(NSWindowOcclusionState::NSWindowOcclusionStateVisible)
+-            {
+-                return;
++        // PATCH (twigpui): see `crate::set_draw_while_occluded`.
++        if !crate::draws_while_occluded() {
++            unsafe {
++                if !self
++                    .native_window
++                    .occlusionState()
++                    .contains(NSWindowOcclusionState::NSWindowOcclusionStateVisible)
++                {
++                    return;
++                }
+             }
+         }
+         let display_id = unsafe { display_id_for_screen(self.native_window.screen()) };
+@@ -859,6 +862,14 @@
+             NSWindow::setFrameTopLeftPoint_(native_window, window_rect.origin);
+             window.0.lock().move_traffic_light();
+ 
++            // PATCH (twigpui): a window opened while the screen is locked
++            // gets no occlusion or screen-change callback that would start
++            // its display link, so start it here.
++            // See `crate::set_draw_while_occluded`.
++            if crate::draws_while_occluded() {
++                window.0.lock().start_display_link();
++            }
++
+             pool.drain();
+ 
+             window
+@@ -1915,6 +1926,9 @@
+         {
+             lock.move_traffic_light();
+             lock.start_display_link();
++        } else if crate::draws_while_occluded() {
++            // PATCH (twigpui): see `crate::set_draw_while_occluded`.
++            lock.start_display_link();
+         } else {
+             lock.stop_display_link();
+         }
+--- a/src/taffy.rs
++++ b/src/taffy.rs
+@@ -309,7 +309,9 @@
+             unit: &Option<u16>,
+         ) -> Vec<taffy::GridTemplateComponent<T>> {
+             // grid-template-columns: repeat(<number>, minmax(0, 1fr));
+-            unit.map(|count| vec![repeat(count, vec![minmax(length(0.0), fr(1.0))])])
++            // PATCH (twigpui): explicit `f32` — the `f64` fallback is a
++            // future-incompatibility warning on current toolchains.
++            unit.map(|count| vec![repeat(count, vec![minmax(length(0.0_f32), fr(1.0_f32))])])
+                 .unwrap_or_default()
+         }
+ 
