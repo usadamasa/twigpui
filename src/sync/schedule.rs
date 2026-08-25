@@ -3,8 +3,8 @@
 //! #163 の上に足した auto-sync のうち純粋な側の半分で､`ui::reload_policy`
 //! が `ui` から切り出されているのと同じ線で [`super::auto`] から切り出して
 //! ある: ここにあるのはすべて支出するかどうかの判断で､どれも request を
-//! 投げない｡[`Step`] を受けて動く loop は隣にあり､unit test されていない｡
-//! その分岐がどれも HTTP だからだ｡
+//! 投げない｡[`Step`] を受けて動く loop は隣の [`super::auto`] にあり､
+//! そちらは [`super::api::ListSyncApi`] 越しに request を投げる｡
 
 /// loop が今すべきこと｡
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -112,6 +112,11 @@ src/repost.rs	150
 # 350 -> 300: `SyncState` は state.rs へ移した (#197, #198)｡そこでは今
 # それが担うペース配分の隣に遷移関数がある｡
 src/sync/mod.rs	300
+# api.rs は新設｡run.rs と auto.rs が `XClient` に求める 6 つを trait に
+# 括り出し､`XClient` 側の impl はそこへ委譲するだけを持つ｡実装 113 行の
+# うち判断は 1 つも無く､残りは doc と委譲だ｡run.rs と auto.rs の天井を
+# 上げずに済んでいるのは､trait と impl の行がこちらへ来たからである｡
+src/sync/api.rs	150
 # sync/run.rs 300 -> 350: #169 の `seed_users`｡開発時の sync が follow
 # グラフ全体の代わりに読む､固定の screen name の代替物だ｡
 # 350 -> 400: `apply_some`｡バックグラウンド同期が plan を捌く上限付きの
