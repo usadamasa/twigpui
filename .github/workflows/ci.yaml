@@ -67,8 +67,16 @@ jobs:
   # 補うチェックで､既知の脆弱性を持つ依存を pull request が持ち込むのを
   # 防ぐ｡dependency review は pull request と merge queue のイベントが
   # 渡す base と head の依存グラフを比べる｡
+  #
+  # main への push では比べる相手が無いので走らせない｡このジョブは
+  # `ci-status-check` の `needs` に入っているが､skip は failure ではないので
+  # `if: failure()` は false のままで､Test や Lint が落ちたときには変わらず
+  # true になる｡そして skip が起きるのは push の run だけだ — branch
+  # protection が見るのは pull request と merge queue の run で､そこでは
+  # このジョブは今までどおり走る｡ゲートの振る舞いは変わらない｡
   dependency-review:
     name: Dependency Review
+    if: github.event_name != 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
