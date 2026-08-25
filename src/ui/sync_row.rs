@@ -228,6 +228,22 @@ pub(super) fn sync_plan_label(pending: usize) -> Option<String> {
         .then(|| format!("A plan from an earlier run still owes {pending} membership changes."))
 }
 
+/// `plan` が `list_id` に対してまだ負っている件数 (#205)｡別の list の
+/// ものなら 0｡
+///
+/// list を照合するのは `sync::apply` が適用前に照合するのと同じ理由だ｡
+/// plan が意味を持つのは diff された相手の list に対してだけで､`list_id`
+/// を別の場所へ向けたあとにディスクへ残っていた plan は､今から書き込む
+/// list について何も言っていない｡そのまま数えると､ダイアログは片方の行で
+/// 新しい list を名指しながら､もう片方の行で古い list の残件を報告する｡
+pub(super) fn plan_pending_for(plan: &sync::Plan, list_id: &str) -> usize {
+    if plan.list_id != list_id {
+        return 0;
+    }
+    plan.pending_count(sync::Action::Add)
+        .saturating_add(plan.pending_count(sync::Action::Remove))
+}
+
 /// list sync の見せ方のうち､ウィンドウの状態に触る半分 (#205)｡
 impl TimelineView {
     /// ステータスバーの sync の入口 (#174, #205)｡
@@ -535,13 +551,11 @@ impl TimelineView {
     /// 始められない状態でも開く｡そのときダイアログは確認ボタンの代わりに
     /// [`sync_blocked_reason`] を出す｡リクエストは飛ばない｡
     pub(super) fn ask_to_sync(&mut self, cx: &mut Context<'_, Self>) {
+        let list_id = self.config.list_id.clone().unwrap_or_default();
         self.sync_plan_pending = sync::load_plan(&self.paths.sync_plan_file())
             .ok()
             .flatten()
-            .map_or(0, |plan| {
-                plan.pending_count(sync::Action::Add)
-                    .saturating_add(plan.pending_count(sync::Action::Remove))
-            });
+            .map_or(0, |plan| plan_pending_for(&plan, &list_id));
         self.pending_sync = true;
         cx.notify();
     }
@@ -756,6 +770,46 @@ mod tests {
         let label = sync_plan_label(1_204).expect("a plan with work left has to be shown");
         assert!(label.contains("1204"), "{label}");
         assert_eq!(sync_plan_label(0), None);
+    }
+
+    /// 適用済みの entry は負債ではない｡中断された apply の残りだけを数える｡
+    #[test]
+    fn only_the_entries_still_owed_are_counted() {
+        let mut plan = plan_for("1750");
+        plan.entries[0].applied = true;
+        assert_eq!(plan_pending_for(&plan, "1750"), 1);
+    }
+
+    /// 別の list の plan は今から書き込む list について何も言っていない｡
+    /// 数えると､ダイアログは片方の行で新しい list を名指しながら､もう
+    /// 片方で古い list の残件を報告することになる｡
+    #[test]
+    fn a_plan_for_another_list_owes_this_one_nothing() {
+        let plan = plan_for("1750");
+        assert_eq!(plan_pending_for(&plan, "1750"), 2);
+        assert_eq!(plan_pending_for(&plan, "9999"), 0);
+    }
+
+    /// `Add` 1 件と `Remove` 1 件を負う `list_id` の plan｡
+    fn plan_for(list_id: &str) -> sync::Plan {
+        sync::Plan {
+            list_id: list_id.to_string(),
+            created_at: 0,
+            members_total: 10,
+            entries: vec![
+                plan_entry("1", sync::Action::Add),
+                plan_entry("2", sync::Action::Remove),
+            ],
+        }
+    }
+
+    fn plan_entry(user_id: &str, action: sync::Action) -> sync::PlanEntry {
+        sync::PlanEntry {
+            user_id: user_id.to_string(),
+            username: format!("user{user_id}"),
+            action,
+            applied: false,
+        }
     }
 
     #[test]
