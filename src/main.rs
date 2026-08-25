@@ -39,6 +39,7 @@ mod log;
 mod menu;
 mod oauth;
 mod paths;
+mod perf;
 mod profile;
 mod rate_limit;
 mod repost;
