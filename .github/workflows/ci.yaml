@@ -114,13 +114,23 @@ jobs:
         with:
           components: llvm-tools-preview
 
-      # ここに `rust-cache` を置かないのは意図的だ｡計測付きのビルドは専用の
-      # target ディレクトリを使い (手元で 2.4 GB)､このリポジトリの Actions
-      # キャッシュは GitHub の 10 GB 上限に対してすでに 9 GB ある — ここで
-      # キャッシュすると Test と Lint のキャッシュを追い出し､レポートを速く
-      # するために *それらの* ジョブを遅くすることになる｡冷えた状態の計測付き
-      # ビルドは手元で約 1m40s｡ランナーはもっと遅いマシンだが､このジョブは
-      # 何も止めない｡
+      # 計測付きのビルドは専用の target ディレクトリ (`target/llvm-cov-target`､
+      # 手元で 2.4 GB) を使う｡`cache-targets` が保存するのは workspace の
+      # `target` そのもので､その下にあるこのディレクトリも一緒に入る｡
+      #
+      # `prefix-key` を分けてあるのは､restore-key の前方一致で Test や Lint の
+      # 計測無しのキャッシュを拾わないためだ — 拾っても計測付きのビルドには
+      # 使えず､展開の時間だけ払うことになる｡
+      #
+      # 以前ここにキャッシュを置かなかったのは 10 GB の上限を Test と Lint と
+      # 奪い合うからだったが､書き込むのが main だけになった今は合計およそ
+      # 1.0 + 0.7 + 2.4 GB で収まる｡
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
+        with:
+          prefix-key: v0-rust-coverage
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@6cd13508893c0e7eab5f273c2575d3859bd7229a  # v2.86.6
         with:
