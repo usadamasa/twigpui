@@ -8,6 +8,7 @@ use gpui::{
 };
 use gpui_component::input::{Input, InputEvent, InputState};
 
+use crate::activity::{self, Activity};
 use crate::assets;
 use crate::avatar;
 use crate::browser;

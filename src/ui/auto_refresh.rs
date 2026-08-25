@@ -85,6 +85,17 @@ pub(super) struct Situation {
     pub interval_seconds: u32,
     /// すでに fetch が飛んでいるかどうか — [`BUSY_RECHECK_SECONDS`] を見よ｡
     pub busy: bool,
+    /// 読み手が画面の前にいるかどうか (#204)｡ロックされた画面の向こうに
+    /// 届く post には誰も気づかないので､この 1 ビットが他のすべてに
+    /// 優先する｡どう知るかは [`crate::activity`] を見よ｡
+    pub activity: Activity,
+    /// 読み手が戻ってきたと分かった時刻 (#204)｡ロックが解けたことに
+    /// 気づいた瞬間か､マシンが sleep から戻った瞬間で､まだ一度も
+    /// 離れていなければ `None`｡
+    ///
+    /// なぜこれが anchor に混ざるのかは
+    /// [`crate::activity::Presence::resumed_at`] を見よ｡
+    pub resumed_at: Option<i64>,
 }
 
 /// この起床が何をすべきか｡
@@ -98,13 +109,26 @@ pub(super) struct Situation {
 /// - キャッシュが答えたので何も支払わなかった起動 (#9) は､その後も
 ///   1 interval は何も支払わない｡auto-refresh は開けっぱなしのウィンドウ
 ///   にリズムを足すもので､起動時の判断への second opinion ではない｡
+///
+/// ロックされた画面は他のすべてに優先する (#204)｡そこには開けっぱなしの
+/// ウィンドウが無いので､足すリズムも無い｡`busy` より先に見るのは､
+/// 飛んでいる fetch を待つ理由がそもそも無いからだ — 待った先で
+/// ポーリングするわけではない｡
 pub(super) fn next_tick(situation: &Situation, now: i64) -> Tick {
+    if matches!(situation.activity, Activity::Away) {
+        return Tick::Wait {
+            until: now.saturating_add(activity::AWAY_RECHECK_SECONDS),
+        };
+    }
     if situation.busy {
         return Tick::Wait {
             until: now.saturating_add(BUSY_RECHECK_SECONDS),
         };
     }
-    let anchor = situation.last_reload_at.unwrap_or(situation.started_at);
+    let anchor = situation
+        .last_reload_at
+        .unwrap_or(situation.started_at)
+        .max(situation.resumed_at.unwrap_or(i64::MIN));
     let due = anchor.saturating_add(i64::from(situation.interval_seconds));
     if due > now {
         Tick::Wait { until: due }
@@ -302,7 +326,18 @@ impl TimelineView {
         ));
 
         self.auto_refresh = Some(cx.spawn(async move |this, cx| {
+            let mut presence = activity::Presence::present();
+
             loop {
+                // 画面がロックされているかを尋ねるのに `ioreg` を spawn
+                // するので､main thread ではなく background で待つ (#204)｡
+                let probed = cx
+                    .background_executor()
+                    .spawn(async { activity::probe() })
+                    .await;
+                let now = oauth::unix_now();
+                let activity = presence.observe(probed, now, interval_seconds);
+
                 // `Err` はウィンドウが消えたということで､このループが
                 // 終わる唯一の理由だ — `start_auto_sync` の約束｡
                 let Ok(situation) = this.update(cx, |this, _| Situation {
@@ -310,11 +345,12 @@ impl TimelineView {
                     started_at,
                     interval_seconds,
                     busy: this.reloading,
+                    activity,
+                    resumed_at: presence.resumed_at(),
                 }) else {
                     return;
                 };
 
-                let now = oauth::unix_now();
                 let sleep_until = match next_tick(&situation, now) {
                     Tick::Wait { until } => until,
                     Tick::Poll => {
@@ -348,9 +384,14 @@ impl TimelineView {
                 let wait = sleep_until
                     .saturating_sub(oauth::unix_now())
                     .clamp(MIN_SLEEP_SECONDS, MAX_SLEEP_SECONDS);
+                // 期限は `sleep_until` ではなくここで読み直した時計から
+                // 測る (#204)｡上の clamp は待つ長さを切り詰めるので､
+                // 2 つは普段から食い違っている｡
+                let expected_wake_at = oauth::unix_now().saturating_add(wait);
                 cx.background_executor()
                     .timer(Duration::from_secs(u64::try_from(wait).unwrap_or(1)))
                     .await;
+                presence.woke(expected_wake_at, oauth::unix_now(), interval_seconds);
             }
         }));
     }
@@ -591,6 +632,8 @@ mod tests {
             started_at,
             interval_seconds: 300,
             busy: false,
+            activity: Activity::Present,
+            resumed_at: None,
         }
     }
 
@@ -665,6 +708,70 @@ mod tests {
                 until: 9_000 + BUSY_RECHECK_SECONDS
             }
         );
+    }
+
+    // --- #204: ロックされた画面と sleep ---
+
+    // 「ロック中に何度 tick しても request が 0 回」｡期限をどれだけ過ぎて
+    // いても `Poll` は返らないし､返らないので何も溜まらない｡
+    #[test]
+    fn a_locked_screen_never_becomes_due_however_long_it_stays_locked() {
+        let mut situation = situation(Some(1_000), 500);
+        situation.activity = Activity::Away;
+
+        for now in [1_300, 2_000, 10_000, 1_000_000] {
+            assert_eq!(
+                next_tick(&situation, now),
+                Tick::Wait {
+                    until: now + activity::AWAY_RECHECK_SECONDS
+                },
+                "a locked screen must never poll, and {now} is well past the deadline"
+            );
+        }
+    }
+
+    // ロックは飛んでいる fetch より先に見る｡`busy` の再確認は数秒後に
+    // ポーリングするために待つものだが､ロックされた画面にはその先が無い｡
+    #[test]
+    fn a_locked_screen_outranks_a_fetch_in_flight() {
+        let mut situation = situation(Some(1_000), 500);
+        situation.activity = Activity::Away;
+        situation.busy = true;
+
+        assert_eq!(
+            next_tick(&situation, 9_000),
+            Tick::Wait {
+                until: 9_000 + activity::AWAY_RECHECK_SECONDS
+            }
+        );
+    }
+
+    // 「復帰後は最大 1 回だけ schedule される」｡ロックの間に interval は
+    // 100 回ぶん過ぎているが､起点は最後の fetch ではなく復帰した瞬間だ｡
+    #[test]
+    fn coming_back_schedules_one_poll_an_interval_out_not_the_backlog() {
+        let mut situation = situation(Some(1_000), 500);
+        situation.resumed_at = Some(31_000);
+
+        assert_eq!(next_tick(&situation, 31_000), Tick::Wait { until: 31_300 });
+        assert_eq!(next_tick(&situation, 31_299), Tick::Wait { until: 31_300 });
+        assert_eq!(next_tick(&situation, 31_300), Tick::Poll);
+
+        // そしてその 1 回が `last_reload_at` を動かせば､次はまた丸ごと
+        // 1 interval 先だ — 溜まっていた tick が続けて発火することは無い｡
+        situation.last_reload_at = Some(31_300);
+        assert_eq!(next_tick(&situation, 31_301), Tick::Wait { until: 31_600 });
+    }
+
+    // 復帰時刻は起点を **遅らせる** だけで､早めることはしない｡復帰した
+    // 直後に読み手が自分で reload を押したなら､次のポーリングはその
+    // reload から測る｡
+    #[test]
+    fn a_reload_after_coming_back_still_pushes_the_next_poll_out() {
+        let mut situation = situation(Some(31_100), 500);
+        situation.resumed_at = Some(31_000);
+
+        assert_eq!(next_tick(&situation, 31_300), Tick::Wait { until: 31_400 });
     }
 
     #[test]

@@ -25,6 +25,7 @@
     )
 )]
 
+mod activity;
 mod assets;
 mod avatar;
 mod browser;
