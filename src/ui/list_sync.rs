@@ -18,23 +18,25 @@
 //! 同じ — status の enum と､それを書くループと､そのループを始めるボタン
 //! は 1 つの機構だからだ｡
 //!
+//! #205 でその機構の *見せ方* が [`super::sync_row`] へ出た — 行､その
+//! フェード､確認のダイアログ｡機構が 1 つであることは変わっていない｡
+//! 分かれたのは問いのほうだ: ここが答えるのは「sync は何をしているか｡
+//! 今 何を支払ってよいか」で､あちらが答えるのは「それを読み手にどう
+//! 出すか」である｡
+//!
 //! # なぜ始めるのに確認が要るのか
 //!
 //! diff はフォローリスト全体と list のメンバー全体を読み､どちらも返った
 //! アカウントごとに課金される (`x-api-budget`)｡数千フォローもあれば
 //! 1 クリックで数ドルだ — このウィンドウで押せるもののうち､桁違いに
 //! いちばん高い｡その場合のスキルの規則は､押す前に最悪のケースを画面に
-//! 出すことで､[`sync_confirm_label`] はそのためにあり､ボタンが 1 回の
-//! クリックではなく #72 の削除のような 2 段構えなのもそのためだ｡
+//! 出すことで､[`sync_confirm_label`] はそのためにあり､クリック 1 回で
+//! 始まらず [`super::sync_row`] のダイアログを通るのもそのためだ｡
 
 // [`super::render`] や [`super::auto_refresh`] のような `use super::*`
 // ではなく書き下す: このモジュールが名指しする `ui` の import は､clippy
 // の `wildcard_imports` が列挙できる程度に少なく､だから glob を通さない｡
-use super::{
-    AnyElement, Context, Duration, InteractiveElement as _, IntoElement as _, ParentElement as _,
-    ReloadNotice, StatefulInteractiveElement as _, Styled as _, Theme, TimelineView, div, log,
-    oauth, rgb, sync,
-};
+use super::{Context, Duration, ReloadNotice, Theme, TimelineView, log, oauth, sync};
 
 /// ウィンドウが list sync について今知っていること (#174)｡
 ///
@@ -115,11 +117,14 @@ pub(super) fn offers_sync(status: &SyncStatus) -> bool {
     }
 }
 
-/// ステータスバーが sync について言うこと (#174)｡
+/// sync の行が言うこと (#174, #205)｡
 ///
-/// どの文字列も "List sync:" を前に付けてセグメントが自分を名乗るように
-/// する — ステータスバーの他の 2 つの数字はリクエストと post のもので､
-/// その隣に裸の "1,204 to go" があれば 3 つ目の無記名の数になる｡
+/// どの文字列も "List sync:" を前に付けて行が自分を名乗るようにする｡
+/// #174 でこれを足した理由 — ステータスバーには他に無記名の数が 2 つ
+/// あり､その隣の裸の "1,204 to go" は 3 つ目になってしまう — は #205 で
+/// 消えた｡行は自分だけの段を持つ｡それでも前置きは残す: 22px の帯に
+/// 数字が 1 つ浮いているだけでは､何の数字かを言う手がかりがどこにも
+/// 無い｡
 ///
 /// これを状態名ではなく進捗にしているのは件数だ｡6 時間の "Idle" と､
 /// 1100 件の write が残っている追いつきの最中の "Idle" は､まったく違う
@@ -140,19 +145,25 @@ pub(super) fn sync_status_label(status: &SyncStatus, now: i64) -> String {
             pending,
             refusals,
         } => {
-            // `saturating_sub` とゼロ下限は `cooldown_label` と同じ理由:
-            // `until` は API のヘッダー由来､`now` は時計由来なので､
-            // どちらもこのコードが信じてよいものではない｡
-            let remaining = until.saturating_sub(now).max(0);
-            if *refusals >= STUCK_AFTER_REFUSALS {
+            let stuck = *refusals >= STUCK_AFTER_REFUSALS;
+            let lifts = if *until <= now {
+                // 期限が過ぎている｡過去の時刻をそのまま出すと､もう明けて
+                // いるのにまだ待っているかのように読める｡`until` は API の
+                // ヘッダー由来､`now` は時計由来で､どちらもこのコードが
+                // 信じきってよいものではない — #174 の 0 下限と同じ用心を､
+                // カウントダウンではなく時刻に対して置いたものだ｡
+                "resuming".to_string()
+            } else if stuck {
+                format!("retry at {} JST", jst_hhmm(*until))
+            } else {
+                format!("resumes {} JST", jst_hhmm(*until))
+            };
+            if stuck {
                 // #197: 20 時間続く "rate limited — 900s" は待っている
                 // ように見えた｡連続は待っているのではなく､動いていない｡
-                format!(
-                    "List sync: refused {refusals}× in a row, {pending} to go — retry in \
-                     {remaining}s"
-                )
+                format!("List sync: refused {refusals}× in a row, {pending} to go — {lifts}")
             } else {
-                format!("List sync: rate limited, {pending} to go — {remaining}s")
+                format!("List sync: rate limited, {pending} to go — {lifts}")
             }
         }
         SyncStatus::Failed => "List sync: last attempt failed".to_string(),
@@ -169,6 +180,28 @@ pub(super) fn sync_status_label(status: &SyncStatus, now: i64) -> String {
 /// いる人に委ねる｡
 pub(super) fn sync_confirm_label() -> &'static str {
     "Reads your whole follow list and the whole list, billed per account. Sync anyway?"
+}
+
+/// `unix` の時刻を JST の `HH:MM` で描く (#205)｡
+///
+/// 日付 crate は足さない｡JST は UTC+9 の固定オフセットで DST が無いので､
+/// 必要なのは足し算 1 回と剰余だけだ — `log::format_utc` が同じ理由で
+/// `civil_from_days` を手書きしているのと同じ判断で､あちらより桁違いに
+/// 小さい｡
+///
+/// 日付を出さないのは､rate limit の窓が長くても数時間だからだ｡日付を
+/// 足しても曖昧さは減らず､22px の行から読める文字だけが減る｡
+fn jst_hhmm(unix: i64) -> String {
+    /// JST は UTC より 9 時間進んでいる｡DST は無い｡
+    const JST_OFFSET_SECONDS: i64 = 9 * 3_600;
+    const SECONDS_PER_DAY: i64 = 24 * 3_600;
+
+    let seconds_of_day = unix
+        .saturating_add(JST_OFFSET_SECONDS)
+        .rem_euclid(SECONDS_PER_DAY);
+    let hour = seconds_of_day.div_euclid(3_600);
+    let minute = seconds_of_day.div_euclid(60).rem_euclid(60);
+    format!("{hour:02}:{minute:02}")
 }
 
 /// ステータスバーが rate limit と呼ぶのをやめて stuck と呼び始めるまでの
@@ -341,8 +374,7 @@ impl TimelineView {
         const AWAITING_ID_SECONDS: i64 = 30;
 
         if let Some(off) = self.sync_gate() {
-            self.sync_status = SyncStatus::Off(off);
-            cx.notify();
+            self.show_sync(SyncStatus::Off(off), cx);
             return;
         }
         // どちらも上の `sync_gate` が確認済み｡`expect` ではなく `else`
@@ -355,8 +387,7 @@ impl TimelineView {
 
         let scheduled = self.config.auto_sync_list;
         if matches!(trigger, SyncTrigger::Scheduled) && !scheduled {
-            self.sync_status = SyncStatus::Ready;
-            cx.notify();
+            self.show_sync(SyncStatus::Ready, cx);
             return;
         }
 
@@ -367,8 +398,7 @@ impl TimelineView {
         log::info(&format!(
             "list sync started for {list_id} ({trigger:?}), interval {interval}s"
         ));
-        self.sync_status = SyncStatus::Working;
-        cx.notify();
+        self.show_sync(SyncStatus::Working, cx);
 
         self.auto_sync = Some(cx.spawn(async move |this, cx| {
             // ここで他に何も覚えないのは意図的だ: 期限と件数は tick が
@@ -474,8 +504,13 @@ impl TimelineView {
     /// ぶんだけ `clippy::too_many_lines` を超えていた｡いずれにせよ名前を
     /// 付ける価値はある: `sync_status` への書き込みはすべて `notify` を
     /// 伴わなければならず､4 か所から書くループは忘れる機会が 4 回ある｡
-    fn show_sync(&mut self, status: SyncStatus, cx: &mut Context<'_, Self>) {
+    ///
+    /// #205 以降はフェードもここが起こす｡`sync_status` への書き込みは
+    /// すべてここを通るので､行の出入りが status から取り残されることは
+    /// ない｡
+    pub(super) fn show_sync(&mut self, status: SyncStatus, cx: &mut Context<'_, Self>) {
         self.sync_status = status;
+        self.fade_sync_row(cx);
         cx.notify();
     }
 
@@ -496,103 +531,6 @@ impl TimelineView {
             self.reload_notice = Some(ReloadNotice::Outcome(text.into()));
         }
         self.show_sync(status, cx);
-    }
-
-    /// ステータスバーの sync セグメント (#174): sync が何をしているかと､
-    /// 1 回始める方法｡
-    ///
-    /// ボタンの隣にラベルを置くのではなく､1 つの要素で両方の役を担う｡
-    /// sync を始められる状態は､まさに押す価値のある状態そのものなので､
-    /// 別立てのボタンなら､理由をすでに書いてある行の隣で一生の大半を
-    /// 灰色にして過ごすことになる — しかもステータスバーは 24px の帯で､
-    /// すでに 2 つの件数が入っている｡
-    ///
-    /// [`Self::pending_sync`] が立っている間､これは代わりに確認になる:
-    /// いくらかかるか､それから "Sync" と "Cancel"｡#72 の削除の行が同じ
-    /// 形で､理由も同じ — 1 回のクリックでこれだけ支払わせてはならない｡
-    pub(super) fn sync_segment(&self, cx: &mut Context<'_, Self>) -> AnyElement {
-        let theme = self.theme;
-
-        if self.pending_sync {
-            return div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .child(
-                    div()
-                        .text_color(rgb(theme.text_muted))
-                        .child(sync_confirm_label()),
-                )
-                .child(
-                    div()
-                        .id("sync-confirm")
-                        .text_color(rgb(theme.danger))
-                        .child("Sync")
-                        .on_click(cx.listener(|this, _event, _window, cx| this.confirm_sync(cx))),
-                )
-                .child(
-                    div()
-                        .id("sync-cancel")
-                        .text_color(rgb(theme.text_muted))
-                        .child("Cancel")
-                        .on_click(cx.listener(|this, _event, _window, cx| this.cancel_sync(cx))),
-                )
-                .into_any_element();
-        }
-
-        let label = sync_status_label(&self.sync_status, oauth::unix_now());
-        let color = sync_status_color(&self.sync_status, theme);
-        let clickable = offers_sync(&self.sync_status);
-
-        let segment = div().text_color(rgb(color)).child(label);
-        if clickable {
-            segment
-                .id("sync-now")
-                .on_click(cx.listener(|this, _event, _window, cx| this.ask_to_sync(cx)))
-                .into_any_element()
-        } else {
-            segment.into_any_element()
-        }
-    }
-
-    /// ステータスバーの sync セグメントへの 1 回目のクリック (#174):
-    /// 支払う前に尋ねる｡
-    ///
-    /// #72 の削除と同じ 2 段構えで､理由も似ている — sync が取り消せない
-    /// からではなく､このウィンドウで押せるもののうち桁違いにいちばん高い
-    /// からだ｡そして `x-api-budget` は､リクエストへ広がるクリックは
-    /// 受け取られる前に最悪のケースを画面に出さなければならないと言う｡
-    ///
-    /// tick が飛んでいる間は拒否する｡これは礼儀ではない: tick は
-    /// バックグラウンドスレッド上で同期的に走り､タスクスロットが割り当て
-    /// 直されても生き延びるので､走っている diff の最中に 2 度目を始めると
-    /// 両側を 2 度払うことになる｡
-    pub(super) fn ask_to_sync(&mut self, cx: &mut Context<'_, Self>) {
-        if !offers_sync(&self.sync_status) {
-            return;
-        }
-        self.pending_sync = true;
-        cx.notify();
-    }
-
-    /// 尋ねたのを取り消す (#174)｡
-    pub(super) fn cancel_sync(&mut self, cx: &mut Context<'_, Self>) {
-        self.pending_sync = false;
-        cx.notify();
-    }
-
-    /// 2 回目のクリック: 実行を始める (#174)｡
-    ///
-    /// [`Self::ask_to_sync`] の確認を信じるのではなく status を確認し直す
-    /// — 2 回のクリックの隙間で予定された tick が始まりうるし､その隙間は
-    /// 確認を読むのにかかるだけの長さがある｡
-    pub(super) fn confirm_sync(&mut self, cx: &mut Context<'_, Self>) {
-        self.pending_sync = false;
-        if !offers_sync(&self.sync_status) {
-            cx.notify();
-            return;
-        }
-        self.start_sync(SyncTrigger::Manual, cx);
     }
 }
 
@@ -649,47 +587,18 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_rate_limited_sync_counts_down_and_still_says_what_is_owed() {
-        assert_eq!(
-            sync_status_label(
-                &SyncStatus::RateLimited {
-                    until: 1_060,
-                    pending: 40,
-                    refusals: 1,
-                },
-                1_000
-            ),
-            "List sync: rate limited, 40 to go — 60s"
-        );
-    }
-
-    #[test]
-    fn a_rate_limit_countdown_clamps_a_deadline_already_passed() {
-        let label = sync_status_label(
-            &SyncStatus::RateLimited {
-                until: 900,
-                pending: 40,
-                refusals: 1,
-            },
-            1_000,
-        );
-        assert!(label.ends_with("0s"), "never a negative countdown: {label}");
-    }
-
     // #197: 20 時間続く "rate limited — 900s" は待っていると読めた｡連続は
-    // 上限が明けていないということで､ラベルはそう言わなければならない｡
+    // 上限が明けていないということで､ラベルと色がそう言わなければならない｡
+    // 文言そのものは #205 で JST の時刻になった —
+    // `a_repeated_refusal_keeps_its_count_and_still_names_the_hour` を見よ｡
     #[test]
-    fn a_repeated_refusal_says_how_many_times_and_reads_as_stuck() {
+    fn a_repeated_refusal_reads_as_stuck() {
         let stuck = SyncStatus::RateLimited {
             until: 8_200,
             pending: 2_157,
             refusals: 3,
         };
-        assert_eq!(
-            sync_status_label(&stuck, 1_000),
-            "List sync: refused 3× in a row, 2157 to go — retry in 7200s"
-        );
+        assert!(sync_status_label(&stuck, 1_000).contains("refused 3×"));
         let theme = Theme::light();
         assert_eq!(sync_status_color(&stuck, theme), theme.danger);
     }
@@ -972,5 +881,58 @@ mod tests {
     fn the_confirmation_says_what_the_click_will_be_billed_for() {
         let label = sync_confirm_label();
         assert!(label.contains("per account"), "{label}");
+    }
+
+    // --- #205: JST の解除予定 ---
+
+    /// カウントダウンの秒数ではなく時刻を出す｡秒数は数時間続く block では
+    /// 読めない — #197 の "20 時間続く 900s" と同じ読み違いだ｡
+    #[test]
+    fn a_rate_limit_says_when_it_lifts_in_jst() {
+        // unix 0 は UTC の 1970-01-01 00:00､JST では同じ日の 09:00｡
+        let label = sync_status_label(
+            &SyncStatus::RateLimited {
+                until: 0,
+                pending: 40,
+                refusals: 1,
+            },
+            -1,
+        );
+        assert_eq!(
+            label,
+            "List sync: rate limited, 40 to go — resumes 09:00 JST"
+        );
+    }
+
+    #[test]
+    fn a_repeated_refusal_keeps_its_count_and_still_names_the_hour() {
+        let label = sync_status_label(
+            &SyncStatus::RateLimited {
+                until: 8_200,
+                pending: 2_157,
+                refusals: 3,
+            },
+            1_000,
+        );
+        assert_eq!(
+            label,
+            "List sync: refused 3× in a row, 2157 to go — retry at 11:16 JST"
+        );
+    }
+
+    /// 過ぎた期限を過去の時刻として出すと､明けているのに待っているように
+    /// 読める｡`until` は API のヘッダー由来なので信じきれない｡
+    #[test]
+    fn a_deadline_already_passed_reads_as_resuming_rather_than_a_past_hour() {
+        let label = sync_status_label(
+            &SyncStatus::RateLimited {
+                until: 900,
+                pending: 40,
+                refusals: 1,
+            },
+            1_000,
+        );
+        assert!(label.ends_with("resuming"), "{label}");
+        assert!(label.contains("40 to go"), "{label}");
     }
 }
