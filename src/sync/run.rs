@@ -180,7 +180,7 @@ pub(super) fn apply_some(
         // 投げる — #197 のロックの直前にしていた形｡1 件目の前には置かない｡
         // tick は既に batch と batch の間を待って来ている｡
         if sent > 0 {
-            std::thread::sleep(super::state::write_gap(
+            client.pause_between_writes(super::state::write_gap(
                 crate::rate_limit::random_jitter_fraction(),
             ));
         }
