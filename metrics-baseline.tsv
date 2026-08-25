@@ -208,7 +208,12 @@ src/ui/reload_policy.rs	300
 # cadence の側だけだ — `Situation` の 2 フィールドと､他のすべてに優先する
 # `Away` の早期 return｡ロックの問い合わせも sleep の判定も遷移のログも
 # 上の `src/activity.rs` へ行った｡だからこれは 150 ではなく 50 だ｡
-src/ui/auto_refresh.rs	650
+# 650 -> 700: #208 の glide の速さ｡毎フレーム残りの 15% を進む 1 行から､
+# 距離に比例した時間を smoothstep で歩く `glide_duration_s`/`glide_y` の
+# 対になった｡増えた行の大半は 3 つの定数の doc — なぜ 240px/s か､なぜ
+# 下限と上限があるか､そしてなぜ壁時計ではなくフレームごとに時間を足すか
+# (テストの executor は timer の時計しか進めない)｡
+src/ui/auto_refresh.rs	700
 # #174 で新設｡`ui/mod.rs` がこのために再び上がらずに済んだ理由でもある:
 # `start_auto_sync` が `ui` からここへ移り､`start_sync` として戻ってきた｡
 # 加えてステータスバーが報告する status の enum､2 つのラベル､手動トリガの
