@@ -1,28 +1,28 @@
-//! The shared half of twigpui's two per-post toggles: repost (#15) and
-//! like (#68).
+//! twigpui が持つ post ごとの 2 つのトグル､repost (#15) と like (#68) の
+//! 共有部分｡
 //!
-//! Both features have exactly the same shape. X API v2's timeline response
-//! carries no field for "has the signed-in user reposted/liked this post"
-//! — there is no v2 equivalent of v1.1's `retweeted`/`favorited` — and
-//! checking per-post would cost one request per visible post, which is out
-//! of the question for a project whose entire cache exists to avoid spend
-//! (see #9's module doc). So each feature keeps its own local record of
-//! post ids under `state_dir`, and each drives a button that flips on
-//! click and rolls back on failure.
+//! この 2 つの機能はまったく同じ形をしている｡X API v2 のタイムライン
+//! レスポンスには「サインイン中のユーザーがこの post を repost/いいねした
+//! か」を示すフィールドが無く (v1.1 の `retweeted`/`favorited` に相当する
+//! ものが v2 には無い)､post ごとに問い合わせると表示 post 1 つにつき
+//! 1 リクエストかかる｡キャッシュ全体が課金を避けるために存在している
+//! プロジェクトでは論外だ (#9 の module doc を参照)｡そこで各機能は
+//! `state_dir` の下に post id のローカル記録を自前で持ち､クリックで反転し
+//! 失敗したらロールバックするボタンをそれぞれ駆動している｡
 //!
-//! Neither of those two mechanisms is repost- or like-specific, so they
-//! live here once rather than twice:
+//! この 2 つの仕組みはどちらも repost 固有でも like 固有でもないので､
+//! 2 箇所に書く代わりにここへ 1 度だけ置いてある:
 //!
-//! - [`load_all`]/[`mark`]/[`unmark`]/[`persist`] — the id-set file,
-//!   parameterized by path so `repost.rs` and `like.rs` each pass their own
-//!   ([`Paths::reposted_posts_file`]/[`Paths::liked_posts_file`]).
-//! - [`ToggleState`]/[`ToggleStatus`] — the optimistic-update/rollback
-//!   state machine the button renders from, mirroring `compose.rs`'s
-//!   `ComposeState`/`ComposeStatus` convention.
+//! - [`load_all`]/[`mark`]/[`unmark`]/[`persist`] — id 集合のファイル｡
+//!   パスを引数に取るので､`repost.rs` と `like.rs` がそれぞれ自分のものを
+//!   渡す ([`Paths::reposted_posts_file`]/[`Paths::liked_posts_file`])｡
+//! - [`ToggleState`]/[`ToggleStatus`] — ボタンの描画元になる楽観更新/
+//!   ロールバックの状態機械｡`compose.rs` の
+//!   `ComposeState`/`ComposeStatus` の慣習に倣っている｡
 //!
-//! What stays in `repost.rs`/`like.rs` is what genuinely differs: which
-//! endpoint to call, which file to record into, and which of X's own error
-//! phrasings mean "the local record is stale" rather than "this failed".
+//! `repost.rs`/`like.rs` に残るのは本当に異なる部分だ: どのエンドポイントを
+//! 呼ぶか､どのファイルに記録するか､そして X が返すエラー文言のうちどれが
+//! 「これは失敗した」ではなく「ローカル記録が古い」を意味するか｡
 //!
 //! [`Paths::reposted_posts_file`]: crate::paths::Paths::reposted_posts_file
 //! [`Paths::liked_posts_file`]: crate::paths::Paths::liked_posts_file
@@ -33,18 +33,18 @@ use std::path::Path;
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
 
-/// The whole contents of one toggle's record file: every post id this app
-/// has currently toggled on.
+/// トグル 1 つ分の記録ファイルの全内容: このアプリが現在オンにしている
+/// post id の全体｡
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct IdSetFile {
     #[serde(default)]
     post_ids: HashSet<String>,
 }
 
-/// Load [`IdSetFile`] from disk. A missing file is a clean "nothing
-/// recorded yet from this app"; a corrupt or differently-shaped file is
-/// *also* a clean miss rather than an error, mirroring
-/// `rate_limit::load_file`/`cache::load_json`'s shared rule.
+/// [`IdSetFile`] をディスクから読む｡ファイルが無いのは
+/// 「このアプリからはまだ何も記録していない」という正常なミスだ｡壊れた
+/// ファイルや形の違うファイルも *同様に* エラーではなく正常なミスとして
+/// 扱う｡`rate_limit::load_file`/`cache::load_json` と共有している規則だ｡
 fn load_file(path: &Path) -> Result<IdSetFile> {
     let contents = match std::fs::read_to_string(path) {
         Ok(contents) => contents,
@@ -64,32 +64,32 @@ fn save_file(path: &Path, file: &IdSetFile) -> Result<()> {
     std::fs::write(path, json).with_context(|| format!("could not write {}", path.display()))
 }
 
-/// Every post id currently on file, read once — `ui.rs` calls this whenever
-/// the visible timeline changes (a reload, "Load older", startup) to seed
-/// each row's default [`ToggleState`], rather than reading disk once per
-/// row on every render.
+/// ファイルにある post id の全体を 1 度だけ読む — `ui.rs` は表示中の
+/// タイムラインが変わるたび (リロード､"Load older"､起動時) にこれを呼び､
+/// 各行の既定の [`ToggleState`] を初期化する｡描画のたびに行ごとに
+/// ディスクを読むのを避けるためだ｡
 pub(crate) fn load_all(path: &Path) -> Result<HashSet<String>> {
     Ok(load_file(path)?.post_ids)
 }
 
-/// Record `post_id`, alongside whatever else was already on file.
+/// すでにファイルにあるものはそのままに､`post_id` を記録する｡
 pub(crate) fn mark(path: &Path, post_id: &str) -> Result<()> {
     let mut file = load_file(path)?;
     file.post_ids.insert(post_id.to_string());
     save_file(path, &file)
 }
 
-/// Remove `post_id` from the record, alongside whatever else was already on
-/// file. Removing an id that was never present is not an error.
+/// すでにファイルにあるものはそのままに､`post_id` を記録から取り除く｡
+/// もともと無かった id を取り除こうとしてもエラーにはならない｡
 pub(crate) fn unmark(path: &Path, post_id: &str) -> Result<()> {
     let mut file = load_file(path)?;
     file.post_ids.remove(post_id);
     save_file(path, &file)
 }
 
-/// [`mark`] or [`unmark`], whichever `on` calls for — the shape the
-/// error-reconciliation paths in `repost.rs`/`like.rs` need, where the
-/// value to persist is only known once X's own error has been read.
+/// `on` が求めるほうに応じて [`mark`] または [`unmark`] を呼ぶ —
+/// `repost.rs`/`like.rs` のエラー訂正の経路が必要とする形だ｡そこでは
+/// 永続化すべき値が､X のエラーを読んで初めて分かる｡
 pub(crate) fn persist(path: &Path, post_id: &str, on: bool) -> Result<()> {
     if on {
         mark(path, post_id)
@@ -98,26 +98,26 @@ pub(crate) fn persist(path: &Path, post_id: &str, on: bool) -> Result<()> {
     }
 }
 
-/// One toggle button's status, independent of whether the toggle is
-/// currently on — kept separate from [`ToggleState`]'s own value the same
-/// way `compose.rs`'s `ComposeStatus` is kept separate from its draft text.
+/// トグルボタン 1 つの状態｡現在オンかどうかとは独立している —
+/// `compose.rs` の `ComposeStatus` が下書きのテキストと分けてあるのと
+/// 同じように､[`ToggleState`] が持つ値とは分けてある｡
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ToggleStatus {
     Idle,
-    /// A create/delete request is in flight (#15) — mirrors #14's
-    /// double-submit guard, though both toggles are reversible so a stray
-    /// second click matters less than it does there.
+    /// 作成/削除リクエストが飛んでいる最中 (#15) — #14 の二重送信ガードに
+    /// 倣っている｡ただしどちらのトグルも元に戻せるので､余計な 2 回目の
+    /// クリックの重みはあちらほどではない｡
     Pending,
-    /// The last toggle failed; carries a message for `ui.rs` to render. Not
-    /// itself a reason to refuse another attempt.
+    /// 直前のトグルが失敗した｡`ui.rs` が描画するメッセージを持つ｡これ自体は
+    /// 次の試行を拒む理由にはならない｡
     Failed(String),
 }
 
-/// One post's toggle state (#15, #68): whether it is currently on (by this
-/// app's own local record, possibly still optimistic — see
-/// [`Self::start_toggle`]) plus [`ToggleStatus`]. Nothing here touches
-/// gpui, the network, or the clock — `ui.rs` drives every transition from a
-/// click or a finished request, mirroring `compose.rs`'s `ComposeState`.
+/// post 1 つ分のトグル状態 (#15, #68): 現在オンかどうか (このアプリ自身の
+/// ローカル記録に基づく｡まだ楽観的な値かもしれない — [`Self::start_toggle`]
+/// を参照) と [`ToggleStatus`]｡ここにあるものは gpui にもネットワークにも
+/// 時計にも触れない — 遷移はすべて `ui.rs` がクリックか完了したリクエスト
+/// から駆動する｡`compose.rs` の `ComposeState` と同じだ｡
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ToggleState {
     on: bool,
@@ -125,8 +125,8 @@ pub(crate) struct ToggleState {
 }
 
 impl ToggleState {
-    /// A fresh state seeded from the local record (or the default `false`
-    /// for a post never seen before).
+    /// ローカル記録から初期化した新しい状態 (一度も見たことのない post なら
+    /// 既定の `false`)｡
     pub(crate) fn new(on: bool) -> Self {
         Self {
             on,
@@ -146,35 +146,35 @@ impl ToggleState {
         matches!(self.status, ToggleStatus::Pending)
     }
 
-    /// Whether a click should be allowed to do anything: nothing already in
-    /// flight for this exact post.
+    /// クリックに何かをさせてよいかどうか: この post について飛んでいる
+    /// リクエストが無いこと｡
     pub(crate) fn can_toggle(&self) -> bool {
         !self.is_pending()
     }
 
-    /// Optimistically flip to the opposite state and mark a request in
-    /// flight (#15's "flip on click, revert on failure") — the button never
-    /// waits on the network to show something changed. Callers must have
-    /// already checked [`Self::can_toggle`]; this doesn't re-check.
+    /// 楽観的に反対の状態へ反転させ､リクエストが飛んでいる印を付ける
+    /// (#15 の「クリックで反転､失敗したら戻す」) — 何かが変わったことを
+    /// 見せるのにボタンがネットワークを待つことはない｡呼び出し側は事前に
+    /// [`Self::can_toggle`] を確認していなければならない｡ここでは
+    /// 再確認しない｡
     pub(crate) fn start_toggle(&mut self) {
         self.on = !self.on;
         self.status = ToggleStatus::Pending;
     }
 
-    /// Refuse a toggle without ever having attempted a request — e.g. #15's
-    /// missing-`tweet.write`-scope check runs before `start_toggle`, the
-    /// same way `ComposeState::refuse` handles #14's identical check.
+    /// リクエストを一度も試みずにトグルを拒否する — 例えば #15 の
+    /// `tweet.write` スコープ欠落チェックは `start_toggle` の前に走る｡
+    /// `ComposeState::refuse` が #14 の同じチェックを扱うのと同じだ｡
     pub(crate) fn refuse(&mut self, message: String) {
         self.status = ToggleStatus::Failed(message);
     }
 
-    /// Apply a finished create/delete request's outcome: `Ok(actual)`
-    /// commits to the server's own resulting state (via the caller's own
-    /// reconciliation, this may not equal the value [`Self::start_toggle`]
-    /// optimistically guessed, though in practice it generally does — see
-    /// `repost::reconcile_from_error`'s doc); `Err` rolls the optimistic
-    /// flip back to exactly what it was before `start_toggle`, #15's
-    /// explicit rollback guarantee.
+    /// 完了した作成/削除リクエストの結果を適用する: `Ok(actual)` は
+    /// サーバー側の結果の状態を確定させる (呼び出し側の訂正処理を経るため､
+    /// [`Self::start_toggle`] が楽観的に推測した値と一致しないことがある｡
+    /// 実際にはたいてい一致する — `repost::reconcile_from_error` の doc を
+    /// 参照)｡`Err` は楽観的な反転を `start_toggle` の直前とまったく同じ値へ
+    /// 巻き戻す｡#15 が明示している rollback の保証だ｡
     pub(crate) fn apply_result(&mut self, result: Result<bool, String>) {
         match result {
             Ok(actual) => {
@@ -282,8 +282,8 @@ mod tests {
     #[test]
     fn a_genuine_io_error_reading_the_file_still_propagates() {
         let path = temp_file("io-error");
-        // A directory where a file is expected is a real I/O error, not
-        // corruption — it must surface rather than being swallowed.
+        // ファイルがあるべき場所にディレクトリがあるのは､破損ではなく
+        // 本物の I/O エラーだ — 握り潰さずに表に出さなければならない｡
         std::fs::create_dir(&path).unwrap();
         assert!(load_all(&path).is_err());
         cleanup(&path);
@@ -329,11 +329,11 @@ mod tests {
 
     #[test]
     fn a_successful_toggle_can_commit_a_state_that_disagrees_with_the_optimistic_guess() {
-        // #15's reconciliation path: the server's own resulting state wins
-        // even when it differs from what `start_toggle` guessed.
+        // #15 の訂正経路: サーバー側の結果の状態が､`start_toggle` の推測と
+        // 食い違っていても優先される｡
         let mut state = ToggleState::new(false);
-        state.start_toggle(); // optimistic guess: true
-        state.apply_result(Ok(false)); // server says: actually still false
+        state.start_toggle(); // 楽観的な推測: true
+        state.apply_result(Ok(false)); // サーバーの答え: 実際にはまだ false
         assert!(!state.is_on());
         assert!(state.can_toggle());
     }
@@ -341,7 +341,7 @@ mod tests {
     #[test]
     fn a_failed_create_toggle_rolls_back_to_off() {
         let mut state = ToggleState::new(false);
-        state.start_toggle(); // optimistic true, pending
+        state.start_toggle(); // 楽観的に true､pending
         state.apply_result(Err("network error".to_string()));
 
         assert!(!state.is_on(), "rollback must restore the pre-toggle value");
@@ -355,7 +355,7 @@ mod tests {
     #[test]
     fn a_failed_undo_toggle_rolls_back_to_on() {
         let mut state = ToggleState::new(true);
-        state.start_toggle(); // optimistic false, pending
+        state.start_toggle(); // 楽観的に false､pending
         state.apply_result(Err("boom".to_string()));
 
         assert!(state.is_on(), "rollback must restore the pre-toggle value");
@@ -363,7 +363,7 @@ mod tests {
 
     #[test]
     fn refuse_records_a_message_without_ever_having_toggled() {
-        // #15's missing-scope refusal — mirrors `ComposeState::refuse`.
+        // #15 のスコープ欠落による拒否 — `ComposeState::refuse` と同じ形｡
         let mut state = ToggleState::new(false);
         state.refuse("needs re-authorization".to_string());
 

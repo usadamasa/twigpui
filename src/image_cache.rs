@@ -1,20 +1,20 @@
-//! Downloading and caching remote images (#64, #65).
+//! リモート画像のダウンロードとキャッシュ (#64, #65)｡
 //!
-//! Avatars (`avatar.rs`) and post media (`ui.rs`'s media grid) both need
-//! the same thing: fetch a URL once, keep the bytes on disk, hand back a
-//! path `gpui::img` can render. Neither is X API traffic — both go to
-//! `pbs.twimg.com` — so **no quota and no credits**, but they are still
-//! HTTP requests, so they happen off the UI thread and only once per URL:
-//! [`ensure_cached`] returns immediately when the file is already there.
+//! アバター (`avatar.rs`) も post のメディア (`ui.rs` のメディアグリッド) も
+//! 必要なものは同じだ: URL を一度 fetch し､バイト列をディスクに置き､
+//! `gpui::img` が描けるパスを返す｡どちらも X API のトラフィックではなく
+//! — 両方とも `pbs.twimg.com` へ行く — **quota も credit も使わない**｡
+//! それでも HTTP リクエストではあるので､UI スレッドの外で､URL ごとに
+//! 一度だけ行う: ファイルがすでにあれば [`ensure_cached`] は即座に返る｡
 //!
-//! What differs between the two callers is only *which directory* the file
-//! lands in, which is why that is a parameter here rather than two copies
-//! of this module.
+//! 2 つの呼び出し元で違うのはファイルが落ちる *ディレクトリ* だけだ｡
+//! だからそれをここのパラメータにしてあり､このモジュールを 2 つ複製して
+//! いない｡
 //!
-//! [`cache_key`] is the pure seam carrying the coverage; [`ensure_cached`]
-//! touches the network and disk and is not unit-tested, the convention
-//! `cache::reload` and `repost::create` already follow — the project's
-//! tests never make a network request.
+//! カバレッジを担っている純粋な継ぎ目は [`cache_key`] だ｡[`ensure_cached`]
+//! はネットワークとディスクに触るので unit test しない｡`cache::reload` と
+//! `repost::create` がすでに従っている慣習で — このプロジェクトのテストは
+//! ネットワークリクエストを一切しない｡
 
 use std::fmt::Write as _;
 use std::io::Read as _;
@@ -24,35 +24,35 @@ use std::time::Duration;
 use anyhow::{Context as _, Result, bail};
 use sha2::{Digest as _, Sha256};
 
-/// Give up on an image that hasn't arrived by then. Deliberately short:
-/// nothing depends on it, the row renders a placeholder meanwhile, and a
-/// hung connection must not keep a background task alive indefinitely.
+/// これまでに届かない画像は諦める｡意図的に短くしてある: 依存するものが
+/// 何も無く､その間 row はプレースホルダを描き､固まった接続が background
+/// task を無期限に生かしつづけてはならないからだ｡
 const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Refuse anything larger than this. A profile image is tens of kilobytes
-/// and a timeline photo a few hundred; a response far past that is a
-/// redirect to something else, a server error page, or a resource this app
-/// has no business writing to disk.
+/// これより大きいものは拒否する｡プロフィール画像は数十キロバイト､
+/// timeline の写真は数百キロバイトだ｡それをはるかに超えるレスポンスは
+/// 別物へのリダイレクトか､サーバのエラーページか､このアプリがディスクに
+/// 書く筋合いの無いリソースだ｡
 const MAX_BYTES: u64 = 8 * 1024 * 1024;
 
-/// The file name one image URL is cached under.
+/// 1 つの画像 URL がキャッシュされるファイル名｡
 ///
-/// A hash of the whole URL, not the URL itself: these URLs contain `/` and
-/// query strings, and X reuses the same basename (`image_normal.jpg`)
-/// across different accounts, so anything shorter would either be an
-/// invalid file name or collide between users. The extension is carried
-/// over when the URL has a plausible one so the file stays recognizable to
-/// anything that opens the cache directory by hand; anything unexpected
-/// falls back to `.img` rather than being trusted as a path component.
+/// URL そのものではなく URL 全体のハッシュだ: これらの URL は `/` と
+/// クエリ文字列を含むし､X は同じ basename (`image_normal.jpg`) を別々の
+/// アカウントで使い回すので､これより短いものは不正なファイル名になるか
+/// ユーザー間で衝突するかのどちらかになる｡URL がもっともらしい拡張子を
+/// 持つときはそれを引き継ぐ｡キャッシュディレクトリを手で開いたものから
+/// ファイルが見分けられるままになるようにだ｡想定外のものはパス要素として
+/// 信用せず､`.img` へ落とす｡
 pub(crate) fn cache_key(url: &str) -> String {
     let digest = Sha256::digest(url.as_bytes());
-    // Capacity hint only: two hex characters per byte, plus a dot and a
-    // short extension. Saturating because it is an optimization, not a
-    // bound — an overflow here would be a wrong allocation size, not a
-    // wrong key (#47).
+    // 容量のヒントにすぎない: 1 バイトあたり 16 進 2 文字､それにドットと
+    // 短い拡張子｡saturating なのはこれが最適化であって境界ではないからだ
+    // — ここでの overflow は誤った確保サイズであり､誤った key ではない
+    // (#47)｡
     let mut key = String::with_capacity(digest.len().saturating_mul(2).saturating_add(5));
     for byte in digest {
-        // Infallible: writing to a String never fails.
+        // 失敗しない: String への書き込みは決して失敗しない｡
         let _ = write!(key, "{byte:02x}");
     }
     key.push('.');
@@ -60,10 +60,10 @@ pub(crate) fn cache_key(url: &str) -> String {
     key
 }
 
-/// The extension to give a cached image: the URL's own when it is a short,
-/// purely alphanumeric one (`jpg`, `png`, `webp`), else `img`. Never
-/// trusted verbatim — an extension is part of a file name this code then
-/// writes to.
+/// キャッシュした画像に与える拡張子: URL 自身のものが短く純粋に英数字
+/// (`jpg`, `png`, `webp`) ならそれを､そうでなければ `img` を使う｡そのまま
+/// 信用することは決してない — 拡張子は､このコードがこの後書き込む
+/// ファイル名の一部だからだ｡
 fn extension_of(url: &str) -> &str {
     let candidate = url
         .rsplit('/')
@@ -77,16 +77,16 @@ fn extension_of(url: &str) -> &str {
     if plausible { candidate } else { "img" }
 }
 
-/// Where one image URL lives inside `dir`, whether or not it is there yet.
+/// 1 つの画像 URL が `dir` の中のどこに住むか｡まだそこに無くても答える｡
 pub(crate) fn cached_path(dir: &Path, url: &str) -> PathBuf {
     dir.join(cache_key(url))
 }
 
-/// The local path for `url`, downloading it into `dir` first if it isn't
-/// cached yet.
+/// `url` のローカルパス｡まだキャッシュされていなければ先に `dir` へ
+/// ダウンロードする｡
 ///
-/// Not unit-tested — it makes a real HTTP request. [`cache_key`] carries
-/// the coverage.
+/// unit test しない — 本物の HTTP リクエストを出すからだ｡カバレッジは
+/// [`cache_key`] が担う｡
 pub(crate) fn ensure_cached(dir: &Path, url: &str) -> Result<PathBuf> {
     let path = cached_path(dir, url);
     if path.exists() {
@@ -136,8 +136,8 @@ mod tests {
 
     #[test]
     fn different_urls_get_different_cache_keys() {
-        // X reuses the same basename across accounts, so hashing the whole
-        // URL is what keeps two images apart.
+        // X はアカウントをまたいで同じ basename を使い回すので､2 つの画像を
+        // 分けているのは URL 全体をハッシュすることだ｡
         assert_ne!(
             cache_key("https://pbs.twimg.com/profile_images/1/image_normal.jpg"),
             cache_key("https://pbs.twimg.com/profile_images/2/image_normal.jpg")
@@ -169,8 +169,8 @@ mod tests {
 
     #[test]
     fn an_implausible_extension_falls_back_to_img() {
-        // Never trusted verbatim: this becomes part of a file name that is
-        // then written to.
+        // そのまま信用することは決してない: これはこの後書き込まれる
+        // ファイル名の一部になる｡
         for url in [
             "https://example.com/a/b.php?x=/../../etc",
             "https://example.com/avatar",

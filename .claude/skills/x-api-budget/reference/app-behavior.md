@@ -1,160 +1,145 @@
 # twigpui の課金まわりの挙動 — リクエスト数・レートリミット・消費集計・キャッシュ
 
-`../SKILL.md` が判断の規範、`pricing.md` が X 側の課金仕様 (単価・出典・実測)。
-このファイルは **twigpui が何をしているか**。
+`../SKILL.md` が判断の規範､`pricing.md` が X 側の課金仕様 (単価・出典・実測)｡
+このファイルは **twigpui が何をしているか**｡
 
-以下は英語のまま。#4 以来のドキュメントを畳んだもので、書き直す理由がない。
+## 1 操作あたりのリクエスト数
 
-## Requests per action
+読み取りは返ってきた resource の数で課金される (`pricing.md`) が､リクエスト数は
+今もレートリミットと､本当にリクエスト単位である操作のほうを支配している｡
 
-Reads are billed per resource returned (see `pricing.md`), but the request
-count still governs rate limits and the actions that really are per-request.
+コールドなリロードは 2 本送る｡id の解決 1 本 (単一ユーザー表示なら
+`/users/by/username/:username`､ホームタイムラインなら `/users/me` — #11) と
+タイムライン取得 1 本｡さらに "Load older" のクリック 1 回につき 1 本､返信への
+"Show thread" のクリック 1 回につき**最大 5 本** (#12 — 親の階層 1 つにつき
+`GET /2/tweets?ids=` を 1 本)｡取得は明示的な操作のときにしか起きない — ポーリングも
+自動更新も無く､#9 以降は**アプリを開くこと自体は何も消費しない**｡起動時は下に書いた
+ローカルキャッシュがあればそこから直接描画し､リクエストは 1 本も挟まらない｡
 
-A cold reload sends two: one id lookup
-(`/users/by/username/:username` for the single-user view, `/users/me` for the
-home timeline — #11) and one timeline fetch, plus one more per "Load older"
-click, plus **up to five** more per "Show thread" click on a reply (#12 — one
-`GET /2/tweets?ids=` request per parent level). Fetching happens only on an
-explicit action — there is no polling or auto-refresh, and since #9,
-**opening the app spends nothing at all**: startup renders straight from the
-local cache below whenever one exists, with no request in the loop.
+リポストは 1 リクエスト､リポストの取り消しでもう 1 リクエスト｡いいねと取り消し (#68)
+も同じくそれぞれ 1 リクエストで､投稿の削除 (#72) も同じ｡
 
-Reposting spends one request; un-reposting spends one more. Liking and
-unliking (#68) cost the same, one request each, and so does deleting a post
-(#72).
+`--fetch-post` (#42) は post id をいくつ渡しても 1 回の実行につきちょうど 1 リクエスト
+しか送らない｡すべてが 1 本の `GET /2/tweets?ids=` のカンマ区切りの `ids=` パラメータに
+乗るのであって､id ごとに 1 リクエストにはならない｡ただし課金のほうは､返ってきた
+post の数に従う｡
 
-`--fetch-post` (#42) sends exactly one request per run, however many post ids
-are given — they all ride in a single `GET /2/tweets?ids=` request's
-comma-separated `ids=` parameter, never one request per id. The billing,
-though, still follows the number of posts that come back.
+残高が尽きると API は `UsageCapExceeded` の problem body を付けた `429` を返す｡
+アプリはそのテキストをそのままウィンドウに出す｡
 
-When credits run out the API answers `429` with a `UsageCapExceeded` problem
-body; the app surfaces that text directly in the window.
+## `--sync-list` と､debug ビルドが別のものを同期する理由
 
-## `--sync-list`, and why a debug build syncs something else
+`--sync-list` (#163) は､ここで扱う操作のうち読み取りコストに天井が無い唯一のもの｡
+dry run がフォローグラフ全体とリストのメンバー全体をページングし､どちらも返ってきた
+アカウント単位で課金される｡数千のフォローに対しては､何も書き込まない実行に
+ドル単位が飛ぶ｡
 
-`--sync-list` (#163) is the one action here whose read cost has no ceiling:
-its dry run pages through the whole follow graph and the whole list
-membership, and both are billed per account returned. Against a few
-thousand follows that is dollars for a run that writes nothing.
+#169 以降､その読み取りは **release** ビルドでしか起きない｡debug ビルドは開発用の
+プロファイルで､フォローグラフの読み取りを 4 つの固定スクリーンネーム
+(`src/profile.rs` の `DEV_SYNC_SEED`) に置き換える｡解決にはリロードと同じ 30 日の
+`user_ids.json` キャッシュを通すので､課金される lookup は月に 4 回だけで､あとはゼロ｡
+さらに `list_id` の既定を使い捨てのリストにしてあるので､開発中の `--apply` が本物の
+リストを書き換えることはない｡
 
-Since #169, that read only happens in a **release** build. A debug build is
-the development profile, and it replaces the follow-graph read with four
-fixed screen names (`DEV_SYNC_SEED` in `src/profile.rs`), resolved through
-the same 30-day `user_ids.json` cache a reload uses — four billed lookups a
-month, then nothing. It also defaults `list_id` to a throwaway list, so a
-development `--apply` cannot rewrite the real one.
+ドキュメントを読み書きするときに覚えておくべき帰結: **`--release` の付かない
+`--sync-list` の例は開発用の同期である｡** 失敗するのではなく､別の組を同期する｡
+リストのメンバーの読み取りはどちらのプロファイルでもページングされて課金される —
+代役が立つのはフォローグラフの側だけ｡
 
-The consequence to keep in mind when reading or writing docs: **a
-`--sync-list` example without `--release` is a development sync.** It does
-not fail, it syncs the other pair. The list membership read is paginated
-and billed in both profiles — only the follow-graph side is stood in for.
+## レートリミット
 
-## Rate limits
+X のエンドポイントごとのレートリミットと､上に書いたプリペイド残高の上限は､どちらも
+HTTP `429` として現れるが挙動は似ても似つかない — 残高上限の `429` はリトライしても
+何の助けにもならない (アカウントへの入金が要る) 一方､通常のレートリミットはウィンドウ
+がリセットされれば回復する｡twigpui はこの 2 つを見分け､それぞれに応じて扱う｡
 
-X's per-endpoint rate limits and the prepaid usage cap above both surface as
-HTTP `429`, but they behave nothing alike — retrying a usage-cap `429` never
-helps (the account needs topping up), while an ordinary rate limit recovers
-once its window resets. twigpui tells them apart and treats each accordingly:
+- **何を追っているか｡** すべてのレスポンスの `x-rate-limit-limit` / `-remaining` /
+  `-reset` ヘッダーをパースし､エンドポイントごとに保持する: ユーザー名の解決､
+  単一ユーザーのタイムライン取得､`/users/me`､ホームタイムライン (#11)､
+  `GET /2/tweets?ids=` (#12, "Show thread")､`POST /2/tweets` (#14, 投稿)､
+  リポストとその取り消し (#15, `POST`/`DELETE /2/users/:id/retweets…`｡X がリポストの
+  作成と削除を別々に制限するので 2 つの別エンドポイントとして追う)､いいねとその
+  取り消し (#68, `POST`/`DELETE /2/users/:id/likes…`｡同じ理由で 2 エンドポイント) を
+  すべて個別に追う｡X がそれぞれを別々に制限するためだ｡
+- **待つのではなく送信を拒む｡** 追っている残数がゼロで､リセット時刻がまだ来ていなければ､
+  twigpui はリクエストを送ら**ない**｡クリックが勝手に解決するかもしれないという当てで
+  GUI アプリがバックグラウンドスレッドを最大 15 分眠らせるいわれは無い｡代わりに
+  リロードボタンがリセット時刻までのカウントダウンを出し､その前にもう一度押しても
+  (無料でローカルな) 追跡済みの状態を読み直すだけで､ネットワークには出ない｡
+- **リトライ｡** ネットワークエラーと `5xx` のレスポンスは､指数バックオフとジッタを
+  掛けて小さな試行回数の上限までリトライする｡`429` はどちらの種類も決してリトライ
+  しない — 一方はリトライしてもしなくても自分のスケジュールで回復し､もう一方は
+  そもそも回復しないからだ｡
+- **どこに置くか｡** `$XDG_STATE_HOME/twigpui/rate_limit.json` (cache ではなく state —
+  プロセスを再起動しても X 側のウィンドウはリセットされないので､このファイルを失うと
+  枯渇済みのウィンドウへそのままリクエストを撃ちかねない)｡ファイルが無い､または
+  壊れている場合は､壊れたレスポンスキャッシュ (下記) と同じく「まだ何も追っていない」
+  として素直に扱い､起動の失敗にはしない｡
+- **最小取得間隔｡** `X_MIN_FETCH_INTERVAL_SECONDS` (`config.toml` では
+  `min_fetch_interval_seconds`､既定は `60`) は､上の API 側の追跡状態とは独立に､
+  リロードボタン自体が発火してよい頻度に対するクライアント側の下限｡ボタンはこれに
+  ついてもカウントダウンするが､言い方は変える — "Rate limited by X" ではなく
+  "Waiting out the fetch interval"｡この場合は何も送っておらず､X は何も言っていない
+  からだ｡#21 の自動更新も､入ったら同じ設定を使う｡
 
-- **What's tracked.** Every response's `x-rate-limit-limit` /
-  `-remaining` / `-reset` headers are parsed and kept per endpoint: the
-  username lookup, the single-user timeline fetch, `/users/me`, the home
-  timeline (#11), `GET /2/tweets?ids=` (#12, "Show thread"),
-  `POST /2/tweets` (#14, posting), reposting/un-reposting (#15,
-  `POST`/`DELETE /2/users/:id/retweets…`, tracked as two separate endpoints
-  since X limits creating and deleting a repost independently), and
-  liking/unliking (#68, `POST`/`DELETE /2/users/:id/likes…`, two endpoints
-  for the same reason) are all tracked separately, since X limits each of
-  them separately.
-- **The app refuses to send rather than waiting.** If the tracked remaining
-  count is zero and the reset time hasn't arrived yet, twigpui does **not**
-  send the request — a GUI app has no business sleeping a background thread
-  for up to 15 minutes on the chance a click resolves itself. Instead the
-  reload button shows a countdown to the reset time, and clicking again
-  before then just re-checks the (free, local) tracked state rather than
-  hitting the network.
-- **Retries.** A network error or a `5xx` response is retried with
-  exponential backoff and jitter, up to a small attempt cap. Neither kind of
-  `429` is ever retried — one recovers on its own schedule regardless of
-  retrying, and the other never recovers at all.
-- **Where it's kept.** `$XDG_STATE_HOME/twigpui/rate_limit.json` (state, not
-  cache — a process restart doesn't reset X's window, so losing this file
-  risks firing a request straight into one that's already exhausted). A
-  missing or corrupt file is a clean "nothing tracked yet", the same way a
-  broken response cache is (see below), never a startup failure.
-- **Minimum fetch interval.** `X_MIN_FETCH_INTERVAL_SECONDS` (or
-  `min_fetch_interval_seconds` in `config.toml`, default `60`) is a
-  client-side floor on how often the reload button itself may fire,
-  independent of what the tracked API state above says. The button counts
-  down for this too, but says so in different words — "Waiting out the fetch
-  interval" rather than "Rate limited by X" — because in this case nothing
-  was sent and X has said nothing. #21's auto-refresh will use the same
-  setting once it lands.
+<a id="usage-tracking"></a>
+## 消費集計
 
-## Usage tracking
+**この節が書いている内容は､X の実際の課金と一致しない｡** ここが数えるのは
+リクエスト数だが､読み取りは resource 単位で課金される (`pricing.md`) ので､下の数字は
+読み取りを 1〜2 桁小さく見せる｡修正は #162 で追っている｡それまでは､この数を
+「いくら掛かったか」ではなく「アプリが何回外へ出たか」として読む｡
 
-**What this section describes does not match how X actually bills.** It
-counts requests; reads are billed per resource (`pricing.md`), so the numbers
-below understate reads by one to two orders of magnitude. #162 tracks the fix.
-Until then, treat the counts as "how many times the app called out", not "what
-this cost".
+本当の数字を見る手は 2 つ｡Developer Console の Usage / Billing の明細か､
+`GET /2/usage/tweets` — どちらも `pricing.md` に書いてある｡
 
-Two ways to see the real figure: the Developer Console's Usage / Billing
-breakdown, or `GET /2/usage/tweets` — both described in `pricing.md`.
+twigpui は実際に送ったリクエストをすべて数えて永続化するので､累計はウィンドウからも
+コマンドラインからも見える｡
 
-twigpui counts every request it actually sends and persists the counts, so a
-running total is visible both in the window and from the command line.
+**何を数えるか｡** `x_api::client` の中央にある 1 つの `get` メソッドから数えた､実際の
+HTTP 送信すべて — リトライも含む｡ネットワークエラーや `5xx` の後にリトライした
+リクエストは試行ごとに 1 回数える｡どれも API へ届く (あるいは届こうとする) 実際の
+送信であり､それに応じて課金されるからだ｡`#10` のレートリミット追跡がそもそも送信を
+拒んだリクエストは､何も出ていないので数え**ない**｡カウントはエンドポイントごとに
+保持し (#10 がすでに別々に追っているのと同じ 5 つの `Endpoint`)､下に出す合計は
+それを足し上げたもの｡
 
-**What's counted.** Every actual HTTP send counted from `x_api::client`'s one
-central `get` method — including retries: a request retried after a network
-error or a `5xx` counts once per attempt, since each one is a real send that
-reaches (or attempts to reach) the API and is billed accordingly. A request
-`#10`'s rate-limit tracker refuses to send in the first place is **not**
-counted, since nothing went out. Counts are kept per endpoint (the same five
-`Endpoint`s #10 already tracks separately) and summed for the totals shown
-below.
+**どこに置くか｡** `$XDG_STATE_HOME/twigpui/usage.json` (cache ではなく state —
+この区別がここでも効く理由は上のレートリミットの節を見る)｡エンドポイントごとの
+エントリが､全期間の合計と現在の UTC 日のカウントを持つ｡ファイルが無い､または壊れて
+いる場合は､壊れたレスポンスキャッシュやレートリミットのファイルと同じく「まだ何も
+追っていない」として素直に扱い､起動の失敗にはしない｡
 
-**Where it's kept.** `$XDG_STATE_HOME/twigpui/usage.json` (state, not cache —
-see the rate-limit section above for why that distinction matters here too).
-Each endpoint's entry holds an all-time total and a count for the current UTC
-day. A missing or corrupt file is a clean "nothing tracked yet", the same way
-a broken response cache or rate-limit file is — never a startup failure.
+**日付の境界は UTC｡** 「今日」はマシンのローカルの深夜ではなく UTC の深夜にリセット
+される｡理由は 2 つ｡X API の `created_at` のタイムスタンプがそもそも UTC なので､
+こうしておけばアプリ全体で「今日」が 1 つの意味に揃うこと｡そして Rust の標準
+ライブラリには､日付時刻の crate を引き込まずにローカルの UTC オフセットを確実に読む
+手が無く､このプロジェクトは他にその crate を必要としないこと｡この機能のために依存は
+足していない — 日付の境界は､他のモジュールがすでに使っているのと同じ Unix
+タイムスタンプに対する `unix_seconds.div_euclid(86_400)` にすぎない｡引き換えに､
+UTC より西にいる人には「今日」が自分の深夜ではなくローカルの昼過ぎに切り替わる｡
 
-**Day boundary: UTC.** "Today" resets at UTC midnight, not the machine's
-local midnight, for two reasons: the X API's own `created_at` timestamps are
-already UTC, so this keeps "today" meaning one consistent thing throughout
-the app; and Rust's standard library has no reliable way to read the local
-UTC offset without pulling in a date/time crate, which this project does not
-otherwise need. No new dependency was added for this feature — a day
-boundary is just `unix_seconds.div_euclid(86_400)` on the same Unix
-timestamp every other module already uses. The tradeoff: someone west of UTC
-sees "today" roll over mid-afternoon local time, not at their own midnight.
+**単価が設定されていない限り､金額は一切表示しない｡** リクエストあたりの単価は
+アカウントのプランに依存し､ここからは知りようがない — なので既定ではヘッダーと
+`--usage` (下記) はリクエストの*件数*だけを出す｡`X_REQUEST_PRICE` (`config.toml` では
+`request_price`) を､頭にある任意の単位で設定すると､その件数が見積もり金額
+(`count × price`) に変わる｡当てずっぽうの間違った単価は単価が無いより悪いので､
+twigpui が組み込みの既定を勝手に作ることはない｡
 
-**No amount is ever shown unless a price is configured.** The per-request
-price depends on the account's plan, and there is no way to know it from
-here — so by default the header and `--usage` (below) show request *counts*
-only. Setting `X_REQUEST_PRICE` (or `request_price` in `config.toml`), in
-whatever unit you have in mind, turns those counts into an estimated amount
-(`count × price`). A wrong, guessed price would be worse than no price at
-all, so twigpui never invents a built-in default.
+**予算の色付け｡** `X_DAILY_REQUEST_BUDGET` (`config.toml` では
+`daily_request_budget`) は金額ではなくリクエスト件数の予算｡これは意図的で､
+リクエスト件数は常に分かるため､単価が設定されていてもいなくても効く｡全エンドポイント
+を合わせた今日の合計が予算の 80% に達すると､ヘッダーの消費行が警告色に変わる｡
+予算そのものに達するかそれを超えると､エラーやレートリミットのカウントダウンと同じ色に
+変わる｡
 
-**Budget coloring.** `X_DAILY_REQUEST_BUDGET` (or `daily_request_budget` in
-`config.toml`) is a request-count budget, not a monetary one — deliberately,
-so it works whether or not a price is configured, since request counts are
-always known. Once today's total across every endpoint reaches 80% of the
-budget the header's usage line switches to a warning color; at or past the
-budget itself, it switches to the same color used for errors and rate-limit
-countdowns.
+**ウィンドウでの見え方｡** ヘッダーはタイトルの下に常に短い 1 行を出す｡今日の
+リクエスト件数と全期間の合計で､単価が設定されていれば見積もり金額が後ろに付く —
+例えば `Today: 3 req (~0.06) · Total: 42 req`､単価が無ければ
+`Today: 3 req · Total: 42 req`｡
 
-**In the window.** The header always shows a compact line under the title:
-today's request count and the all-time total, with an estimated amount
-appended when a price is configured — e.g. `Today: 3 req (~0.06) · Total: 42
-req` or, with no price set, `Today: 3 req · Total: 42 req`.
-
-**From the command line: `--usage`.** Prints the same numbers as JSON to
-stdout and exits, without opening a window or making any network call (it
-only reads `usage.json`):
+**コマンドラインから: `--usage`｡** 同じ数字を JSON で標準出力へ出して終了する｡
+ウィンドウは開かず､ネットワーク呼び出しもしない (`usage.json` を読むだけ):
 
 ```sh
 cargo run -- --usage
@@ -181,80 +166,74 @@ cargo run -- --usage
 }
 ```
 
-JSON rather than a bespoke text format, since the project already depends on
-`serde_json` for everything else it persists, and a machine-readable
-consumer (a script, another tool) needs structure to parse rather than a
-format it has to scrape. `price_per_request` and every `estimated_amount_*`
-field are `null` unless `X_REQUEST_PRICE` is configured, matching the
-header's own rule. `budget_status` is `"ok"`, `"near"` (80% of the configured
-budget), or `"exceeded"`; it's always `"ok"` when no budget is configured.
+独自のテキスト形式ではなく JSON にしたのは､このプロジェクトが永続化する他のものは
+すべてすでに `serde_json` に依存しているからであり､機械が読む側 (スクリプトや別の
+ツール) は削り取らねばならない形式ではなくパースできる構造を必要とするからだ｡
+`price_per_request` と `estimated_amount_*` のフィールドは､`X_REQUEST_PRICE` が
+設定されていない限り `null` で､ヘッダー自身の規則と揃えてある｡`budget_status` は
+`"ok"`､`"near"` (設定した予算の 80%)､`"exceeded"` のいずれか｡予算が設定されて
+いなければ常に `"ok"`｡
 
-## Local cache
+<a id="local-cache"></a>
+## ローカルキャッシュ
 
-To avoid re-paying for the same content, twigpui keeps a small JSON cache
-under `$XDG_CACHE_HOME/twigpui/` (see the [file locations table](../../../../README.md#file-locations-xdg-base-directory)):
+同じ内容に二度払わないよう､twigpui は `$XDG_CACHE_HOME/twigpui/` の下に小さな JSON
+キャッシュを持つ ([ファイル配置の表](../../../../README.md#file-locations-xdg-base-directory)を参照):
 
-| File | Holds | TTL |
+| ファイル | 中身 | TTL |
 | --- | --- | --- |
-| `user_ids.json` | Every screen name resolved so far, mapped to its numeric user id | 30 days |
-| `timeline-<user_id>.json` | One user's cached posts (single-user mode), newest first, plus when they were fetched | none — see below |
-| `me.json` | The signed-in user's own id and screen name, from `/users/me` (#11) | 30 days |
-| `home-timeline-<user_id>.json` | That user's cached home timeline (#11), newest first — a deliberately separate file from `timeline-<user_id>.json` for the same id, since the two hold different content | none — see below |
-| `thread-<reply_id>.json` | One reply's already-walked parent chain (#12), keyed by the reply's own post id | none — a post's parents never change once posted |
+| `user_ids.json` | これまでに解決したすべてのスクリーンネームと､対応する数値の user id | 30 日 |
+| `timeline-<user_id>.json` | 1 ユーザーのキャッシュ済み post (単一ユーザーモード)｡新しい順､および取得した時刻 | 無し — 下記 |
+| `me.json` | `/users/me` (#11) から取った､サインイン中のユーザー自身の id とスクリーンネーム | 30 日 |
+| `home-timeline-<user_id>.json` | そのユーザーのキャッシュ済みホームタイムライン (#11)｡新しい順 — 同じ id の `timeline-<user_id>.json` とは意図的に別ファイルにしてある｡2 つは違う内容を持つからだ | 無し — 下記 |
+| `thread-<reply_id>.json` | 1 つの返信について辿り終えた親のチェーン (#12)｡返信自身の post id をキーにする | 無し — post の親は投稿された後に変わらない |
 
-**User ids — including the signed-in user's own, from `/users/me` — are
-effectively permanent**, so caching the lookup is what turns a reload from
-two requests into one: once an id is cached and still within its 30-day TTL,
-a reload skips straight to the timeline-fetch request.
+**user id は — `/users/me` から取るサインイン中のユーザー自身のものも含めて —
+事実上不変**なので､lookup をキャッシュすることがリロードを 2 リクエストから 1 つへ
+変える｡id がキャッシュ済みで 30 日の TTL の内にあれば､リロードはタイムライン取得の
+リクエストへ直接飛ぶ｡
 
-**Timelines have no TTL**, in either mode. Freshness is bounded by an explicit
-reload, not by age — the cache is trusted at startup no matter how old it is,
-since the whole point is that opening the window costs nothing. Reloading
-passes the newest cached post's id as the API's `since_id`, so the response
-only contains what's actually new; those posts are merged ahead of what's
-already cached (any id already on file is dropped rather than duplicated),
-and the result is capped at **500 posts per user**, oldest dropped first —
-`~/.cache` isn't purged automatically by macOS the way `~/Library/Caches` is,
-so this cap is twigpui's own. The home timeline's "Load older" button works
-the other direction: it appends older posts (via `meta.next_token`) *behind*
-what's cached rather than merging them ahead, and the same 500-post cap still
-applies.
+**タイムラインに TTL は無い**｡どちらのモードでも同じ｡鮮度を区切るのは経過時間では
+なく明示的なリロードで､どれだけ古くても起動時のキャッシュは信頼する｡ウィンドウを
+開くのに何も掛からないことが要点だからだ｡リロードはキャッシュ済みで最も新しい post
+の id を API の `since_id` として渡すので､レスポンスには本当に新しいものしか入らない｡
+その post はキャッシュ済みのものの前へマージされ (すでにファイルにある id は重複させず
+落とす)､結果は**1 ユーザーあたり 500 post** を上限に古いものから落とす｡macOS は
+`~/Library/Caches` に対してするようには `~/.cache` を自動で掃除しないので､この上限は
+twigpui 自身のものだ｡ホームタイムラインの "Load older" ボタンは逆向きに働く｡古い
+post を (`meta.next_token` 経由で) 前へマージするのではなくキャッシュ済みのものの
+*後ろ*へ足すのであり､500 post の上限は同じく効く｡
 
-**A broken cache never blocks startup.** If a cache file fails to parse — or
-was written by a version of twigpui with a different file shape — it's
-treated as a plain cache miss and silently rebuilt on the next reload, rather
-than as an error.
+**壊れたキャッシュが起動を止めることはない｡** キャッシュファイルのパースに失敗した
+場合 — あるいはファイルの形が違う版の twigpui が書いたものだった場合 — エラーとして
+ではなく､ただのキャッシュミスとして扱い､次のリロードで黙って作り直す｡
 
-**Time Machine.** `cache_dir` is excluded from Time Machine backups via
-`tmutil addexclusion` the first time it's created (best-effort; a failure
-here, e.g. `tmutil` missing, never blocks startup).
+**Time Machine｡** `cache_dir` は最初に作られたときに `tmutil addexclusion` で
+Time Machine のバックアップから除外する (best-effort｡`tmutil` が無いなどでここが
+失敗しても､起動は決して止めない)｡
 
-**Clearing the cache by hand:**
+**手でキャッシュを消す:**
 
 ```sh
-rm -rf "$XDG_CACHE_HOME/twigpui"   # or ~/.cache/twigpui if XDG_CACHE_HOME is unset
+rm -rf "$XDG_CACHE_HOME/twigpui"   # XDG_CACHE_HOME が未設定なら ~/.cache/twigpui
 ```
 
-The directory is recreated automatically on the next run; the next startup
-after that falls back to a full reload since there's nothing cached yet.
+ディレクトリは次の実行で自動的に作り直される｡その後の起動は､まだ何もキャッシュされて
+いないので全件のリロードに落ちる｡
 
-**When you have to.** A `since_id`/`pagination_token` walk only ever asks
-the API for posts *outside* the cached range, so a row already on file is
-never re-fetched. Change what a field holds — add one to `TimelineItem`, or
-widen `expansions` the way #104 did to make a repost's images load — and
-every row already cached keeps the old, emptier value indefinitely.
-Deleting the files is what forces them through again. It costs nothing but
-the reload that was going to happen anyway: an empty cache makes `since_id`
-return `None`, and the fetch that follows is the same single request.
+**消さざるを得ないとき｡** `since_id` / `pagination_token` による走査は､キャッシュ済み
+の範囲の*外*にある post しか API に要求しないので､すでにファイルにある行が取り直され
+ることはない｡フィールドの中身を変えると — `TimelineItem` に 1 つ足す､リポストの画像を
+読ませるために #104 がやったように `expansions` を広げる — キャッシュ済みの行はいつまでも
+古く中身の薄い値を持ち続ける｡もう一度通させるのは､ファイルを消すことだけ｡どのみち
+起きるはずだったリロード以上の費用は掛からない｡キャッシュが空なら `since_id` は
+`None` を返し､続く取得は同じ 1 リクエストだ｡
 
-`splice` covers part of this on its own, filling a cached row's missing
-fields from the incoming copy whenever the same id turns up again — a page
-boundary, a `since_id` overlap. The rows in between are the ones that need
-the `rm`.
+`splice` はこの一部を自前で埋める｡同じ id が再び現れたとき — ページの境界､`since_id`
+の重なり — キャッシュ済みの行の欠けたフィールドを､届いた側のコピーから埋める｡`rm` が
+要るのは､その間に挟まった行のほう｡
 
-#97 automated it with a schema version stamped on write and checked on
-read. It was removed again: for a single-user development tool the constant
-was one more thing to remember to bump, with the same failure mode as
-forgetting to delete the files, and it threw away 500 rows of scrollback
-every time it fired.
-
+#97 は書き込み時にスキーマバージョンを打ち､読み込み時に照合することでこれを自動化した｡
+それは再び取り除かれた｡単一ユーザーの開発用ツールにとって､その定数は上げるのを覚えて
+おくべきものが 1 つ増えるだけで､ファイルを消し忘れるのと同じ失敗の仕方をし､しかも
+発火するたびに 500 行のスクロールバックを捨てたからだ｡

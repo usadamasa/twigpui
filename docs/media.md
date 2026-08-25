@@ -1,57 +1,58 @@
-# Media: attached images and author avatars
+# メディア: 添付画像と著者アバター
 
-## Attached images
+## 添付画像
 
-A post's attached images render as thumbnails under its text. Videos and
-animated GIFs show their still with a "Video" / "GIF" badge — neither plays
-here; that is deliberately out of scope. Clicking a thumbnail opens the full
-image in the browser (#70), since this app has no lightbox.
+post の添付画像は本文の下にサムネイルとして表示する｡動画と GIF アニメーションは
+静止画に "Video" / "GIF" のバッジを付けて出すが､どちらもここでは再生しない｡
+これは意図的に対象外としている｡このアプリに lightbox は無いので､サムネイルを
+クリックするとブラウザでフル画像を開く (#70)｡
 
-`attachments.media_keys` and the `media.fields` join ride along in the
-timeline request already being made, so **no extra request and no extra
-cost** — only a larger response. The images themselves come from
-`pbs.twimg.com` and share the download-once cache layer with avatars (see
-below), under `$XDG_CACHE_HOME/twigpui/media/`.
+`attachments.media_keys` と `media.fields` の join は､すでに投げている
+timeline リクエストに相乗りするので､**追加のリクエストも追加のコストも無い** —
+レスポンスが大きくなるだけだ｡画像そのものは `pbs.twimg.com` から届き､
+アバターと同じ「一度だけダウンロードする」キャッシュ層 (下記参照) を
+`$XDG_CACHE_HOME/twigpui/media/` の下で共有する｡
 
-**Thumbnail cells are a fixed height**, not sized from each image's own
-`width`/`height`. A row whose height depends on which images have finished
-downloading reflows under the reader as they land, which is worse than
-showing frames waiting to be filled. One image renders across a single
-column, two or more in two columns — three across would each be too narrow
-to read, and X's own maximum of four is two rows of two.
+**サムネイルのセルは固定高**で､画像ごとの `width`/`height` から寸法を
+決めていない｡どの画像のダウンロードが終わったかで高さが変わる行は､画像が
+届くたびに読み手の目の前でリフローする｡それは埋まるのを待っている枠を
+見せるより悪い｡画像 1 枚なら 1 カラムいっぱいに､2 枚以上なら 2 カラムで
+描画する — 横に 3 枚並べるとどれも細くて読めないし､X 自身の上限である
+4 枚は 2 行 × 2 列になる｡
 
-**Alt text is shown, not hidden behind a hover.** This app has no
-screen-reader path of its own, so alt text a sighted reader can actually see
-is more use than alt text nobody ever reaches.
+**alt テキストはホバーの裏に隠さず表示する｡** このアプリには自前の
+スクリーンリーダー経路が無いので､目の見える読み手が実際に読める alt
+テキストのほうが､誰にも届かない alt テキストより役に立つ｡
 
-## Author avatars
+## 著者アバター
 
-Each row shows the author's profile image, 44pt and circular, to the left of
-the byline. `user.fields=profile_image_url` rides along in the timeline
-request that was already being made, so the URL costs nothing extra; the
-image itself is fetched from `pbs.twimg.com`, which is **not** the X API —
-no quota, no credits, nothing for the usage tracking to count.
+各行は著者のプロフィール画像を､44pt の円形で byline の左に表示する｡
+`user.fields=profile_image_url` はすでに投げていた timeline リクエストに
+相乗りするので､URL の取得に追加コストはかからない｡画像そのものは
+`pbs.twimg.com` から取得するが､これは X API では**ない** — quota も
+credit も無く､使用量の集計が数えるものは何も無い｡
 
-**Downloaded once, off the UI thread.** Images are cached under
-`$XDG_CACHE_HOME/twigpui/avatars/`, keyed by a hash of the URL (X reuses the
-same basename across accounts, so anything shorter would collide). A
-timeline where one author posts ten times downloads one image. Fetching runs
-on the background executor one URL at a time, and each avatar appears as it
-lands rather than the timeline waiting for the slowest.
+**一度だけ､UI スレッドの外でダウンロードする｡** 画像は
+`$XDG_CACHE_HOME/twigpui/avatars/` の下に､URL のハッシュをキーにして
+キャッシュする (X はアカウントをまたいで同じ basename を使い回すので､
+これより短いキーだと衝突する)｡同じ著者が 10 回投稿している timeline でも
+ダウンロードは 1 枚で済む｡取得はバックグラウンドの executor が URL を
+1 つずつ処理し､各アバターは届いた順に現れる｡timeline が最も遅い 1 枚を
+待つことはない｡
 
-**Until then — or if it fails — a placeholder** the exact same size holds
-the space, carrying the author's initial. A row never reflows when an image
-arrives, and an author whose name never expanded gets the bare circle rather
-than an invented character. A failed download is simply left absent and
-retried on the next reload; there is nothing useful to tell the user about
-an avatar that didn't load.
+**それまでの間は — 失敗したときも — まったく同じサイズのプレースホルダ**が
+場所を確保し､著者のイニシャルを載せる｡画像が届いても行がリフローすることは
+無いし､名前が展開されなかった著者には､でっち上げた文字ではなく素の円を
+出す｡ダウンロードに失敗したものは単に欠けたままにして､次のリロードで
+再取得する｡読み込めなかったアバターについて､ユーザーに伝えて役に立つことは
+何も無い｡
 
-**Size.** X's `profile_image_url` ends in `_normal` (48×48), which blurs on
-a Retina display, so twigpui asks for the `_400x400` variant instead. That
-suffix convention is X's own and not promised by the API, so a URL that
-doesn't match is used unchanged, and a rewritten URL that fails falls back
-to the original rather than leaving the row without a face.
+**サイズ｡** X の `profile_image_url` は `_normal` (48×48) で終わっていて､
+Retina ディスプレイではぼやける｡そこで twigpui は代わりに `_400x400` の
+バリアントを要求する｡この suffix の慣習は X 独自のもので API が約束した
+ものではないので､合致しない URL はそのまま使い､書き換えた URL が失敗した
+ときは､行から顔を消してしまうのではなく元の URL へフォールバックする｡
 
-Losing the avatar cache costs one re-download per author and nothing else —
-it is cache, not state.
+アバターキャッシュを失っても､著者ごとに 1 回ダウンロードし直すだけで他には
+何も起きない — これは cache であって state ではない｡
 

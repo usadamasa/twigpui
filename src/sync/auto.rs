@@ -1,47 +1,44 @@
-//! One wake-up of the background sync: the half that spends.
+//! background sync の 1 回の起床: 支払う側の半分｡
 //!
-//! [`super::schedule`] decides what a tick should do, [`super::state`]
-//! remembers what came of it, and this performs it in between. The split
-//! is `run.rs`'s, for `run.rs`'s reason — nothing here is unit tested,
-//! because every branch of it is an HTTP request or a file the request's
-//! result is written to. What carries the coverage is
-//! [`super::schedule::next_step`], [`super::schedule::next_batch`],
-//! [`super::schedule::apply_outcome`] and [`super::state::settle`], which
-//! are pure and live next door.
+//! [`super::schedule`] が tick の内容を決め､[`super::state`] がその結果を
+//! 覚え､この module があいだで実行する｡分割は `run.rs` と同じ理由による
+//! もので､ここは一つも unit test されていない｡どの分岐も HTTP request か､
+//! その結果を書き込むファイルだからだ｡カバレッジを担っているのは
+//! [`super::schedule::next_step`]､[`super::schedule::next_batch`]､
+//! [`super::schedule::apply_outcome`]､[`super::state::settle`] で､
+//! いずれも純粋関数として隣に置いてある｡
 //!
-//! # What a tick is allowed to cost
+//! # tick が使ってよい費用
 //!
-//! A `Diff` is the expensive one: both sides read in full, one billed
-//! resource per account. It is paced by `config.sync_interval_seconds` and
-//! by [`super::SyncState`], which persists across launches so relaunching
-//! the app does not buy the same answer again.
+//! `Diff` が高くつく方だ: 両側を丸ごと読み､1 アカウントにつき 1 課金
+//! resource｡`config.sync_interval_seconds` と [`super::SyncState`] が
+//! ペースを決め､後者は起動をまたいで残るので､アプリを再起動しても同じ
+//! 答えを買い直さずに済む｡
 //!
-//! An `Apply` is bounded by [`Pacing::writes_per_minute`] writes, and the
-//! loop waits `state::APPLY_PAUSE_SECONDS` between batches. Together they
-//! are the sustained write rate, and its default is deliberately low —
-//! see [`super::state`] for the lock #197 measured and what it followed,
-//! and `config::DEFAULT_SYNC_WRITES_PER_MINUTE` for the knob that raises
-//! it once a run has shown no refusals.
+//! `Apply` は [`Pacing::writes_per_minute`] 件の write に制限され､loop は
+//! batch のあいだ `state::APPLY_PAUSE_SECONDS` 待つ｡この二つで持続的な
+//! write レートが決まり､その既定値は意図的に低くしてある — #197 が実測した
+//! ロックと､それが何のあとに起きたかは [`super::state`] を､refusal が
+//! 出ない実行のあとに引き上げるためのつまみは
+//! `config::DEFAULT_SYNC_WRITES_PER_MINUTE` を見よ｡
 //!
-//! # What a tick is allowed to delete
+//! # tick が消してよいもの
 //!
-//! Pruning here is unconditional in the sense that nobody is asked — but
-//! it is capped (#176). A plan whose removals are more of the list than
-//! `config.sync_prune_limit_percent` allows has its additions drained and
-//! its removals left in the plan file, unsent, for `--sync-list --apply
-//! --prune` to confirm. [`schedule::prune_allowed`] is the verdict and
-//! carries the reasoning; the rule this module adds is that a held plan
-//! is *not* finished work: [`schedule::sendable`] is what `pending` means
-//! here, so a plan with nothing sendable left lets the next diff come due
-//! instead of pinning the loop on it.
+//! ここでの prune は誰にも確認しないという意味では無条件だが､上限は
+//! ある (#176)｡removal が `config.sync_prune_limit_percent` の許す割合を
+//! 超える plan は､addition だけを流し切り､removal は未送信のまま plan
+//! ファイルに残して `--sync-list --apply --prune` の確認に委ねる｡判定は
+//! [`schedule::prune_allowed`] にあり､理由もそこが持つ｡この module が
+//! 足す規則は､保留された plan は完了した仕事では *ない* ということだ:
+//! ここでの `pending` は [`schedule::sendable`] のことなので､送れるものが
+//! 残っていない plan は loop を縛らず､次の diff を期限どおりに来させる｡
 //!
-//! # What a tick leaves in the log (#199)
+//! # tick が log に残すもの (#199)
 //!
-//! One line per tick that did or was refused something, none for a tick
-//! that only waited — the loop wakes every minute, and a line per wake-up
-//! would fill the file with the same sentence. A refusal is logged every
-//! time because, after #198, a refusal only happens once per backoff, not
-//! once per wake-up.
+//! 何かをした tick と拒否された tick には 1 行ずつ､待っただけの tick には
+//! 何も出さない — loop は毎分起きるので､起床ごとに 1 行出せば同じ文で
+//! ファイルが埋まる｡refusal は毎回 log する｡#198 のあとでは refusal は
+//! 起床ごとではなく backoff ごとに 1 回しか起きないからだ｡
 
 use anyhow::Result;
 
@@ -50,65 +47,62 @@ use super::{Action, SyncState, load_plan, load_state, save_plan, save_state, sch
 use crate::paths::Paths;
 use crate::x_api::XClient;
 
-/// How the caller wants this tick paced — everything that is about *when*
-/// rather than *what*, and that is not already in [`SyncState`].
+/// 呼び出し側がこの tick に望むペース配分 — *何を* ではなく *いつ* に
+/// 関わるもののうち､[`SyncState`] にまだ無いものすべて｡
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Pacing {
-    /// `config.sync_interval_seconds`.
+    /// `config.sync_interval_seconds`｡
     pub interval_seconds: u32,
-    /// `config.sync_writes_per_minute` (#197): writes sent per `Apply`
-    /// tick, which with `state::APPLY_PAUSE_SECONDS` is the sustained
-    /// rate. The default's reasoning — and why raising it is a deliberate
-    /// act with a measurement behind it — lives on the config constant.
+    /// `config.sync_writes_per_minute` (#197): `Apply` の tick ごとに送る
+    /// write 数で､`state::APPLY_PAUSE_SECONDS` と合わせて持続レートに
+    /// なる｡既定値の根拠と､引き上げが実測を伴う意図的な行為である理由は
+    /// config 側の定数に置いてある｡
     pub writes_per_minute: u8,
-    /// #174's manual start: drop the interval for this one tick, and the
-    /// block a failed tick earned.
+    /// #174 の手動起動: この 1 tick だけ interval と､失敗した tick が
+    /// 得た block を落とす｡
     ///
-    /// Done by handing [`schedule::next_step`] no last-diff time at all
-    /// ([`schedule::last_diff_for`]), which is the value it already reads
-    /// as "a diff has never run", and no block unless it is a refusal's
-    /// ([`schedule::blocked_for`]). Nothing else about the decision
-    /// changes, and that is the reason it is done this way rather than
-    /// with a shorter interval or a fourth [`schedule::Step`]: the
-    /// precedence still holds, so a refusal's backoff still refuses the
-    /// tick and an undrained plan is still drained before both sides are
-    /// re-read. Pressing the button while a catch-up is outstanding
-    /// therefore spends nothing on reads — it resumes the plan already
-    /// paid for.
+    /// やり方は､[`schedule::next_step`] に last-diff の時刻をまったく
+    /// 渡さず ([`schedule::last_diff_for`])､これは「diff が一度も走って
+    /// いない」として既に読まれる値だ､かつ refusal 由来でない限り block も
+    /// 渡さない ([`schedule::blocked_for`])｡判断のそれ以外は何も変わらず､
+    /// interval を短くしたり 4 つ目の [`schedule::Step`] を足したりせずに
+    /// こうしてあるのはそのためだ: 優先順位はそのままなので､refusal の
+    /// backoff は今も tick を拒み､流し切っていない plan は両側を読み直す
+    /// 前に流し切られる｡catch-up が残っているあいだにボタンを押しても
+    /// read には何も使わない — 支払い済みの plan を再開するだけだ｡
     ///
-    /// The caller keeps it set across a tick that only waited, so a press
-    /// during a backoff is honoured when the backoff ends rather than
-    /// consumed by it.
+    /// 呼び出し側は待っただけの tick をまたいでこれを立てたままにするので､
+    /// backoff 中の押下は backoff に食われず､明けたときに効く｡
     pub forced: bool,
 }
 
-/// What one tick came to: what it did, the state it left on disk, and
-/// when the loop should come back.
+/// 1 回の tick の帰結: 何をしたか､disk に残した state､そして loop が
+/// いつ戻ってくるべきか｡
 ///
-/// The state is returned as well as saved so the window can describe the
-/// sync from it — the streak, the deadline — without reading the file
-/// again or keeping a copy of its own, which is the copy #198 lost.
+/// state は保存するだけでなく返しもする｡ウィンドウがそこから sync の
+/// 様子 — 連続回数､期限 — を語れるようにするためで､ファイルを読み直す
+/// ことも自前の写しを持つこともしない｡#198 で失われたのがその写しだ｡
 #[derive(Debug)]
 pub(crate) struct Tick {
-    /// `Err` is a tick that failed outright; `state` already carries the
-    /// interval it earned.
+    /// `Err` は完全に失敗した tick で､`state` は既にそれが得た interval を
+    /// 持っている｡
     pub outcome: Result<Outcome>,
     pub state: SyncState,
-    /// The soonest the next tick may run.
+    /// 次の tick を走らせてよい最も早い時刻｡
     pub wake_at: i64,
 }
 
-/// Run one tick: decide, perform, settle, save, log.
+/// 1 回の tick を走らせる: 決め､実行し､settle し､保存し､log する｡
 ///
-/// Pruning is not opt-in here, unlike `--sync-list`, where it stays behind
-/// `--prune` — see this module's parent for why the two paths differ — but
-/// it is capped at `prune_limit_percent` of the list (#176); see the
-/// module docs.
+/// ここでの prune は `--sync-list` と違って opt-in ではない (あちらは
+/// `--prune` の後ろに置いたままだ — 二つの経路が分かれる理由はこの module
+/// の親を見よ) が､list の `prune_limit_percent` を上限とする (#176)｡
+/// module doc を見よ｡
 ///
-/// The state is saved whether or not the tick succeeded: a failure earns
-/// an interval, and that interval has to survive a relaunch. A save that
-/// itself fails is logged and the tick's state is returned anyway, so the
-/// running loop at least paces itself correctly until the next save.
+/// tick が成功したかどうかによらず state は保存する: 失敗は interval を
+/// 得るし､その interval は再起動を越えて残らなければならない｡保存自体が
+/// 失敗した場合は log に出したうえで tick の state をそのまま返す｡走って
+/// いる loop が少なくとも次の保存までは正しくペース配分できるようにだ｡
 pub(crate) fn tick(
     paths: &Paths,
     client: &XClient,
@@ -142,10 +136,11 @@ pub(crate) fn tick(
     }
 }
 
-/// The tick's work: what [`schedule::next_step`] says, done.
+/// tick の仕事: [`schedule::next_step`] が言うことを､実行する｡
 ///
-/// `state` is mutated in exactly one case — a diff stamps `last_diff_at`
-/// before it reads — and the caller settles and saves whatever comes out.
+/// `state` が変わるのはただ一つの場合だけ — diff が読む前に
+/// `last_diff_at` を打刻する — で､出てきたものは呼び出し側が settle して
+/// 保存する｡
 #[allow(clippy::too_many_arguments)]
 fn perform(
     paths: &Paths,
@@ -157,13 +152,13 @@ fn perform(
     state: &mut SyncState,
     now: i64,
 ) -> Result<Outcome> {
-    // A plan diffed against a different list is not this list's work. It is
-    // dropped rather than applied: `run.rs` refuses in the same situation,
-    // and a loop has nobody to refuse to.
+    // 別の list に対して diff された plan は､この list の仕事ではない｡
+    // 適用せずに捨てる: 同じ状況で `run.rs` は拒否するが､loop には拒否を
+    // 伝える相手がいない｡
     let plan = load_plan(&paths.sync_plan_file())?.filter(|plan| plan.list_id == list_id);
-    // Decided here, on the plan as it is now, rather than once at the diff:
-    // the limit is configuration and can change between the two, and a
-    // plan file from before the cap has never been judged at all.
+    // diff のときに一度きりではなく､今の plan に対してここで決める:
+    // 上限は設定なので二つのあいだで変わりうるし､上限が入る前の plan
+    // ファイルはそもそも一度も判定されていない｡
     let prune = plan
         .as_ref()
         .is_none_or(|plan| schedule::prune_allowed(plan, prune_limit_percent));
@@ -179,11 +174,10 @@ fn perform(
     };
 
     match schedule::next_step(&situation, now) {
-        // `pending` rides along (#174) precisely because this arm is
-        // reached both with a drained plan and with a rate-limited one
-        // that still owes hundreds of writes — see
-        // [`schedule::is_finished`], which is the one caller that has to
-        // tell those apart.
+        // `pending` を連れて回る (#174) のは､この arm に流し切った plan
+        // でも､数百の write を残したまま rate limit に当たった plan でも
+        // 到達するからだ — その二つを見分けなければならない唯一の
+        // 呼び出し側である [`schedule::is_finished`] を見よ｡
         schedule::Step::Wait { until } => Ok(Outcome::Idle { until, pending }),
         schedule::Step::Diff => diff(
             paths,
@@ -194,9 +188,9 @@ fn perform(
             state,
             now,
         ),
-        // `pending > 0` is what produced this step, so the plan is `Some`.
-        // Listed rather than unwrapped so a later change to the precedence
-        // cannot turn this into a panic.
+        // この step を生んだのは `pending > 0` なので plan は `Some` だ｡
+        // unwrap せずに列挙してあるのは､あとで優先順位を変えてもここが
+        // panic に化けないようにするためだ｡
         schedule::Step::Apply => match plan {
             Some(plan) => apply(
                 paths,
@@ -214,19 +208,18 @@ fn perform(
     }
 }
 
-/// Read both sides and write a fresh plan.
+/// 両側を読み､新しい plan を書く｡
 ///
-/// The clock is stamped **before** the reads, and stays stamped whether or
-/// not they succeed. Both halves matter: a crash part way through has
-/// already been billed for the pages that landed, so a relaunch must not
-/// read them again immediately; and a diff that fails every time — a
-/// revoked scope, an endpoint that has started 400ing — would otherwise be
-/// retried by every wake-up of the loop forever.
+/// 時刻は read の **前** に打刻し､read が成功したかどうかによらず打刻された
+/// ままにする｡どちらの側面も効く: 途中で crash しても届いたページ分は既に
+/// 課金されているので､再起動が即座にそれを読み直してはならない｡そして
+/// 毎回失敗する diff — scope の失効､400 を返し始めた endpoint — は､
+/// そうしなければ loop の起床ごとに永久に再試行される｡
 ///
-/// The prune verdict is taken here too, for the outcome only — so the
-/// window hears about a held plan once, when it is made, rather than on
-/// every batch of additions drained out of it. What is *enforced* is the
-/// verdict [`perform`] takes at apply time.
+/// prune の判定もここで取るが outcome のためだけだ — 保留された plan の
+/// ことをウィンドウが聞くのは､そこから addition の batch を流し出すたびでは
+/// なく､作られた 1 回だけになる｡実際に *強制する* のは [`perform`] が
+/// apply 時に取る判定の方だ｡
 fn diff(
     paths: &Paths,
     client: &XClient,
@@ -260,14 +253,14 @@ fn diff(
     })
 }
 
-/// Send up to `limit` ([`Pacing::writes_per_minute`]) of the plan's
-/// outstanding writes.
+/// plan に残っている write を最大 `limit` 件 ([`Pacing::writes_per_minute`])
+/// 送る｡
 ///
-/// `prune` is [`perform`]'s verdict from [`schedule::prune_allowed`]. With
-/// it false the batch is additions only, and `remaining` counts what may
-/// still be sent rather than every unapplied entry — the same reading of
-/// "outstanding" as `pending`, so the completion notice fires when the
-/// additions are drained even though held removals stay behind.
+/// `prune` は [`schedule::prune_allowed`] から得た [`perform`] の判定だ｡
+/// false なら batch は addition のみで､`remaining` は未適用の entry すべて
+/// ではなく､まだ送ってよいものを数える — `pending` と同じ「残り」の
+/// 読み方なので､保留された removal が残っていても addition を流し切れば
+/// 完了通知が出る｡
 fn apply(
     paths: &Paths,
     client: &XClient,
@@ -280,25 +273,24 @@ fn apply(
     let remaining = schedule::sendable(&plan, prune);
 
     if plan.is_complete() {
-        // Nothing left to resume from. Leaving it behind would make the
-        // next tick read it as outstanding work and skip the diff.
+        // 再開すべきものは残っていない｡置いたままにすると次の tick が
+        // 残務として読み､diff を飛ばしてしまう｡
         //
-        // `is_complete`, not `remaining == 0`: a plan drained of its
-        // additions with removals held is *not* removed. Those removals
-        // were paid for, and the file is what `--sync-list --apply --prune`
-        // sends without reading both sides again. The next diff replaces
-        // it either way.
+        // `remaining == 0` ではなく `is_complete` なのは: addition を
+        // 流し切って removal を保留した plan は削除 *しない* からだ｡
+        // その removal は支払い済みで､両側を読み直さずに
+        // `--sync-list --apply --prune` が送る元がこのファイルだ｡
+        // どちらにせよ次の diff が置き換える｡
         let _ = std::fs::remove_file(paths.sync_plan_file());
     }
 
     schedule::apply_outcome(sent, remaining, result)
 }
 
-/// The tick's line in the log (#199), or nothing for a tick that only
-/// waited.
+/// tick が log に書く行 (#199)｡待っただけの tick には何も書かない｡
 ///
-/// `log::redact` runs on the way out — an API error can quote a request
-/// URL.
+/// 出ていく途中で `log::redact` が走る — API のエラーは request の URL を
+/// 引用しうる｡
 fn log_outcome(outcome: &Result<Outcome>, state: SyncState, wake_at: i64) {
     match outcome {
         Ok(Outcome::Idle { .. }) => {}

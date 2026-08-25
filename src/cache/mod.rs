@@ -1,38 +1,37 @@
-//! Local JSON cache for X API responses (#9).
+//! X API レスポンスのローカル JSON キャッシュ (#9)｡
 //!
-//! Cuts API spend: startup renders straight from cache with no request at
-//! all (see [`startup`]), and an explicit reload spends one request instead
-//! of two once a user's id is cached (see [`reload`]). Mirrors
-//! `oauth::tokens`'s injected-`now` seam — TTL and merge logic never read
-//! the real clock or touch the filesystem themselves, so they're testable in
-//! isolation; only the thin `cached_*` / `save_*` wrappers below touch disk.
-//! [`reload`] is the one function that also touches the network (via
-//! `XClient`), so unlike the rest of this module it is not unit tested — see
-//! its own doc comment.
+//! API の出費を削る: 起動時は request をまったく送らずキャッシュから直接
+//! 描画し ([`startup`] を見よ)､明示的な reload は user id がキャッシュ済み
+//! なら 2 回ではなく 1 回の request で済む ([`reload`] を見よ)｡
+//! `oauth::tokens` の `now` 注入の継ぎ目を踏襲している — TTL とマージの
+//! ロジックは実時計を読まずファイルシステムにも自分で触れないので単体で
+//! テストできる｡ディスクに触るのは下の薄い `cached_*` / `save_*` ラッパだけだ｡
+//! ネットワークにも触れる唯一の関数は [`reload`] で (`XClient` 経由)､この
+//! モジュールの他と違って unit test されていない — その関数自身の doc comment
+//! を見よ｡
 //!
-//! ## Cached rows can outlive the code that wrote them
+//! ## キャッシュされた行は､それを書いたコードより長生きしうる
 //!
-//! A `since_id`/`pagination_token` walk only ever asks the API for posts
-//! *outside* the cached range, so a row already on file is never
-//! re-fetched. Change what a field holds — add one to `TimelineItem`, or
-//! widen `expansions` the way #104 did for a repost's media — and every
-//! row already cached keeps the old, emptier value indefinitely.
+//! `since_id`/`pagination_token` の歩みはキャッシュ範囲の *外* の post しか
+//! API へ要求しないので､既にファイルにある行が取り直されることは無い｡
+//! フィールドの中身を変えても — `TimelineItem` に一つ足す､#104 が repost の
+//! media でやったように `expansions` を広げる — 既にキャッシュ済みの行は
+//! すべて古く中身の薄い値を持ち続ける｡
 //!
-//! Two things address that, and neither is automatic:
+//! これに対処するものが 2 つあり､どちらも自動ではない:
 //!
-//! - [`splice`] fills a cached row's missing fields from the incoming copy
-//!   when the same id turns up again, which covers a page boundary or a
-//!   `since_id` overlap but not the rows in between.
-//! - **Deleting the cache files by hand covers the rest.** They live under
-//!   `Paths::cache_dir`; removing them costs nothing but the one reload
-//!   that was going to happen anyway, since an empty cache makes
-//!   `since_id` return `None`.
+//! - [`splice`] は同じ id が再び現れたときに､キャッシュ済みの行の欠けた
+//!   フィールドを流入したコピーから埋める｡ページ境界や `since_id` の重なりは
+//!   これで賄えるが､その間の行は賄えない｡
+//! - **残りは手でキャッシュファイルを消すことで賄う｡** ファイルは
+//!   `Paths::cache_dir` の下にある｡消しても､どのみち起きるはずだった reload
+//!   1 回以外に代償は無い｡空のキャッシュでは `since_id` が `None` を返すからだ｡
 //!
-//! #97 automated the second half with a schema version stamped on write
-//! and checked on read. It was removed again: for a single-user
-//! development tool the constant was one more thing to remember to bump,
-//! with the same failure mode as forgetting to delete the files, and it
-//! discarded 500 rows of scrollback each time it fired.
+//! #97 は後半を自動化した｡書き込み時に schema version を刻み､読み込み時に
+//! 照合するものだった｡これは再び取り除かれた: 単一ユーザーの開発ツールに
+//! とって､この定数は bump を忘れないよう覚えておくものが一つ増えるだけで､
+//! ファイルを消し忘れるのと同じ失敗の仕方をし､しかも発火のたびに 500 行分の
+//! スクロールバックを捨てていた｡
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -43,46 +42,44 @@ use serde::{Deserialize, Serialize};
 
 mod timeline;
 
-// A child module, not a sibling (#117, following #126's split of `ui`):
-// nothing here needs widening for `timeline` to see it, and the
-// re-exports below keep every caller's path unchanged -- `cache::splice`
-// stayed `cache::splice`.
+// 兄弟ではなく子モジュールにした (#117､#126 の `ui` の分割にならって):
+// `timeline` から見えるようにするためにここの可視性を広げる必要が無く､
+// 下の re-export によって呼び出し側のパスはどれも変わらない --
+// `cache::splice` は `cache::splice` のままだ｡
 pub(crate) use timeline::{Side, since_id, splice, without_post};
 
 use crate::paths::Paths;
 use crate::thread::{self, ThreadChain};
 use crate::x_api::{ListSummary, TimelineItem, XClient};
 
-/// How long a cached screen-name → user-id mapping stays usable before a
-/// reload re-resolves it via the API. User ids are effectively permanent, so
-/// this is generous — the whole point is to turn a reload's two requests
-/// into one for as long as possible.
+/// キャッシュした screen name → user id の対応が､reload が API で再解決する
+/// までどれだけ使えるか｡user id は事実上恒久的なので長めに取ってある —
+/// 狙いは reload の 2 request をできるだけ長く 1 回に減らすことだ｡
 const USER_ID_TTL_SECONDS: i64 = 30 * 24 * 60 * 60;
 
-/// Per-user cap on how many cached posts are kept, oldest dropped first.
-/// `~/.cache` is not purged automatically by macOS the way `~/Library/Caches`
-/// is, so without this an actively reloaded user's cache would grow forever.
+/// ユーザーごとに保持するキャッシュ済み post の上限｡古いものから捨てる｡
+/// `~/.cache` は `~/Library/Caches` と違って macOS が自動で掃除しないので､
+/// これが無いと活発に reload するユーザーのキャッシュは無限に膨らむ｡
 ///
-/// `ui.rs` reads this too: at the cap, [`splice`] would throw away
-/// everything a "Load older" request bought, so the button has to be
-/// withheld rather than left to spend credits for nothing.
+/// `ui.rs` もこれを読む: 上限に達すると [`splice`] は "Load older" の request
+/// が買ったものをすべて捨ててしまうので､ボタンは無駄に credit を使わせるまま
+/// にせず出さないでおく必要がある｡
 pub(crate) const MAX_CACHED_POSTS: usize = 500;
 
-/// One cached screen-name → user-id mapping.
+/// キャッシュされた screen name → user id の対応 1 件｡
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct UserIdEntry {
     id: String,
     cached_at: i64,
 }
 
-/// The cached result of `GET /2/users/me` (#11): the signed-in user's own id
-/// and screen name. Reuses the same TTL policy as [`UserIdEntry`] (ids are
-/// effectively permanent) via [`user_id_is_fresh`], but is not stored in
-/// [`UserIdCacheFile`]'s `username → id` map — that map only goes one
-/// direction, and "who is the signed-in account" needs the reverse: this
-/// value is discovered from `/me` itself, not looked up by a screen name the
-/// caller already knew. A parallel single-entry file
-/// ([`Paths::me_file`]) is the simplest fit.
+/// `GET /2/users/me` の結果のキャッシュ (#11): サインイン中のユーザー自身の
+/// id と screen name｡[`user_id_is_fresh`] を通じて [`UserIdEntry`] と同じ TTL
+/// 方針を使い回す (id は事実上恒久的だ) が､[`UserIdCacheFile`] の
+/// `username → id` マップには入れない — あのマップは一方向にしか引けず､
+/// 「サインイン中のアカウントは誰か」に要るのはその逆だ: この値は呼び出し側が
+/// 既に知っている screen name から引くのではなく､`/me` 自身から判明する｡
+/// 同じ形の 1 件だけのファイル ([`Paths::me_file`]) が一番素直に嵌まる｡
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct MeEntry {
     pub id: String,
@@ -90,52 +87,50 @@ pub(crate) struct MeEntry {
     cached_at: i64,
 }
 
-/// The cached result of `GET /2/users/:id/owned_lists` (#164): every list
-/// the signed-in account owns, in the order the API returned them, which
-/// is the order the picker draws them in.
+/// `GET /2/users/:id/owned_lists` の結果のキャッシュ (#164): サインイン中の
+/// アカウントが所有するすべての list を､API が返した順で持つ｡picker が描く
+/// のもその順だ｡
 ///
-/// No TTL, unlike [`MeEntry`]. A user id never changes, so its cache can
-/// expire on a clock; a list's name can change any day, and no clock
-/// knows which. The picker's own refresh is the only thing that moves
-/// this — the same rule [`load_timeline`] follows, where staleness is
-/// bounded by an explicit reload rather than by age. `cached_at` is
-/// recorded anyway so the file says when it was last believed.
+/// [`MeEntry`] と違い TTL は無い｡user id は決して変わらないのでキャッシュを
+/// 時計で失効させられるが､list の名前はいつ変わってもおかしくなく､どの日か
+/// を知っている時計は無い｡これを動かすのは picker 自身の refresh だけだ —
+/// [`load_timeline`] が従うのと同じ規則で､陳腐化は経過時間ではなく明示的な
+/// reload で区切られる｡`cached_at` はそれでも記録する｡最後にいつ信じたかを
+/// ファイルが語れるようにだ｡
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct OwnedListsEntry {
     lists: Vec<ListSummary>,
     cached_at: i64,
 }
 
-/// The whole contents of [`Paths::user_ids_file`]: every screen name
-/// resolved so far, keyed exactly as configured
-/// (`Config::target_username`, already trimmed and `@`-stripped).
+/// [`Paths::user_ids_file`] の中身すべて: これまでに解決した screen name を
+/// 設定されたとおりのキーで持つ (`Config::target_username` の値で､trim 済み
+/// かつ `@` を落としてある)｡
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct UserIdCacheFile {
     #[serde(default)]
     users: HashMap<String, UserIdEntry>,
 }
 
-/// The whole contents of one [`Paths::timeline_file`].
+/// [`Paths::timeline_file`] 1 つ分の中身すべて｡
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct TimelineCacheFile {
     fetched_at: i64,
     items: Vec<TimelineItem>,
 }
 
-/// Whether a user id cached at `cached_at` is still within the TTL window at
-/// `now`.
+/// `cached_at` にキャッシュした user id が､`now` 時点でまだ TTL の窓の中か｡
 fn user_id_is_fresh(cached_at: i64, now: i64) -> bool {
     now.saturating_sub(cached_at) < USER_ID_TTL_SECONDS
 }
 
-/// Load and parse `path` as JSON. Distinguishes three outcomes: the file
-/// doesn't exist (`Ok(None)`, same as `oauth::tokens::load`'s missing-file
-/// case), it exists but fails to parse — corruption, or a shape from a
-/// future or old version — which is *also* `Ok(None)` rather than an error,
-/// and a genuine I/O error (permissions, etc.), which propagates. The whole
-/// point of the cache is saving money, so a broken cache file must never
-/// stop the app from starting; it just gets silently rebuilt on the next
-/// write.
+/// `path` を JSON として読み込みパースする｡3 つの結末を区別する: ファイルが
+/// 存在しない (`Ok(None)`｡`oauth::tokens::load` のファイル欠落時と同じ)､
+/// 存在するがパースに失敗する — 破損､あるいは将来や過去のバージョンの形 —
+/// これも error ではなく *やはり* `Ok(None)` になる､そして本物の I/O error
+/// (権限など) はそのまま伝播する｡キャッシュの目的はまるごと金を節約すること
+/// なので､壊れたキャッシュファイルがアプリの起動を止めてはならない｡次の
+/// 書き込みで黙って作り直されるだけだ｡
 fn load_json<T: DeserializeOwned>(path: &Path) -> Result<Option<T>> {
     let contents = match std::fs::read_to_string(path) {
         Ok(contents) => contents,
@@ -153,9 +148,9 @@ fn save_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     std::fs::write(path, json).with_context(|| format!("could not write {}", path.display()))
 }
 
-/// The cached user id for `username`, if one is on file and still fresh.
-/// `None` means "resolve it via the API and cache it" — either there was
-/// nothing cached, the file was unreadable/corrupt, or the TTL lapsed.
+/// `username` に対するキャッシュ済みの user id｡ファイルにあってまだ新鮮な
+/// ときだけ返す｡`None` は「API で解決してキャッシュせよ」の意味 — 何も
+/// キャッシュされていないか､ファイルが読めない/壊れているか､TTL が切れたかだ｡
 pub(crate) fn cached_user_id(paths: &Paths, username: &str, now: i64) -> Result<Option<String>> {
     let file: UserIdCacheFile = load_json(&paths.user_ids_file())?.unwrap_or_default();
     Ok(file
@@ -165,8 +160,8 @@ pub(crate) fn cached_user_id(paths: &Paths, username: &str, now: i64) -> Result<
         .map(|entry| entry.id.clone()))
 }
 
-/// Persist `username`'s resolved id, alongside whatever other screen names
-/// were already cached.
+/// `username` の解決済み id を､既にキャッシュされている他の screen name と
+/// 並べて永続化する｡
 pub(crate) fn save_user_id(paths: &Paths, username: &str, user_id: &str, now: i64) -> Result<()> {
     let path = paths.user_ids_file();
     let mut file: UserIdCacheFile = load_json(&path)?.unwrap_or_default();
@@ -180,15 +175,15 @@ pub(crate) fn save_user_id(paths: &Paths, username: &str, user_id: &str, now: i6
     save_json(&path, &file)
 }
 
-/// The cached `/me` result, if one is on file and still fresh. `None` means
-/// "resolve it via the API and cache it" — the same contract as
-/// [`cached_user_id`].
+/// キャッシュ済みの `/me` の結果｡ファイルにあってまだ新鮮なときだけ返す｡
+/// `None` は「API で解決してキャッシュせよ」の意味 — [`cached_user_id`] と
+/// 同じ契約だ｡
 pub(crate) fn cached_me(paths: &Paths, now: i64) -> Result<Option<MeEntry>> {
     let entry: Option<MeEntry> = load_json(&paths.me_file())?;
     Ok(entry.filter(|entry| user_id_is_fresh(entry.cached_at, now)))
 }
 
-/// Persist the signed-in user's id and screen name from `/me`.
+/// `/me` から得たサインイン中ユーザーの id と screen name を永続化する｡
 pub(crate) fn save_me(paths: &Paths, id: &str, username: &str, now: i64) -> Result<()> {
     let entry = MeEntry {
         id: id.to_string(),
@@ -198,14 +193,14 @@ pub(crate) fn save_me(paths: &Paths, id: &str, username: &str, now: i64) -> Resu
     save_json(&paths.me_file(), &entry)
 }
 
-/// The lists the picker last fetched (#164), or `None` if it never has —
-/// which is the picker's cue to offer the fetch rather than to spend it.
+/// picker が最後に取得した list 群 (#164)｡一度も取得していなければ `None` —
+/// それは picker にとって､取得を実行せず提示せよという合図だ｡
 pub(crate) fn cached_owned_lists(paths: &Paths) -> Result<Option<Vec<ListSummary>>> {
     let entry: Option<OwnedListsEntry> = load_json(&paths.owned_lists_file())?;
     Ok(entry.map(|entry| entry.lists))
 }
 
-/// Persist the lists `GET /2/users/:id/owned_lists` returned (#164).
+/// `GET /2/users/:id/owned_lists` が返した list 群を永続化する (#164)｡
 pub(crate) fn save_owned_lists(paths: &Paths, lists: &[ListSummary], now: i64) -> Result<()> {
     let entry = OwnedListsEntry {
         lists: lists.to_vec(),
@@ -214,23 +209,23 @@ pub(crate) fn save_owned_lists(paths: &Paths, lists: &[ListSummary], now: i64) -
     save_json(&paths.owned_lists_file(), &entry)
 }
 
-/// The cached timeline for `user_id`, newest-first, or `None` if there is
-/// nothing usable cached (missing or corrupt file). Unlike the user-id
-/// cache, there is no TTL here — staleness is bounded by an explicit
-/// reload, never by age alone, matching the issue's "render from cache,
-/// only an explicit reload spends credits" decision.
+/// `user_id` のキャッシュ済み timeline を newest-first で返す｡使えるものが
+/// キャッシュされていなければ (ファイルが無いか壊れている) `None`｡user id の
+/// キャッシュと違い､ここに TTL は無い — 陳腐化は明示的な reload で区切られ､
+/// 経過時間だけで区切られることは無い｡issue の「キャッシュから描画し､明示的な
+/// reload だけが credit を使う」という決定に沿っている｡
 pub(crate) fn load_timeline(paths: &Paths, user_id: &str) -> Result<Option<Vec<TimelineItem>>> {
     load_timeline_file(&paths.timeline_file(user_id))
 }
 
-/// Read one timeline cache file, whichever of the two it is (#92).
+/// timeline のキャッシュファイルを 1 つ読む｡2 つのうちどちらでもよい (#92)｡
 fn load_timeline_file(path: &Path) -> Result<Option<Vec<TimelineItem>>> {
     let file: Option<TimelineCacheFile> = load_json(path)?;
     Ok(file.map(|file| file.items))
 }
 
-/// Persist `items` (already merged and capped by the caller) as `user_id`'s
-/// timeline cache.
+/// `items` (呼び出し側で既にマージと上限処理を済ませたもの) を `user_id` の
+/// timeline キャッシュとして永続化する｡
 pub(crate) fn save_timeline(
     paths: &Paths,
     user_id: &str,
@@ -240,8 +235,8 @@ pub(crate) fn save_timeline(
     save_timeline_file(&paths.timeline_file(user_id), items, now)
 }
 
-/// Write one timeline cache file (#92) — [`load_timeline_file`]'s
-/// counterpart.
+/// timeline のキャッシュファイルを 1 つ書く (#92) —
+/// [`load_timeline_file`] の対になるものだ｡
 fn save_timeline_file(path: &Path, items: &[TimelineItem], now: i64) -> Result<()> {
     let file = TimelineCacheFile {
         fetched_at: now,
@@ -250,36 +245,36 @@ fn save_timeline_file(path: &Path, items: &[TimelineItem], now: i64) -> Result<(
     save_json(path, &file)
 }
 
-/// Which timeline fills the window (#161).
+/// どの timeline がウィンドウを埋めるか (#161)｡
 ///
-/// The name is a revival: a `TimelineSource` existed until #33, when the
-/// app-only bearer token went away and left nothing to branch on. #157 put
-/// a branch back — `GET /2/users/:id/timelines/reverse_chronological`
-/// stopped returning followed authors' posts for this account, and a List
-/// is how a following-shaped feed is read at all now.
+/// この名前は復活だ: `TimelineSource` は #33 まで存在していて､app-only の
+/// bearer token が消えて分岐する対象が無くなった時点で失われた｡#157 が分岐を
+/// 戻した — `GET /2/users/:id/timelines/reverse_chronological` がこの
+/// アカウントのフォロー中著者の post を返さなくなり､following の形をした
+/// フィードを読む手段は今や List しか無い｡
 ///
-/// Two variants, deliberately. Choosing among several lists is #164 and
-/// blending sources into one lane is #43; both want more than this, and
-/// neither is served by guessing at the shape here first. The single-user
-/// timeline (`--fetch-only`) is not a variant: it is fetched by
-/// [`reload`], never shown in the window, and giving it one would mean
-/// every match arm below carrying a case the window cannot reach.
+/// variant が 2 つなのは意図的だ｡複数の list から選ぶのは #164､ソースを 1 つの
+/// レーンへ混ぜるのは #43｡どちらもこれ以上を求めており､どちらもここで形を先に
+/// 当て推量して得をしない｡単一ユーザーの timeline (`--fetch-only`) は variant
+/// ではない: [`reload`] が取得しウィンドウに出ることは決して無く､variant を
+/// 与えれば下のすべての match の腕が､ウィンドウから到達できない case を抱える
+/// ことになる｡
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum TimelineSource {
-    /// `GET /2/users/:id/timelines/reverse_chronological` (#11), cached per
-    /// signed-in user id. What every launch shows with no list configured.
+    /// `GET /2/users/:id/timelines/reverse_chronological` (#11)｡サインイン中の
+    /// user id ごとにキャッシュする｡list 未設定ならどの起動もこれを出す｡
     Home,
-    /// `GET /2/lists/:id/tweets` (#161), cached per list id.
+    /// `GET /2/lists/:id/tweets` (#161)｡list id ごとにキャッシュする｡
     List(String),
 }
 
 impl TimelineSource {
-    /// Which cache file this source's posts belong in.
+    /// このソースの post がどのキャッシュファイルに属するか｡
     ///
-    /// `user_id` is the signed-in account's own id, and only [`Self::Home`]
-    /// uses it: a list's contents are the same whoever reads them, so
-    /// keying its cache by the reader would write the same posts to a
-    /// second file the moment a different account opened the same list.
+    /// `user_id` はサインイン中アカウント自身の id で､使うのは [`Self::Home`]
+    /// だけだ: list の中身は誰が読んでも同じなので､読み手でキャッシュを
+    /// キーづけすると､別のアカウントが同じ list を開いた瞬間に同じ post が
+    /// 2 つ目のファイルへ書かれる｡
     fn cache_file(&self, paths: &Paths, user_id: &str) -> PathBuf {
         match self {
             Self::Home => paths.home_timeline_file(user_id),
@@ -288,13 +283,12 @@ impl TimelineSource {
     }
 }
 
-/// The cached timeline for whichever source the window is showing (#161),
-/// newest-first, or `None` if there is nothing usable cached. Mirrors
-/// [`load_timeline`] exactly, but reads the file
-/// [`TimelineSource::cache_file`] picks — a distinct file per source, so a
-/// single-user timeline cached for the same id is never read back as home
-/// content (#11), and a list's posts never land on top of the home
-/// timeline (#161).
+/// ウィンドウが表示しているソースのキャッシュ済み timeline を newest-first で
+/// 返す (#161)｡使えるものがキャッシュされていなければ `None`｡[`load_timeline`]
+/// をそのまま写しているが､読むのは [`TimelineSource::cache_file`] が選ぶ
+/// ファイルだ — ソースごとに別のファイルなので､同じ id でキャッシュされた
+/// 単一ユーザーの timeline が home の中身として読み戻されることは無く (#11)､
+/// list の post が home timeline の上に載ることも無い (#161)｡
 pub(crate) fn load_primary_timeline(
     paths: &Paths,
     source: &TimelineSource,
@@ -303,8 +297,8 @@ pub(crate) fn load_primary_timeline(
     load_timeline_file(&source.cache_file(paths, user_id))
 }
 
-/// Persist `items` as `source`'s cache. Mirrors [`save_timeline`], writing
-/// to whichever file [`TimelineSource::cache_file`] picks instead.
+/// `items` を `source` のキャッシュとして永続化する｡[`save_timeline`] を写した
+/// もので､書き込み先は [`TimelineSource::cache_file`] が選ぶファイルになる｡
 pub(crate) fn save_primary_timeline(
     paths: &Paths,
     source: &TimelineSource,
@@ -315,16 +309,16 @@ pub(crate) fn save_primary_timeline(
     save_timeline_file(&source.cache_file(paths, user_id), items, now)
 }
 
-/// Render the window's timeline straight from cache: `Some` only when both
-/// `/me` and `source`'s own timeline are already cached (and `/me` is still
-/// within its TTL) — mirrors [`startup`], but for the window's primary
-/// source (#11, extended to lists by #161). Returns the resolved
-/// [`MeEntry`] alongside the items so the caller (`ui.rs`) can populate the
-/// header and the id needed for "Load older" even on a cache-only render.
+/// ウィンドウの timeline をキャッシュから直接描画する: `Some` になるのは
+/// `/me` と `source` 自身の timeline がどちらもキャッシュ済みで､かつ `/me` が
+/// まだ TTL の内側にあるときだけだ — [`startup`] を写したもので､対象は
+/// ウィンドウの主ソースになっている (#11｡#161 で list へ広げた)｡解決した
+/// [`MeEntry`] を items と一緒に返すので､呼び出し側 (`ui.rs`) はキャッシュ
+/// だけの描画でもヘッダと "Load older" に要る id を埋められる｡
 ///
-/// `/me` is required in list mode too, even though no list request needs
-/// it: the header names the signed-in account, and liking or reposting from
-/// a list row calls endpoints that take the signed-in id in their path.
+/// list モードでも `/me` は要る｡list の request がそれを必要としなくてもだ:
+/// ヘッダはサインイン中のアカウントを名指しするし､list の行から like や
+/// repost をすると､サインイン中の id をパスに取る endpoint を呼ぶ｡
 pub(crate) fn startup_primary(
     paths: &Paths,
     source: &TimelineSource,
@@ -339,29 +333,27 @@ pub(crate) fn startup_primary(
     Ok(Some((me, items)))
 }
 
-/// Drop `post_id` from the cached timeline on disk and return what is left
-/// (#72).
+/// ディスク上のキャッシュ済み timeline から `post_id` を落とし､残ったものを
+/// 返す (#72)｡
 ///
-/// Deleting a post from X but leaving it in the cache is the failure mode
-/// the issue warns about: the row disappears until the next start, then
-/// comes back — the app looking like it worked when it did not. So this
-/// rewrites the file and then **reads it back**, returning what is actually
-/// on disk rather than what was just written; a write that silently did
-/// nothing shows up as the post still being present.
+/// X から post を消したのにキャッシュへ残す､というのが issue の警告する失敗の
+/// 仕方だ: 行は次の起動まで消え､そのあと戻ってくる — 動いていないのに動いた
+/// ように見えるアプリになる｡だからこれはファイルを書き換えたうえで
+/// **読み戻し**､今書いたものではなく実際にディスクにあるものを返す｡黙って
+/// 何もしなかった書き込みは､post がまだ在ることとして表に出る｡
 ///
-/// `source` selects which cache file to touch — the same post can sit in
-/// the home timeline and in a list at once, and only the one being
-/// displayed is what the user just acted on.
+/// `source` はどのキャッシュファイルに触るかを選ぶ — 同じ post が home
+/// timeline と list に同時に居ることはあり得て､ユーザーが今操作したのは
+/// 表示されている方だけだ｡
 ///
-/// This used to be a `home: bool` whose `false` arm reached the
-/// single-user cache. Nothing passed `false`: that cache is written only
-/// by [`reload`], which serves `--fetch-only`, and a headless fetch has no
-/// delete affordance to reach this from. #161 replaced the flag with
-/// [`TimelineSource`] rather than growing it a third state for a path the
-/// window cannot take.
+/// かつてこれは `home: bool` で､`false` の腕が単一ユーザーのキャッシュへ届いて
+/// いた｡`false` を渡すものは無かった: あのキャッシュを書くのは `--fetch-only`
+/// を担う [`reload`] だけで､headless な取得にはここへ至る削除の操作面が無い｡
+/// #161 は､ウィンドウが取れない経路のために 3 つ目の状態を生やすのではなく､
+/// このフラグを [`TimelineSource`] へ置き換えた｡
 ///
-/// A missing cache file is not an error: there is nothing to remove, and
-/// the post is gone from X either way.
+/// キャッシュファイルが無いのは error ではない: 消すものが無く､どのみち post
+/// は X から消えている｡
 pub(crate) fn forget_post(
     paths: &Paths,
     source: &TimelineSource,
@@ -369,10 +361,10 @@ pub(crate) fn forget_post(
     post_id: &str,
     now: i64,
 ) -> Result<Vec<TimelineItem>> {
-    // Resolved once (#92). The selector used to be branched on twice, with
-    // each arm naming both a load and a save, so writing to one file and
-    // reading the other back was expressible — which would have defeated
-    // the read-back above: it is meant to prove *this* write landed.
+    // 一度だけ解決する (#92)｡かつてこの selector は二度分岐され､それぞれの腕が
+    // load と save の両方を名指ししていたので､片方のファイルへ書いてもう片方を
+    // 読み戻す､という書き方ができてしまった — それでは上の読み戻しが台無しだ｡
+    // 読み戻しは *この* 書き込みが着地したことを示すためにある｡
     let path = source.cache_file(paths, user_id);
 
     let Some(cached) = load_timeline_file(&path)? else {
@@ -383,25 +375,25 @@ pub(crate) fn forget_post(
     Ok(load_timeline_file(&path)?.unwrap_or_default())
 }
 
-/// What a reload spent: the merged, capped timeline to render, and whether
-/// the user-id lookup was skipped because it was already cached (in which
-/// case the reload cost one request instead of two).
+/// reload が使ったもの: 描画するマージ済み・上限処理済みの timeline と､
+/// user id の引き当てがキャッシュ済みゆえに省かれたかどうか (省かれた場合､
+/// reload は 2 回ではなく 1 回の request で済んでいる)｡
 #[derive(Debug)]
 pub(crate) struct Reloaded {
     pub items: Vec<TimelineItem>,
     pub user_id_cache_hit: bool,
 }
 
-/// Spend the credits an explicit reload is allowed to spend: resolve the
-/// user id (from cache if fresh, else one API request, then cached for next
-/// time), fetch posts newer than the newest cached one, merge them ahead of
-/// what's cached, persist the result, and return it.
+/// 明示的な reload に許された credit を使う: user id を解決し (新鮮なら
+/// キャッシュから､でなければ API request 1 回｡そのあと次回のためにキャッシュ
+/// する)､キャッシュ済みで最も新しいものより新しい post を取得し､キャッシュ済み
+/// のものの前へマージし､結果を永続化して返す｡
 ///
-/// Not unit-tested directly — it makes real HTTP requests through `client`.
-/// Everything it composes ([`cached_user_id`], [`save_user_id`],
-/// [`load_timeline`], [`since_id`], [`splice`], [`save_timeline`])
-/// is tested standalone, the same way `oauth::resolve_credential`'s
-/// network-calling refresh branch isn't directly tested either.
+/// 直接の unit test は無い — `client` を通じて本物の HTTP request を送るからだ｡
+/// これが組み立てている部品 ([`cached_user_id`]､[`save_user_id`]､
+/// [`load_timeline`]､[`since_id`]､[`splice`]､[`save_timeline`]) は
+/// 単体でテストされている｡`oauth::resolve_credential` のネットワークを呼ぶ
+/// refresh 分岐が直接テストされていないのと同じだ｡
 pub(crate) fn reload(
     paths: &Paths,
     client: &XClient,
@@ -428,16 +420,16 @@ pub(crate) fn reload(
     })
 }
 
-/// What a reload of the window's primary timeline spent (#11, #161): the
-/// merged, capped timeline to render, the resolved [`MeEntry`] itself (so
-/// `ui.rs` can populate the header and remember the id for a later "Load
-/// older"), and the response's `meta.next_token`, if any.
+/// ウィンドウの主 timeline の reload が使ったもの (#11､#161): 描画する
+/// マージ済み・上限処理済みの timeline､解決した [`MeEntry`] そのもの
+/// (`ui.rs` がヘッダを埋め､後の "Load older" のために id を覚えられるように)､
+/// そしてレスポンスの `meta.next_token` があればそれ｡
 ///
-/// Unlike [`Reloaded`], this carries no `me_cache_hit` flag: nothing in this
-/// crate currently reports per-reload request cost for the window's path
-/// the way `main.rs`'s `--fetch-only` does for [`Reloaded`] via
-/// `user_id_cache_hit`, so tracking it here would be dead weight. Add it back
-/// if a caller needs it.
+/// [`Reloaded`] と違い `me_cache_hit` フラグは持たない: `main.rs` の
+/// `--fetch-only` が `user_id_cache_hit` を通じて [`Reloaded`] に対してやって
+/// いるような reload ごとの request 費用の報告を､ウィンドウの経路については
+/// この crate の誰もしていないので､ここで追跡しても死荷重になる｡呼び出し側が
+/// 要るようになったら戻せばよい｡
 #[derive(Debug)]
 pub(crate) struct ReloadedPrimary {
     pub items: Vec<TimelineItem>,
@@ -445,22 +437,22 @@ pub(crate) struct ReloadedPrimary {
     pub next_token: Option<String>,
 }
 
-/// Spend the credits a reload of the window's timeline is allowed to spend:
-/// resolve `/me` (from cache if fresh, else one API request, then cached
-/// for next time), fetch a page from `source`, merge it ahead of what's
-/// cached (never appended behind — that's [`load_older_primary`]'s job),
-/// persist the result, and return it alongside `meta.next_token`.
+/// ウィンドウの timeline の reload に許された credit を使う: `/me` を解決し
+/// (新鮮ならキャッシュから､でなければ API request 1 回｡そのあと次回のために
+/// キャッシュする)､`source` から 1 ページ取得し､キャッシュ済みのものの前へ
+/// マージし (後ろへ足すことは決してしない — それは [`load_older_primary`] の
+/// 仕事だ)､結果を永続化して `meta.next_token` と一緒に返す｡
 ///
-/// **Only [`TimelineSource::Home`] fetches incrementally.** It passes
-/// `since_id` so the API returns nothing already on file;
-/// `GET /2/lists/:id/tweets` accepts no such parameter, so a list reload
-/// always re-reads the head page. [`splice`] merges by id either way, so
-/// the difference is in what is billed, not in what is rendered — see
-/// [`XClient::list_timeline`].
+/// **増分で取得するのは [`TimelineSource::Home`] だけだ｡** これは `since_id`
+/// を渡すので API は既にファイルにあるものを返さない｡
+/// `GET /2/lists/:id/tweets` はそのパラメータを受け付けないので､list の reload
+/// は常に先頭ページを読み直す｡どちらにせよ [`splice`] が id でマージするので､
+/// 違いは何が課金されるかであって何が描画されるかではない —
+/// [`XClient::list_timeline`] を見よ｡
 ///
-/// Mirrors [`reload`], the single-user equivalent. Not unit-tested directly
-/// for the same reason `reload` isn't — it makes real HTTP requests through
-/// `client`. Everything it composes is tested standalone.
+/// 単一ユーザー版の [`reload`] を写したもの｡直接の unit test が無いのは
+/// `reload` と同じ理由だ — `client` を通じて本物の HTTP request を送る｡
+/// 組み立てている部品はすべて単体でテストされている｡
 pub(crate) fn reload_primary(
     paths: &Paths,
     client: &XClient,
@@ -498,20 +490,19 @@ pub(crate) fn reload_primary(
     })
 }
 
-/// Spend one request to fetch the page *behind* `pagination_token` (#11's
-/// "Load older"): append it after what's cached — [`Side::Behind`], never
-/// [`Side::Ahead`] — persist the combined result, and return it
-/// alongside the next `meta.next_token` (`None` once there's nothing further
-/// back). `user_id` is the caller's responsibility to supply — `ui.rs` keeps
-/// it around from the last [`reload_primary`] or [`startup_primary`], since
-/// this function has no reason to re-resolve `/me` just to page further back
-/// through content it's already showing.
+/// request 1 回を使って `pagination_token` の *後ろ* のページを取得する
+/// (#11 の "Load older"): キャッシュ済みのものの後ろへ足し — [`Side::Behind`]
+/// であって決して [`Side::Ahead`] ではない — 合わせた結果を永続化し､次の
+/// `meta.next_token` と一緒に返す (これ以上後ろが無ければ `None`)｡`user_id` を
+/// 渡すのは呼び出し側の責任だ — `ui.rs` は直近の [`reload_primary`] か
+/// [`startup_primary`] のものを持ち回している｡既に表示している中身をさらに
+/// 後ろへ辿るためだけに `/me` を解決し直す理由はこの関数に無いからだ｡
 ///
-/// Paging back through a list works the same way: `pagination_token` is the
-/// one parameter `GET /2/lists/:id/tweets` shares with the home timeline,
-/// so this is the one direction where the two sources are not asymmetric.
+/// list を後ろへ辿るのも同じように動く: `pagination_token` は
+/// `GET /2/lists/:id/tweets` が home timeline と共有する唯一のパラメータで､
+/// だからここは 2 つのソースが非対称にならない唯一の向きだ｡
 ///
-/// Not unit-tested directly, for the same reason [`reload_primary`] isn't.
+/// 直接の unit test は無い｡[`reload_primary`] に無いのと同じ理由だ｡
 pub(crate) fn load_older_primary(
     paths: &Paths,
     client: &XClient,
@@ -540,26 +531,25 @@ pub(crate) fn load_older_primary(
     Ok((items, next_token))
 }
 
-/// The whole contents of one [`Paths::thread_file`]: a cached parent chain
-/// for one reply (#12).
+/// [`Paths::thread_file`] 1 つ分の中身すべて: 1 つの reply に対する親の連鎖の
+/// キャッシュ (#12)｡
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ThreadCacheFile {
     fetched_at: i64,
     chain: ThreadChain,
 }
 
-/// The cached parent chain for `reply_post_id`, if one is on file (#12).
-/// Unlike [`load_timeline`], there is no refresh path here at all — a
-/// thread's parents are immutable once posted (aside from deletion, which
-/// [`thread::assemble_chain`] already renders sensibly), so a cache hit is
-/// trusted forever, matching [`load_timeline`]'s own "no TTL" rule for
-/// materially the same reason.
+/// `reply_post_id` に対する親の連鎖のキャッシュ｡ファイルにあれば返す (#12)｡
+/// [`load_timeline`] と違い､ここには refresh の経路がそもそも無い — thread の
+/// 親は投稿された時点で不変だ (削除は別だが､[`thread::assemble_chain`] が
+/// 既に無難に描いている)｡だからキャッシュヒットは永久に信頼される｡
+/// [`load_timeline`] 自身の「TTL 無し」の規則と､実質同じ理由で揃っている｡
 pub(crate) fn load_thread(paths: &Paths, reply_post_id: &str) -> Result<Option<ThreadChain>> {
     let file: Option<ThreadCacheFile> = load_json(&paths.thread_file(reply_post_id))?;
     Ok(file.map(|file| file.chain))
 }
 
-/// Persist `chain` as `reply_post_id`'s cached parent chain (#12).
+/// `chain` を `reply_post_id` の親の連鎖のキャッシュとして永続化する (#12)｡
 pub(crate) fn save_thread(
     paths: &Paths,
     reply_post_id: &str,
@@ -573,27 +563,25 @@ pub(crate) fn save_thread(
     save_json(&paths.thread_file(reply_post_id), &file)
 }
 
-/// Spend the credits "Show thread" (#12) is allowed to spend: if a chain for
-/// `reply_post_id` is already cached, render it for free; otherwise walk
-/// upward one `GET /2/tweets?ids=` request per level — starting from
-/// `first_parent_id` (the reply's own `TimelineItem::replied_to.post_id`,
-/// already known at zero request cost) — stopping at
-/// [`thread::MAX_THREAD_DEPTH`] levels or the first missing/absent parent,
-/// then cache and return the assembled result.
+/// "Show thread" (#12) に許された credit を使う: `reply_post_id` の連鎖が既に
+/// キャッシュされていれば無料で描画する｡そうでなければ 1 段につき
+/// `GET /2/tweets?ids=` request 1 回で上へ辿る — 起点は `first_parent_id`
+/// (reply 自身の `TimelineItem::replied_to.post_id` で､request 費用ゼロで
+/// 既に判っている) — [`thread::MAX_THREAD_DEPTH`] 段か､最初に欠けた/不在の
+/// 親で止まり､組み上げた結果をキャッシュして返す｡
 ///
-/// An empty result is deliberately *not* cached — see the comment at the
-/// bottom of the body.
+/// 空の結果は意図的にキャッシュ *しない* — 本体末尾のコメントを見よ｡
 ///
-/// The loop below checks the depth cap *before* each fetch, never after, so
-/// the worst case is exactly [`thread::MAX_THREAD_DEPTH`] requests: hitting
-/// the cap is detected from data already in hand (the last fetched post's
-/// own `replied_to`), never by spending one more request to find out.
+/// 下のループは深さの上限を各 fetch の *前* に確かめる｡後ではない｡だから
+/// 最悪でもちょうど [`thread::MAX_THREAD_DEPTH`] request で済む: 上限に達した
+/// ことは既に手元にあるデータ (最後に取得した post 自身の `replied_to`) から
+/// 判り､それを知るために request をもう 1 回使うことは決して無い｡
 ///
-/// Not unit-tested directly — it makes real HTTP requests through `client`,
-/// the same way [`reload`] isn't. The pure seam that carries this
-/// function's ordering/dedup/cap logic is [`thread::assemble_chain`];
-/// [`load_thread`]/[`save_thread`] are tested standalone like the rest of
-/// this module's cache accessors.
+/// 直接の unit test は無い — `client` を通じて本物の HTTP request を送るからで､
+/// [`reload`] に無いのと同じだ｡この関数の順序づけ・重複除去・上限のロジックを
+/// 担う純粋な継ぎ目は [`thread::assemble_chain`] だ｡
+/// [`load_thread`]/[`save_thread`] はこのモジュールの他のキャッシュ
+/// アクセサと同じく単体でテストされている｡
 pub(crate) fn fetch_thread(
     paths: &Paths,
     client: &XClient,
@@ -611,17 +599,17 @@ pub(crate) fn fetch_thread(
 
     while let Some(id) = next_id.take() {
         if hops.len() >= thread::MAX_THREAD_DEPTH {
-            // A further parent is known (`id`) but the cap was already hit
-            // by the previous iteration — stop without spending a request
-            // to confirm what's already known.
+            // さらに上の親は判っている (`id`) が､上限は前の反復で既に
+            // 達している — 判りきったことを確かめるために request を使わず
+            // ここで止める｡
             reached_cap = true;
             break;
         }
 
         let items = client.tweets_by_id(paths, &id, now)?;
         let Some(fetched) = items.into_iter().next() else {
-            // Deleted, protected, or otherwise absent from the response —
-            // the walk stops cleanly here rather than erroring (#12).
+            // 削除された､保護されている､あるいは他の理由でレスポンスに
+            // 不在 — 歩みは error にせずここで綺麗に止まる (#12)｡
             break;
         };
 
@@ -635,12 +623,11 @@ pub(crate) fn fetch_thread(
     }
 
     let chain = thread::assemble_chain(hops, reached_cap);
-    // An empty chain means the very first parent came back absent. That is
-    // usually permanent (deleted, protected), but it is also what a transient
-    // hiccup looks like — and this cache has no TTL, so persisting it would
-    // wedge "Show thread" on this reply forever with no way out but deleting
-    // the file by hand. Re-deriving it costs exactly one request, on an
-    // explicit click; that is the cheaper mistake to make.
+    // 空の連鎖は､一番最初の親が不在で返ってきたことを意味する｡たいていそれは
+    // 恒久的だが (削除､保護)､一時的なしゃっくりもそう見える — そしてこの
+    // キャッシュには TTL が無いので､永続化すればこの reply の "Show thread" は
+    // 永久に詰まり､手でファイルを消す以外に逃げ道が無くなる｡導出し直す代償は
+    // 明示的なクリック時のちょうど request 1 回だ｡そちらが安い方の間違いだ｡
     if !chain.items.is_empty() {
         save_thread(paths, reply_post_id, &chain, now)?;
     }
@@ -673,19 +660,19 @@ mod tests {
         items.iter().map(|item| item.id.as_str()).collect()
     }
 
-    /// [`item`] with `created_at` set to a real-shaped, fixed-width
-    /// timestamp string, for the #102 ordering tests below.
+    /// 下の #102 の順序テストのために､`created_at` に実物と同じ形の固定幅な
+    /// タイムスタンプ文字列を入れた [`item`]｡
     fn item_at(id: &str, created_at: &str) -> TimelineItem {
         let mut built = item(id);
         built.created_at = Some(created_at.to_string());
         built
     }
 
-    /// A fixed-width `created_at` string that increases with `n`, in the
-    /// same `YYYY-MM-DDTHH:MM:SS.mmmZ` shape the API actually sends. Used
-    /// instead of hand-writing distinct timestamp literals per test so the
-    /// ordering under test (`n` larger => string compares greater) is
-    /// obviously correct by construction.
+    /// `n` とともに増える固定幅の `created_at` 文字列｡API が実際に送るのと
+    /// 同じ `YYYY-MM-DDTHH:MM:SS.mmmZ` の形をしている｡テストごとに別々の
+    /// タイムスタンプ literal を手で書く代わりにこれを使うことで､テスト対象の
+    /// 順序 (`n` が大きい => 文字列比較でも大きい) が構成から明らかに正しく
+    /// なる｡
     fn ts(n: u32) -> String {
         format!(
             "2026-01-01T{:02}:{:02}:{:02}.000Z",
@@ -721,7 +708,7 @@ mod tests {
 
     // --- since_id ---
 
-    // --- #72: deleting a post ---
+    // --- #72: post の削除 ---
 
     #[test]
     fn without_post_drops_only_the_named_post() {
@@ -737,9 +724,9 @@ mod tests {
 
     #[test]
     fn forget_post_rewrites_the_displayed_cache_and_reads_it_back() {
-        // The issue's actual completion criterion: gone from the cache too,
-        // so it cannot come back on the next start. Asserted by reading the
-        // file again rather than trusting the write.
+        // issue の本当の完了条件: キャッシュからも消えていて､次の起動で
+        // 戻ってこられないこと｡書き込みを信じるのではなくファイルを読み直して
+        // assert する｡
         let root = temp_root("forget-home");
         let paths = test_paths(&root);
         paths.ensure_dirs().unwrap();
@@ -766,8 +753,8 @@ mod tests {
 
     #[test]
     fn forget_post_touches_only_the_displayed_timelines_file() {
-        // The same post can sit in both caches; only the one the user was
-        // looking at is what they acted on.
+        // 同じ post は両方のキャッシュに居られる｡ユーザーが操作したのは
+        // 見ていた方だけだ｡
         let root = temp_root("forget-one-file");
         let paths = test_paths(&root);
         paths.ensure_dirs().unwrap();
@@ -813,7 +800,7 @@ mod tests {
         assert_eq!(since_id(&cached), Some("300"));
     }
 
-    // --- splice ahead (#92, formerly merge_timeline) ---
+    // --- splice ahead (#92｡かつての merge_timeline) ---
 
     #[test]
     fn splice_ahead_places_fresh_posts_before_cached_posts() {
@@ -825,8 +812,8 @@ mod tests {
 
     #[test]
     fn splice_ahead_drops_a_fresh_post_whose_id_is_already_cached() {
-        // The API can hand back a post that's already on file; the cached
-        // copy stays put rather than being duplicated.
+        // API は既にファイルにある post を返してくることがある｡キャッシュ済み
+        // のコピーは重複せずそのまま居座る｡
         let fresh = vec![item("3"), item("2")];
         let cached = vec![item("2"), item("1")];
         let merged = splice(cached, fresh, Side::Ahead);
@@ -848,7 +835,7 @@ mod tests {
         let merged = splice(cached, fresh, Side::Ahead);
         assert_eq!(merged.len(), 500);
         assert_eq!(merged.first().unwrap().id, "502");
-        // The two oldest cached posts ("2" and "1") were pushed out by the cap.
+        // キャッシュ済みで最も古い 2 つの post ("2" と "1") は上限で押し出された｡
         assert!(!ids(&merged).contains(&"1"));
         assert!(!ids(&merged).contains(&"2"));
         assert_eq!(merged.last().unwrap().id, "3");
@@ -856,11 +843,11 @@ mod tests {
 
     #[test]
     fn splice_keeps_the_cached_copy_of_a_duplicate_in_both_directions() {
-        // #92: the two functions this replaced both kept what was already
-        // on file, and that is load-bearing rather than incidental — a
-        // post's metrics (#67) are a snapshot from when it was fetched, so
-        // keeping the cached copy is what stops a reload shuffling the
-        // counts on rows the user is already looking at.
+        // #92: これが置き換えた 2 つの関数はどちらも既にファイルにあるものを
+        // 残していて､それは偶然ではなく効いている — post の metrics (#67) は
+        // 取得した時点のスナップショットなので､キャッシュ済みのコピーを残す
+        // ことが､ユーザーが今見ている行のカウントを reload にかき混ぜさせない
+        // ようにしている｡
         let mut cached_copy = item("1");
         cached_copy.text = "on file".to_string();
         let mut incoming_copy = item("1");
@@ -879,7 +866,7 @@ mod tests {
         assert_eq!(behind[0].text, "on file");
     }
 
-    // --- splice merges a recurring id's missing fields (#97) ---
+    // --- splice は再登場した id の欠けたフィールドをマージする (#97) ---
 
     #[test]
     fn splice_fills_a_missing_optional_field_from_the_incoming_copy() {
@@ -897,10 +884,10 @@ mod tests {
 
     #[test]
     fn splice_keeps_the_cached_metrics_snapshot_instead_of_the_incoming_one() {
-        // #67: metrics are a snapshot from when the post was first fetched.
-        // The merge rule ("cached Some wins") must not special-case this —
-        // it falls out of the same rule that fills a missing
-        // author_avatar_url, and this test is what proves it does.
+        // #67: metrics は post を最初に取得した時点のスナップショットだ｡
+        // マージの規則 ("cached Some wins") はこれを特別扱いしてはならない —
+        // 欠けた author_avatar_url を埋めるのと同じ規則から自然に出てくるもの
+        // であり､このテストがそうなっていることを示している｡
         let mut cached_copy = item("1");
         cached_copy.metrics = Some(crate::x_api::PostMetrics {
             likes: 1,
@@ -948,7 +935,7 @@ mod tests {
         assert_eq!(merged[0].links[0].label, "example.com");
     }
 
-    // --- splice behind (#92, formerly append_older) ---
+    // --- splice behind (#92｡かつての append_older) ---
 
     #[test]
     fn splice_behind_places_older_posts_after_cached_posts() {
@@ -960,8 +947,8 @@ mod tests {
 
     #[test]
     fn splice_behind_drops_an_older_post_whose_id_is_already_cached() {
-        // The page boundary can overlap: the API can hand back a post
-        // that's already on file, and it must not be duplicated.
+        // ページ境界は重なりうる: API は既にファイルにある post を返して
+        // くることがあり､それを重複させてはならない｡
         let cached = vec![item("3"), item("2")];
         let older = vec![item("2"), item("1")];
         let merged = splice(cached, older, Side::Behind);
@@ -983,21 +970,20 @@ mod tests {
         let merged = splice(cached, older, Side::Behind);
         assert_eq!(merged.len(), 500);
         assert_eq!(merged.first().unwrap().id, "502");
-        // The two oldest fetched posts ("2" and "1") are pushed out by the cap.
+        // 取得したうち最も古い 2 つの post ("2" と "1") は上限で押し出される｡
         assert!(!ids(&merged).contains(&"1"));
         assert!(!ids(&merged).contains(&"2"));
         assert_eq!(merged.last().unwrap().id, "3");
     }
 
-    // --- splice orders the result by created_at, not by fetch order (#102) ---
+    // --- splice は取得順ではなく created_at で結果を並べる (#102) ---
 
     #[test]
     fn splice_ahead_orders_by_created_at_even_when_the_fresh_batch_is_older() {
-        // A `since_id` reload's own posts are expected to be newer than
-        // what's cached, but this must not be an assumption baked into the
-        // result — if it ever isn't (clock skew, a backfilled post), the
-        // splice still has to land in created_at order rather than fresh-
-        // batch-always-first.
+        // `since_id` reload が持ち帰る post はキャッシュ済みのものより新しい
+        // はずだが､それを結果へ焼き込んだ前提にしてはならない — そうでない
+        // とき (時計のずれ､後から埋められた post) でも､splice は fresh の
+        // バッチが常に先､ではなく created_at 順に着地しなければならない｡
         let cached = vec![item_at("2", &ts(20))];
         let fresh = vec![item_at("3", &ts(10))];
         let merged = splice(cached, fresh, Side::Ahead);
@@ -1006,7 +992,7 @@ mod tests {
 
     #[test]
     fn splice_behind_orders_by_created_at_even_when_the_older_batch_is_newer() {
-        // Mirrors the Ahead case above for a "Load older" page.
+        // 上の Ahead の場合を "Load older" のページについて写したものだ｡
         let cached = vec![item_at("5", &ts(10))];
         let older = vec![item_at("4", &ts(20))];
         let merged = splice(cached, older, Side::Behind);
@@ -1015,10 +1001,9 @@ mod tests {
 
     #[test]
     fn splice_sort_is_stable_for_equal_created_at() {
-        // Same created_at down to the string: the relative order the API
-        // returned them in (here, the pre-sort concatenation order) must
-        // survive, which is exactly what a stable sort guarantees and
-        // `sort_unstable_by` would not.
+        // 文字列レベルまで同じ created_at: API が返した相対順序 (ここでは
+        // ソート前の連結順) が生き残らなければならない｡それはまさに安定
+        // ソートが保証するもので､`sort_unstable_by` では保証されない｡
         let cached = vec![item_at("1", &ts(10))];
         let fresh = vec![item_at("3", &ts(10)), item_at("2", &ts(10))];
         let merged = splice(cached, fresh, Side::Ahead);
@@ -1027,9 +1012,9 @@ mod tests {
 
     #[test]
     fn splice_sinks_a_missing_created_at_row_to_the_end() {
-        // A row with no created_at (#97's old cache rows, or a malformed
-        // response) must not sort ahead of a row that has one, even when
-        // fetch order would otherwise place it first.
+        // created_at を持たない行 (#97 の古いキャッシュ行や､壊れた
+        // レスポンス) は､取得順なら先頭に来る場合でも､持っている行より
+        // 前に並んではならない｡
         let cached = vec![item_at("2", &ts(10))];
         let fresh = vec![item("3")]; // created_at: None
         let merged = splice(cached, fresh, Side::Ahead);
@@ -1038,26 +1023,25 @@ mod tests {
 
     #[test]
     fn splice_preserves_relative_order_among_multiple_missing_created_at_rows() {
-        // Two None rows must not swap relative to each other just because
-        // sorting moved them both past a row that does have a created_at.
+        // None の行が 2 つあるとき､ソートが両方を created_at を持つ行の
+        // 後ろへ動かしただけで､互いの順序が入れ替わってはならない｡
         let fresh = vec![item("9")]; // created_at: None
-        let cached = vec![item_at("5", &ts(10)), item("8")]; // second: None
-        // Pre-sort concatenation (Side::Ahead) is ["9", "5", "8"]: a None
-        // row ahead of a Some row, and another None row behind it.
+        let cached = vec![item_at("5", &ts(10)), item("8")]; // 2 つ目: None
+        // ソート前の連結 (Side::Ahead) は ["9", "5", "8"] だ: None の行が
+        // Some の行の前にあり､その後ろにもう一つ None の行がある｡
         let merged = splice(cached, fresh, Side::Ahead);
         assert_eq!(ids(&merged), vec!["5", "9", "8"]);
     }
 
     #[test]
     fn splice_sorts_before_capping_so_the_500_cap_drops_the_oldest_rows() {
-        // Regression guard for ordering the truncate after the sort: build
-        // a batch where the naive "concatenate, then cut at 500" order
-        // would keep the wrong rows. `fresh` sits at the front of the
-        // Side::Ahead concatenation (positions 0-1) but is, by created_at,
-        // older than every cached row. If truncate ran before the sort (or
-        // the sort didn't run at all), the cap would keep these two and
-        // drop the two oldest *cached* rows instead — even though those
-        // cached rows are chronologically newer than `fresh`.
+        // 切り詰めをソートの後に置くことの回帰ガード: 素朴な「連結して
+        // 500 で切る」順序だと間違った行が残るようなバッチを組む｡`fresh` は
+        // Side::Ahead の連結の先頭 (位置 0-1) に居るが､created_at では
+        // キャッシュ済みのどの行より古い｡ソートの前に切り詰めが走ったら
+        // (あるいはソートがまったく走らなかったら)､上限はこの 2 つを残し､
+        // 代わりに最も古い *キャッシュ済み* の 2 行を落とす — それらの
+        // キャッシュ済み行の方が `fresh` より時系列で新しいのにだ｡
         let cached: Vec<_> = (1000..1500)
             .rev()
             .map(|n| item_at(&n.to_string(), &ts(n)))
@@ -1067,8 +1051,8 @@ mod tests {
         assert_eq!(merged.len(), 500);
         assert_eq!(merged.first().unwrap().id, "1499");
         assert_eq!(merged.last().unwrap().id, "1000");
-        // The chronologically-oldest rows (the fresh ones) are the ones
-        // the cap drops, not the two oldest cached rows.
+        // 上限が落とすのは時系列で最も古い行 (fresh の方) であって､
+        // キャッシュ済みで最も古い 2 行ではない｡
         assert!(!ids(&merged).contains(&"502"));
         assert!(!ids(&merged).contains(&"501"));
     }
@@ -1104,9 +1088,9 @@ mod tests {
 
     #[test]
     fn cached_me_is_none_once_the_ttl_has_elapsed() {
-        // #11 reuses #9's TTL policy: an id is effectively permanent, but
-        // this still guards against a cache file from an account that has
-        // since been deleted or renamed staying trusted forever.
+        // #11 は #9 の TTL 方針を使い回す: id は事実上恒久的だが､それでも
+        // これは､その後削除されたり改名されたりしたアカウントのキャッシュ
+        // ファイルが永久に信頼され続けるのを防いでいる｡
         let root = temp_root("me-stale");
         let paths = test_paths(&root);
         paths.ensure_dirs().unwrap();
@@ -1154,9 +1138,9 @@ mod tests {
 
     #[test]
     fn owned_lists_never_expire_by_age() {
-        // #164: staleness is bounded by the picker's explicit refresh,
-        // the way `load_timeline` is bounded by an explicit reload —
-        // a list renamed last month is still the right list to switch to.
+        // #164: 陳腐化は picker の明示的な refresh で区切られる｡
+        // `load_timeline` が明示的な reload で区切られるのと同じだ —
+        // 先月改名された list も､切り替え先として依然正しい list だ｡
         let root = temp_root("owned-lists-old");
         let paths = test_paths(&root);
         paths.ensure_dirs().unwrap();
@@ -1271,9 +1255,9 @@ mod tests {
         let root = temp_root("user-id-io-error");
         let paths = test_paths(&root);
         paths.ensure_dirs().unwrap();
-        // A directory where a file is expected is a real I/O error (not
-        // NotFound), distinct from corruption — it must surface rather than
-        // being swallowed as a cache miss.
+        // ファイルがあるはずの場所にディレクトリがあるのは本物の I/O error で
+        // (NotFound ではない)､破損とは別物だ — キャッシュミスとして飲み込まず
+        // 表に出さなければならない｡
         std::fs::create_dir(paths.user_ids_file()).unwrap();
 
         assert!(cached_user_id(&paths, "XDevelopers", 0).is_err());
@@ -1325,8 +1309,8 @@ mod tests {
         let root = temp_root("timeline-future-shape");
         let paths = test_paths(&root);
         paths.ensure_dirs().unwrap();
-        // Valid JSON, but not the shape this version expects — simulates a
-        // cache file written by a future version of twigpui.
+        // JSON としては妥当だが､このバージョンが期待する形ではない —
+        // 将来のバージョンの twigpui が書いたキャッシュファイルを模している｡
         std::fs::write(
             paths.timeline_file("2244994945"),
             br#"{"schema_version": 99, "wildly_different_shape": true}"#,
@@ -1340,13 +1324,13 @@ mod tests {
 
     #[test]
     fn a_cache_file_carrying_a_schema_version_key_still_reads_back() {
-        // Every cache file on disk right now was written while
-        // `schema_version` existed (#97, dropped again since). Serde
-        // ignores unknown fields, so those files still load — but that is
-        // a property of the derive rather than an intention anyone wrote
-        // down, and if it stopped holding the whole cache would go quiet
-        // rather than loudly: `load_json` turns a parse failure into
-        // `Ok(None)`, which reads exactly like an empty cache.
+        // 今ディスクにあるキャッシュファイルはどれも `schema_version` が
+        // 存在していた頃に書かれた (#97｡その後また取り除かれた)｡serde は
+        // 未知のフィールドを無視するのでそれらのファイルは今も読める — が､
+        // それは誰かが書き留めた意図ではなく derive の性質でしかなく､
+        // 成り立たなくなったときキャッシュ全体は騒がしくではなく静かに
+        // 死ぬ: `load_json` はパース失敗を `Ok(None)` に変え､それは空の
+        // キャッシュとまったく同じに読めるからだ｡
         let root = temp_root("timeline-legacy-schema-version-key");
         let paths = test_paths(&root);
         paths.ensure_dirs().unwrap();
@@ -1411,9 +1395,9 @@ mod tests {
 
     #[test]
     fn single_user_and_home_timeline_caches_for_the_same_user_id_do_not_collide() {
-        // #11's whole point: the same user id (e.g. someone reloading in
-        // single-user mode, then signing in and reloading their home
-        // timeline) must not have one mode's cache overwrite the other's.
+        // #11 の眼目そのもの: 同じ user id であっても (たとえば単一ユーザー
+        // モードで reload したあと､サインインして home timeline を reload
+        // した場合)､片方のモードのキャッシュが他方を上書きしてはならない｡
         let root = temp_root("no-collision");
         let paths = test_paths(&root);
         paths.ensure_dirs().unwrap();
@@ -1443,12 +1427,12 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
     }
 
-    // --- #161: the list source ---
+    // --- #161: list のソース ---
 
     #[test]
     fn a_lists_cache_and_the_home_cache_do_not_collide() {
-        // #161: the window shows one or the other, and switching between
-        // them must not have the newcomer overwrite what the other had.
+        // #161: ウィンドウはどちらか一方を表示する｡両者を切り替えたときに､
+        // 新しく来た方がもう一方の持っていたものを上書きしてはならない｡
         let root = temp_root("list-vs-home");
         let paths = test_paths(&root);
         paths.ensure_dirs().unwrap();
@@ -1474,9 +1458,9 @@ mod tests {
 
     #[test]
     fn a_lists_cache_is_keyed_by_the_list_not_the_reader() {
-        // The same list read by two accounts is the same posts, so the
-        // signed-in id must not appear in the filename — otherwise the
-        // second account re-fetches everything the first already paid for.
+        // 同じ list を 2 つのアカウントが読んでも post は同じなので､
+        // サインイン中の id がファイル名に現れてはならない — さもないと
+        // 2 つ目のアカウントが､1 つ目が既に払ったものを取り直す｡
         let root = temp_root("list-not-per-reader");
         let paths = test_paths(&root);
         paths.ensure_dirs().unwrap();
@@ -1519,10 +1503,10 @@ mod tests {
 
     #[test]
     fn re_reading_the_whole_head_page_adds_no_rows() {
-        // #161's cost of having no `since_id`: every list reload returns
-        // the same head page. `splice` has to absorb a batch that overlaps
-        // the cache completely, or the timeline grows a duplicate of itself
-        // on every reload.
+        // `since_id` が無いことの #161 における代償: list の reload は毎回
+        // 同じ先頭ページを返す｡`splice` はキャッシュと完全に重なるバッチを
+        // 吸収しなければならない｡さもないと timeline は reload のたびに
+        // 自分自身の複製を育てる｡
         let cached = vec![item("3"), item("2"), item("1")];
         let head_page_again = vec![item("3"), item("2"), item("1")];
 
@@ -1569,9 +1553,8 @@ mod tests {
 
     #[test]
     fn startup_primary_is_none_for_a_list_with_only_the_home_cache_on_file() {
-        // Configuring a list on an install that has been running on the
-        // home timeline must not render the home timeline's posts under a
-        // list's name.
+        // home timeline で動いてきたインストールに list を設定したとき､
+        // home timeline の post が list の名前の下に描かれてはならない｡
         let root = temp_root("startup-list-miss");
         let paths = test_paths(&root);
         paths.ensure_dirs().unwrap();

@@ -1,176 +1,169 @@
-//! Color theme (#19). [`Theme`] bundles every color slot the UI's render
-//! helpers need into one `Copy` value, so it can be threaded through
-//! `TimelineView`'s free functions without a lifetime or a global.
+//! カラーテーマ (#19)｡[`Theme`] は UI の描画ヘルパーが必要とする色スロットを
+//! すべて 1 つの `Copy` な値へ束ねる｡おかげでライフタイムもグローバルも無しに
+//! `TimelineView` の自由関数へ通せる｡
 //!
-//! [`ThemeMode`] is the user-facing setting (`light` / `dark` / `system`),
-//! resolved from `config.toml` / `X_THEME` in [`crate::config::Config`].
-//! [`ThemeMode::resolve`] turns that into a concrete [`Theme`], consulting
-//! the OS appearance only for `System`, via gpui's `Window::appearance()`.
+//! [`ThemeMode`] はユーザーに見える設定 (`light` / `dark` / `system`) で､
+//! [`crate::config::Config`] が `config.toml` / `X_THEME` から解決する｡
+//! [`ThemeMode::resolve`] がそれを具体的な [`Theme`] へ変える｡OS の外観を
+//! 参照するのは `System` のときだけで､gpui の `Window::appearance()` を使う｡
 //!
-//! ## Light palette contrast
+//! ## light パレットのコントラスト
 //!
-//! Computed with the WCAG 2 relative-luminance formula —
-//! `(L1 + 0.05) / (L2 + 0.05)` over linearized sRGB channels — against the
-//! values in [`Theme::light`]:
+//! WCAG 2 の相対輝度の式 — 線形化した sRGB チャンネルに対する
+//! `(L1 + 0.05) / (L2 + 0.05)` — で [`Theme::light`] の値に対して計算した:
 //!
-//! | Pair | Ratio | AA text threshold (4.5:1) |
+//! | 組 | 比 | AA テキストの閾値 (4.5:1) |
 //! | --- | --- | --- |
-//! | `text` on `bg` | 18.5:1 | pass |
-//! | `text_muted` on `bg` | 6.9:1 | pass |
-//! | `text_tertiary` on `bg` (#95) | 5.1:1 | pass |
-//! | `button_label` on `accent` (idle button) | 5.7:1 | pass |
-//! | `button_label` on `button_busy_bg` (busy button) | 6.9:1 | pass |
-//! | `danger` on `bg` | 5.8:1 | pass |
-//! | `warning` on `bg` (#18) | 5.0:1 | pass |
-//! | `like` on `bg` (#95) | 5.8:1 | pass |
-//! | `repost` on `bg` (#95) | 4.9:1 | pass |
+//! | `bg` の上の `text` | 18.5:1 | 合格 |
+//! | `bg` の上の `text_muted` | 6.9:1 | 合格 |
+//! | `bg` の上の `text_tertiary` (#95) | 5.1:1 | 合格 |
+//! | `accent` の上の `button_label` (idle のボタン) | 5.7:1 | 合格 |
+//! | `button_busy_bg` の上の `button_label` (busy のボタン) | 6.9:1 | 合格 |
+//! | `bg` の上の `danger` | 5.8:1 | 合格 |
+//! | `bg` の上の `warning` (#18) | 5.0:1 | 合格 |
+//! | `bg` の上の `like` (#95) | 5.8:1 | 合格 |
+//! | `bg` の上の `repost` (#95) | 4.9:1 | 合格 |
 //!
-//! ## Why these are not macOS's literal system colors (#95)
+//! ## これらが macOS のシステムカラーそのものではない理由 (#95)
 //!
-//! #95 settles the look as "follow macOS". Its *hues* are taken from the
-//! system palette — systemBlue for the accent, systemRed for `like`,
-//! systemGreen for `repost`, and the four-step label ramp — but the
-//! luminances are not. Apple's own values fail the table above on a white
-//! background: systemBlue (`#007AFF`) reaches 3.6:1, systemGreen
-//! (`#34C759`) only 1.8:1, and `secondaryLabelColor` (black at 50% alpha)
-//! 3.9:1. This project has documented AA for every text pair since #19, and
-//! a look change is not a reason to drop that. So each system hue is kept
-//! and darkened until it passes, which reads as the macOS palette without
-//! shipping text nobody can read.
+//! #95 は見た目を「macOS に倣う」と定めた｡*色相*はシステムパレットから
+//! 取っている — accent は systemBlue､`like` は systemRed､`repost` は
+//! systemGreen､それとラベルの 4 段階のランプ — が輝度は取っていない｡
+//! Apple 自身の値は白い背景では上の表を落ちる｡systemBlue (`#007AFF`) は
+//! 3.6:1 止まり､systemGreen (`#34C759`) は 1.8:1 しかなく､
+//! `secondaryLabelColor` (黒のアルファ 50%) は 3.9:1｡このプロジェクトは #19
+//! 以来すべてのテキストの組について AA を文書化しており､見た目の変更はそれを
+//! 捨てる理由にならない｡だからシステムの色相は保ったまま通るまで暗くした｡
+//! 誰にも読めないテキストを出さずに macOS のパレットとして読める｡
 
 use gpui::{App, Pixels, Window, WindowAppearance, px};
 
-/// Body text. macOS's own body style is 13pt, not the 14px `text_sm` the
-/// window used to set globally (#95).
+/// 本文テキスト｡macOS 自身の body スタイルは 13pt であって､ウィンドウが
+/// かつてグローバルに設定していた 14px の `text_sm` ではない (#95)｡
 pub(crate) const TEXT_BODY: Pixels = px(13.0);
 
-/// Handles, timestamps, engagement counts, and the status bar — macOS's
-/// supplementary sizes sit at 11 (#95).
+/// ハンドル､タイムスタンプ､エンゲージメント数､それとステータスバー —
+/// macOS の補助的なサイズは 11 に置かれている (#95)｡
 pub(crate) const TEXT_META: Pixels = px(11.0);
 
-/// Buttons, fields, and anything else that reads as a control.
+/// ボタン､フィールド､その他コントロールとして読めるものすべて｡
 pub(crate) const RADIUS_CONTROL: Pixels = px(6.0);
 
-/// Image thumbnails, which sit a step tighter than a control (#95).
+/// 画像のサムネイル｡コントロールより 1 段きつい (#95)｡
 pub(crate) const RADIUS_THUMB: Pixels = px(5.0);
 
-/// How big a toolbar icon is drawn (#95) — matched to the meta text size
-/// rather than the body size, since an icon in a toolbar is a control's
-/// label, not prose.
+/// ツールバーのアイコンを描く大きさ (#95) — body ではなく meta のテキスト
+/// サイズに合わせてある｡ツールバーのアイコンは散文ではなくコントロールの
+/// ラベルだからだ｡
 pub(crate) const ICON_SIZE: Pixels = px(15.0);
 
-/// How tall one attached image renders (#65), cut from 160px by #95.
+/// 添付画像 1 枚を描く高さ (#65)｡#95 で 160px から切り下げた｡
 ///
-/// Four attachments at the old height filled the window on their own,
-/// which put the post under them off screen — the timeline stopped being a
-/// timeline whenever someone posted a grid. At this height a full grid of
-/// four still fits beside its neighbours, and a thumbnail is a thing you
-/// click to see properly (#70) rather than the thing you read.
+/// 旧来の高さでは添付 4 枚だけでウィンドウが埋まり､その下の post が画面外へ
+/// 押し出された — 誰かがグリッドを投稿するたびに timeline が timeline で
+/// なくなっていた｡この高さなら 4 枚のグリッド全体が隣と並んで収まるし､
+/// サムネイルは読むものではなく､ちゃんと見るためにクリックするもの (#70) だ｡
 pub(crate) const MEDIA_CELL_HEIGHT: Pixels = px(96.0);
 
-/// One timeline row's horizontal padding.
+/// timeline の 1 行の水平パディング｡
 pub(crate) const ROW_PAD_X: Pixels = px(12.0);
 
-/// One timeline row's vertical padding.
+/// timeline の 1 行の垂直パディング｡
 pub(crate) const ROW_PAD_Y: Pixels = px(8.0);
 
-/// How far a row separator is indented from the left edge, so it starts
-/// where the text does rather than under the avatar — the same inset Mail
-/// and Messages use. [`AVATAR_SIZE`] + [`ROW_PAD_X`] + the row's gap (#95).
+/// 行の区切り線を左端からどれだけ字下げするか｡アバターの下ではなくテキストの
+/// 始まる位置から引くためで､Mail と Messages が使うのと同じインセットだ｡
+/// [`AVATAR_SIZE`] + [`ROW_PAD_X`] + 行の gap (#95)｡
 pub(crate) const SEPARATOR_INSET: Pixels = px(52.0);
 
-/// The toolbar strip at the top of the window (#95).
+/// ウィンドウ上端のツールバーの帯 (#95)｡
 pub(crate) const TOOLBAR_HEIGHT: Pixels = px(44.0);
 
-/// The status bar at the bottom of the window (#95).
+/// ウィンドウ下端のステータスバー (#95)｡
 pub(crate) const STATUS_BAR_HEIGHT: Pixels = px(24.0);
 
-/// The corner radius an avatar is drawn with (#98).
+/// アバターを描くときの角丸の半径 (#98)｡
 ///
-/// Lives here rather than in `ui.rs` so the two places that draw an avatar
-/// — the downloaded image and the initial-carrying placeholder — cannot
-/// drift apart, the same reason `AVATAR_SIZE` is one constant. They are
-/// the same shape or the row visibly changes when a download lands.
+/// `ui.rs` ではなくここに置いたのは､アバターを描く 2 か所 — ダウンロードした
+/// 画像と､イニシャルを載せたプレースホルダー — が食い違えないようにするためで､
+/// `AVATAR_SIZE` が 1 つの定数なのと同じ理由だ｡形が同じでなければ､ダウンロード
+/// が届いた瞬間に行が目に見えて変わる｡
 ///
-/// Sized against [`AVATAR_SIZE`]'s 32px, and matched to
-/// [`RADIUS_CONTROL`] (#95): on macOS a small square image reads as an app
-/// icon at this radius, and using the control radius keeps one rounding in
-/// the window rather than two that almost agree. Buttons share it — the
-/// pill shapes went away with #95.
+/// [`AVATAR_SIZE`] の 32px に対して寸法を決め､[`RADIUS_CONTROL`] に合わせて
+/// ある (#95)｡macOS では小さな正方形の画像はこの半径でアプリアイコンとして
+/// 読めるし､コントロールの半径を使えば､ほとんど一致する 2 つの丸めではなく
+/// 1 つの丸めがウィンドウに残る｡ボタンも共有する — ピル型は #95 で無くなった｡
 pub(crate) const AVATAR_RADIUS: Pixels = RADIUS_CONTROL;
 
-/// The size one row's author avatar is drawn at (#64), reduced from 44px
-/// to macOS's small-icon size by #95 — the old value came from X's own web
-/// timeline, which is built for a much wider column.
+/// 1 行の投稿者アバターを描く大きさ (#64)｡#95 で 44px から macOS の小アイコン
+/// のサイズへ縮めた — 旧来の値は X 自身の web の timeline から取ったもので､
+/// あちらはずっと幅の広いカラム向けに作られている｡
 ///
-/// Lives here rather than in `ui::render` so it stays next to
-/// [`AVATAR_RADIUS`] and [`SEPARATOR_INSET`], both of which are derived
-/// from it.
+/// `ui::render` ではなくここに置いたのは､これから導かれる
+/// [`AVATAR_RADIUS`] と [`SEPARATOR_INSET`] の隣に置いておくためだ｡
 pub(crate) const AVATAR_SIZE: Pixels = px(32.0);
 
-/// One color slot per named UI role, replacing the `BG` / `TEXT` / ... `u32`
-/// constants that used to live directly in `ui.rs`. Grouped per RGB channel,
-/// which is also the digit grouping clippy asks for.
+/// 名前の付いた UI の役割ごとに色スロットを 1 つ｡`ui.rs` に直接置かれていた
+/// `BG` / `TEXT` / ... の `u32` 定数を置き換えたものだ｡RGB のチャンネルごとに
+/// 区切ってあり､これは clippy が求める桁区切りでもある｡
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Theme {
-    /// Main window background.
+    /// ウィンドウ本体の背景｡
     pub(crate) bg: u32,
-    /// Header bar background — distinct from `bg` so the header reads as a
-    /// separate region.
+    /// ヘッダーバーの背景 — ヘッダーが別の領域として読めるよう `bg` とは
+    /// 区別してある｡
     pub(crate) bg_header: u32,
-    /// Header/row separator lines.
+    /// ヘッダーと行の区切り線｡
     pub(crate) border: u32,
-    /// The recessed track a segmented control's segments sit in (#95).
-    /// Its own slot rather than reusing `border`: a separator is a
-    /// hairline drawn against the window's white background, and the same
-    /// value used as a fill against the toolbar's grey is invisible.
+    /// セグメンテッドコントロールのセグメントが収まる窪んだトラック (#95)｡
+    /// `border` を使い回さず独自のスロットにしてある｡区切り線はウィンドウの
+    /// 白い背景に対して引くヘアラインで､同じ値をツールバーのグレーに対する
+    /// 塗りとして使うと見えなくなるからだ｡
     pub(crate) control_trough: u32,
-    /// Primary body text.
+    /// 主たる本文テキスト｡
     pub(crate) text: u32,
-    /// De-emphasized text (bylines, engagement counts, placeholder
-    /// notices) — the second step of macOS's four-level label ramp (#95).
+    /// 強調を落としたテキスト (署名行､エンゲージメント数､プレースホルダーの
+    /// 断り書き) — macOS の 4 段階のラベルランプの 2 段目 (#95)｡
     pub(crate) text_muted: u32,
-    /// The third step of that ramp (#95): timestamps and the "· replying
-    /// to" tail, which have to be readable but must not compete with the
-    /// byline beside them.
+    /// そのランプの 3 段目 (#95)｡タイムスタンプと "· replying to" の末尾で､
+    /// 読めなければならないが､隣の署名行と張り合ってはいけない｡
     pub(crate) text_tertiary: u32,
-    /// The primary action button's fill while idle (clickable).
+    /// 主アクションボタンの idle (クリックできる) ときの塗り｡
     pub(crate) accent: u32,
-    /// The primary action button's fill while busy/disabled — deliberately
-    /// its own slot rather than reusing `border`: a light theme's hairline
-    /// border is far too pale to keep `button_label` legible as a button
-    /// fill (see the module doc's contrast table).
+    /// 主アクションボタンの busy / disabled のときの塗り — `border` を使い
+    /// 回さず意図して独自のスロットにしてある｡light テーマのヘアラインの
+    /// ボーダーは淡すぎて､ボタンの塗りとしては `button_label` を読めるままに
+    /// 保てない (モジュールドキュメントのコントラスト表を参照)｡
     pub(crate) button_busy_bg: u32,
-    /// Text drawn on top of the primary action button, in either fill state
-    /// above. Its own slot rather than reusing `text`: on a light theme,
-    /// body text is near-black, which fails contrast against `accent`.
+    /// 上のどちらの塗りの状態でも､主アクションボタンの上に描くテキスト｡
+    /// `text` を使い回さず独自のスロットにしてある｡light テーマでは本文
+    /// テキストはほぼ黒で､`accent` に対するコントラストを満たさないからだ｡
     pub(crate) button_label: u32,
-    /// Error and rate-limit text.
+    /// エラーとレートリミットのテキスト｡
     pub(crate) danger: u32,
-    /// Whether this is the dark palette — kept alongside the color slots
-    /// rather than re-derived by comparing them, so
-    /// [`sync_gpui_component_theme`] (#38) has a single, direct source of
-    /// truth for which of gpui-component's own light/dark modes to point at.
+    /// これが dark パレットかどうか — 色スロットを比べて導き直すのではなく
+    /// スロットと並べて持たせてある｡gpui-component 自身の light/dark の
+    /// どちらへ向けるかについて､[`sync_gpui_component_theme`] (#38) が単一で
+    /// 直接の source of truth を持てるようにするためだ｡
     pub(crate) is_dark: bool,
-    /// The usage line's color while today's request count is approaching
-    /// (but has not yet reached) a configured daily budget (#18) — distinct
-    /// from `danger`, which is reserved for the budget actually being
-    /// exceeded (and for errors), so the two severities read as visibly
-    /// different at a glance.
+    /// 今日のリクエスト数が､設定した日次予算に近づいている (まだ達しては
+    /// いない) あいだの消費行の色 (#18) — `danger` とは区別してある｡あちらは
+    /// 予算を実際に超えた場合 (とエラー) のために取ってあり､2 つの深刻度が
+    /// 一目で見分けられるようにするためだ｡
     pub(crate) warning: u32,
-    /// A liked post's action (#95) — systemRed's hue, darkened to clear
-    /// the module doc's AA table. Its own slot rather than reusing
-    /// `accent`: on macOS "on" states are colored by what they mean, and a
-    /// like that reads the same blue as a link says nothing.
+    /// いいねした post のアクション (#95) — systemRed の色相を､モジュール
+    /// ドキュメントの AA の表を通るまで暗くしたもの｡`accent` を使い回さず
+    /// 独自のスロットにしてある｡macOS では「on」の状態はそれが何を意味するかで
+    /// 色が付くし､リンクと同じ青に読めるいいねは何も言っていない｡
     pub(crate) like: u32,
-    /// A reposted post's action (#95) — systemGreen's hue, darkened the
-    /// same way and for the same reason as `like`.
+    /// リポストした post のアクション (#95) — systemGreen の色相を､`like` と
+    /// 同じやり方で同じ理由から暗くしたもの｡
     pub(crate) repost: u32,
 }
 
 impl Theme {
-    /// The palette twigpui shipped with before #19, carried over unchanged
-    /// so switching to `dark` reproduces the old look exactly.
+    /// #19 より前の twigpui が積んでいたパレット｡そのまま持ち越してあるので､
+    /// `dark` へ切り替えれば昔の見た目がそのまま再現される｡
     pub(crate) const fn dark() -> Self {
         Self {
             bg: 0x15_20_2b,
@@ -179,28 +172,28 @@ impl Theme {
             control_trough: 0x0f_18_20,
             text: 0xf7_f9_f9,
             text_muted: 0x88_99_a6,
-            // A step below `text_muted` against the dark `bg`, mirroring
-            // what `light` does in the other direction (#95).
+            // 暗い `bg` に対して `text_muted` より 1 段下｡`light` が逆向きに
+            // やっていることの鏡像だ (#95)｡
             text_tertiary: 0x6b_7a_86,
             accent: 0x1d_9b_f0,
-            // Reproduces the pre-#19 button exactly: the button used `BORDER`
-            // as its busy fill and `TEXT` as its label, unconditionally.
+            // #19 より前のボタンをそのまま再現する｡当時のボタンは無条件に
+            // `BORDER` を busy の塗りに､`TEXT` をラベルに使っていた｡
             button_busy_bg: 0x38_44_4d,
             button_label: 0xf7_f9_f9,
             danger: 0xf4_21_2e,
             is_dark: true,
-            // Amber-400-ish: ~9.9:1 against `bg` (0x15_20_2b) by the same
-            // WCAG formula the module doc's light-palette table uses.
+            // Amber-400 あたり｡モジュールドキュメントの light パレットの表が
+            // 使うのと同じ WCAG の式で `bg` (0x15_20_2b) に対して約 9.9:1｡
             warning: 0xfb_bf_24,
-            // systemRed / systemGreen lightened for a dark ground, the
-            // mirror of what `light` does to them (#95).
+            // systemRed / systemGreen を暗い地の上向けに明るくしたもの｡
+            // `light` がこの 2 つにやることの鏡像だ (#95)｡
             like: 0xff_6b_6b,
             repost: 0x4c_d9_8f,
         }
     }
 
-    /// The light palette #19 makes the default. See the module doc for the
-    /// contrast ratios behind these values.
+    /// #19 が既定にする light パレット｡これらの値の裏にあるコントラスト比は
+    /// モジュールドキュメントを参照｡
     pub(crate) const fn light() -> Self {
         Self {
             bg: 0xff_ff_ff,
@@ -209,51 +202,51 @@ impl Theme {
             control_trough: 0xe4_e8_eb,
             text: 0x0f_14_19,
             text_muted: 0x54_5b_63,
-            // 5.1:1 — one readable step below `text_muted`. macOS's own
-            // tertiaryLabelColor (black at 26% alpha, 3.4:1 over white)
-            // would not clear the module doc's table.
+            // 5.1:1 — `text_muted` より読める範囲で 1 段下｡macOS 自身の
+            // tertiaryLabelColor (黒のアルファ 26%､白の上で 3.4:1) では
+            // モジュールドキュメントの表を通らない｡
             text_tertiary: 0x6e_6e_73,
             accent: 0x0b_65_c2,
-            // A pale hairline border would leave a white `button_label`
-            // unreadable, so the busy fill is a mid gray instead — see the
-            // module doc's contrast table.
+            // 淡いヘアラインのボーダーでは白い `button_label` が読めなく
+            // なるので､busy の塗りは代わりに中間のグレーにしてある —
+            // モジュールドキュメントのコントラスト表を参照｡
             button_busy_bg: 0x54_5b_63,
             button_label: 0xff_ff_ff,
             danger: 0xc4_1e_3a,
             is_dark: false,
-            // Amber-700-ish: ~5.0:1 against `bg` (white), passing the same
-            // AA text threshold (4.5:1) the module doc's table checks the
-            // other slots against.
+            // Amber-700 あたり｡`bg` (白) に対して約 5.0:1 で､モジュール
+            // ドキュメントの表が他のスロットを照らすのと同じ AA テキストの
+            // 閾値 (4.5:1) を通る｡
             warning: 0xb4_53_09,
-            // systemRed's hue at `danger`'s luminance — the same color,
-            // since "liked" and "failed" never sit next to each other.
+            // systemRed の色相を `danger` の輝度で — 同じ色だ｡「いいね済み」と
+            // 「失敗」が隣り合うことは無いからだ｡
             like: 0xc4_1e_3a,
-            // systemGreen darkened from 1.8:1 to 4.9:1 (#95).
+            // systemGreen を 1.8:1 から 4.9:1 へ暗くした (#95)｡
             repost: 0x1f_7a_4d,
         }
     }
 }
 
-/// The `theme` setting as configured — distinct from [`Theme`] itself
-/// because `System` has no fixed color values until resolved against the
-/// window's actual OS appearance.
+/// 設定されたままの `theme` の設定値 — [`Theme`] 自体とは別物だ｡`System` は
+/// ウィンドウの実際の OS 外観に対して解決されるまで､決まった色の値を
+/// 持たないからだ｡
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum ThemeMode {
-    /// Always the light palette.
+    /// 常に light パレット｡
     #[default]
     Light,
-    /// Always the dark palette.
+    /// 常に dark パレット｡
     Dark,
-    /// Follows the OS appearance, via gpui's `Window::appearance()`.
+    /// gpui の `Window::appearance()` 経由で OS の外観に従う｡
     System,
 }
 
 impl ThemeMode {
-    /// Parse a `theme` setting value (`X_THEME` or `config.toml`'s `theme`
-    /// key). Case-insensitive and trims whitespace, matching how
-    /// `Config::resolve` treats its other string settings. `None` for
-    /// anything else — the caller decides how to report a bad value, since
-    /// an unrecognized theme must not fail startup (#19).
+    /// `theme` の設定値 (`X_THEME` か `config.toml` の `theme` キー) を
+    /// パースする｡大文字小文字を区別せず空白を落とす — `Config::resolve` が
+    /// 他の文字列設定を扱うのに合わせてある｡それ以外は `None`｡不正な値を
+    /// どう報告するかは呼び出し側が決める｡認識できないテーマが起動を失敗
+    /// させてはならないからだ (#19)｡
     pub(crate) fn parse(raw: &str) -> Option<Self> {
         match raw.trim().to_ascii_lowercase().as_str() {
             "light" => Some(Self::Light),
@@ -263,8 +256,8 @@ impl ThemeMode {
         }
     }
 
-    /// Resolve to a concrete [`Theme`]. `appearance` is only consulted for
-    /// `System` — `Light` and `Dark` are fixed regardless of the OS setting.
+    /// 具体的な [`Theme`] へ解決する｡`appearance` を参照するのは `System` の
+    /// ときだけで､`Light` と `Dark` は OS の設定に関わらず固定だ｡
     pub(crate) fn resolve(self, appearance: WindowAppearance) -> Theme {
         match self {
             Self::Light => Theme::light(),
@@ -277,27 +270,27 @@ impl ThemeMode {
     }
 }
 
-/// Point gpui-component's own global theme at this project's resolved
-/// palette (#38).
+/// gpui-component 自身のグローバルテーマを､このプロジェクトが解決した
+/// パレットへ向ける (#38)｡
 ///
-/// The composer's text input is a `gpui_component::input::Input`, which
-/// reads its colors from `gpui_component::theme::Theme` — a global entirely
-/// separate from this module's [`Theme`]. Without this, that global would
-/// stay wherever `gpui_component::init` last left it (synced to the raw OS
-/// appearance), which can disagree with what this project just resolved
-/// from `config.theme` — e.g. `config.theme = "dark"` on a light-appearance
-/// OS would otherwise leave the input rendering light-on-light against a
-/// dark surrounding window. Called once, from [`crate::ui::TimelineView::new`]
-/// right after [`ThemeMode::resolve`], with a real `Window` in hand — there
-/// is no separate "System" case to handle here, `theme` is already concrete.
+/// composer のテキスト入力は `gpui_component::input::Input` で､色を
+/// `gpui_component::theme::Theme` から読む — このモジュールの [`Theme`] とは
+/// 完全に別のグローバルだ｡これが無いとそのグローバルは
+/// `gpui_component::init` が最後に置いた場所 (生の OS 外観に同期した状態) に
+/// 留まり､このプロジェクトが `config.theme` から解決したばかりのものと
+/// 食い違いうる — 例えば light 外観の OS で `config.theme = "dark"` だと､
+/// 暗いウィンドウに囲まれた入力が light-on-light で描かれてしまう｡
+/// [`ThemeMode::resolve`] の直後に [`crate::ui::TimelineView::new`] から
+/// 本物の `Window` を持って 1 度だけ呼ぶ — ここで扱うべき "System" の場合分けは
+/// 無く､`theme` はすでに具体的だ｡
 ///
-/// Only the color slots gpui-component's `Input` actually reads (per its
-/// own source: `background`, `foreground`, `muted_foreground` for the
-/// placeholder, `border`/`input` for the box outline, `caret`, `selection`,
-/// and `accent`/`primary`/`ring` for focus styling) are pointed at this
-/// project's palette; every other slot (menus, tables, charts, …) is left
-/// at gpui-component's own default for the resolved light/dark mode, since
-/// this app never renders any of those widgets.
+/// このプロジェクトのパレットへ向けるのは､gpui-component の `Input` が実際に
+/// 読む色スロットだけだ (あちらのソースによれば `background`､`foreground`､
+/// プレースホルダー用の `muted_foreground`､枠線用の `border`/`input`､
+/// `caret`､`selection`､それとフォーカス表示用の `accent`/`primary`/`ring`)｡
+/// 他のスロット (メニュー､テーブル､チャート､…) は解決した light/dark モードに
+/// 対する gpui-component 自身の既定のままにする｡このアプリはそれらの
+/// ウィジェットを一切描かないからだ｡
 pub(crate) fn sync_gpui_component_theme(theme: Theme, window: &mut Window, cx: &mut App) {
     use gpui_component::theme::{Theme as ComponentTheme, ThemeMode as ComponentThemeMode};
 
@@ -363,19 +356,19 @@ mod tests {
 
     #[test]
     fn warning_is_distinct_from_danger_in_both_palettes() {
-        // #18: `usage_color` maps "near budget" to `warning` and "budget
-        // exceeded" to `danger` — if the two colors were the same, the
-        // header couldn't visually distinguish the two severities.
+        // #18: `usage_color` は「予算に近い」を `warning` へ､「予算を超えた」を
+        // `danger` へ対応させる — 2 つの色が同じなら､ヘッダーは 2 つの
+        // 深刻度を見た目で区別できない｡
         assert_ne!(Theme::light().warning, Theme::light().danger);
         assert_ne!(Theme::dark().warning, Theme::dark().danger);
     }
 
     #[test]
     fn an_on_state_is_never_the_same_color_as_a_link() {
-        // #95: `like` and `repost` exist so an "on" action says which
-        // action it is. Collapsing either onto `accent` — the color every
-        // link and the primary button already wear — would undo that, and
-        // the two are near enough in hue that a careless edit could.
+        // #95: `like` と `repost` があるのは､「on」のアクションがどの
+        // アクションなのかを示すためだ｡どちらかを `accent` — すべてのリンクと
+        // 主ボタンがすでに纏っている色 — へ潰せばそれが台無しになるし､
+        // 2 つは色相が十分に近いので不注意な編集でそうなりうる｡
         for theme in [Theme::light(), Theme::dark()] {
             assert_ne!(theme.like, theme.accent);
             assert_ne!(theme.repost, theme.accent);
@@ -385,9 +378,9 @@ mod tests {
 
     #[test]
     fn the_three_label_steps_are_distinct_within_a_palette() {
-        // #95: the ramp is only a ramp if the steps differ. A palette that
-        // set two of them the same would render a byline and a timestamp
-        // identically, which is the flattening this issue set out to fix.
+        // #95: ランプがランプであるのは段が違うときだけだ｡2 つを同じ値にした
+        // パレットは署名行とタイムスタンプを同じに描く｡それこそがこの issue が
+        // 直そうとした平板化だ｡
         for theme in [Theme::light(), Theme::dark()] {
             assert_ne!(theme.text, theme.text_muted);
             assert_ne!(theme.text_muted, theme.text_tertiary);
@@ -453,8 +446,8 @@ mod tests {
 
     #[test]
     fn display_matches_the_parse_keywords() {
-        // The fallback warning in Config::resolve embeds this, so it needs
-        // to round-trip through parse() rather than drifting from it.
+        // Config::resolve のフォールバックの警告がこれを埋め込むので､
+        // parse() から乖離するのではなく往復できる必要がある｡
         for mode in [ThemeMode::Light, ThemeMode::Dark, ThemeMode::System] {
             assert_eq!(ThemeMode::parse(&mode.to_string()), Some(mode));
         }

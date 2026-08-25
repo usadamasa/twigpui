@@ -1,62 +1,55 @@
-//! The post composer's pure logic (#14): character counting, draft
-//! validation, and the submit state machine. Nothing here touches gpui, the
-//! network, or the clock — the same "pure core, thin shell" split
-//! `rate_limit.rs` and `oauth::pkce` already use, so the properties that
-//! matter most (never lose a draft, never submit twice, never send an
-//! obviously-too-long post) are unit-tested directly rather than only
-//! inspectable by reading `ui.rs`.
+//! post composer の純粋なロジック (#14): 文字数の勘定､下書きの検証､そして
+//! 送信のステートマシン｡ここは gpui にもネットワークにも時計にも触れない —
+//! `rate_limit.rs` と `oauth::pkce` が既に使っているのと同じ「純粋な核と薄い
+//! 殻」の分け方だ｡おかげで最も大事な性質 (下書きを決して失わない､二度送信
+//! しない､明らかに長すぎる post を送らない) を､`ui.rs` を読んで確かめるしか
+//! ないのではなく直接ユニットテストできる｡
 //!
-//! #16 adds an optional quote target alongside the draft text: the post
-//! being quoted, carried as [`QuoteTarget`] on [`ComposeState`]. It follows
-//! the same "survive a failure together" rule the draft text already has
-//! (#14) — see [`ComposeState::apply_result`] — and can be cleared
-//! independently of the draft (a mis-click on "Quote" shouldn't force
-//! discarding what was typed).
+//! #16 は下書きの本文と並んで任意の引用対象を足す: 引用される post で､
+//! [`ComposeState`] 上に [`QuoteTarget`] として載る｡下書きの本文が既に持つ
+//! 「一緒に失敗を生き延びる」規則に従い (#14) — [`ComposeState::apply_result`]
+//! を見よ — 下書きとは独立に消せる ("Quote" の押し間違いが､打ったものを
+//! 捨てさせてはならない)｡
 
 use crate::x_api::QuotedPost;
 
-/// X's public character limit (Free/Basic tiers) that a post must fit
-/// under, measured by [`weighted_length`] rather than a plain
-/// `chars().count()`.
+/// post が収まらねばならない X の公開された文字数上限 (Free/Basic の階層)｡
+/// 素の `chars().count()` ではなく [`weighted_length`] で測る｡
 pub(crate) const MAX_WEIGHTED_LENGTH: usize = 280;
 
-/// The fixed weight X assigns to *any* `http://…` or `https://…` URL,
-/// regardless of its own length — X always rewrites a link to a t.co URL of
-/// this length before counting it.
+/// `http://…` または `https://…` の *どの* URL にも､それ自身の長さに関わらず
+/// X が割り当てる固定の重み — X は数える前に必ずリンクをこの長さの t.co の
+/// URL へ書き換える｡
 const URL_WEIGHT: usize = 23;
 
-/// X's "weighted length" (per the open-source `twitter-text` library). Two
-/// adjustments from a plain `chars().count()`:
+/// X の「重み付き長さ」(オープンソースの `twitter-text` ライブラリに従う)｡
+/// 素の `chars().count()` からの調整は二つ:
 ///
-/// - A whitespace-delimited token starting with `http://` or `https://`
-///   counts as [`URL_WEIGHT`] regardless of its actual length. The
-///   whitespace *between* tokens is weighed by the same rule as any other
-///   character, not assumed to be weight 1 — an ideographic space (U+3000)
-///   weighs 2.
-/// - A codepoint outside `twitter-text`'s "weight 1" ranges — see
-///   [`is_low_weight`] — counts as 2; everything inside them (plain ASCII,
-///   Latin-1, the rest of the Latin/Greek/Cyrillic block, and a few
-///   punctuation ranges) counts as 1.
+/// - `http://` または `https://` で始まる空白区切りのトークンは､実際の長さに
+///   関わらず [`URL_WEIGHT`] として数える｡トークンの *あいだ* の空白も他の
+///   どの文字とも同じ規則で重み付けし､重み 1 と決めてかからない — 表意文字
+///   空白 (U+3000) は 2 を量る｡
+/// - `twitter-text` の「重み 1」の範囲の外にある符号位置は — [`is_low_weight`]
+///   を見よ — 2 として数える｡その中にあるもの (素の ASCII､Latin-1､
+///   Latin / Greek / Cyrillic ブロックの残り､それといくつかの句読点の範囲) は
+///   1 として数える｡
 ///
-/// #61: earlier versions of this function had the rule backwards — it
-/// listed the *double-width* blocks (CJK ideographs, hiragana/katakana,
-/// hangul, fullwidth forms, …) and treated everything unlisted as weight 1.
-/// That list was necessarily incomplete — it stopped at U+FF60 and missed
-/// halfwidth kana and halfwidth punctuation at U+FF61–U+FF9F, among other
-/// gaps — and every such gap was an *undercount*: a character
-/// `twitter-text` weighs 2 fell through to the unlisted default of 1, so
-/// this counter could tell a user a draft still fit when X would reject
-/// it. `twitter-text` itself defines the rule the other way around: a
-/// short, fixed list of ranges weighs 1, and *everything else* weighs 2.
-/// Mirroring that shape here — rather than the inverse — means any
-/// codepoint this function has never specifically heard of already gets
-/// the safe (2) weight by default, so there is no longer a gap left to
-/// undercount through.
+/// #61: この関数の以前の版は規則が逆だった — *全角* のブロック (CJK 統合
+/// 漢字､ひらがな/カタカナ､ハングル､全角形､…) を並べ､載っていないものは
+/// すべて重み 1 として扱っていた｡その一覧は必然的に不完全で — U+FF60 で
+/// 止まっており､U+FF61–U+FF9F の半角カナと半角句読点などを取りこぼしていた —
+/// そしてその手の穴はどれも *過小計上* だった: `twitter-text` が 2 と量る
+/// 文字が､載っていない既定の 1 へ落ちる｡だからこの勘定は､X なら拒否する
+/// 下書きをまだ収まると利用者に告げ得た｡`twitter-text` 自身は規則を逆向きに
+/// 定めている: 短く固定された範囲の一覧が重み 1 で､*それ以外すべて* が重み
+/// 2 だ｡その形をここで — 逆ではなく — 映せば､この関数が名指しで聞いたことの
+/// ない符号位置は既定で安全な側 (2) の重みを得るので､過小計上が漏れ出す穴は
+/// もう残らない｡
 pub(crate) fn weighted_length(text: &str) -> usize {
-    // Whitespace is weighed the same way as everything else (#61): an
-    // ideographic space (U+3000) is weight 2 to `twitter-text`, and
-    // counting every whitespace character as 1 here would reopen exactly
-    // the undercount this function's doc says is closed.
+    // 空白も他のすべてと同じやり方で重み付けする (#61): 表意文字空白
+    // (U+3000) は `twitter-text` にとって重み 2 であり､ここで空白文字を
+    // すべて 1 と数えれば､この関数の doc が閉じたと言う過小計上をそのまま
+    // 開け直すことになる｡
     let whitespace_weight: usize = text
         .chars()
         .filter(|c| c.is_whitespace())
@@ -72,16 +65,16 @@ pub(crate) fn weighted_length(text: &str) -> usize {
             }
         })
         .sum();
-    // `saturating_add` (#47): a draft long enough to overflow `usize`
-    // cannot exist, but saying so explicitly beats a debug-only panic as
-    // the thing standing between this counter and a wrong answer.
+    // `saturating_add` (#47): `usize` を overflow させるほど長い下書きは存在
+    // し得ないが､この勘定と誤った答えのあいだに立つものとしては､debug でしか
+    // 効かない panic より明示的にそう言うほうがよい｡
     whitespace_weight.saturating_add(word_weight)
 }
 
-/// Whether `word` looks like a URL X would shorten to a fixed-length t.co
-/// link. A plain prefix check — no validation of what follows — since a
-/// false positive here only ever rounds a token *up* to 23, the safe
-/// direction per [`weighted_length`]'s doc.
+/// `word` が､X なら固定長の t.co リンクへ縮める URL に見えるかどうか｡素の
+/// 前置き検査で — 後ろに続くものの検証はしない — ここでの偽陽性はトークンを
+/// 23 へ切り *上げる* だけであり､[`weighted_length`] の doc に言う安全な
+/// 向きだからだ｡
 fn is_url(word: &str) -> bool {
     word.starts_with("http://") || word.starts_with("https://")
 }
@@ -90,16 +83,15 @@ fn char_weight(c: char) -> usize {
     if is_low_weight(c) { 1 } else { 2 }
 }
 
-/// Whether `c` falls in one of `twitter-text`'s "weight 1" ranges (#61):
-/// `0x0000..=0x10FF` (ASCII, Latin-1 Supplement, and the rest of the Latin
-/// Extended / Greek / Cyrillic block, among others), `0x2000..=0x200D`
-/// (general punctuation spaces and dashes), `0x2010..=0x201F` (general
-/// punctuation hyphens and quotation marks), and `0x2032..=0x2037` (prime
-/// marks). Everything *not* in one of these four ranges — CJK ideographs,
-/// hangul, hiragana/katakana (fullwidth and halfwidth alike), fullwidth
-/// forms, emoji, and so on — is weight 2 via [`char_weight`]'s default. See
-/// [`weighted_length`]'s doc for why listing what's weight *1* (rather than
-/// what's weight 2) is what keeps this from ever undercounting again.
+/// `c` が `twitter-text` の「重み 1」の範囲のどれかに入るかどうか (#61):
+/// `0x0000..=0x10FF` (ASCII､Latin-1 Supplement､それと Latin Extended /
+/// Greek / Cyrillic ブロックの残りなど)､`0x2000..=0x200D` (一般句読点の空白
+/// とダッシュ)､`0x2010..=0x201F` (一般句読点のハイフンと引用符)､そして
+/// `0x2032..=0x2037` (プライム記号)｡この四つの範囲のどれにも入ら *ない* もの
+/// — CJK 統合漢字､ハングル､ひらがな/カタカナ (全角も半角も)､全角形､絵文字
+/// など — は [`char_weight`] の既定を通して重み 2 になる｡重み *1* のものを
+/// (重み 2 のものではなく) 並べることが二度と過小計上させない理由は
+/// [`weighted_length`] の doc を見よ｡
 fn is_low_weight(c: char) -> bool {
     matches!(u32::from(c),
         0x0000..=0x10FF
@@ -109,24 +101,22 @@ fn is_low_weight(c: char) -> bool {
     )
 }
 
-/// Why [`validate`] refused a draft — [`ComposeState::can_submit`] and
-/// `ui.rs`'s render side both need to distinguish these, since they're
-/// shown with different wording.
+/// [`validate`] が下書きを拒んだ理由 — [`ComposeState::can_submit`] と
+/// `ui.rs` の描画側はどちらもこれらを区別する必要がある｡違う言い回しで
+/// 見せるからだ｡
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ComposeValidationError {
-    /// Nothing but whitespace (including truly empty) — there is nothing to
-    /// post.
+    /// 空白しか無い (本当に空の場合も含む) — post するものが無い｡
     Empty,
-    /// Over [`MAX_WEIGHTED_LENGTH`], carrying the actual weighted length so
-    /// the message can say by how much.
+    /// [`MAX_WEIGHTED_LENGTH`] を超えている｡どれだけ超えたかをメッセージが
+    /// 言えるよう､実際の重み付き長さを持つ｡
     TooLong { weighted_length: usize },
 }
 
-/// Whether `text` is postable, checked entirely client-side so an obvious
-/// rejection never spends a request (#14). `text.trim()` is what's tested
-/// for blankness — a draft of pure whitespace has nothing to say — but the
-/// *length* check runs against the untrimmed text, matching what X will
-/// actually receive.
+/// `text` が post 可能かどうか｡明らかな拒否がリクエストを費やさないよう
+/// (#14)､完全にクライアント側で確かめる｡空かどうかを試すのは `text.trim()`
+/// だが — 空白だけの下書きには言うことが無い — *長さ* の検査は trim して
+/// いない本文に対して走る｡X が実際に受け取るものに合わせるためだ｡
 pub(crate) fn validate(text: &str) -> Result<(), ComposeValidationError> {
     if text.trim().is_empty() {
         return Err(ComposeValidationError::Empty);
@@ -138,60 +128,57 @@ pub(crate) fn validate(text: &str) -> Result<(), ComposeValidationError> {
     Ok(())
 }
 
-/// The composer's status, independent of its text — kept as a separate enum
-/// from [`ComposeState`]'s `text` field so "a failed submit changes only
-/// the status" is a property of the type, not just a convention `ui.rs` has
-/// to remember to honor.
+/// composer の状態｡本文とは独立している — [`ComposeState`] の `text`
+/// フィールドとは別の enum にしてあるので､「失敗した送信は状態だけを変える」
+/// が型の性質になる｡`ui.rs` が守るのを覚えておくべき決まり事ではなくなる｡
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ComposeStatus {
     Idle,
-    /// A `POST /2/tweets` request is in flight. [`ComposeState::can_submit`]
-    /// is false in this state — #14's double-submit guard.
+    /// `POST /2/tweets` のリクエストが飛んでいる｡この状態では
+    /// [`ComposeState::can_submit`] が false になる — #14 の二重送信の番人だ｡
     Submitting,
-    /// The last submit failed; carries a message for `ui.rs` to render. Not
-    /// itself a reason to refuse another attempt — see
-    /// [`ComposeState::can_submit`].
+    /// 直近の送信が失敗した｡`ui.rs` が描くためのメッセージを持つ｡それ自体は
+    /// 再挑戦を拒む理由ではない — [`ComposeState::can_submit`] を見よ｡
     Failed(String),
 }
 
-/// The post a draft quotes (#16): its id (what `quote_tweet_id` sends X) and
-/// the already-known author/text (reusing [`QuotedPost`], #13's own "post
-/// embedded as a card" shape) so `ui.rs` can render the same quote card
-/// inside the composer without a second lookup — the timeline row that
-/// offered the "Quote" button already had this data on screen.
+/// 下書きが引用する post (#16): その id (`quote_tweet_id` が X へ送るもの) と､
+/// 既に判っている著者と本文 ([`QuotedPost`] を再利用する｡#13 自身の「カードと
+/// して埋め込まれた post」の形だ)｡おかげで `ui.rs` は二度目の参照無しに同じ
+/// 引用カードを composer の中へ描ける — "Quote" ボタンを差し出した timeline
+/// の行が､既にこのデータを画面に持っていたからだ｡
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct QuoteTarget {
     pub(crate) post_id: String,
     pub(crate) quoted: QuotedPost,
 }
 
-/// The post a draft replies to (#71): its id (what `in_reply_to_tweet_id`
-/// sends X) and the already-known author/text, reusing [`QuotedPost`] the
-/// same way [`QuoteTarget`] does — it is #13's "a post embedded as a card"
-/// shape, and a reply target is rendered as exactly that, with a different
-/// heading.
+/// 下書きが返信する post (#71): その id (`in_reply_to_tweet_id` が X へ送る
+/// もの) と､既に判っている著者と本文｡[`QuoteTarget`] と同じやり方で
+/// [`QuotedPost`] を再利用する — #13 の「カードとして埋め込まれた post」の形
+/// であり､返信対象はまさにそれとして､違う見出しで描かれる｡
 ///
-/// `post_id` must be the id of the post actually being replied to, which
-/// for a repost row is the *original's* id, not the retweet activity's —
-/// `x_api::action_post_id` is what resolves that (#52). Getting it wrong
-/// does not fail loudly: the reply lands under a different conversation.
+/// `post_id` は実際に返信される post の id でなければならない｡repost の行なら
+/// それは retweet という行為のものではなく *元の post の* id だ｡それを解決
+/// するのが `x_api::action_post_id` である (#52)｡間違えても声高に失敗はし
+/// ない: 返信が別の会話の下に着地するだけだ｡
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ReplyTarget {
     pub(crate) post_id: String,
     pub(crate) replying_to: QuotedPost,
 }
 
-/// The composer's full state (#14, #16, #71): draft text, an optional
-/// target (a quote or a reply), plus [`ComposeStatus`], bundled so "never
-/// lose the draft", "never lose the target", and "never submit twice" can
-/// each be expressed — and tested — as one value's transitions.
+/// composer の完全な状態 (#14, #16, #71): 下書きの本文､任意の対象 (引用か
+/// 返信)､そして [`ComposeStatus`]｡「下書きを決して失わない」「対象を決して
+/// 失わない」「二度送信しない」がそれぞれ一つの値の遷移として表現できる —
+/// そしてテストできる — ようにまとめてある｡
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ComposeState {
     text: String,
     quote: Option<QuoteTarget>,
-    /// #71. Mutually exclusive with `quote` — see [`Self::set_reply`] for
-    /// why this crate refuses to build a post that is both at once, even
-    /// though X's API would accept one.
+    /// #71｡`quote` とは排他だ — X の API なら受け付けるにもかかわらず､この
+    /// クレートが両方を兼ねた post を組むのを拒む理由は [`Self::set_reply`]
+    /// を見よ｡
     reply: Option<ReplyTarget>,
     status: ComposeStatus,
 }
@@ -218,97 +205,92 @@ impl ComposeState {
         &self.status
     }
 
-    /// The post currently being quoted, if any (#16).
+    /// 今引用している post があればそれ (#16)｡
     pub(crate) fn quote(&self) -> Option<&QuoteTarget> {
         self.quote.as_ref()
     }
 
-    /// Set (or replace) the quote target (#16) — clicking "Quote" on a post
-    /// while composing simply overwrites whatever was there before, since a
-    /// draft only ever quotes one post at a time.
+    /// 引用対象を設定する (または差し替える) (#16) — 書いている最中に post の
+    /// "Quote" を押すと､それまであったものを単に上書きする｡下書きが一度に
+    /// 引用する post は常に一つだけだからだ｡
     pub(crate) fn set_quote(&mut self, target: QuoteTarget) {
         self.quote = Some(target);
-        // #71: one target at a time — see `set_reply`'s doc.
+        // #71: 対象は一度に一つ — `set_reply` の doc を見よ｡
         self.reply = None;
     }
 
-    /// The post currently being replied to, if any (#71).
+    /// 今返信している post があればそれ (#71)｡
     pub(crate) fn reply(&self) -> Option<&ReplyTarget> {
         self.reply.as_ref()
     }
 
-    /// Set (or replace) the reply target (#71), clearing any quote target.
+    /// 返信対象を設定し (または差し替え) (#71)､引用対象があれば消す｡
     ///
-    /// X's API would accept a post that is both a reply and a quote, but
-    /// this composer deliberately refuses to build one: the two read almost
-    /// identically in a small composer, and sending the wrong one is not a
-    /// visible mistake — a reply lands under a conversation, a quote does
-    /// not. One target at a time makes "what will this post be" answerable
-    /// from a single line of UI. Clicking "Reply" while a quote is set is
-    /// therefore a switch, not an addition, and the draft text survives it
-    /// either way.
+    /// X の API は返信でも引用でもある post を受け付けるが､この composer は
+    /// 意図的にそれを組むのを拒む: 小さな composer では二つはほとんど同じに
+    /// 読め､取り違えて送っても目に見える間違いにならない — 返信は会話の下に
+    /// 着地し､引用はしない｡対象を一度に一つにすれば「この post は何になるか」
+    /// が UI の一行から答えられる｡だから引用が設定されている最中の "Reply"
+    /// は追加ではなく切り替えであり､下書きの本文はどちらにせよ生き残る｡
     pub(crate) fn set_reply(&mut self, target: ReplyTarget) {
         self.reply = Some(target);
         self.quote = None;
     }
 
-    /// Clear the reply target without touching the draft text (#71) — the
-    /// same mis-click recovery [`Self::clear_quote`] provides.
+    /// 下書きの本文に触れずに返信対象を消す (#71) — [`Self::clear_quote`] が
+    /// 与えるのと同じ押し間違いからの回復だ｡
     pub(crate) fn clear_reply(&mut self) {
         self.reply = None;
     }
 
-    /// Clear the quote target without touching the draft text (#16) — the
-    /// mis-click recovery the issue calls for: removing a wrong quote must
-    /// not force discarding what was already typed.
+    /// 下書きの本文に触れずに引用対象を消す (#16) — issue が求める押し間違い
+    /// からの回復だ: 誤った引用を取り除くために､既に打ったものを捨てさせては
+    /// ならない｡
     pub(crate) fn clear_quote(&mut self) {
         self.quote = None;
     }
 
-    /// Whether a submit is currently in flight.
+    /// 今送信が飛んでいるかどうか｡
     pub(crate) fn is_submitting(&self) -> bool {
         matches!(self.status, ComposeStatus::Submitting)
     }
 
-    /// Whether `TimelineView::submit_post` should be allowed to proceed:
-    /// nothing already in flight, and the text passes [`validate`]. Both
-    /// `Idle` and `Failed` allow a submit — a failed attempt must stay
-    /// retryable, which is the entire point of never clearing the text on
-    /// failure.
+    /// `TimelineView::submit_post` を進ませてよいかどうか: 既に飛んでいるもの
+    /// が無く､本文が [`validate`] を通ること｡`Idle` も `Failed` も送信を許す
+    /// — 失敗した試みは再挑戦できるままでなければならず､失敗時に本文を決して
+    /// 消さないことのすべての眼目がそこにある｡
     pub(crate) fn can_submit(&self) -> bool {
         !self.is_submitting() && validate(&self.text).is_ok()
     }
 
-    /// Move to `Submitting`, keeping the text untouched. Callers must have
-    /// already checked [`Self::can_submit`] — this doesn't re-check, since
-    /// the whole point is a synchronous transition the caller can rely on
-    /// completing before anything else runs on the same thread (see
-    /// `ui.rs::TimelineView::submit_post`'s doc for why that's what
-    /// actually prevents a double submit).
+    /// 本文には触れずに `Submitting` へ移る｡呼び出し側は先に
+    /// [`Self::can_submit`] を確かめておかねばならない — こちらは確かめ直さ
+    /// ない｡眼目は､同じスレッドで他の何かが走る前に完了すると呼び出し側が
+    /// 頼れる同期的な遷移だからだ (それが実際に二重送信を防ぐ仕組みである
+    /// 理由は `ui.rs::TimelineView::submit_post` の doc を見よ)｡
     pub(crate) fn start_submitting(&mut self) {
         self.status = ComposeStatus::Submitting;
     }
 
-    /// Refuse a submit attempt without ever having sent one — e.g. #14's
-    /// missing-scope check runs before `start_submitting`, so this is how
-    /// that refusal gets shown without pretending a request went out.
+    /// 一度も送らずに送信の試みを拒む — 例えば #14 の scope 欠落の検査は
+    /// `start_submitting` より前に走るので､リクエストが出たふりをせずにその
+    /// 拒否を見せる道がこれだ｡
     pub(crate) fn refuse(&mut self, message: String) {
         self.status = ComposeStatus::Failed(message);
     }
 
-    /// Apply a finished submit's outcome (#14's core guarantee, extended by
-    /// #16): success clears the draft *and* the quote target — the post
-    /// that was quoted has now been sent, so there's nothing left to keep
-    /// showing in the composer; failure leaves both `text` and `quote`
-    /// completely untouched and records `message` in their place.
+    /// 終わった送信の結果を適用する (#14 の中核の保証を #16 が広げたもの):
+    /// 成功は下書き *と* 引用対象を消す — 引用していた post はもう送られた
+    /// ので､composer に見せ続けるものは残っていない｡失敗は `text` も `quote`
+    /// もまったく触れずに置き､代わりに `message` を記録する｡
     pub(crate) fn apply_result(&mut self, result: Result<(), String>) {
         match result {
             Ok(()) => {
                 self.text.clear();
                 self.quote = None;
-                // #71: the reply target goes with the draft it belonged to,
-                // for the same reason the quote target does — the next
-                // draft starts from nothing.
+                // #71: 返信対象は､引用対象がそうするのと同じ理由で､属して
+                // いた下書きと一緒に去る — 次の下書きは何も無いところから
+                // 始まる｡
                 self.reply = None;
                 self.status = ComposeStatus::Idle;
             }
@@ -376,69 +358,68 @@ mod tests {
 
     #[test]
     fn counts_koujaa_with_a_trailing_fullwidth_period_as_ten() {
-        // Regression check for a screen report that showed "こうじゃ。" as
-        // 9/280: five characters — こ (U+3053), う (U+3046), じ (U+3058),
-        // ゃ (U+3083), and 。 (U+3002) — all outside `is_low_weight`'s
-        // ranges (which top out at U+10FF for non-punctuation codepoints),
-        // so each defaults to weight 2 and the correct weighted length is
-        // 5 * 2 = 10. If this assertion ever fails, `weighted_length`/
-        // `is_low_weight` has a bug, not the display.
+        // "こうじゃ。" が 9/280 と表示されたという画面報告への回帰確認だ｡
+        // 5 文字 — こ (U+3053)､う (U+3046)､じ (U+3058)､ゃ (U+3083)､
+        // そして 。 (U+3002) — はすべて `is_low_weight` の範囲 (句読点以外の
+        // codepoint では U+10FF が上限) の外にあるので､それぞれ既定の
+        // 重み 2 になり､正しい weighted length は 5 * 2 = 10 だ｡この
+        // assertion が失敗するようなら､バグは表示側ではなく
+        // `weighted_length`/`is_low_weight` にある｡
         assert_eq!(weighted_length("こうじゃ。"), 10);
     }
 
     #[test]
     fn a_fullwidth_period_counts_double_while_a_halfwidth_period_counts_single() {
-        // U+3002 (fullwidth "。") is outside `is_low_weight`'s ranges, so
-        // it defaults to weight 2; U+002E (halfwidth ".") is plain ASCII,
-        // inside `0x0000..=0x10FF`, so it stays weight 1 — the two look
-        // similar but are not interchangeable here.
+        // U+3002 (全角の "。") は `is_low_weight` の範囲の外なので既定の
+        // 重み 2 になる｡U+002E (半角の ".") は素の ASCII で
+        // `0x0000..=0x10FF` の中にあるので重み 1 のままだ — 2 つは似て
+        // 見えるが､ここでは交換できない｡
         assert_eq!(weighted_length("。"), 2);
         assert_eq!(weighted_length("."), 1);
     }
 
     #[test]
     fn counts_koujaa_with_a_trailing_halfwidth_period_as_ten() {
-        // #61 — the actual bug report: "こうじゃ｡" with a *halfwidth*
-        // trailing period (U+FF61), not the fullwidth U+3002 the older
-        // regression test above uses. The old range table stopped at
-        // U+FF60, so U+FF61 fell through to the unlisted default of 1 and
-        // the composer showed 9/280 while X counts 10. All five codepoints
-        // here — こ (U+3053), う (U+3046), じ (U+3058), ゃ (U+3083), ｡
-        // (U+FF61) — must weigh 2, for a total of 5 * 2 = 10.
+        // #61 — 実際のバグ報告: "こうじゃ｡" の末尾は *半角* の句点
+        // (U+FF61) であって､上の古い回帰テストが使う全角の U+3002 では
+        // ない｡古い範囲表は U+FF60 で止まっていたので U+FF61 は表に無い
+        // 既定の 1 へ落ち､X が 10 と数えるところを composer は 9/280 と
+        // 表示した｡ここの 5 つの codepoint — こ (U+3053)､う (U+3046)､
+        // じ (U+3058)､ゃ (U+3083)､｡ (U+FF61) — はすべて重み 2 でなければ
+        // ならず､合計は 5 * 2 = 10 だ｡
         assert_eq!(weighted_length("こうじゃ\u{FF61}"), 10);
     }
 
     #[test]
     fn counts_halfwidth_katakana_double() {
-        // #61 completion criterion — halfwidth katakana (U+FF61–U+FF9F) is
-        // exactly the range the old table's `0xFF00..=0xFF60` upper bound
-        // dropped off the edge of.
+        // #61 の完了条件 — 半角カタカナ (U+FF61–U+FF9F) は､古い表の
+        // `0xFF00..=0xFF60` という上限がちょうど取りこぼしていた範囲だ｡
         assert_eq!(weighted_length("ｱ"), 2);
     }
 
     #[test]
     fn counts_an_emoji_double() {
-        // #61 completion criterion — 😀 (U+1F600) is well outside every
-        // weight-1 range, so it must default to weight 2 rather than rely
-        // on ever being named in a double-width list.
+        // #61 の完了条件 — 😀 (U+1F600) は重み 1 のどの範囲からも大きく
+        // 外れるので､倍幅の一覧に名前が挙がることに頼らず既定で重み 2 に
+        // ならねばならない｡
         assert_eq!(weighted_length("😀"), 2);
     }
 
     #[test]
     fn counts_latin_diacritics_and_cyrillic_single() {
-        // #61 completion criterion — é (U+00E9, Latin-1 Supplement) and И
-        // (U+0418, Cyrillic) both fall inside 0x0000..=0x10FF and must stay
-        // weight 1, same as plain ASCII.
+        // #61 の完了条件 — é (U+00E9, Latin-1 Supplement) と И
+        // (U+0418, Cyrillic) はどちらも 0x0000..=0x10FF の中に入るので､
+        // 素の ASCII と同じく重み 1 のままでなければならない｡
         assert_eq!(weighted_length("é"), 1);
         assert_eq!(weighted_length("И"), 1);
     }
 
     #[test]
     fn counts_an_ideographic_space_double() {
-        // The same undercount #61 is about, in the one place the rewritten
-        // range table did not reach: whitespace was summed separately at a
-        // flat 1 each, so U+3000 — weight 2 to `twitter-text` — slipped
-        // through even after the table was inverted.
+        // #61 が扱うのと同じ数え落としが､書き直した範囲表の届かなかった
+        // 唯一の場所で起きる: 空白は一律 1 として別に合計されていたので､
+        // `twitter-text` では重み 2 の U+3000 が､表を反転させた後もすり
+        // 抜けていた｡
         assert_eq!(weighted_length("\u{3000}"), 2);
     }
 
@@ -447,7 +428,7 @@ mod tests {
         assert_eq!(weighted_length("a b"), 3);
     }
 
-    // --- #71: reply target ---
+    // --- #71: reply の対象 ---
 
     fn a_post() -> QuotedPost {
         QuotedPost {
@@ -489,9 +470,9 @@ mod tests {
 
     #[test]
     fn setting_a_reply_clears_a_quote_and_the_other_way_round() {
-        // Deliberate: X would accept a post that is both, but the two read
-        // almost identically in a small composer and sending the wrong one
-        // is not a visible mistake.
+        // 意図的だ: X は両方を兼ねた post も受け付けるが､小さな composer
+        // では 2 つがほとんど同じに見え､誤ったほうを送っても目に見える
+        // 間違いにならない｡
         let mut state = ComposeState::new();
         state.set_quote(a_quote_target("quoted"));
         state.set_reply(a_reply_target("replied"));
@@ -514,8 +495,8 @@ mod tests {
 
     #[test]
     fn clearing_a_reply_keeps_the_draft() {
-        // The mis-click recovery: removing the wrong target must not force
-        // discarding what was already typed.
+        // 誤クリックからの復帰: 誤った対象を外すために､すでに入力した
+        // ものを捨てさせてはならない｡
         let mut state = ComposeState::new();
         state.set_text("already typed".to_string());
         state.set_reply(a_reply_target("1"));
@@ -537,9 +518,8 @@ mod tests {
 
     #[test]
     fn a_failed_submit_keeps_the_reply_target_and_the_draft() {
-        // A retry has to send the same reply to the same post; losing the
-        // target on failure would silently turn the retry into a top-level
-        // post.
+        // リトライは同じ post へ同じ reply を送らねばならない｡失敗時に
+        // 対象を失えば､リトライが黙ってトップレベルの post に化ける｡
         let mut state = ComposeState::new();
         state.set_text("a reply".to_string());
         state.set_reply(a_reply_target("1"));
@@ -586,7 +566,7 @@ mod tests {
         assert_eq!(validate("hello"), Ok(()));
     }
 
-    // --- ComposeState transitions ---
+    // --- ComposeState の遷移 ---
 
     #[test]
     fn a_fresh_composer_is_idle_and_empty() {
@@ -597,8 +577,8 @@ mod tests {
 
     #[test]
     fn a_fresh_composer_has_no_quote_target() {
-        // #16: an ordinary post is the default — nothing is being quoted
-        // until "Quote" is clicked on some row.
+        // #16: 既定は普通の post だ — どこかの行で "Quote" が押されるまで
+        // 何も引用されていない｡
         let state = ComposeState::new();
         assert_eq!(state.quote(), None);
     }
@@ -618,8 +598,8 @@ mod tests {
 
     #[test]
     fn cannot_submit_while_already_submitting() {
-        // #14: the double-submit guard — a second click while one request
-        // is in flight must find nothing to do.
+        // #14: 二重送信のガード — リクエストが 1 つ進行中のあいだの
+        // 2 度目のクリックは､何もすることを見つけてはならない｡
         let mut state = ComposeState::new();
         state.set_text("hello".to_string());
         state.start_submitting();
@@ -628,7 +608,7 @@ mod tests {
 
     #[test]
     fn a_failed_submit_keeps_the_text_and_allows_a_retry() {
-        // #14's central guarantee: losing typed text is the worst outcome.
+        // #14 の中心的な保証: 入力したテキストを失うのが最悪の結果だ｡
         let mut state = ComposeState::new();
         state.set_text("hello".to_string());
         state.start_submitting();
@@ -644,9 +624,9 @@ mod tests {
 
     #[test]
     fn a_failed_quote_submit_keeps_the_quote_target_together_with_the_draft() {
-        // #16's central guarantee, mirroring #14's for plain text: a failed
-        // quote must not silently drop what was being quoted, any more than
-        // it drops the draft itself.
+        // 素のテキストに対する #14 の保証に対応する､#16 の中心的な保証だ:
+        // 失敗した quote は､下書き自体を落とさないのと同様に､引用していた
+        // ものを黙って落としてはならない｡
         let mut state = ComposeState::new();
         state.set_text("hello".to_string());
         state.set_quote(sample_target("1700000000000000001"));
@@ -691,8 +671,8 @@ mod tests {
 
     #[test]
     fn set_quote_replaces_a_previously_set_target() {
-        // A draft only ever quotes one post at a time — clicking "Quote" on
-        // a second row while composing overwrites, not stacks.
+        // 下書きが一度に引用する post は常に 1 つだけだ — 作成中に 2 つめの
+        // 行で "Quote" を押すと積み重ならず上書きされる｡
         let mut state = ComposeState::new();
         state.set_quote(sample_target("1700000000000000001"));
         state.set_quote(sample_target("1700000000000000002"));
@@ -701,8 +681,8 @@ mod tests {
 
     #[test]
     fn clear_quote_removes_the_target_without_touching_the_draft_text() {
-        // #16: a mis-click on "Quote" must not force discarding the draft —
-        // clearing the quote target is the way out.
+        // #16: "Quote" の誤クリックが下書きを捨てさせてはならない —
+        // quote の対象を外すのが逃げ道だ｡
         let mut state = ComposeState::new();
         state.set_text("hello".to_string());
         state.set_quote(sample_target("1700000000000000001"));
@@ -714,9 +694,8 @@ mod tests {
 
     #[test]
     fn refuse_records_a_message_without_ever_having_started_submitting() {
-        // The missing-scope refusal (#14): never went to `Submitting` at
-        // all, so no request was ever sent, but the text still must not be
-        // touched.
+        // scope 不足による拒否 (#14): `Submitting` に一度も入っていないので
+        // リクエストは送られていないが､それでもテキストに触れてはならない｡
         let mut state = ComposeState::new();
         state.set_text("hello".to_string());
         state.refuse("needs re-authorization".to_string());

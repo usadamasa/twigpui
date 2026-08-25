@@ -4,18 +4,18 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
-# `deny`, not `warn` (#47). CI runs `cargo clippy -- -D warnings`, so every
-# one of these was already a build failure there while passing locally —
-# the asymmetry meant finding out on CI what could have been found on the
-# machine that wrote the code.
+# `warn` ではなく `deny` (#47)｡CI は `cargo clippy -- -D warnings` を走らせる
+# ので､ここに並ぶものはどれも手元では通るのに CI ではすでにビルド失敗だった —
+# この非対称は､コードを書いたマシンで分かったはずのことを CI で知る羽目に
+# なる､ということだった｡
 [lints.rust]
 unsafe_code = "forbid"
 missing_debug_implementations = "deny"
 unreachable_pub = "deny"
 unused_qualifications = "deny"
 rust_2018_idioms = { level = "deny", priority = -1 }
-# Adopted by #47 after measuring: each of these fires zero times on the
-# current tree, so they cost nothing today and catch the first occurrence.
+# 計測のうえで #47 が採用: どれも現在のツリーで発火が 0 回なので､今日の
+# コストはゼロで､最初の 1 件を捕まえられる｡
 missing_docs = "deny"
 trivial_casts = "deny"
 trivial_numeric_casts = "deny"
@@ -24,22 +24,22 @@ unused_macro_rules = "deny"
 unused_crate_dependencies = "deny"
 variant_size_differences = "deny"
 
-# Not adopted by #47, with the measurement that decided it:
+# #47 が採用しなかったものと､そう決めた計測:
 #
-# - `let_underscore_drop` (26 hits in `src/`): every one is a deliberate
-#   `let _ = this.update(cx, …)` — gpui's own way of saying "the entity may
-#   already be gone". Adopting it would mean 26 `#[allow]`s, which is the
-#   issue's own stated reason not to adopt a lint.
+# - `let_underscore_drop` (`src/` で 26 件): どれも意図的な
+#   `let _ = this.update(cx, …)` — gpui 自身の "the entity may already be
+#   gone" の言い方だ｡採用すれば `#[allow]` が 26 個要る｡それは issue 自身が
+#   挙げる､lint を採用しない理由そのものだ｡
 [lints.clippy]
 pedantic = { level = "deny", priority = -1 }
 unwrap_used = "deny"
 expect_used = "deny"
 todo = "deny"
 dbg_macro = "deny"
-# Adopted by #47. `indexing_slicing` and `string_slice` were not free —
-# they found a real panic on remote input in `browser::strip_scheme` and
-# two more reachable ones in `ui::format_timestamp` and
-# `oauth::callback::percent_decode`. The rest fire zero times.
+# #47 が採用｡`indexing_slicing` と `string_slice` はタダではなかった —
+# `browser::strip_scheme` でリモート入力による実際の panic を 1 件､
+# `ui::format_timestamp` と `oauth::callback::percent_decode` で到達可能な
+# ものをさらに 2 件見つけた｡残りは発火が 0 回だ｡
 indexing_slicing = "deny"
 string_slice = "deny"
 panic = "deny"
@@ -49,25 +49,26 @@ verbose_file_reads = "deny"
 same_name_method = "deny"
 missing_assert_message = "deny"
 redundant_type_annotations = "deny"
-# The second half of #47's lint work: every arithmetic operation in `src/`
-# now states what it does on overflow (saturate, wrap where the range
-# already proves it cannot, or check and fall back). Timestamps come from
-# the clock and from API headers, and byte offsets from a redirect URL —
-# none of it this code's to trust.
+# #47 の lint 作業の後半: `src/` のすべての算術演算が､オーバーフロー時に
+# 何をするかを明示するようになった (飽和させる｡範囲がすでに起きないと証明して
+# いる箇所では wrap する｡あるいは検査してフォールバックする)｡タイムスタンプは
+# クロックと API のヘッダから来るし､バイトオフセットはリダイレクト URL から
+# 来る — どれもこのコードが信用してよいものではない｡
 arithmetic_side_effects = "deny"
 
 [dependencies]
 anyhow = "1.0.104"
-# URL-safe, no-padding base64 for the PKCE verifier/challenge (RFC 7636 §4.1-4.2).
+# PKCE の verifier/challenge 用の URL-safe でパディング無しの base64 (RFC 7636 §4.1-4.2)｡
 base64 = "0.23.1"
 dotenvy = "0.15.7"
-# Only a source of raw random bytes is needed (the PKCE verifier and the OAuth
-# `state`), not the full `rand` API surface (distributions, seeding, shuffling
-# helpers). `getrandom` covers exactly that, so it's used over `rand`.
+# 必要なのは生のランダムバイトの供給源だけで (PKCE の verifier と OAuth の
+# `state`)､`rand` の API 全面 (分布､シード､シャッフル補助) ではない｡
+# `getrandom` がちょうどそこを覆うので､`rand` ではなくこちらを使う｡
 getrandom = { version = "0.4.3", features = ["std"] }
-# macos-blade renders through blade instead of pre-compiled Metal shaders, so
-# the build needs no `xcrun metal` — which ships with full Xcode, not the
-# Command Line Tools. x11/wayland are Linux-only and this project is macOS-only.
+# macos-blade はプリコンパイル済みの Metal シェーダではなく blade 経由で描画
+# するので､ビルドに `xcrun metal` が要らない — あれは Command Line Tools では
+# なく完全な Xcode に付いてくる｡x11/wayland は Linux 専用で､このプロジェクトは
+# macOS 専用だ｡
 gpui = { version = "0.2.2", default-features = false, features = [
     "font-kit",
     "macos-blade",
@@ -79,12 +80,12 @@ sha2 = "0.11.0"
 toml = "1.1.4"
 ureq = { version = "3.4.0", features = ["json"] }
 
-# Only the startup smoke test (#59) needs this. `test-support` brings in
-# `TestAppContext`, whose window implementation draws to nothing
-# (`TestWindow::draw` is a no-op in gpui's `platform/test/window.rs`), so a
-# test can open a window and render a frame without a GPU or the window
-# server. That path is what `cargo test` never covered before, and it is
-# where #55 hid: a panic reachable only once something actually renders.
+# これを必要とするのは起動の smoke test (#59) だけだ｡`test-support` は
+# `TestAppContext` を引き込む｡そのウィンドウ実装はどこにも描画しないので
+# (gpui の `platform/test/window.rs` で `TestWindow::draw` は no-op)､
+# テストは GPU もウィンドウサーバも無しにウィンドウを開いて 1 フレーム描ける｡
+# この経路は `cargo test` がそれまで一度も覆っていなかったところで､#55 が
+# 隠れていた場所だ: 実際に何かが描画されて初めて到達する panic｡
 [dev-dependencies]
 gpui = { version = "0.2.2", default-features = false, features = [
     "font-kit",

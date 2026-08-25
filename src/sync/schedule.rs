@@ -1,66 +1,64 @@
-//! What one wake-up of the background sync loop should do.
+//! background sync の loop が 1 回の起床で何をすべきか｡
 //!
-//! The pure half of the auto-sync added on top of #163, split from
-//! [`super::auto`] on the same line `ui::reload_policy` is split from `ui`:
-//! everything here is a decision about whether to spend, and none of it
-//! makes a request. The loop that acts on a [`Step`] lives next door and is
-//! not unit tested, because every branch of it is HTTP.
+//! #163 の上に足した auto-sync のうち純粋な側の半分で､`ui::reload_policy`
+//! が `ui` から切り出されているのと同じ線で [`super::auto`] から切り出して
+//! ある: ここにあるのはすべて支出するかどうかの判断で､どれも request を
+//! 投げない｡[`Step`] を受けて動く loop は隣にあり､unit test されていない｡
+//! その分岐がどれも HTTP だからだ｡
 
-/// What the loop should do right now.
+/// loop が今すべきこと｡
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Step {
-    /// Read both sides in full and write a fresh plan. The expensive one:
-    /// every account on both sides is a billed resource.
+    /// 両側を丸ごと読み､新しい plan を書く｡高くつく方だ: 両側のどの
+    /// アカウントも課金 resource になる｡
     Diff,
-    /// Send a batch of the plan's outstanding writes.
+    /// plan に残っている write を 1 batch 送る｡
     Apply,
-    /// Nothing to do until `until`. The caller sleeps — capping how long
-    /// it sleeps in one go is its business, not this function's.
+    /// `until` まですることは無い｡呼び出し側が sleep する — 1 回でどれだけ
+    /// sleep するかに上限を付けるのは呼び出し側の仕事で､この関数のでは
+    /// ない｡
     Wait { until: i64 },
 }
 
-/// Everything [`next_step`] needs to know about where the sync has got to.
+/// sync がどこまで進んだかについて [`next_step`] が知る必要のあるすべて｡
 ///
-/// A struct rather than five positional arguments: `Option<i64>` twice and
-/// two counts next to each other is exactly the shape a call site gets
-/// wrong silently.
+/// 引数 5 つではなく struct にしてある: `Option<i64>` が 2 つと件数が 2 つ
+/// 並ぶ形は､呼び出し側が黙って取り違える形そのものだ｡
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Situation {
-    /// When the last diff was *attempted*, from the state file, or `None`
-    /// if there has never been one. Attempted rather than succeeded — see
-    /// [`super::auto`] for why a failed read still moves this.
+    /// 最後に diff を *試みた* 時刻｡state ファイル由来で､一度も無ければ
+    /// `None`｡成功ではなく試行なのは — 失敗した read でもこれが動く理由は
+    /// [`super::auto`] を見よ｡
     pub last_diff_at: Option<i64>,
-    /// `config.sync_interval_seconds`.
+    /// `config.sync_interval_seconds`｡
     pub interval_seconds: u32,
-    /// Entries in the plan on file the loop may still send — [`sendable`],
-    /// not every unapplied entry. Removals #176 holds are left out; counted,
-    /// they would pin [`next_step`] on `Apply` draining a plan it never
-    /// finishes.
+    /// ファイル上の plan のうち loop がまだ送ってよい entry — 未適用の
+    /// entry すべてではなく [`sendable`] だ｡#176 が保留する removal は
+    /// 除いてある｡数えてしまうと､終わらない plan を流し続ける `Apply` に
+    /// [`next_step`] を縛りつけることになる｡
     pub pending: usize,
-    /// Until when nothing may be sent — [`super::state::SyncState::blocked_until`],
-    /// or `None` if nothing is holding the loop back.
+    /// いつまで何も送ってはならないか — [`super::state::SyncState::blocked_until`]､
+    /// loop を止めるものが何も無ければ `None`｡
     pub blocked_until: Option<i64>,
 }
 
-/// Decide what one wake-up should do.
+/// 1 回の起床が何をすべきかを決める｡
 ///
-/// The precedence is the whole design:
+/// 優先順位が設計のすべてだ:
 ///
-/// 1. **A live rate limit wins.** Both other steps send requests, and
-///    sending into a window that has already refused is how a self-imposed
-///    throttle turns into X's.
-/// 2. **Draining outranks re-diffing.** The entries in a plan were paid
-///    for by the diff that produced them. Re-diffing on top of an
-///    undrained plan buys the same answer a second time and throws away
-///    the record of what has already been sent.
-/// 3. **Then the interval.** A diff that has never run is due immediately;
-///    otherwise it is due `interval_seconds` after the last attempt.
+/// 1. **生きている rate limit が勝つ｡** 他の 2 つの step はどちらも
+///    request を送るし､既に拒否した window へ送り込むのは､自ら課した
+///    throttle を X のものに変える道だ｡
+/// 2. **流し切りが diff のやり直しに優先する｡** plan の entry は､それを
+///    生んだ diff によって支払われている｡流し切っていない plan の上で
+///    diff し直せば同じ答えを 2 度買い､既に送ったものの記録を捨てる｡
+/// 3. **そのうえで interval｡** 一度も走っていない diff は即座に期限を
+///    迎える｡そうでなければ最後の試行から `interval_seconds` 後だ｡
 ///
-/// `last_diff_at` in the future is treated as due now rather than waited
-/// out. It comes from a file stamped by a clock this code does not own, so
-/// a backwards jump (or a hand-edited state file) would otherwise stall
-/// the loop until the clock caught up — for a value far enough ahead,
-/// forever.
+/// 未来の `last_diff_at` は待たずに､今が期限として扱う｡このコードの
+/// 持ち物ではない時計が打刻したファイル由来なので､そうしなければ時計が
+/// 巻き戻ったとき (あるいは state ファイルを手で編集したとき) 追いつくまで
+/// loop が止まる — 十分に先の値なら永久にだ｡
 pub(crate) fn next_step(situation: &Situation, now: i64) -> Step {
     if let Some(until) = situation.blocked_until
         && until > now
@@ -84,44 +82,45 @@ pub(crate) fn next_step(situation: &Situation, now: i64) -> Step {
     }
 }
 
-/// What one tick did, for the caller to log, show, and pace itself by.
+/// 1 回の tick が何をしたか｡呼び出し側が log し､表示し､ペース配分の
+/// 拠りどころにする｡
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Outcome {
-    /// Nothing was due. Nothing was sent.
+    /// 期限を迎えたものは無かった｡何も送っていない｡
     ///
-    /// `pending` is what the plan on file still owes, and it is not
-    /// always zero: [`next_step`] checks `blocked_until` *before* it
-    /// checks `pending`, so a live rate limit part way through a
-    /// catch-up produces an idle tick sitting on hundreds of
-    /// outstanding writes. #174's manual sync uses exactly that
-    /// distinction to decide when it is finished — "idle" alone would
-    /// have it walk away from a plan a full diff was paid for.
+    /// `pending` はファイル上の plan がまだ負っているもので､常に 0 とは
+    /// 限らない: [`next_step`] は `pending` を見る *前に* `blocked_until` を
+    /// 見るので､catch-up の途中で生きている rate limit に当たると､数百の
+    /// 未送信 write を抱えたまま idle な tick になる｡#174 の手動 sync は
+    /// まさにこの区別で完了を判断する — 「idle」だけでは､丸ごと 1 回の
+    /// diff を支払って得た plan を置き去りにしてしまう｡
     Idle { until: i64, pending: usize },
-    /// Both sides were read and a fresh plan written.
+    /// 両側を読み､新しい plan を書いた｡
     ///
-    /// `held` is #176's verdict on the removals: `true` means they are
-    /// more of the list's `members_total` than `sync_prune_limit_percent`
-    /// allows, so the background sync will drain the additions and leave
-    /// the removals in the plan file for `--sync-list --apply --prune`.
+    /// `held` は removal についての #176 の判定だ: `true` なら list の
+    /// `members_total` に対して `sync_prune_limit_percent` の許す割合を
+    /// 超えているということで､background sync は addition を流し切り､
+    /// removal は `--sync-list --apply --prune` のために plan ファイルへ
+    /// 残す｡
     Diffed {
         adds: usize,
         removals: usize,
         members_total: usize,
         held: bool,
     },
-    /// A batch of the plan's writes went out. `remaining` is what the loop
-    /// may still send — [`sendable`], so held removals are not counted.
+    /// plan の write を 1 batch 送り出した｡`remaining` は loop がまだ
+    /// 送ってよいもの — [`sendable`] なので保留された removal は数えない｡
     Applied { sent: usize, remaining: usize },
-    /// A write was refused — by the tracked window before it was sent, or
-    /// by X with a 429. The plan on disk records exactly where the
-    /// catch-up got to: `sent` is how many of this batch landed before the
-    /// refusal, `remaining` what is still owed.
+    /// write が拒否された — 送る前に追跡している window によってか､
+    /// X から 429 で｡disk 上の plan は catch-up がどこまで進んだかを正確に
+    /// 記録する: `sent` はこの batch のうち refusal の前に届いた件数､
+    /// `remaining` はまだ負っている分だ｡
     ///
-    /// `opaque` is the [`crate::rate_limit::RateLimited::opaque`] flag:
-    /// `true` for a cap the headers do not describe, which
-    /// [`super::state::settle`] backs away from further each time (#197).
-    /// `until` is only the answer for the other kind; for an opaque one it
-    /// is the client's first guess, and the state's streak decides.
+    /// `opaque` は [`crate::rate_limit::RateLimited::opaque`] のフラグだ:
+    /// ヘッダが記述しない上限なら `true` で､[`super::state::settle`] が
+    /// 毎回さらに後退していく (#197)｡`until` が答えになるのはもう一方の
+    /// 種類のときだけで､opaque なものではクライアントの最初の当て推量に
+    /// すぎず､state の連続回数が決める｡
     RateLimited {
         until: i64,
         opaque: bool,
@@ -130,20 +129,19 @@ pub(crate) enum Outcome {
     },
 }
 
-/// What a batch of writes amounts to: the [`Outcome`] for the sends that
-/// went through and, if the batch stopped short, why.
+/// write の batch が何になったか: 通った送信分の [`Outcome`] と､batch が
+/// 途中で止まったならその理由｡
 ///
-/// A rate limit is an outcome rather than an error whichever way it came
-/// — refused by the tracked window before sending, or by X with a 429 —
-/// because in both cases the plan on disk records everything that did
-/// land, and the only thing the loop has to do about it is wait. Every
-/// other failure propagates: carrying on past a revoked scope or a
-/// deleted list would keep spending writes against a credential or a
-/// list that has just proven it cannot take them.
+/// rate limit はどちらの経路で来ても — 送信前に追跡している window に
+/// 拒否されても､X から 429 で来ても — エラーではなく outcome だ｡どちらの
+/// 場合も disk 上の plan が届いたものをすべて記録しており､loop がそれに
+/// ついてすべきことは待つことだけだからだ｡それ以外の失敗は伝播する:
+/// 失効した scope や削除された list を越えて続ければ､受け付けられないと
+/// 今しがた証明した credential や list に write を使い続けることになる｡
 ///
-/// Pure apart from the downcast, which is why it is here rather than in
-/// `auto`: the mapping from "what the client said" to "what the loop
-/// remembers" is exactly the seam #198 lost information across.
+/// downcast を除けば純粋で､`auto` ではなくここにあるのはそのためだ:
+/// 「クライアントが言ったこと」から「loop が覚えること」への写像こそ､
+/// #198 が情報を落とした継ぎ目だ｡
 pub(crate) fn apply_outcome(
     sent: usize,
     remaining: usize,
@@ -166,24 +164,21 @@ pub(crate) fn apply_outcome(
     }
 }
 
-/// What the window should say about `outcome`, or `None` to say nothing.
+/// `outcome` についてウィンドウが言うべきこと｡何も言わないなら `None`｡
 ///
-/// Silent by design in the two cases that happen most: a diff that found
-/// nothing (the steady state, several times a day) and a batch part way
-/// through a catch-up (one every few seconds for hours). Announcing either
-/// would turn a background feature into a stream of notifications about
-/// itself.
+/// 最も頻繁に起きる二つの場合では意図して黙る: 何も見つけなかった diff
+/// (定常状態で 1 日に何度も) と､catch-up の途中の batch (何時間ものあいだ
+/// 数秒ごとに 1 回)｡どちらかでも告知すれば､background の機能が自分に
+/// ついての通知の流れに変わってしまう｡
 ///
-/// A rate limit is logged rather than shown for a third reason: the status
-/// bar already carries it, with the streak and the countdown, for as long
-/// as it lasts — a banner would be the same news with a dismiss button
-/// that does nothing.
+/// rate limit を表示せず log に落とすのは三つ目の理由による: それが続く
+/// あいだ status bar が連続回数とカウントダウンごと既に運んでいる —
+/// バナーを出しても､何もしない dismiss ボタンの付いた同じ知らせになる｡
 pub(crate) fn notice(outcome: &Outcome) -> Option<String> {
     match outcome {
-        // Shown once per diff, not once per apply tick: the loop
-        // re-reaches a held plan on every batch of additions it drains,
-        // and a banner that came back with each would be the rate-limit
-        // problem below all over again.
+        // apply の tick ごとではなく diff ごとに 1 回出す: loop は addition
+        // の batch を流すたびに保留された plan へ再到達するので､そのたび
+        // バナーが戻ってくれば下の rate limit の問題の再来になる｡
         Outcome::Diffed {
             adds,
             removals,
@@ -212,42 +207,39 @@ pub(crate) fn notice(outcome: &Outcome) -> Option<String> {
     }
 }
 
-/// What [`Situation::last_diff_at`] should be for this tick, given
-/// whether the caller forced it (#174).
+/// 呼び出し側が強制したかどうか (#174) を踏まえ､この tick での
+/// [`Situation::last_diff_at`] が何であるべきか｡
 ///
-/// The whole of the manual trigger's mechanism, and a named function
-/// rather than an `if` inside [`super::auto::tick`] because that function
-/// makes HTTP requests and so has no test of its own — this had none
-/// either until it moved out here, which for a switch that decides
-/// whether both sides get re-read is not a good place to leave it.
+/// 手動トリガーの仕組みのすべてだ｡[`super::auto::tick`] の中の `if` では
+/// なく名前の付いた関数にしてあるのは､あの関数が HTTP request を投げる
+/// せいで自前のテストを持てないからだ — ここへ出てくるまではこれにも
+/// テストが無く､両側を読み直すかどうかを決めるスイッチをそのまま置いて
+/// おいてよい場所ではなかった｡
 ///
-/// Forcing discards the recorded time rather than shortening the interval.
-/// `None` is what [`next_step`] already reads as "a diff has never run",
-/// so the decision below it is untouched: a live rate limit still refuses
-/// the tick, and an undrained plan is still drained before anything is
-/// bought again.
+/// 強制は interval を短くするのではなく､記録された時刻を捨てる｡`None` は
+/// [`next_step`] が既に「diff が一度も走っていない」と読む値なので､その
+/// 下の判断には手が付かない: 生きている rate limit は今も tick を拒むし､
+/// 流し切っていない plan は何かを買い直す前に流し切られる｡
 pub(crate) fn last_diff_for(forced: bool, recorded: Option<i64>) -> Option<i64> {
     if forced { None } else { recorded }
 }
 
-/// What [`Situation::blocked_until`] should be for this tick, given
-/// whether the caller forced it (#174) and what the block is for.
+/// 呼び出し側が強制したかどうか (#174) と block が何のためのものかを
+/// 踏まえ､この tick での [`Situation::blocked_until`] が何であるべきか｡
 ///
-/// The block became persistent in #198, which gave a forced tick two
-/// kinds to meet. A failed tick's block (`refusals == 0`) is the interval
-/// [`super::state::settle`] hands a revoked scope or a deleted list so the
-/// loop does not retry it every minute — and the status bar offers
-/// "Failed" as something to press precisely so a person who has fixed the
-/// cause can retry now. Forcing steps over that one. A refusal's block
-/// (`refusals > 0`) is the ladder backing away from a cap that has said
-/// no, and pressing the button is not evidence it has lifted: forcing
-/// waits that one out like any other tick, which is what keeps the button
-/// from being a way to spend around it.
+/// block は #198 で永続化され､強制された tick が出会う種類が二つになった｡
+/// 失敗した tick の block (`refusals == 0`) は､loop が毎分再試行しないよう
+/// [`super::state::settle`] が失効した scope や削除された list に渡す
+/// interval だ — そして status bar が「Failed」を押せるものとして出すのは､
+/// 原因を直した人が今すぐ再試行できるようにするためにほかならない｡強制は
+/// こちらをまたぐ｡refusal の block (`refusals > 0`) は否と言った上限から
+/// 後退していく梯子であり､ボタンを押すことはそれが明けた証拠にならない:
+/// 強制は他の tick と同じくこちらは待ち切る｡それがボタンを上限の迂回路に
+/// しないための仕組みだ｡
 ///
-/// A block from an exhausted window (which leaves `refusals` alone) is
-/// stepped over too, and costs nothing: `rate_limit::decision` refuses
-/// the send before it goes out, and the tick comes back `RateLimited`
-/// with the same deadline.
+/// 使い切った window 由来の block (`refusals` には触れない) もまたぐが､
+/// 費用はかからない: `rate_limit::decision` が送信前に拒否し､tick は同じ
+/// 期限を持って `RateLimited` で戻ってくる｡
 pub(crate) fn blocked_for(forced: bool, state: &super::SyncState) -> Option<i64> {
     if forced && state.refusals == 0 {
         None
@@ -256,42 +248,41 @@ pub(crate) fn blocked_for(forced: bool, state: &super::SyncState) -> Option<i64>
     }
 }
 
-/// Whether a run that was asked for one pass has nothing left to do
-/// (#174).
+/// 1 pass だけを求められた実行に､もうすることが残っていないかどうか
+/// (#174)｡
 ///
-/// Only for a loop that is meant to stop — the scheduled sync never does,
-/// and asks this nothing. What it is protecting is the plan file: a diff
-/// against a few thousand follows costs dollars, so a manual run that
-/// walks away leaving entries unsent has thrown that money at a list it
-/// did not finish rewriting.
+/// 止まることを前提とした loop のためだけのものだ — 定期 sync は決して
+/// 止まらず､これを訊きもしない｡守っているのは plan ファイルだ: 数千の
+/// follow に対する diff はドルの話なので､entry を未送信のまま立ち去る
+/// 手動実行は､書き換え終えていない list にその金を捨てたことになる｡
 ///
-/// So "idle" is not the test; **idle with nothing outstanding** is. The
-/// two come apart exactly where it matters: [`next_step`] checks
-/// `blocked_until` before `pending`, so a rate limit hit half way through
-/// a catch-up produces `Idle` with hundreds of writes still owed. That run
-/// has to keep waiting, not declare itself done.
+/// だから判定は「idle」ではなく､**残件ゼロの idle** だ｡この二つは
+/// ちょうど効くところで分かれる: [`next_step`] は `pending` より先に
+/// `blocked_until` を見るので､catch-up の途中で rate limit に当たると
+/// 数百の write を負ったまま `Idle` になる｡その実行は完了を宣言せず
+/// 待ち続けなければならない｡
 ///
-/// A failed tick (`None`) does not end the run either — [`super::state::settle`]
-/// has already given it a full interval to come back on, and the plan it
-/// was draining is still on disk.
+/// 失敗した tick (`None`) も実行を終わらせない — [`super::state::settle`]
+/// が戻ってくるための interval を丸ごと既に与えているし､流していた plan は
+/// まだ disk にある｡
 pub(crate) fn is_finished(outcome: Option<&Outcome>) -> bool {
     matches!(outcome, Some(Outcome::Idle { pending: 0, .. }))
 }
 
-/// The next `limit` entries the loop should send, taken alternately from
-/// the additions and the removals.
+/// loop が次に送るべき `limit` 件の entry｡addition と removal から交互に
+/// 取る｡
 ///
-/// Alternately, rather than every addition and then every removal, because
-/// a list that is badly out of date is caught up over hours: sending the
-/// adds first would show every new account long before the first stale one
-/// went away, and a run interrupted half way would leave the list strictly
-/// larger than it should be rather than closer to right.
+/// addition を全部送ってから removal ではなく交互なのは､ひどく古びた
+/// list の catch-up が何時間もかかるからだ: add を先に送れば､最初の
+/// stale なアカウントが消えるはるか前に新しいアカウントがすべて見え､
+/// 途中で中断した実行は list を正解に近づけるどころか､あるべき大きさより
+/// 確実に大きいまま残す｡
 ///
-/// `prune` false drops removals entirely — that is the CLI's default, and
-/// this function is the one place the two paths differ.
+/// `prune` が false なら removal は丸ごと落とす — それが CLI の既定で､
+/// 二つの経路が分かれる唯一の場所がこの関数だ｡
 ///
-/// Returns owned ids rather than borrowing `plan`, because the caller
-/// marks entries applied as it goes.
+/// `plan` を借りずに所有権のある id を返すのは､呼び出し側が進めながら
+/// entry に適用済みの印を付けるからだ｡
 pub(crate) fn next_batch(
     plan: &super::Plan,
     prune: bool,
@@ -319,49 +310,49 @@ pub(crate) fn next_batch(
     batch
 }
 
-/// Whether the background sync may send `plan`'s removals (#176).
+/// background sync が `plan` の removal を送ってよいかどうか (#176)｡
 ///
-/// The cap is a share of the list: removals go out when they would delete
-/// at most `limit_percent` of the `members_total` the plan was diffed
-/// against. It is for the failure `read_all`'s all-or-nothing rule cannot
-/// see — a follow read that comes back short *with a 200* (an outage, a
-/// scope quietly dropped, a regression upstream of `plan`) reads as a mass
-/// unfollow, and with pruning unconditional that is a mass deletion.
+/// 上限は list に対する割合だ: plan が diff された相手の `members_total` の
+/// うち削除するのが最大 `limit_percent` までなら removal は出ていく｡
+/// `read_all` の all-or-nothing 規則では見えない失敗のためのものだ —
+/// *200 を返しながら* 足りずに戻ってきた follow の read (障害､黙って
+/// 落ちた scope､`plan` より上流の退行) は大量 unfollow と読まれ､prune が
+/// 無条件ならそれは大量削除になる｡
 ///
-/// Over the cap, *every* removal is held rather than the first N sent: the
-/// suspicion is about the read, and a bad read's first N are no better
-/// than its last. Held removals stay in the plan file — they were paid
-/// for — where `--sync-list --apply --prune` sends them under a person's
-/// eye. The CLI has no cap: its dry-run report shows the same numbers, and
-/// typing `--prune` after reading them is the confirmation.
+/// 上限を超えたら最初の N 件を送るのではなく removal を *すべて* 保留する:
+/// 疑っているのは read の方で､悪い read の最初の N 件は最後の N 件より
+/// ましではない｡保留された removal は plan ファイルに残り — 支払い済み
+/// だからだ — そこから `--sync-list --apply --prune` が人の目の下で送る｡
+/// CLI に上限は無い: その dry-run の report が同じ数字を見せ､それを読んで
+/// から `--prune` と打つことが確認になる｡
 ///
-/// Measured on what is still pending, not on the plan as diffed, so a plan
-/// the CLI has already pruned most of is not still held for the part that
-/// landed. A `members_total` of 0 with removals pending holds them: that is
-/// a plan file from before this cap (`#[serde(default)]`), and the next
-/// diff replaces it.
+/// diff された時点の plan ではなく今なお残っているものを測るので､CLI が
+/// 既に大半を prune した plan が､届いた分のせいで保留され続けることは
+/// ない｡`members_total` が 0 で removal が残っていれば保留する: それは
+/// この上限より前の plan ファイル (`#[serde(default)]`) であり､次の diff が
+/// 置き換える｡
 ///
-/// `limit_percent` is `config.sync_prune_limit_percent`, 0..=100. 100
-/// allows emptying the list; 0 makes the background sync additive only.
+/// `limit_percent` は `config.sync_prune_limit_percent` で 0..=100｡100 なら
+/// list を空にすることも許し､0 なら background sync は追加専用になる｡
 pub(crate) fn prune_allowed(plan: &super::Plan, limit_percent: u8) -> bool {
     let removals = plan.pending_count(super::Action::Remove);
     if removals == 0 {
         return true;
     }
-    // Cross-multiplied rather than divided, so 1 of 15 at 10% (1.5
-    // allowed) is over the line rather than rounded onto it.
+    // 割らずにたすき掛けにしてある｡そうすれば 15 件中 1 件を 10% で見た
+    // とき (許容 1.5) 線上に丸められず､超過として扱われる｡
     removals.saturating_mul(100)
         <= plan
             .members_total
             .saturating_mul(usize::from(limit_percent))
 }
 
-/// How many of `plan`'s entries the background sync may still send —
-/// [`Situation::pending`]'s value (#176).
+/// background sync が `plan` の entry をまだ何件送ってよいか —
+/// [`Situation::pending`] の値だ (#176)｡
 ///
-/// Additions always count. Removals count only while `prune` (the
-/// [`prune_allowed`] verdict) says they may go; held ones are not
-/// outstanding work for the loop, because the loop will never do them.
+/// addition は常に数える｡removal を数えるのは `prune` ([`prune_allowed`] の
+/// 判定) が送ってよいと言うあいだだけだ｡保留されたものは loop にとって
+/// 残務ではない｡loop が決してそれをしないからだ｡
 pub(crate) fn sendable(plan: &super::Plan, prune: bool) -> usize {
     let adds = plan.pending_count(super::Action::Add);
     if prune {
@@ -395,8 +386,8 @@ mod tests {
         }
     }
 
-    /// The batch as a compact `+id` / `-id` string, so the interleaving is
-    /// readable in the assertion rather than buried in a tuple vec.
+    /// batch を `+id` / `-id` の簡潔な文字列にしたもの｡交互になっている
+    /// 様子が tuple の vec に埋もれず assertion 上で読めるようにだ｡
     fn batch(plan: &Plan, prune: bool, limit: usize) -> String {
         next_batch(plan, prune, limit)
             .iter()
@@ -408,8 +399,8 @@ mod tests {
             .join(" ")
     }
 
-    /// A settled loop: a diff has run, nothing is outstanding, nothing is
-    /// blocked. Tests override the one field they are about.
+    /// 落ち着いた loop: diff は走り済み､残件も block も無い｡各テストは
+    /// 自分が扱う 1 フィールドだけを上書きする｡
     fn idle() -> Situation {
         Situation {
             last_diff_at: Some(1_000),
@@ -430,8 +421,8 @@ mod tests {
 
     #[test]
     fn nothing_happens_again_until_the_interval_has_elapsed() {
-        // The persisted `last_diff_at` is what stops a relaunch from
-        // paying for both full reads over again.
+        // 永続化された `last_diff_at` が､再起動に両側の全 read をもう一度
+        // 支払わせないための仕組みだ｡
         assert_eq!(next_step(&idle(), 1_001), Step::Wait { until: 22_600 });
     }
 
@@ -442,15 +433,15 @@ mod tests {
 
     #[test]
     fn a_diff_that_is_long_overdue_is_still_just_one_diff() {
-        // A machine asleep for a week wakes up owing one sync, not a week
-        // of them.
+        // 1 週間眠っていたマシンが目覚めて負っているのは sync 1 回分で
+        // あって､1 週間分ではない｡
         assert_eq!(next_step(&idle(), 1_000_000), Step::Diff);
     }
 
     #[test]
     fn outstanding_entries_are_drained_before_the_next_diff() {
-        // The entries were paid for by the diff that found them. Re-diffing
-        // on top of them buys the same answer twice.
+        // entry はそれを見つけた diff によって支払われている｡その上で
+        // diff し直せば同じ答えを 2 度買うことになる｡
         let situation = Situation {
             pending: 3,
             ..idle()
@@ -460,9 +451,8 @@ mod tests {
 
     #[test]
     fn draining_happens_inside_the_interval_too() {
-        // The apply drip is the point of the whole thing: a list 2,000
-        // accounts behind is caught up a batch at a time, not held until
-        // the next diff is due.
+        // apply を少しずつ垂らすことが全体の要だ: 2,000 アカウント遅れた
+        // list は次の diff の期限まで留め置かれず､1 batch ずつ追いつく｡
         let situation = Situation {
             pending: 2_000,
             ..idle()
@@ -472,8 +462,8 @@ mod tests {
 
     #[test]
     fn a_live_rate_limit_outranks_the_work_waiting_behind_it() {
-        // Both other steps send. Sending into a window that has already
-        // refused is how the self-imposed throttle becomes X's.
+        // 他の 2 つの step はどちらも送る｡既に拒否した window へ送り込む
+        // のが､自ら課した throttle を X のものに変える道だ｡
         let situation = Situation {
             pending: 5,
             blocked_until: Some(2_000),
@@ -503,9 +493,9 @@ mod tests {
 
     #[test]
     fn a_last_diff_stamped_in_the_future_is_treated_as_due_now() {
-        // The stamp comes from a file written by a clock this code does not
-        // own. Waiting it out would stall the loop until the clock caught
-        // up — for a value far enough ahead, forever.
+        // 打刻はこのコードの持ち物ではない時計が書いたファイル由来だ｡
+        // 待ち切れば時計が追いつくまで loop が止まる — 十分に先の値なら
+        // 永久にだ｡
         let situation = Situation {
             last_diff_at: Some(i64::MAX),
             ..idle()
@@ -528,9 +518,8 @@ mod tests {
 
     #[test]
     fn a_refusal_keeps_what_the_batch_sent_before_it() {
-        // The `sent` count is what lets the state tell "refused after
-        // three landed" from "refused again": the former restarts the
-        // streak.
+        // `sent` の件数があるから state は「3 件届いたあとの拒否」と
+        // 「また拒否」を見分けられる: 前者は連続を数え直す｡
         let error: anyhow::Error = crate::rate_limit::RateLimited {
             reset_at: Some(5_000),
             opaque: true,
@@ -566,16 +555,16 @@ mod tests {
 
     #[test]
     fn any_other_failure_propagates() {
-        // A revoked scope, a deleted list: not something to wait out.
+        // 失効した scope､削除された list: 待ち切って済むものではない｡
         let error = apply_outcome(0, 400, Err(anyhow::anyhow!("403 Forbidden"))).unwrap_err();
         assert!(error.to_string().contains("403"), "{error}");
     }
 
     #[test]
     fn a_rate_limit_with_no_reset_time_at_all_propagates() {
-        // Production always fills `reset_at` (`Refusal::into_error`); this
-        // is the shape a future client change could produce, and it is
-        // safer as a logged failure than as a wait until nothing.
+        // 実運用では `reset_at` は常に埋まる (`Refusal::into_error`)｡これは
+        // 将来クライアントを変えたときに生まれうる形で､何も無いところまで
+        // 待つよりは log に残る失敗とする方が安全だ｡
         let error: anyhow::Error = crate::rate_limit::RateLimited {
             reset_at: None,
             opaque: false,
@@ -584,7 +573,7 @@ mod tests {
         assert!(apply_outcome(0, 1, Err(error)).is_err());
     }
 
-    // --- #174: forcing a tick past the interval ---
+    // --- #174: interval を越えて tick を強制する ---
 
     #[test]
     fn an_ordinary_tick_is_paced_by_the_recorded_diff_time() {
@@ -596,8 +585,8 @@ mod tests {
         assert_eq!(last_diff_for(true, Some(1_000)), None);
     }
 
-    // The end-to-end shape of the button: a diff four hours from due
-    // becomes due now, and nothing else about the decision moves.
+    // ボタンの端から端までの形: 期限まで 4 時間ある diff が今の期限に
+    // なり､判断のそれ以外は何も動かない｡
     #[test]
     fn forcing_turns_a_tick_that_would_have_waited_into_a_diff() {
         let recorded = Some(1_000);
@@ -619,9 +608,9 @@ mod tests {
         assert_eq!(next_step(&forced, 1_100), Step::Diff);
     }
 
-    // Forcing drops the interval and *only* the interval. Both of the
-    // checks above it in `next_step` still hold, which is what keeps the
-    // button from being a way to spend around them.
+    // 強制が落とすのは interval だけ､interval *のみ* だ｡`next_step` で
+    // その上にある二つの検査は今も効いており､それがボタンをそれらの
+    // 迂回路にしないための仕組みだ｡
     #[test]
     fn forcing_does_not_get_past_a_live_rate_limit() {
         let refused = crate::sync::SyncState {
@@ -637,10 +626,10 @@ mod tests {
         assert_eq!(next_step(&situation, 1_100), Step::Wait { until: 5_000 });
     }
 
-    // The block a failed tick earns is the one thing forcing may step
-    // over: "Failed" is offered as something to press so that a fixed
-    // cause can be retried now, not after the interval a relaunch would
-    // otherwise honour (#198 made the block persistent).
+    // 失敗した tick が得る block だけは強制がまたいでよい:「Failed」を
+    // 押せるものとして出すのは､直した原因を再起動が守るはずの interval の
+    // あとではなく今すぐ再試行できるようにするためだ (#198 が block を
+    // 永続化した)｡
     #[test]
     fn forcing_steps_over_the_interval_a_failed_tick_earned() {
         let failed = crate::sync::SyncState {
@@ -669,7 +658,7 @@ mod tests {
 
     #[test]
     fn forcing_never_steps_over_a_refusal_streak() {
-        // Pressing the button is not evidence the cap has lifted.
+        // ボタンを押すことは上限が明けた証拠にならない｡
         let refused = crate::sync::SyncState {
             last_diff_at: Some(1_000),
             blocked_until: Some(22_600),
@@ -688,7 +677,7 @@ mod tests {
         assert_eq!(next_step(&situation, 1_100), Step::Apply);
     }
 
-    // --- #174: when a one-pass run may stop ---
+    // --- #174: 1 pass の実行が止まってよいのはいつか ---
 
     #[test]
     fn a_run_is_finished_once_it_goes_idle_with_nothing_owed() {
@@ -698,10 +687,10 @@ mod tests {
         })));
     }
 
-    // The case the whole function exists for. `next_step` weighs
-    // `blocked_until` ahead of `pending`, so a rate limit part way through
-    // a catch-up looks idle — and stopping there abandons a plan a full
-    // paid diff produced.
+    // この関数が存在する理由そのものの場合｡`next_step` は `pending` より
+    // `blocked_until` を先に量るので､catch-up の途中の rate limit は idle に
+    // 見える — そこで止まれば､満額支払った diff が生んだ plan を捨てる
+    // ことになる｡
     #[test]
     fn a_run_blocked_part_way_through_a_catch_up_is_not_finished() {
         assert!(!is_finished(Some(&Outcome::Idle {
@@ -728,8 +717,8 @@ mod tests {
         })));
     }
 
-    // `settle` has already handed a failed tick a full interval to come
-    // back on, and whatever it was draining is still on disk.
+    // `settle` は失敗した tick に戻ってくるための interval を丸ごと既に
+    // 渡しているし､流していたものは何であれまだ disk にある｡
     #[test]
     fn a_run_whose_tick_failed_is_not_finished() {
         assert!(!is_finished(None));
@@ -739,7 +728,7 @@ mod tests {
 
     #[test]
     fn a_diff_that_found_nothing_says_nothing() {
-        // The steady state, several times a day.
+        // 定常状態｡1 日に何度も起きる｡
         assert_eq!(
             notice(&Outcome::Diffed {
                 adds: 0,
@@ -766,7 +755,7 @@ mod tests {
 
     #[test]
     fn a_batch_part_way_through_a_catch_up_says_nothing() {
-        // One every few seconds for hours, if it did.
+        // 出すとしたら何時間ものあいだ数秒ごとに 1 回になる｡
         assert_eq!(
             notice(&Outcome::Applied {
                 sent: 20,
@@ -799,9 +788,9 @@ mod tests {
 
     #[test]
     fn neither_idling_nor_a_rate_limit_reaches_the_banner() {
-        // The rate limit especially: the status bar carries it for as long
-        // as it lasts, so a banner would be the same news with a dismiss
-        // button that does nothing.
+        // とくに rate limit は: それが続くあいだ status bar が運ぶので､
+        // バナーを出しても､何もしない dismiss ボタンの付いた同じ知らせに
+        // なる｡
         assert_eq!(
             notice(&Outcome::Idle {
                 until: 9_000,
@@ -824,17 +813,17 @@ mod tests {
 
     #[test]
     fn a_batch_alternates_additions_and_removals() {
-        // A list caught up over hours should get closer to right the whole
-        // way, not grow to its final size first and shed the stale members
-        // afterwards.
+        // 何時間もかけて追いつく list は､まず最終的な大きさまで膨らんで
+        // から stale な member を落とすのではなく､その間ずっと正解に
+        // 近づいていくべきだ｡
         let plan = plan_of(&["1", "2"], &["3", "4"]);
         assert_eq!(batch(&plan, true, 10), "+1 -3 +2 -4");
     }
 
     #[test]
     fn a_batch_stops_at_the_limit_mid_pair() {
-        // The odd limit is the case where the interleaving could quietly
-        // send one extra request.
+        // limit が奇数のときが､交互送信が黙って request を 1 回余分に
+        // 送りかねない場合だ｡
         let plan = plan_of(&["1", "2"], &["3", "4"]);
         assert_eq!(batch(&plan, true, 3), "+1 -3 +2");
     }
@@ -853,25 +842,25 @@ mod tests {
 
     #[test]
     fn without_prune_a_batch_is_additions_only() {
-        // The CLI's default. Removals stay listed in the plan and unsent.
+        // CLI の既定｡removal は plan に載ったまま送られない｡
         let plan = plan_of(&["1", "2"], &["3", "4"]);
         assert_eq!(batch(&plan, false, 10), "+1 +2");
     }
 
     #[test]
     fn without_prune_removals_do_not_eat_into_the_limit() {
-        // The bug the interleaving invites: counting a skipped removal as
-        // one of the `limit` sends, so a bounded batch sends half as many
-        // additions as it was asked for.
+        // 交互送信が招くバグ: 飛ばした removal を `limit` の 1 件として
+        // 数えてしまい､上限付きの batch が求められた addition の半分しか
+        // 送らなくなる｡
         let plan = plan_of(&["1", "2"], &["3", "4"]);
         assert_eq!(batch(&plan, false, 2), "+1 +2");
     }
 
     #[test]
     fn an_already_applied_entry_is_never_in_a_batch() {
-        // What makes a resumed apply cheap: the plan file remembers what
-        // went through, and re-sending it would spend a write to change
-        // nothing.
+        // 再開した apply が安く済む理由: plan ファイルが通ったものを
+        // 覚えており､送り直せば何も変えないのに write を 1 回使うことに
+        // なる｡
         let mut plan = plan_of(&["1", "2"], &["3"]);
         plan.mark_applied("1", Action::Add);
         assert_eq!(batch(&plan, true, 10), "+2 -3");
@@ -893,9 +882,9 @@ mod tests {
 
     #[test]
     fn an_interval_that_would_overflow_the_clock_still_answers() {
-        // `saturating_add` rather than `+`: `interval_seconds` is a u32
-        // from config and `last_diff_at` is from a file, so neither bound
-        // is this function's to assume.
+        // `+` ではなく `saturating_add` なのは: `interval_seconds` は
+        // config 由来の u32､`last_diff_at` はファイル由来なので､どちらの
+        // 範囲もこの関数が前提にしてよいものではないからだ｡
         let situation = Situation {
             last_diff_at: Some(i64::MAX.saturating_sub(1)),
             interval_seconds: u32::MAX,
@@ -907,9 +896,9 @@ mod tests {
         );
     }
 
-    // --- #176: the prune cap ---
+    // --- #176: prune の上限 ---
 
-    /// A plan whose list had `members` accounts when it was diffed.
+    /// diff された時点で list が `members` 件のアカウントを持っていた plan｡
     fn plan_against(members: usize, adds: &[&str], removals: &[&str]) -> Plan {
         Plan {
             members_total: members,
@@ -922,16 +911,15 @@ mod tests {
 
     #[test]
     fn removals_within_the_limit_are_allowed() {
-        // 10 of 100 is exactly 10%: at the limit, not over it.
+        // 100 のうち 10 はちょうど 10%: 上限ちょうどであって超過ではない｡
         assert!(prune_allowed(&plan_against(100, &[], &TEN), 10));
     }
 
     #[test]
     fn one_removal_over_the_limit_holds_them_all() {
-        // Held, not trimmed to fit: a plan that wants to remove more than
-        // the cap allows is a plan whose follow read is suspect as a
-        // whole, and sending the first ten of a bad diff is still sending
-        // a bad diff.
+        // 収まるよう削るのではなく保留する: 上限より多く削除しようとする
+        // plan は follow の read が全体として疑わしい plan であり､悪い
+        // diff の最初の 10 件を送ることもやはり悪い diff を送ることだ｡
         assert!(!prune_allowed(&plan_against(100, &[], &ELEVEN), 10));
     }
 
@@ -942,15 +930,15 @@ mod tests {
 
     #[test]
     fn a_plan_that_does_not_know_the_list_size_holds_every_removal() {
-        // A plan file written before #176 carries no `members_total` and
-        // reads as 0. Anything divided by an unknown total is over the
-        // limit; the next diff at the interval replaces the file.
+        // #176 より前に書かれた plan ファイルは `members_total` を持たず
+        // 0 と読まれる｡不明な総数で割れば何であれ上限超過だ｡interval で
+        // 来る次の diff がファイルを置き換える｡
         assert!(!prune_allowed(&plan_against(0, &[], &["1"]), 10));
     }
 
     #[test]
     fn a_limit_of_one_hundred_percent_turns_the_cap_off() {
-        // Emptying the list is within a 100% limit by definition.
+        // list を空にすることは定義上 100% の上限に収まる｡
         assert!(prune_allowed(&plan_against(3, &[], &["1", "2", "3"]), 100));
     }
 
@@ -961,9 +949,8 @@ mod tests {
 
     #[test]
     fn already_applied_removals_do_not_count_against_the_limit() {
-        // What is measured is what would be sent now. A plan the CLI has
-        // already pruned most of is not still over the cap for the part
-        // that landed.
+        // 測るのは今送られるものだ｡CLI が既に大半を prune した plan が､
+        // 届いた分のせいで上限超過のままになることはない｡
         let mut plan = plan_against(100, &[], &ELEVEN);
         plan.mark_applied("11", Action::Remove);
         assert!(prune_allowed(&plan, 10));

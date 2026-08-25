@@ -1,21 +1,21 @@
-//! Repost bookkeeping (#15) — the parts that are actually about reposting.
+//! repost の記録 (#15) — 本当に repost に固有の部分だけ｡
 //!
-//! The two mechanisms this feature runs on, a local record of post ids and
-//! an optimistic-update/rollback button state, are shared with likes (#68)
-//! and live in [`crate::toggle`]. What stays here is what is genuinely
-//! repost-specific: which endpoint to call, which file to record into, and
-//! which of X's own error phrasings mean "the local record is stale"
-//! rather than "this failed".
+//! この機能が乗っている 2 つの仕組み､すなわち post id のローカル記録と
+//! 楽観更新/ロールバックのボタン状態は､いいね (#68) と共有していて
+//! [`crate::toggle`] にある｡ここに残っているのは純粋に repost 固有の部分だ:
+//! どのエンドポイントを呼ぶか､どのファイルに記録するか､そして X が返す
+//! エラー文言のうちどれが「これは失敗した」ではなく
+//! 「ローカル記録が古い」を意味するか｡
 //!
-//! **Reposts made from any other client are never reflected here** — the
-//! local record is the only source of truth twigpui has, accepted as the
-//! tradeoff for a workable button state at zero request cost; see the
-//! README and [`crate::paths::Paths::reposted_posts_file`]'s doc.
+//! **他のクライアントから行った repost はここに反映されない** — ローカル
+//! 記録が twigpui の持つ唯一の source of truth であり､リクエストコスト
+//! ゼロで使えるボタン状態を得るためのトレードオフとして受け入れている｡
+//! README と [`crate::paths::Paths::reposted_posts_file`] の doc を参照｡
 //!
-//! [`create`]/[`remove`] are the thin, not-unit-tested orchestration that
-//! actually touches the network (via `XClient`) and disk — mirroring
-//! `cache::reload`'s own "not unit-tested directly" convention, since
-//! everything they compose is tested standalone.
+//! [`create`]/[`remove`] は実際にネットワーク (`XClient` 経由) とディスクを
+//! 触る薄いオーケストレーションで､ユニットテストは無い —
+//! `cache::reload` の「直接のユニットテストは無い」という慣習に倣っている｡
+//! 組み合わせている要素はすべて単体でテストされているためだ｡
 
 use std::collections::HashSet;
 
@@ -25,30 +25,29 @@ use crate::paths::Paths;
 use crate::toggle;
 use crate::x_api::XClient;
 
-/// Every post id currently recorded as reposted — see [`toggle::load_all`].
+/// repost 済みとして記録されている post id の全体 — [`toggle::load_all`] を参照｡
 pub(crate) fn load_all(paths: &Paths) -> Result<HashSet<String>> {
     toggle::load_all(&paths.reposted_posts_file())
 }
 
-/// Interpret a failed create/delete repost response as a correction to the
-/// local record, rather than a genuine failure (#15's only recovery path
-/// once the record has drifted from reality): `creating: true` recognizes
-/// "you already retweeted this" (the create attempt found the state already
-/// true), `creating: false` recognizes "you have not retweeted this" (the
-/// delete attempt found the state already false). Returns the corrected
-/// value to persist when recognized, `None` for every other failure —
-/// callers propagate `None` as an ordinary error.
+/// repost の作成/削除の失敗レスポンスを､本物の失敗ではなくローカル記録への
+/// 訂正として解釈する (記録が現実から乖離したあとの､#15 における唯一の
+/// 回復経路だ): `creating: true` は "you already retweeted this" を認識し
+/// (作成しようとしたら状態がすでに true だった)､`creating: false` は
+/// "you have not retweeted this" を認識する (削除しようとしたら状態が
+/// すでに false だった)｡認識できたときは永続化すべき訂正後の値を返し､
+/// それ以外の失敗ではすべて `None` を返す — 呼び出し側は `None` を
+/// 通常のエラーとして伝播させる｡
 ///
-/// **Confidence: unverified against the live API.** X's exact error shape
-/// for these two conflicts is not confirmed by this change — see the
-/// implementation report. Matched case-insensitively against the same
-/// human-readable `title`/`detail`/`reason` text
-/// `x_api::client::check_status` already extracts for every other error
-/// (via `ApiProblem`), since that text still reaches this function through
-/// the stringified `anyhow::Error` regardless of the fixed "403 Forbidden —
-/// …" prefix `check_status` adds — more robust to X's exact wording than
-/// matching on the status code alone, since a plain 403 is also returned
-/// for unrelated permission failures.
+/// **確度: 実際の API に対しては未検証｡** この 2 つの衝突に対して X が返す
+/// 正確なエラーの形は､この変更では確認できていない — 実装レポートを参照｡
+/// 一致判定は大文字小文字を無視して行い､対象は `x_api::client::check_status`
+/// が (`ApiProblem` 経由で) 他のあらゆるエラーについてすでに取り出している
+/// のと同じ人間向けの `title`/`detail`/`reason` テキストだ｡`check_status` が
+/// 付ける固定の "403 Forbidden — …" プレフィックスに関わらず､そのテキストは
+/// 文字列化された `anyhow::Error` を通じてこの関数まで届く — ステータス
+/// コードだけで判定するより X の実際の言い回しに対して頑健だ｡素の 403 は
+/// 無関係な権限エラーでも返るためである｡
 pub(crate) fn reconcile_from_error(creating: bool, message: &str) -> Option<bool> {
     let lower = message.to_lowercase();
     if creating && lower.contains("already retweeted") {
@@ -62,15 +61,16 @@ pub(crate) fn reconcile_from_error(creating: bool, message: &str) -> Option<bool
     }
 }
 
-/// Repost `post_id` as `user_id` (#15): call the API, then persist success.
-/// A recognized "already retweeted" conflict (see [`reconcile_from_error`])
-/// corrects the local record instead of propagating an error — the caller
-/// (`ui.rs`) treats `Ok` as "here is the now-current state", not
-/// necessarily "the create succeeded".
+/// `user_id` として `post_id` を repost する (#15): API を呼び､成功したら
+/// 永続化する｡認識できた "already retweeted" の衝突
+/// ([`reconcile_from_error`] を参照) はエラーを伝播させる代わりにローカル
+/// 記録を訂正する — 呼び出し側 (`ui.rs`) は `Ok` を「これが現時点の状態だ」
+/// として扱い､必ずしも「作成が成功した」とは扱わない｡
 ///
-/// Not unit-tested directly — it makes a real HTTP request through `client`,
-/// the same way `cache::reload` isn't. [`reconcile_from_error`] and
-/// [`toggle::ToggleState`] carry this function's actual test coverage.
+/// 直接のユニットテストは無い — `client` を通じて実際に HTTP リクエストを
+/// 出すためで､`cache::reload` にテストが無いのと同じ理由だ｡この関数の実際の
+/// テストカバレッジは [`reconcile_from_error`] と [`toggle::ToggleState`] が
+/// 担っている｡
 pub(crate) fn create(
     paths: &Paths,
     client: &XClient,
@@ -94,8 +94,8 @@ pub(crate) fn create(
     }
 }
 
-/// Un-repost `post_id` as `user_id` (#15) — mirrors [`create`] exactly, the
-/// other direction.
+/// `user_id` として `post_id` の repost を取り消す (#15) — [`create`] の
+/// 完全な鏡像で､方向だけが逆｡
 pub(crate) fn remove(
     paths: &Paths,
     client: &XClient,
@@ -152,9 +152,9 @@ mod tests {
 
     #[test]
     fn a_create_conflict_message_does_not_reconcile_a_delete_attempt() {
-        // The two phrasings are each other's mirror image — matching the
-        // wrong direction would silently flip the local record to the
-        // wrong value instead of leaving a genuine failure alone.
+        // 2 つの文言は互いの鏡像だ — 逆方向に一致させると､本物の失敗を
+        // そのまま通す代わりに､ローカル記録を黙って誤った値へ反転させて
+        // しまう｡
         assert_eq!(
             reconcile_from_error(false, "you have already retweeted this tweet"),
             None
@@ -171,8 +171,9 @@ mod tests {
 
     #[test]
     fn load_all_reads_the_reposted_record_under_the_state_dir() {
-        // The one thing this module still owns about the file: *which*
-        // file. The behaviour of reading it is `toggle`'s, tested there.
+        // ファイルについてこのモジュールがまだ持っている唯一の責務:
+        // *どの* ファイルか｡読み取りの挙動は `toggle` のもので､
+        // テストもそちらにある｡
         let root = std::env::temp_dir().join(format!("twigpui-test-repost-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let home = root.display().to_string();

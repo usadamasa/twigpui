@@ -1,115 +1,110 @@
-//! The list sync as the window sees it (#174): what it is doing, how to
-//! say so, and how to start one by hand.
+//! ウィンドウから見た list sync (#174): 何をしているか､それをどう伝える
+//! か､そして手で 1 回始める方法｡
 //!
-//! `sync/` mirrors the accounts this app follows into a List. Until #174
-//! that whole feature was invisible from the window and unreachable from
-//! it: a loop started at sign-in, woke on a six-hour interval, and said
-//! something only on the two outcomes [`sync::notice`] does not suppress.
-//! Someone watching a list that was thousands of accounts behind had no
-//! way to tell a catch-up in progress from nothing happening at all, and
-//! no way to ask for one.
+//! `sync/` はこのアプリがフォローしているアカウントを List へミラーする｡
+//! #174 までその機能はまるごとウィンドウから見えず､ウィンドウから触れ
+//! なかった: ループはサインイン時に始まり､6 時間間隔で起き､
+//! [`sync::notice`] が抑制しない 2 つの結果でしか何も言わなかった｡
+//! 数千アカウント遅れている list を眺めている人には､追いつきが進行中な
+//! のか何も起きていないのかを見分ける手立ても､1 回頼む手立ても無かった｡
 //!
-//! So this file adds the two halves the issue names. [`SyncStatus`] is
-//! what the status bar reports, updated from every tick's
-//! [`sync::Outcome`]; [`TimelineView::start_sync`] is the loop, now
-//! startable by hand as well as at sign-in.
+//! そこでこのファイルは issue が名指しする 2 つの半分を足す｡
+//! [`SyncStatus`] はステータスバーが報告するもので､tick ごとの
+//! [`sync::Outcome`] から更新される｡[`TimelineView::start_sync`] は
+//! ループで､サインイン時だけでなく手でも始められるようになった｡
 //!
-//! Laid out like [`super::auto_refresh`], which set the precedent: pure
-//! functions with their tests first, then an `impl TimelineView` block for
-//! the parts that spend. Same reason, too — a status enum, the loop that
-//! writes it, and the button that starts the loop are one mechanism.
+//! 先例を作った [`super::auto_refresh`] と同じ並べ方だ: まず純粋な関数と
+//! そのテスト､次に支払う部分のための `impl TimelineView` ブロック｡理由も
+//! 同じ — status の enum と､それを書くループと､そのループを始めるボタン
+//! は 1 つの機構だからだ｡
 //!
-//! # Why starting one costs a confirmation
+//! # なぜ始めるのに確認が要るのか
 //!
-//! A diff reads the whole follow list and the whole list membership, and
-//! both bill per account returned (`x-api-budget`). At a few thousand
-//! follows that is dollars for one click — the most expensive thing anyone
-//! can press in this window by an order of magnitude. The skill's rule for
-//! that case is to put the worst case on screen before the press, which is
-//! what [`sync_confirm_label`] is for and why the button is a two-step
-//! like #72's delete rather than a single click.
+//! diff はフォローリスト全体と list のメンバー全体を読み､どちらも返った
+//! アカウントごとに課金される (`x-api-budget`)｡数千フォローもあれば
+//! 1 クリックで数ドルだ — このウィンドウで押せるもののうち､桁違いに
+//! いちばん高い｡その場合のスキルの規則は､押す前に最悪のケースを画面に
+//! 出すことで､[`sync_confirm_label`] はそのためにあり､ボタンが 1 回の
+//! クリックではなく #72 の削除のような 2 段構えなのもそのためだ｡
 
-// Spelled out rather than `use super::*` like [`super::render`] and
-// [`super::auto_refresh`]: this module names few enough of `ui`'s imports
-// that clippy's `wildcard_imports` can enumerate them, and so does not let
-// the glob past.
+// [`super::render`] や [`super::auto_refresh`] のような `use super::*`
+// ではなく書き下す: このモジュールが名指しする `ui` の import は､clippy
+// の `wildcard_imports` が列挙できる程度に少なく､だから glob を通さない｡
 use super::{
     AnyElement, Context, Duration, InteractiveElement as _, IntoElement as _, ParentElement as _,
     ReloadNotice, StatefulInteractiveElement as _, Styled as _, Theme, TimelineView, div, log,
     oauth, rgb, sync,
 };
 
-/// What the window knows about the list sync right now (#174).
+/// ウィンドウが list sync について今知っていること (#174)｡
 ///
-/// Written by the loop after every tick and read only by the status bar,
-/// so it describes the sync rather than driving it: nothing here decides
-/// whether a request goes out.
+/// tick のたびにループが書き､読むのはステータスバーだけなので､sync を
+/// 駆動するのではなく記述する: ここにリクエストが出るかどうかを決める
+/// ものは無い｡
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum SyncStatus {
-    /// Not running, and not startable either — carrying which of the
-    /// gates it is stopped at.
+    /// 走っていないし､始めることもできない — どの gate で止まっている
+    /// かを持つ｡
     ///
-    /// The reason is the point. "List sync: off" tells someone whose
-    /// session predates the scopes exactly as much as it tells someone
-    /// who has configured no list, and they need opposite things.
+    /// 理由こそが要点だ｡"List sync: off" は､scope より前のセッションを
+    /// 持つ人にも､list を設定していない人にも同じだけしか伝えないが､
+    /// 2 人が必要とするものは正反対だ｡
     Off(SyncOff),
-    /// Not running, but a click would start one. Where a window sits when
-    /// `auto_sync_list` is off and everything else is in place.
+    /// 走っていないが､クリックすれば始まる｡`auto_sync_list` が off で
+    /// 他がすべて揃っているとき､ウィンドウはここに座る｡
     Ready,
-    /// The signed-in id has not landed yet, so there is nothing to diff a
-    /// follow list against. Distinct from [`SyncStatus::Working`] because
-    /// nothing is being spent and nothing is in flight — the loop is
-    /// waiting on the startup fetch, and if that keeps failing this is
-    /// where it stays.
+    /// サインイン中の id がまだ着いていないので､フォローリストを突き
+    /// 合わせる相手が無い｡[`SyncStatus::Working`] とは別物だ｡何も支払われ
+    /// ておらず､何も飛んでいないから — ループは起動時の fetch を待って
+    /// いて､それが失敗し続けるならここに留まる｡
     AwaitingAccount,
-    /// A tick is in flight — reads, writes, or both.
+    /// tick が飛んでいる — read か write か､その両方｡
     Working,
-    /// Between ticks. `pending` is what the plan on file still owes; zero
-    /// is the steady state and anything else is a catch-up that has been
-    /// paced or blocked.
+    /// tick と tick の間｡`pending` はファイル上の計画がまだ負っている分｡
+    /// ゼロが定常状態で､それ以外は間隔を空けられたか止められた追いつき｡
     Idle { until: i64, pending: usize },
-    /// Writes are being refused and the loop is backing off until `until`.
-    /// `pending` is still owed; `refusals` is how many times in a row the
-    /// cap has said no (#197) — one is a pause, several is a catch-up that
-    /// has not moved in hours, and the label and color say so.
+    /// write が拒否されていて､ループは `until` まで後退している｡
+    /// `pending` はまだ負っている分｡`refusals` は上限が続けて何回 no と
+    /// 言ったか (#197) — 1 回なら一時停止､数回なら何時間も動いていない
+    /// 追いつきで､ラベルと色がそう言う｡
     RateLimited {
         until: i64,
         pending: usize,
         refusals: u32,
     },
-    /// The last tick failed outright — a revoked scope, a deleted list, a
-    /// plan file that will not parse. The loop has already given itself a
-    /// full interval to try again; this is here so the window does not
-    /// keep reporting the last success as though it were current.
+    /// 直前の tick が完全に失敗した — 取り消された scope､削除された list､
+    /// parse できない計画ファイル｡ループはすでに丸ごと 1 interval を再試行
+    /// のために取ってある｡これがあるのは､ウィンドウが最後の成功をあたかも
+    /// 現在のことのように報告し続けないためだ｡
     Failed,
 }
 
-/// Which gate a stopped sync is stopped at — see [`SyncStatus::Off`].
+/// 止まった sync がどの gate で止まっているか — [`SyncStatus::Off`] を見よ｡
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum SyncOff {
-    /// No `list_id`, so there is nothing to mirror into. The one gate a
-    /// manual start cannot get past either.
+    /// `list_id` が無いので､ミラー先が無い｡手動で始めても越えられない
+    /// 唯一の gate｡
     NoList,
-    /// The session does not carry the scopes the sync needs
-    /// ([`sync::missing_scope`]). Fixed by "Re-authorize", which the
-    /// header already offers, and without a restart.
+    /// セッションが sync に必要な scope を持っていない
+    /// ([`sync::missing_scope`])｡ヘッダーがすでに出している
+    /// "Re-authorize" で､再起動なしに直る｡
     MissingScope,
-    /// No credential at all yet.
+    /// そもそもまだ credential が無い｡
     NotSignedIn,
 }
 
-/// Whether the status bar's sync segment is something to press (#174).
+/// ステータスバーの sync セグメントが押せるものかどうか (#174)｡
 ///
-/// Three of the states say no, for three different reasons: [`SyncStatus::Off`]
-/// because the gate a click would hit is the one it is already stopped at,
-/// [`SyncStatus::Working`] because a run is in flight — starting a second
-/// diff on top of it is the double-charge this guards against — and
-/// [`SyncStatus::AwaitingAccount`] because there is nothing to diff
-/// against until `/me` resolves.
+/// 3 つの状態が no と言い､理由はそれぞれ違う: [`SyncStatus::Off`] は
+/// クリックが当たる gate が､すでに止まっている当のその gate だから｡
+/// [`SyncStatus::Working`] は実行が飛んでいるから — その上に 2 つ目の
+/// diff を始めるのが､これが守ろうとしている二重課金だ｡そして
+/// [`SyncStatus::AwaitingAccount`] は `/me` が解決するまで突き合わせる
+/// 相手が無いから｡
 ///
-/// [`SyncStatus::RateLimited`] *is* clickable: the loop is already waiting
-/// the window out and a restart will simply wait it out again, which costs
-/// nothing and is a reasonable thing to ask for.
+/// [`SyncStatus::RateLimited`] は *押せる*: ループはすでにその窓が明ける
+/// のを待っていて､始め直してももう一度待つだけだ｡それはただだし､頼むのに
+/// 無理は無い｡
 pub(super) fn offers_sync(status: &SyncStatus) -> bool {
     match status {
         SyncStatus::Ready
@@ -120,16 +115,16 @@ pub(super) fn offers_sync(status: &SyncStatus) -> bool {
     }
 }
 
-/// What the status bar says about the sync (#174).
+/// ステータスバーが sync について言うこと (#174)｡
 ///
-/// Every string is prefixed "List sync:" so the segment identifies itself
-/// — the status bar's other two numbers are about requests and posts, and
-/// a bare "1,204 to go" beside them would be a third unlabelled count.
+/// どの文字列も "List sync:" を前に付けてセグメントが自分を名乗るように
+/// する — ステータスバーの他の 2 つの数字はリクエストと post のもので､
+/// その隣に裸の "1,204 to go" があれば 3 つ目の無記名の数になる｡
 ///
-/// The counts are what make this progress rather than a state name.
-/// "Idle" for six hours and "Idle" during a catch-up that has eleven
-/// hundred writes left are the same word for very different situations,
-/// and it was not being able to tell them apart that #174 was filed about.
+/// これを状態名ではなく進捗にしているのは件数だ｡6 時間の "Idle" と､
+/// 1100 件の write が残っている追いつきの最中の "Idle" は､まったく違う
+/// 状況に対する同じ言葉であり､それを見分けられないことこそ #174 が
+/// 起票された理由だった｡
 pub(super) fn sync_status_label(status: &SyncStatus, now: i64) -> String {
     match status {
         SyncStatus::Off(SyncOff::NoList) => "List sync: no list configured".to_string(),
@@ -145,13 +140,13 @@ pub(super) fn sync_status_label(status: &SyncStatus, now: i64) -> String {
             pending,
             refusals,
         } => {
-            // `saturating_sub` and a floor of zero for `cooldown_label`'s
-            // reason: `until` comes from an API header and `now` from the
-            // clock, so neither is this code's to trust.
+            // `saturating_sub` とゼロ下限は `cooldown_label` と同じ理由:
+            // `until` は API のヘッダー由来､`now` は時計由来なので､
+            // どちらもこのコードが信じてよいものではない｡
             let remaining = until.saturating_sub(now).max(0);
             if *refusals >= STUCK_AFTER_REFUSALS {
-                // #197: twenty hours of "rate limited — 900s" looked like
-                // waiting. A streak is not waiting; it is not moving.
+                // #197: 20 時間続く "rate limited — 900s" は待っている
+                // ように見えた｡連続は待っているのではなく､動いていない｡
                 format!(
                     "List sync: refused {refusals}× in a row, {pending} to go — retry in \
                      {remaining}s"
@@ -164,32 +159,30 @@ pub(super) fn sync_status_label(status: &SyncStatus, now: i64) -> String {
     }
 }
 
-/// What the confirmation says before a manual sync is allowed to spend
-/// (#174).
+/// 手動の sync が支払うのを許す前に､確認が言うこと (#174)｡
 ///
-/// Names the worst case rather than the likely one, per `x-api-budget`'s
-/// rule for a click that fans out into requests. It cannot name a number:
-/// how many accounts are on either side is exactly what the reads are for,
-/// and guessing from a previous plan would put a figure on screen that the
-/// app does not actually know. So it names the shape of the charge and
-/// leaves the size to the person who knows how many accounts they follow.
+/// リクエストへ広がるクリックについての `x-api-budget` の規則に従い､
+/// ありそうなケースではなく最悪のケースを名指しする｡数字は名指しできない:
+/// 両側にアカウントが何件あるかを知るためにこそ read があるのだし､前の
+/// 計画から推測すれば､アプリが実際には知らない数字を画面に出すことになる｡
+/// だから課金の形を名指しし､大きさは自分が何件フォローしているか知って
+/// いる人に委ねる｡
 pub(super) fn sync_confirm_label() -> &'static str {
     "Reads your whole follow list and the whole list, billed per account. Sync anyway?"
 }
 
-/// How many consecutive refusals before the status bar stops calling it a
-/// rate limit and starts calling it stuck (#197). Two: one refusal is the
-/// cap doing its job and the loop waiting the floor out; a second, after
-/// that wait, is the cap not lifting on the schedule anyone assumed.
+/// ステータスバーが rate limit と呼ぶのをやめて stuck と呼び始めるまでの
+/// 連続拒否回数 (#197)｡2 回: 1 回の拒否は上限が仕事をし､ループが下限を
+/// 待っているだけだ｡その待ちのあとの 2 回目は､上限が誰もが想定した予定
+/// どおりには明けていないということだ｡
 const STUCK_AFTER_REFUSALS: u32 = 2;
 
-/// What the status bar's sync segment should be colored with (#174).
+/// ステータスバーの sync セグメントを何色で塗るか (#174)｡
 ///
-/// `danger` only for the states that are genuinely wrong — a failed tick,
-/// a gate that needs someone to do something, and a catch-up that has been
-/// refused [`STUCK_AFTER_REFUSALS`] times in a row (#197). A single rate
-/// limit is not one of them: the loop is handling it, and the count
-/// beside it is still true.
+/// `danger` は本当に間違っている状態だけ — 失敗した tick､誰かが何かを
+/// する必要のある gate､そして [`STUCK_AFTER_REFUSALS`] 回続けて拒否された
+/// 追いつき (#197)｡1 回の rate limit はそこに入らない: ループが対処して
+/// いるし､隣の件数はまだ正しい｡
 pub(super) fn sync_status_color(status: &SyncStatus, theme: Theme) -> u32 {
     match status {
         SyncStatus::Failed
@@ -207,27 +200,26 @@ pub(super) fn sync_status_color(status: &SyncStatus, theme: Theme) -> u32 {
     }
 }
 
-/// Which [`SyncStatus`] one finished tick leaves behind (#174).
+/// 終わった tick 1 回が残す [`SyncStatus`] (#174)｡
 ///
-/// Read off the [`sync::Tick`] alone — the outcome and the state it left
-/// on disk — so the window keeps no memory of its own. It used to keep
-/// two (the deadline and the count), and handing them from tick to tick
-/// is where #198 dropped the deadline: the status flipped between "rate
-/// limited" and "N to go" every minute while the loop sent every two.
+/// [`sync::Tick`] だけから読み取る — 結果と､それがディスクに残した状態
+/// から — ので､ウィンドウは自前の記憶を持たない｡かつては 2 つ (期限と
+/// 件数) を持っていて､それを tick から tick へ手渡すところで #198 は期限
+/// を落とした: ループが 2 分ごとに送る間､status は毎分 "rate limited" と
+/// "N to go" の間で切り替わった｡
 ///
-/// A tick that failed is [`SyncStatus::Failed`]: the loop is still alive
-/// and has given itself a full interval, but the window must stop
-/// reporting the last success as current.
+/// 失敗した tick は [`SyncStatus::Failed`] だ: ループはまだ生きていて
+/// 丸ごと 1 interval を自分に与えているが､ウィンドウは最後の成功を現在の
+/// ものとして報告するのをやめなければならない｡
 ///
-/// [`sync::Outcome::Diffed`] comes straight back to drain what it found
-/// (`wake_at` is now), so it maps to [`SyncStatus::Working`] rather than
-/// an idle state the next tick would overwrite in the same second.
+/// [`sync::Outcome::Diffed`] は見つけたものを吐き出しにそのまま戻って
+/// くる (`wake_at` は now) ので､次の tick が同じ秒のうちに上書きする
+/// idle 状態ではなく [`SyncStatus::Working`] に対応する｡
 ///
-/// An idle tick while the state is blocked with work outstanding is a
-/// catch-up waiting out a refusal, and reads as
-/// [`SyncStatus::RateLimited`] — the same thing the refusing tick said,
-/// for as long as it holds, rather than "N to go" as if the loop were
-/// about to send.
+/// 状態が blocked で仕事が残っている最中の idle な tick は､拒否を待って
+/// いる追いつきであり､[`SyncStatus::RateLimited`] と読む — 拒否した tick
+/// が言ったのと同じことを､それが続く限り言う｡ループが今にも送るかの
+/// ような "N to go" ではなく｡
 pub(super) fn status_of(tick: &sync::Tick, now: i64) -> SyncStatus {
     let refused = |pending: usize| SyncStatus::RateLimited {
         until: tick.state.blocked_until.unwrap_or(tick.wake_at),
@@ -253,40 +245,39 @@ pub(super) fn status_of(tick: &sync::Tick, now: i64) -> SyncStatus {
     }
 }
 
-/// Why a run was started, and therefore what it is allowed to skip and
-/// when it may stop (#174).
+/// なぜ実行が始まったか｡そしてそこから､何を飛ばしてよいか､いつ止まって
+/// よいか (#174)｡
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum SyncTrigger {
-    /// The timer, started at sign-in. Honours `config.auto_sync_list` and
-    /// runs for as long as the window is open.
+    /// サインイン時に始まるタイマー｡`config.auto_sync_list` を尊重し､
+    /// ウィンドウが開いている間ずっと走る｡
     Scheduled,
-    /// Someone pressed the status bar's sync segment.
+    /// 誰かがステータスバーの sync セグメントを押した｡
     ///
-    /// Two differences, both of them the point of #174. It runs even with
-    /// `auto_sync_list` off — turning the timer off and syncing by hand is
-    /// the reason to have a button at all — and its first tick ignores the
-    /// interval, which is what makes pressing it do something rather than
-    /// report that the next diff is four hours away.
+    /// 違いは 2 つ､どちらも #174 の要点だ｡`auto_sync_list` が off でも
+    /// 走る — タイマーを切って手で sync するというのが､そもそもボタンを
+    /// 持つ理由だ — そして最初の tick は interval を無視する｡これが､
+    /// 押したときに次の diff は 4 時間先だと報告するのではなく､実際に
+    /// 何かをさせる｡
     Manual,
 }
 
-/// The half of the list sync that cannot be pure: the loop that spends,
-/// and the button that starts one (#174).
+/// list sync のうち純粋になれない半分: 支払うループと､それを始める
+/// ボタン (#174)｡
 ///
-/// An `impl` block in a child module, following [`super::auto_refresh`] —
-/// see this module's doc for why the whole feature lives in one file.
+/// [`super::auto_refresh`] に倣い､子モジュールに置いた `impl` ブロック —
+/// 機能全体が 1 ファイルにある理由はこのモジュールの doc を見よ｡
 impl TimelineView {
-    /// Which gate the sync is stopped at right now, or `None` when it
-    /// could run (#174).
+    /// sync が今どの gate で止まっているか｡走れるなら `None` (#174)｡
     ///
-    /// The gates were already checked inside the loop's early returns;
-    /// this pulls them out so the status bar can *say* which one, which is
-    /// half of what the issue asked for. Before it, all three failures
-    /// looked identical from the window: nothing.
+    /// gate はもともとループの早期 return の中で確認されていた｡これは
+    /// それを外へ出して､ステータスバーがどれなのかを *言える* ように
+    /// するもので､issue が求めたことの半分だ｡それ以前は 3 つの失敗が
+    /// ウィンドウからは同じに見えた: 何も見えない､だ｡
     ///
-    /// `auto_sync_list` is deliberately not one of them. It decides
-    /// whether the timer runs, not whether a sync is possible, and a
-    /// window with the timer off is exactly where the button matters most.
+    /// `auto_sync_list` は意図的にそこに入れていない｡これはタイマーが
+    /// 走るかを決めるのであって sync が可能かを決めるのではないし､
+    /// タイマーを切ったウィンドウこそボタンがいちばん効くところだ｡
     fn sync_gate(&self) -> Option<SyncOff> {
         if self.config.list_id.is_none() {
             return Some(SyncOff::NoList);
@@ -300,54 +291,53 @@ impl TimelineView {
         None
     }
 
-    /// Start the list sync: keep `config.list_id`'s membership mirroring
-    /// the accounts this app follows.
+    /// list sync を始める: `config.list_id` のメンバーが､このアプリの
+    /// フォローしているアカウントをミラーし続けるようにする｡
     ///
-    /// Three gates, all reported through [`SyncStatus::Off`] rather than
-    /// raised as a banner — none of them is something the reader did, and
-    /// an error message about a feature they may not have asked for is not
-    /// what a window should open with. Since #174 they are *reported*
-    /// though, in the status bar, which is the difference between a
-    /// feature that is off and a feature that appears not to exist:
+    /// gate は 3 つ｡どれもバナーとして上げるのではなく
+    /// [`SyncStatus::Off`] 経由で報告する — どれも読み手がやったことでは
+    /// ないし､頼んだ覚えの無いかもしれない機能についてのエラーメッセージ
+    /// は､ウィンドウが開口一番に出すものではない｡ただし #174 以降は
+    /// ステータスバーで *報告* される｡これが､off の機能と存在しないよう
+    /// に見える機能との違いだ:
     ///
-    /// - no `list_id`, so there is nothing to mirror into,
-    /// - no credential yet,
-    /// - a session predating the scopes the sync needs, which
-    ///   [`sync::missing_scope`] catches before a single billed read.
+    /// - `list_id` が無く､ミラー先が無い､
+    /// - まだ credential が無い､
+    /// - sync が必要とする scope より前のセッションで､これは
+    ///   [`sync::missing_scope`] が課金される read 1 回の前に捕まえる｡
     ///
-    /// `config.auto_sync_list` is a fourth gate, and only for
-    /// [`SyncTrigger::Scheduled`]: with the timer off the window sits at
-    /// [`SyncStatus::Ready`] and waits to be asked.
+    /// `config.auto_sync_list` は 4 つ目の gate で､
+    /// [`SyncTrigger::Scheduled`] のときだけだ: タイマーが off なら
+    /// ウィンドウは [`SyncStatus::Ready`] に座り､頼まれるのを待つ｡
     ///
-    /// Reuses the credential [`Self::start`] already resolved rather than
-    /// resolving its own. `oauth::resolve_credential` rotates the refresh
-    /// token and writes it back, so two of them racing could leave the
-    /// stored session dead — a much worse outcome than the access token in
-    /// hand going stale over a very long run, which is what every other
-    /// fetch path in this file already lives with.
+    /// 自分で解決するのではなく､[`Self::start`] がすでに解決した
+    /// credential を使い回す｡`oauth::resolve_credential` は refresh token
+    /// を回して書き戻すので､2 つが競合すると保存されたセッションが死に
+    /// かねない — 手元の access token が非常に長い実行の間に古くなること
+    /// より､はるかに悪い結末だ｡後者はこのファイルの他の fetch 経路が
+    /// すべてすでに受け入れている｡
     ///
-    /// Assigning `self.auto_sync` drops whatever loop was running, so
-    /// there is never more than one working the same plan file. That is
-    /// also how a manual run supersedes the timer: it is the same slot.
-    /// What it does *not* do is stop a tick already in flight — the tick
-    /// is one synchronous poll on a background thread and runs to
-    /// completion after the drop — which is why the manual path is gated
-    /// on [`SyncStatus::Working`] and not on the task slot.
+    /// `self.auto_sync` への代入は走っていたループを落とすので､同じ計画
+    /// ファイルを扱うループが 2 つ以上になることは無い｡手動の実行が
+    /// タイマーに取って代わるのもこれだ: 同じスロットだからだ｡これが
+    /// *しない* のは､すでに飛んでいる tick を止めることだ — tick は
+    /// バックグラウンドスレッド上の同期的なポーリング 1 回で､落とした
+    /// あとも完走する — だから手動の経路はタスクスロットではなく
+    /// [`SyncStatus::Working`] で塞いである｡
     pub(super) fn start_sync(&mut self, trigger: SyncTrigger, cx: &mut Context<'_, Self>) {
-        /// Longest one `timer` call waits, so the loop re-reads the clock
-        /// (and notices a machine that slept) rather than trusting a
-        /// deadline computed hours ago.
+        /// `timer` 1 回が待つ最長時間｡何時間も前に計算した期限を信じる
+        /// のではなく､ループが時計を読み直す (そして眠ったマシンに
+        /// 気づく) ようにするため｡
         const MAX_SLEEP_SECONDS: i64 = 60;
-        /// Shortest gap between ticks. Only reached between consecutive
-        /// apply batches, where the answer is otherwise "immediately" —
-        /// enough to keep the loop cancellable mid-catch-up.
+        /// tick の最短間隔｡到達するのは連続する apply バッチの間だけで､
+        /// そこでの答えは本来「即座に」だ — 追いつきの最中でもループを
+        /// キャンセル可能に保てるだけの間隔｡
         const MIN_SLEEP_SECONDS: i64 = 1;
-        /// How long to wait when the signed-in id has not landed yet.
-        /// Longer than `MIN_SLEEP_SECONDS` because there is nothing this
-        /// loop can do to hurry it along: a startup fetch that keeps
-        /// failing leaves `home_user_id` `None` indefinitely, and polling
-        /// it every second for the life of the window would be a spin
-        /// dressed up as patience.
+        /// サインイン中の id がまだ着いていないときに待つ長さ｡
+        /// `MIN_SLEEP_SECONDS` より長いのは､このループに急がせる手立てが
+        /// 無いからだ: 起動時の fetch が失敗し続ければ `home_user_id` は
+        /// いつまでも `None` のままで､ウィンドウの一生の間 1 秒ごとに
+        /// それを見に行くのは､辛抱を装ったスピンでしかない｡
         const AWAITING_ID_SECONDS: i64 = 30;
 
         if let Some(off) = self.sync_gate() {
@@ -355,9 +345,9 @@ impl TimelineView {
             cx.notify();
             return;
         }
-        // Both checked by `sync_gate` above; unwrapped through `else`
-        // rather than `expect` so a later change to that function cannot
-        // turn this into a panic.
+        // どちらも上の `sync_gate` が確認済み｡`expect` ではなく `else`
+        // で開くのは､あの関数を後で変えてもここが panic にならないように
+        // するためだ｡
         let (Some(list_id), Some(client)) = (self.config.list_id.clone(), self.client.clone())
         else {
             return;
@@ -381,28 +371,28 @@ impl TimelineView {
         cx.notify();
 
         self.auto_sync = Some(cx.spawn(async move |this, cx| {
-            // Deliberately nothing else is remembered here: the deadline
-            // and the count live in the state file the tick returns, and
-            // keeping copies is how #198 happened.
+            // ここで他に何も覚えないのは意図的だ: 期限と件数は tick が
+            // 返す状態ファイルの中にあり､複製を持つことが #198 の原因
+            // だった｡
             //
-            // Consumed by the first tick. `last_diff_at: None` is what
-            // `next_step` reads as "a diff has never run", which is
-            // exactly the decision a manual start wants — and it leaves
-            // the precedence alone, so a live rate limit still wins and an
-            // undrained plan is still drained before anything is re-read.
+            // 最初の tick が消費する｡`last_diff_at: None` を `next_step`
+            // は「diff は一度も走っていない」と読む｡これはまさに手動の
+            // 開始が望む判断だ — そして優先順位には触らないので､生きて
+            // いる rate limit は依然として勝つし､吐き出していない計画は
+            // 何かを読み直す前に依然として吐き出される｡
             let mut forced = matches!(trigger, SyncTrigger::Manual);
             loop {
-                // `Err` is the window being gone, which is the one reason
-                // this loop ever ends other than a finished manual run.
+                // `Err` はウィンドウが消えたということで､終わった手動の
+                // 実行以外にこのループが終わる唯一の理由だ｡
                 let Ok(user_id) = this.update(cx, |this, _| this.home_user_id.clone()) else {
                     return;
                 };
 
                 let now = oauth::unix_now();
                 let sleep_until = match user_id {
-                    // The startup fetch has not resolved the signed-in id
-                    // yet. There is nothing to diff a follow list against
-                    // until it has.
+                    // 起動時の fetch がまだサインイン中の id を解決して
+                    // いない｡解決するまで､フォローリストを突き合わせる
+                    // 相手が無い｡
                     None => {
                         let _ = this.update(cx, |this, cx| {
                             this.show_sync(SyncStatus::AwaitingAccount, cx);
@@ -410,12 +400,11 @@ impl TimelineView {
                         now.saturating_add(AWAITING_ID_SECONDS)
                     }
                     Some(user_id) => {
-                        // Set before the await and left there for its
-                        // whole length. `offers_sync` refuses a start in
-                        // this state, and that refusal is the one thing
-                        // standing between a second click and a second
-                        // full paged read of both sides — dropping this
-                        // task would not stop the tick below.
+                        // await の前に立て､その間ずっと立てたままにする｡
+                        // `offers_sync` はこの状態での開始を拒否し､その
+                        // 拒否だけが､2 度目のクリックと両側の 2 度目の
+                        // ページ全読みとの間に立っている — このタスクを
+                        // 落としても下の tick は止まらない｡
                         let _ = this.update(cx, |this, cx| {
                             this.show_sync(SyncStatus::Working, cx);
                         });
@@ -424,7 +413,7 @@ impl TimelineView {
                             writes_per_minute,
                             forced,
                         };
-                        // The tick logs its own outcome, failure included.
+                        // tick は失敗も含め自分の結果を自分でログに出す｡
                         let tick = {
                             let (paths, client, list_id) =
                                 (paths.clone(), client.clone(), list_id.clone());
@@ -442,11 +431,10 @@ impl TimelineView {
                                 })
                                 .await
                         };
-                        // Spent by the tick that acted on it, not by one
-                        // that only waited out a refusal — otherwise a
-                        // press during a backoff would be consumed by
-                        // the wait and the interval would apply after
-                        // all.
+                        // 消費するのは実際に動いた tick であって､拒否を
+                        // 待っただけの tick ではない — さもないと後退中
+                        // の押下が待ちに食われ､結局 interval が効いて
+                        // しまう｡
                         forced = forced && matches!(tick.outcome, Ok(sync::Outcome::Idle { .. }));
                         let status = status_of(&tick, now);
                         let outcome = tick.outcome.as_ref().ok();
@@ -455,12 +443,12 @@ impl TimelineView {
                             this.apply_tick(status, notice, cx);
                         });
 
-                        // A manual run against a window whose timer is off
-                        // stops once there is nothing left to do —
-                        // `is_finished` insists on idle *with nothing
-                        // owed*, so a catch-up paused by a rate limit
-                        // keeps waiting rather than walking away from a
-                        // plan a paid diff produced.
+                        // タイマーが off のウィンドウでの手動の実行は､
+                        // やることが無くなった時点で止まる —
+                        // `is_finished` は *何も負っていない* idle を
+                        // 要求するので､rate limit で止まった追いつきは､
+                        // 課金した diff が作った計画から立ち去るのでは
+                        // なく待ち続ける｡
                         if !scheduled && sync::is_finished(outcome) {
                             let _ =
                                 this.update(cx, |this, cx| this.show_sync(SyncStatus::Ready, cx));
@@ -480,29 +468,28 @@ impl TimelineView {
         }));
     }
 
-    /// Put `status` on screen (#174).
+    /// `status` を画面に出す (#174)｡
     ///
-    /// A one-liner extracted from the loop, which reached for it four
-    /// times and was over `clippy::too_many_lines` by roughly the
-    /// difference. Worth naming anyway: every write to `sync_status` has
-    /// to be followed by a `notify`, and a loop that writes it from four
-    /// places is four chances to forget.
+    /// ループから抜き出した 1 行｡ループはこれを 4 回使っていて､その差の
+    /// ぶんだけ `clippy::too_many_lines` を超えていた｡いずれにせよ名前を
+    /// 付ける価値はある: `sync_status` への書き込みはすべて `notify` を
+    /// 伴わなければならず､4 か所から書くループは忘れる機会が 4 回ある｡
     fn show_sync(&mut self, status: SyncStatus, cx: &mut Context<'_, Self>) {
         self.sync_status = status;
         cx.notify();
     }
 
-    /// What one finished tick leaves on screen (#174) — its status, and
-    /// whatever [`sync::notice`] decided was worth saying out loud.
+    /// 終わった tick 1 回が画面に残すもの (#174) — その status と､
+    /// [`sync::notice`] が口に出す価値ありと判断したもの｡
     fn apply_tick(
         &mut self,
         status: SyncStatus,
         notice: Option<String>,
         cx: &mut Context<'_, Self>,
     ) {
-        // Only into an empty slot: the reload banner is the reader's, and
-        // a cooldown countdown they are watching must not be replaced by
-        // a background task's news.
+        // 空のスロットにだけ入れる: reload のバナーは読み手のもので､
+        // 読み手が見ているクールダウンのカウントダウンを､背景タスクの
+        // 知らせで置き換えてはならない｡
         if let Some(text) = notice
             && self.reload_notice.is_none()
         {
@@ -511,19 +498,18 @@ impl TimelineView {
         self.show_sync(status, cx);
     }
 
-    /// The status bar's sync segment (#174): what the sync is doing, and
-    /// the way to start one.
+    /// ステータスバーの sync セグメント (#174): sync が何をしているかと､
+    /// 1 回始める方法｡
     ///
-    /// One element for both jobs rather than a label beside a button. The
-    /// states where a sync can be started are exactly the states worth
-    /// pressing from, so a separate button would spend most of its life
-    /// greyed out next to a line that already says why — and the status
-    /// bar is a 24px strip with two counts in it already.
+    /// ボタンの隣にラベルを置くのではなく､1 つの要素で両方の役を担う｡
+    /// sync を始められる状態は､まさに押す価値のある状態そのものなので､
+    /// 別立てのボタンなら､理由をすでに書いてある行の隣で一生の大半を
+    /// 灰色にして過ごすことになる — しかもステータスバーは 24px の帯で､
+    /// すでに 2 つの件数が入っている｡
     ///
-    /// While [`Self::pending_sync`] is set this becomes the confirmation
-    /// instead: what it costs, then "Sync" and "Cancel". #72's delete row
-    /// is the same shape, and for the same reason — no single click may
-    /// spend this much.
+    /// [`Self::pending_sync`] が立っている間､これは代わりに確認になる:
+    /// いくらかかるか､それから "Sync" と "Cancel"｡#72 の削除の行が同じ
+    /// 形で､理由も同じ — 1 回のクリックでこれだけ支払わせてはならない｡
     pub(super) fn sync_segment(&self, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = self.theme;
 
@@ -569,19 +555,18 @@ impl TimelineView {
         }
     }
 
-    /// First click on the status bar's sync segment (#174): ask before
-    /// spending.
+    /// ステータスバーの sync セグメントへの 1 回目のクリック (#174):
+    /// 支払う前に尋ねる｡
     ///
-    /// A two-step like #72's delete, and for a comparable reason — not
-    /// that a sync is irreversible, but that it is the most expensive
-    /// thing in this window to press by an order of magnitude, and
-    /// `x-api-budget` says a click that fans out into requests has to put
-    /// its worst case on screen before it is taken.
+    /// #72 の削除と同じ 2 段構えで､理由も似ている — sync が取り消せない
+    /// からではなく､このウィンドウで押せるもののうち桁違いにいちばん高い
+    /// からだ｡そして `x-api-budget` は､リクエストへ広がるクリックは
+    /// 受け取られる前に最悪のケースを画面に出さなければならないと言う｡
     ///
-    /// Refuses while a tick is in flight. That is not politeness: the tick
-    /// is synchronous on a background thread and outlives the task slot
-    /// being reassigned, so a second start during a running diff would pay
-    /// for both sides twice.
+    /// tick が飛んでいる間は拒否する｡これは礼儀ではない: tick は
+    /// バックグラウンドスレッド上で同期的に走り､タスクスロットが割り当て
+    /// 直されても生き延びるので､走っている diff の最中に 2 度目を始めると
+    /// 両側を 2 度払うことになる｡
     pub(super) fn ask_to_sync(&mut self, cx: &mut Context<'_, Self>) {
         if !offers_sync(&self.sync_status) {
             return;
@@ -590,18 +575,17 @@ impl TimelineView {
         cx.notify();
     }
 
-    /// Take back the ask (#174).
+    /// 尋ねたのを取り消す (#174)｡
     pub(super) fn cancel_sync(&mut self, cx: &mut Context<'_, Self>) {
         self.pending_sync = false;
         cx.notify();
     }
 
-    /// Second click: start the run (#174).
+    /// 2 回目のクリック: 実行を始める (#174)｡
     ///
-    /// Re-checks the status rather than trusting [`Self::ask_to_sync`]'s
-    /// check — a scheduled tick can start in the gap between the two
-    /// clicks, and that gap is however long someone takes to read the
-    /// confirmation.
+    /// [`Self::ask_to_sync`] の確認を信じるのではなく status を確認し直す
+    /// — 2 回のクリックの隙間で予定された tick が始まりうるし､その隙間は
+    /// 確認を読むのにかかるだけの長さがある｡
     pub(super) fn confirm_sync(&mut self, cx: &mut Context<'_, Self>) {
         self.pending_sync = false;
         if !offers_sync(&self.sync_status) {
@@ -618,8 +602,8 @@ mod tests {
 
     #[test]
     fn a_stopped_sync_says_which_gate_it_is_stopped_at() {
-        // The whole reason `SyncOff` carries a variant rather than being a
-        // bare bool: these two need opposite things done about them.
+        // `SyncOff` が裸の bool ではなく variant を持つ理由のすべて:
+        // この 2 つは正反対の対処を必要とする｡
         assert_ne!(
             sync_status_label(&SyncStatus::Off(SyncOff::NoList), 0),
             sync_status_label(&SyncStatus::Off(SyncOff::MissingScope), 0)
@@ -632,9 +616,9 @@ mod tests {
         assert!(label.contains("authorize"), "{label}");
     }
 
-    // The distinction #174 was filed about: "idle" for six hours and
-    // "idle" with eleven hundred writes still owed are not the same
-    // situation, and the word alone cannot tell them apart.
+    // #174 が起票された理由の区別: 6 時間の "idle" と､1100 件の write を
+    // まだ負っている "idle" は同じ状況ではないし､言葉だけでは見分けが
+    // つかない｡
     #[test]
     fn an_idle_sync_with_work_left_says_how_much() {
         assert_eq!(
@@ -693,8 +677,8 @@ mod tests {
         assert!(label.ends_with("0s"), "never a negative countdown: {label}");
     }
 
-    // #197: "rate limited — 900s" for twenty hours read as waiting. A
-    // streak is the cap not lifting, and the label has to say so.
+    // #197: 20 時間続く "rate limited — 900s" は待っていると読めた｡連続は
+    // 上限が明けていないということで､ラベルはそう言わなければならない｡
     #[test]
     fn a_repeated_refusal_says_how_many_times_and_reads_as_stuck() {
         let stuck = SyncStatus::RateLimited {
@@ -724,8 +708,8 @@ mod tests {
 
     #[test]
     fn every_label_identifies_which_number_it_is() {
-        // The status bar already carries two unlabelled counts. A third
-        // that did not name itself would be unreadable beside them.
+        // ステータスバーはすでに無記名の件数を 2 つ載せている｡自分を
+        // 名乗らない 3 つ目は､その隣では読めない｡
         for status in [
             SyncStatus::Off(SyncOff::NoList),
             SyncStatus::Off(SyncOff::MissingScope),
@@ -758,9 +742,8 @@ mod tests {
         }
     }
 
-    // The double-charge guard. A diff reads both sides in full, so a
-    // second one started on top of a running tick is the most expensive
-    // mistake this window can make.
+    // 二重課金の防護｡diff は両側を全部読むので､走っている tick の上に
+    // 2 つ目を始めるのは､このウィンドウがしうるいちばん高い間違いだ｡
     #[test]
     fn a_sync_already_working_is_not_offered_again() {
         assert!(!offers_sync(&SyncStatus::Working));
@@ -787,8 +770,8 @@ mod tests {
         }));
     }
 
-    // Restarting into a window the loop is already waiting out costs
-    // nothing, and asking for it is a reasonable thing to want to do.
+    // ループがすでに待っている窓へ始め直すのはただだし､それを頼むのは
+    // 望んで無理の無いことだ｡
     #[test]
     fn a_rate_limited_sync_is_still_offered() {
         assert!(offers_sync(&SyncStatus::RateLimited {
@@ -803,8 +786,8 @@ mod tests {
         assert!(offers_sync(&SyncStatus::Failed));
     }
 
-    /// A tick as the loop sees it. `state` defaults to calm; tests set the
-    /// fields the status is about.
+    /// ループから見た tick｡`state` の既定は穏やかな状態で､テストは status
+    /// が関わるフィールドを設定する｡
     fn tick(outcome: Result<sync::Outcome, anyhow::Error>, wake_at: i64) -> sync::Tick {
         sync::Tick {
             outcome,
@@ -819,8 +802,8 @@ mod tests {
         assert_eq!(status_of(&failed, 1_000), SyncStatus::Failed);
     }
 
-    // A diff comes straight back to work (`wake_at` is now), so an idle
-    // status here would be overwritten in the same second.
+    // diff はそのまま仕事へ戻ってくる (`wake_at` は now) ので､ここで idle
+    // な status にしても同じ秒のうちに上書きされる｡
     #[test]
     fn a_diff_leaves_the_status_working_because_the_drain_is_next() {
         let diffed = tick(
@@ -853,7 +836,7 @@ mod tests {
         );
     }
 
-    // The one moment "working" would be wrong: a catch-up stopping.
+    // "working" が誤りになる唯一の瞬間: 追いつきが止まるとき｡
     #[test]
     fn the_last_batch_of_a_catch_up_reports_it_is_done() {
         let applied = tick(
@@ -890,9 +873,8 @@ mod tests {
         );
     }
 
-    // The refusing tick's status comes from the state it left behind —
-    // the deadline the backoff chose, the streak — not from the outcome's
-    // own first guess at a retry time.
+    // 拒否した tick の status は､それが残した状態から来る — 後退が選んだ
+    // 期限と連続回数だ — 結果自身が最初に当てた再試行時刻からではない｡
     #[test]
     fn a_refusal_reports_the_deadline_and_streak_from_the_state() {
         let mut refused = tick(
@@ -919,9 +901,9 @@ mod tests {
         );
     }
 
-    // #198's visible symptom: the status flipped between "rate limited"
-    // and "N to go" every minute, because the idle wake-ups in between
-    // did not know a refusal was being waited out.
+    // #198 の目に見えた症状: status が毎分 "rate limited" と "N to go" の
+    // 間で切り替わった｡間に挟まる idle な起床が､拒否を待っていることを
+    // 知らなかったからだ｡
     #[test]
     fn an_idle_wake_up_during_a_refusal_still_reads_as_rate_limited() {
         let mut idle = tick(
@@ -948,8 +930,7 @@ mod tests {
 
     #[test]
     fn an_idle_wake_up_after_the_deadline_passed_is_plain_idle() {
-        // The block has elapsed; the next tick will send. Nothing to
-        // count down.
+        // block は明けた｡次の tick は送る｡カウントダウンするものは無い｡
         let mut idle = tick(
             Ok(sync::Outcome::Idle {
                 until: 9_000,
@@ -969,8 +950,8 @@ mod tests {
 
     #[test]
     fn an_idle_wake_up_with_nothing_owed_is_never_rate_limited() {
-        // A failed tick leaves `blocked_until` set with a plan that may be
-        // empty. That is a wait, not a refused catch-up.
+        // 失敗した tick は､空かもしれない計画とともに `blocked_until` を
+        // 立てたまま残す｡それは待ちであって､拒否された追いつきではない｡
         let mut idle = tick(
             Ok(sync::Outcome::Idle {
                 until: 22_600,

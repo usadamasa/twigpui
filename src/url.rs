@@ -1,60 +1,56 @@
-//! Building URLs from parts instead of from `format!` (#165).
+//! URL を `format!` ではなく部品から組み立てる (#165)｡
 //!
-//! Every URL this crate sends used to be a format string: the path, the
-//! `?`, the `&`s and the values all typed out together, with
-//! `percent_encode` called by hand on the values that needed it in
-//! `oauth::pkce` and on none of them in `x_api::client`. Nothing about
-//! that arrangement could be checked by the compiler. #161 is the
-//! evidence: adding one scope meant editing a long URL literal in a test
-//! by hand, and a forgotten `&` or a missed encode would have been a
-//! runtime 400 at best.
+//! このクレートが送る URL はどれもかつてフォーマット文字列だった: パスも
+//! `?` も `&` も値も一緒に書き並べ､`percent_encode` は `oauth::pkce` では
+//! 必要な値に手で呼び､`x_api::client` ではどの値にも呼んでいなかった｡
+//! この配置にはコンパイラが検査できるものが何ひとつない｡#161 がその証拠だ:
+//! スコープを 1 つ足すのにテスト内の長い URL リテラルを手で編集することに
+//! なり､`&` の書き忘れやエンコード漏れは､よくてランタイムの 400 だった｡
 //!
-//! So a value goes in as a value here, and the separators and the
-//! escaping are this module's business.
+//! だからここでは値は値として渡し､区切り文字とエスケープはこの
+//! モジュールの仕事にする｡
 //!
-//! # Two escaping policies, because there are two specifications
+//! # エスケープ方針が 2 つあるのは､仕様が 2 つあるから
 //!
-//! [`Escaping::Form`] escapes everything outside RFC 3986's `unreserved`
-//! set. That is what OAuth 2.0 §3.1 asks for — the authorization request's
-//! parameters are `application/x-www-form-urlencoded`, so a space in
-//! `scope` has to travel as `%20` and the `:` and `/` in `redirect_uri`
-//! have to travel escaped.
+//! [`Escaping::Form`] は RFC 3986 の `unreserved` 集合の外をすべて
+//! エスケープする｡OAuth 2.0 §3.1 が求めるのがこれだ — 認可リクエストの
+//! パラメータは `application/x-www-form-urlencoded` なので､`scope` の
+//! 空白は `%20` として､`redirect_uri` の `:` と `/` はエスケープされた
+//! 形で送られなければならない｡
 //!
-//! [`Escaping::Api`] is the same set plus one character: **a comma is left
-//! raw**. Every X API query value that is not alphanumeric is a
-//! comma-separated list — `tweet.fields`, `expansions`, `ids` — and
-//! docs.x.com writes those commas raw. `%2C` decodes to the same thing on
-//! any conformant server, but this crate cannot test that against a paid
-//! API, so the byte the endpoint has always received is the byte it keeps
-//! receiving.
+//! [`Escaping::Api`] は同じ集合に 1 文字だけ足したもので､**カンマを素の
+//! まま残す**｡英数字でない X API のクエリ値はどれもカンマ区切りのリスト
+//! (`tweet.fields`, `expansions`, `ids`) で､docs.x.com はそのカンマを
+//! 素で書いている｡`%2C` は仕様に従うサーバならどれも同じものにデコード
+//! するが､このクレートは有料の API に対してそれを試せない｡だから
+//! エンドポイントがずっと受け取ってきたバイトを､これからも受け取らせる｡
 //!
-//! # Why not the `url` crate
+//! # `url` クレートを使わない理由
 //!
-//! It is already in the dependency tree (gpui → git2 → url), so there is
-//! no build-time argument either way. The argument is that it cannot do
-//! this job: `url::form_urlencoded` serializes a space as `+` and a comma
-//! as `%2C`. Both differ from what this crate sends today, and neither is
-//! configurable — adopting it would mean changing every URL on the wire to
-//! get a builder, which is the opposite of what #165 asked for.
+//! すでに依存ツリーには入っている (gpui → git2 → url) ので､ビルド時間を
+//! 理由にどちらとも言えない｡理由はこの仕事ができないことだ:
+//! `url::form_urlencoded` は空白を `+`､カンマを `%2C` として直列化する｡
+//! どちらも今このクレートが送っているものと違い､しかも設定で変えられない
+//! — 採用すれば､ビルダーを得るために回線に乗る URL をすべて変える羽目に
+//! なる｡#165 が求めたことの正反対だ｡
 
 use std::fmt::Write as _;
 
-/// Which characters a value is allowed to keep — see the module doc for
-/// why there are two.
+/// 値がそのまま保てる文字はどれか — 2 つある理由はモジュールの doc を
+/// 参照｡
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Escaping {
-    /// RFC 3986 `unreserved` plus a raw comma. The X API.
+    /// RFC 3986 の `unreserved` に素のカンマを足したもの｡X API 用｡
     Api,
-    /// RFC 3986 `unreserved` and nothing else. OAuth's authorize URL.
+    /// RFC 3986 の `unreserved` だけ｡OAuth の authorize URL 用｡
     Form,
 }
 
 impl Escaping {
-    /// Whether `byte` may appear as itself.
+    /// `byte` がそれ自身として現れてよいかどうか｡
     ///
-    /// The `unreserved` set is `ALPHA / DIGIT / "-" / "." / "_" / "~"`,
-    /// shared by both policies; the comma is [`Escaping::Api`]'s only
-    /// addition.
+    /// `unreserved` 集合は `ALPHA / DIGIT / "-" / "." / "_" / "~"` で､
+    /// 両方針が共有する｡カンマが [`Escaping::Api`] の唯一の追加分だ｡
     const fn keeps(self, byte: u8) -> bool {
         match byte {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => true,
@@ -63,14 +59,14 @@ impl Escaping {
         }
     }
 
-    /// Percent-encode `value` under this policy.
+    /// この方針で `value` をパーセントエンコードする｡
     fn escape(self, value: &str) -> String {
         let mut out = String::with_capacity(value.len());
         for byte in value.bytes() {
             if self.keeps(byte) {
                 out.push(char::from(byte));
             } else {
-                // `write!` to a `String` is infallible.
+                // `String` への `write!` は失敗しない｡
                 let _ = write!(out, "%{byte:02X}");
             }
         }
@@ -78,30 +74,30 @@ impl Escaping {
     }
 }
 
-/// A URL under construction (#165).
+/// 組み立て中の URL (#165)｡
 ///
-/// **Order is preserved**, and that is load-bearing rather than
-/// incidental: the tests that pin what this crate sends compare whole URL
-/// strings, and a `HashMap` here would make them fail at random. Parameters
-/// come out in the order they went in.
+/// **順序は保たれる**｡これは偶然ではなく構造を支えている: このクレートが
+/// 何を送るかを固定するテストは URL 文字列を丸ごと比較するので､ここに
+/// `HashMap` を置けばテストがランダムに落ちる｡パラメータは入れた順に
+/// 出てくる｡
 #[derive(Debug)]
 pub(crate) struct Url {
     escaping: Escaping,
-    /// The scheme, host and any path already in the base, plus whatever
-    /// [`Url::segment`] has appended.
+    /// base にすでに含まれるスキーム・ホスト・パスと､[`Url::segment`] が
+    /// 追加した分｡
     prefix: String,
-    /// Query parameters, escaped on the way in.
+    /// クエリパラメータ｡入る時点でエスケープ済み｡
     query: Vec<(String, String)>,
 }
 
 impl Url {
-    /// A URL against the X API — see [`Escaping::Api`].
+    /// X API 向けの URL — [`Escaping::Api`] を参照｡
     pub(crate) fn api(base: &str) -> Self {
         Self::with(base, Escaping::Api)
     }
 
-    /// A URL whose parameters follow OAuth's form encoding — see
-    /// [`Escaping::Form`].
+    /// パラメータが OAuth のフォームエンコードに従う URL —
+    /// [`Escaping::Form`] を参照｡
     pub(crate) fn form(base: &str) -> Self {
         Self::with(base, Escaping::Form)
     }
@@ -114,42 +110,42 @@ impl Url {
         }
     }
 
-    /// Append one path segment, escaped.
+    /// パスセグメントを 1 つ､エスケープして追加する｡
     ///
-    /// Always escaped with [`Escaping::Form`]'s set regardless of the
-    /// policy, since no path segment this crate builds is a list: they are
-    /// ids, usernames and fixed words. The escaping is therefore a no-op
-    /// for every value that reaches it today — a list id is validated to
-    /// be all digits (`Config::resolve`), post and user ids are numeric,
-    /// and a username has had its `@` stripped. It is here for the value
-    /// that is not: a segment is what separates one account's timeline
-    /// from another's, so a `/` arriving inside one must not be able to
-    /// become part of the path.
+    /// 方針によらず常に [`Escaping::Form`] の集合でエスケープする｡この
+    /// クレートが組み立てるパスセグメントにリストは無く､id・ユーザー名・
+    /// 決まった語だけだからだ｡したがって今日ここへ届く値にとって､この
+    /// エスケープは何もしないのと同じだ — list id は全桁が数字であることを
+    /// 検証済みで (`Config::resolve`)､post と user の id は数値､
+    /// ユーザー名は `@` を剥いである｡これがあるのは､そうでない値のためだ:
+    /// セグメントはあるアカウントの timeline を別のアカウントのものから
+    /// 隔てるものなので､その中に紛れ込んだ `/` がパスの一部になれては
+    /// ならない｡
     pub(crate) fn segment(mut self, segment: &str) -> Self {
         self.prefix.push('/');
         self.prefix.push_str(&Escaping::Form.escape(segment));
         self
     }
 
-    /// Add one query parameter.
+    /// クエリパラメータを 1 つ追加する｡
     ///
-    /// The key is written as given: every key in this crate is a literal
-    /// from a builder or a `const`, never anything a response or a config
-    /// file supplies, so escaping one would only be able to corrupt a name
-    /// that was already correct.
+    /// キーは渡されたまま書く: このクレートのキーはどれもビルダーか
+    /// `const` のリテラルで､レスポンスや設定ファイルが供給するものでは
+    /// ないので､エスケープしたところで既に正しい名前を壊すことしか
+    /// できない｡
     pub(crate) fn param(mut self, key: &str, value: &str) -> Self {
         self.query
             .push((key.to_string(), self.escaping.escape(value)));
         self
     }
 
-    /// Add one query parameter whose value is a number.
+    /// 値が数値のクエリパラメータを 1 つ追加する｡
     pub(crate) fn number(self, key: &str, value: u32) -> Self {
         self.param(key, &value.to_string())
     }
 
-    /// Add a fixed group of parameters — the `*.fields`/`expansions` sets
-    /// that several endpoints share.
+    /// 決まったパラメータの組を追加する — 複数のエンドポイントが共有する
+    /// `*.fields`/`expansions` の集合｡
     pub(crate) fn params(mut self, pairs: &[(&str, &str)]) -> Self {
         for (key, value) in pairs {
             self = self.param(key, value);
@@ -157,11 +153,11 @@ impl Url {
         self
     }
 
-    /// Add one query parameter only when there is a value for it.
+    /// 値があるときだけクエリパラメータを 1 つ追加する｡
     ///
-    /// The shape every optional cursor in this crate has — `since_id`,
-    /// `pagination_token` — and the one the old `format!` builders spelled
-    /// out with a `match` or an `if let` each time.
+    /// このクレートの省略可能なカーソルがどれも取る形 (`since_id`,
+    /// `pagination_token`) であり､以前の `format!` 組み立てが毎回
+    /// `match` や `if let` で書き下していた形でもある｡
     pub(crate) fn maybe(self, key: &str, value: Option<&str>) -> Self {
         match value {
             Some(value) => self.param(key, value),
@@ -169,11 +165,11 @@ impl Url {
         }
     }
 
-    /// The finished URL.
+    /// 完成した URL｡
     ///
-    /// No `?` at all when nothing was added, so an endpoint with no query
-    /// (`/2/users/me`, `POST /2/tweets`) comes out exactly as it did when
-    /// it was a bare `format!`.
+    /// 何も追加されなければ `?` すら付かないので､クエリを持たない
+    /// エンドポイント (`/2/users/me`, `POST /2/tweets`) は素の `format!`
+    /// だった頃とまったく同じ形で出てくる｡
     pub(crate) fn build(self) -> String {
         let mut out = self.prefix;
         for (index, (key, value)) in self.query.iter().enumerate() {
@@ -209,8 +205,8 @@ mod tests {
         );
     }
 
-    // The pinned URL tests in `x_api::client` and `oauth::pkce` compare
-    // whole strings, so a map here would make them fail at random.
+    // `x_api::client` と `oauth::pkce` の URL 固定テストは文字列を丸ごと
+    // 比較するので､ここにマップを置けばテストがランダムに落ちる｡
     #[test]
     fn parameters_come_out_in_the_order_they_went_in() {
         assert_eq!(
@@ -235,9 +231,9 @@ mod tests {
         );
     }
 
-    // A segment is what separates one account's data from another's. An
-    // id is digits today and the escaping is a no-op, but a `/` arriving
-    // inside one must not be able to become part of the path.
+    // セグメントはあるアカウントのデータを別のアカウントのものから隔てる｡
+    // 今日の id は数字でエスケープは何もしないのと同じだが､その中に
+    // 紛れ込んだ `/` がパスの一部になれてはならない｡
     #[test]
     fn a_slash_inside_a_segment_cannot_become_part_of_the_path() {
         assert_eq!(
@@ -291,7 +287,7 @@ mod tests {
         );
     }
 
-    // --- escaping ---
+    // --- エスケープ ---
 
     #[test]
     fn both_policies_leave_the_unreserved_set_alone() {
@@ -307,10 +303,9 @@ mod tests {
         }
     }
 
-    // The one character the two policies disagree about, and the whole
-    // reason there are two: every non-alphanumeric X API query value is a
-    // comma-separated list, and this is the byte those endpoints have
-    // always been sent.
+    // 2 つの方針が食い違う唯一の文字であり､方針が 2 つある理由そのもの:
+    // 英数字でない X API のクエリ値はどれもカンマ区切りのリストで､
+    // これがそれらのエンドポイントにずっと送られてきたバイトだ｡
     #[test]
     fn the_api_policy_leaves_a_comma_raw() {
         assert_eq!(
@@ -324,9 +319,9 @@ mod tests {
         assert_eq!(Escaping::Form.escape("a,b"), "a%2Cb");
     }
 
-    // A value that could restructure the query if it were passed through.
-    // Neither policy may keep these: `&` would start a parameter that was
-    // never asked for and `=` would split one in half.
+    // 素通しにするとクエリの構造を組み替えかねない値｡どちらの方針も
+    // これらを保ってはならない: `&` は頼んでもいないパラメータを始めて
+    // しまい､`=` は 1 つのパラメータを 2 つに割ってしまう｡
     #[test]
     fn neither_policy_lets_a_value_restructure_the_query() {
         for escaping in [Escaping::Api, Escaping::Form] {
@@ -342,7 +337,7 @@ mod tests {
 
     #[test]
     fn a_multi_byte_character_is_escaped_one_byte_at_a_time() {
-        // UTF-8 percent-encoding is per byte, not per character.
+        // UTF-8 のパーセントエンコードは文字単位ではなくバイト単位だ｡
         assert_eq!(Escaping::Form.escape("あ"), "%E3%81%82");
     }
 }

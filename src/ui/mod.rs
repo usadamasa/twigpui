@@ -25,12 +25,12 @@ mod reload_policy;
 mod render;
 mod tasks;
 
-// Children rather than siblings of `ui` (#126): a child module can see its
-// parent's private items, so `TimelineState`, `ReloadNotice` and
-// `TimelineView` itself stay private to `ui` instead of being widened to
-// `pub(crate)` merely to be reachable from the file next door. Widening
-// them would mean "anything in the crate may touch this", which is the
-// opposite of what splitting the file was for.
+// `ui` の兄弟ではなく子モジュールにする (#126): 子モジュールは親の
+// プライベート項目を参照できるので､`TimelineState`､`ReloadNotice`､
+// `TimelineView` 自体は `pub(crate)` へ広げずに `ui` の内側へ留まる｡
+// 隣のファイルから届かせるためだけに広げると､「クレート内のどこからでも
+// 触ってよい」という意味になり､それはファイルを分割した目的と
+// 正反対になる｡
 use auto_refresh::{FollowMode, Pending, pending_after_poll, pending_label};
 use list_sync::{SyncOff, SyncStatus, SyncTrigger};
 use reload_policy::{
@@ -68,37 +68,37 @@ use crate::x_api::{
     action_post_id,
 };
 
-/// What's known about one reply's "Show thread" walk (#12), keyed by the
-/// reply's own post id in [`TimelineView::threads`]. Absent from that map
-/// means "not requested yet" — the toggle still offers to fetch.
+/// ある reply の "Show thread" の辿り (#12) について分かっていること｡
+/// [`TimelineView::threads`] では reply 自身の post id を鍵にする｡その map に
+/// 無いことは「まだ要求していない」を意味する — トグルは取得を提案しつづける｡
 enum ThreadFetchState {
     Loading,
     Loaded(ThreadChain),
-    /// Carries the error text so a retry click can be offered in its place
-    /// rather than leaving the row stuck.
+    /// エラー文言を保持し､行を固まったままにする代わりに再試行のクリックを
+    /// その場に出せるようにする｡
     Failed(SharedString),
 }
 
 #[derive(Debug)]
 enum TimelineState {
-    /// No usable credential yet: no fresh/refreshable stored OAuth session
-    /// and no bearer token. Shown at startup before the sign-in flow runs.
+    /// 使える資格情報がまだ無い: 新鮮な､あるいは更新できる保存済み OAuth
+    /// session も bearer token も無い｡起動時､サインイン導線が走る前に出る｡
     NotAuthenticated,
-    /// The interactive "Sign in with X" flow is running — browser opened,
-    /// waiting on the loopback callback.
+    /// 対話的な "Sign in with X" の導線が動いている — ブラウザを開き､
+    /// loopback の callback を待っている｡
     SigningIn,
     Loading,
     Loaded(Vec<TimelineItem>),
-    /// Nothing has ever loaded, and the most recent attempt to fetch
-    /// something ran into a rate limit with a known reset time (#10) — see
-    /// [`Cooldown`] for which side imposed it. Since #57, this is no longer
-    /// how a cooldown *or a failed reload* is reported while there are
-    /// already posts on screen: [`TimelineView::reload_notice`] carries that
-    /// independently of `state` instead (mirroring #54's `session_notice`),
-    /// so the timeline is never evicted just to make room for a countdown or
-    /// an error line. This variant only remains reachable as the fallback
-    /// for the narrow case where there is nothing else the body could
-    /// render — see [`reload_failure_outcome`].
+    /// まだ一度も読み込めておらず､直近の取得の試みが reset 時刻の分かる rate
+    /// limit に当たった (#10) — どちら側が課したものかは [`Cooldown`] を見る｡
+    /// #57 以降､画面にすでに post が並んでいる間の cooldown *や失敗した
+    /// reload* はこの形では報告しない: 代わりに
+    /// [`TimelineView::reload_notice`] が `state` とは独立にそれを持ち
+    /// (#54 の `session_notice` に倣っている)､カウントダウンやエラー行の
+    /// 場所を作るためだけに timeline が捨てられることは無くなった｡この
+    /// variant が今も到達可能なのは､body が他に描けるものを何も持たない
+    /// 狭いケースのフォールバックとしてだけである —
+    /// [`reload_failure_outcome`] を見よ｡
     RateLimited {
         reset_at: i64,
         cooldown: Cooldown,
@@ -106,87 +106,87 @@ enum TimelineState {
     Failed(SharedString),
 }
 
-/// Which side is making the app wait. Both render a countdown, but they are
-/// different facts and must not be described with the same words: saying "X
-/// rate limited you" when the app is really just honouring its own configured
-/// fetch interval would be a plain misstatement of what happened.
+/// どちら側がアプリを待たせているか｡どちらもカウントダウンを描くが､別々の
+/// 事実であり同じ言葉で説明してはいけない: 実際にはアプリが自分で設定した
+/// fetch interval を守っているだけなのに「X が rate limit をかけた」と言うのは､
+/// 起きたことの端的な言い間違いになる｡
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Cooldown {
-    /// `config.min_fetch_interval_seconds` — self-imposed, nothing was sent
-    /// and X has said nothing.
+    /// `config.min_fetch_interval_seconds` — 自分で課したもので､何も送って
+    /// いないし X も何も言っていない｡
     LocalInterval,
-    /// X's own rate-limit window, per the tracked `x-rate-limit-*` headers.
+    /// 追跡している `x-rate-limit-*` header が示す X 自身の rate-limit window｡
     ApiRateLimit,
 }
 
-/// A transient notice about the most recent reload attempt, kept
-/// independent of `state` for exactly the reason #54's `session_notice`
-/// field is (see its doc): a cooldown that blocked the request, or a
-/// failure once it ran, describes what just happened to the *request*, not
-/// to whatever posts are already on screen — collapsing the two into one
-/// `state` is what made #57 possible (a countdown, or an error, evicting a
-/// timeline that never actually changed). Cleared the instant a reload
-/// succeeds — see [`TimelineView::reload`]'s result handling — so unlike
-/// `session_notice` this never outlives what it was reporting.
+/// 直近の reload の試みについての一時的な通知｡`state` から独立に保つ理由は
+/// #54 の `session_notice` フィールドとまったく同じである (その doc を見よ):
+/// リクエストを阻んだ cooldown も､走ったあとの失敗も､*リクエスト* に今何が
+/// 起きたかを述べるものであって､すでに画面に並んでいる post について述べる
+/// ものではない — この二つを一つの `state` へ畳んだことが #57 を可能にした
+/// (カウントダウンやエラーが､実際には何も変わっていない timeline を追い出す)｡
+/// reload が成功した瞬間に消える — [`TimelineView::reload`] の結果処理を
+/// 見よ — ので､`session_notice` と違って報告していた対象より長く生き残る
+/// ことは決してない｡
 #[derive(Debug, Clone, PartialEq)]
 enum ReloadNotice {
-    /// Blocked by a cooldown (#10's own interval, or X's rate limit) before
-    /// or while the request was in flight. Carries the same
-    /// `reset_at`/`cooldown` pair [`cooldown_label`] already renders from,
-    /// so the countdown text is computed fresh at render time rather than
-    /// stored — #57's item 3 (making the countdown actually tick) is a
-    /// separate, still-open concern.
+    /// リクエストの発行前か発行中に cooldown (#10 自身の interval か X の
+    /// rate limit) で阻まれた｡[`cooldown_label`] がすでに描画に使っている
+    /// のと同じ `reset_at`/`cooldown` の組を持つので､カウントダウンの
+    /// 文言は保存せず描画時に毎回計算する — #57 の項目 3 (カウントダウンを
+    /// 実際に進ませること) は別の､まだ開いたままの
+    /// 課題である｡
     Cooldown { reset_at: i64, cooldown: Cooldown },
-    /// The request went out and failed for a reason with no known reset
-    /// time.
+    /// リクエストは出ていったが､reset 時刻の分からない理由で
+    /// 失敗した｡
     Failed(SharedString),
-    /// The request went out and came back (#141) — how many posts it
-    /// brought, including none.
+    /// リクエストが出ていって帰ってきた (#141) — 何件の post を持ち帰ったか｡
+    /// ゼロ件も含む｡
     ///
-    /// The other two variants report that something went wrong, and until
-    /// this one a successful reload said nothing at all: the header's
-    /// button flicked to `Loading…` and back, which on a fast response is
-    /// a frame or two, and is not where anyone is looking after `cmd-r`.
-    /// Rendered in the muted color rather than `danger`, since it is the
-    /// one variant that is not a problem.
+    /// 他の二つの variant は何かが失敗したことを報告するもので､これが
+    /// できるまで成功した reload は何も言わなかった: header のボタンが
+    /// `Loading…` へ切り替わって戻るだけで､応答が速ければ 1､2 フレームの
+    /// 話であり､`cmd-r` のあとに誰かが見ている場所でもない｡問題ではない
+    /// 唯一の variant なので､`danger` ではなく muted の色で
+    /// 描く｡
     Outcome(SharedString),
 }
 
-/// What the header's primary button does, independent of its current label —
-/// kept `Copy` so it can be captured into the click closure without
-/// borrowing `self.state`.
+/// header の主ボタンが何をするか｡今のラベルとは独立している —
+/// `self.state` を借りずにクリックのクロージャへ取り込めるよう `Copy` の
+/// ままにしてある｡
 #[derive(Clone, Copy)]
 enum PrimaryAction {
     Reload,
     SignIn,
 }
 
-/// Whether [`TimelineView::reload`] should honor `config.min_fetch_interval_seconds`
-/// (#10) at all. The interval exists to suppress *polling* — it was never
-/// meant to block confirming the result of something the user just did on
-/// purpose, and #57 was exactly that bug: a post or a sign-in, each already
-/// having spent its own request, immediately blocked on the interval it had
-/// no reason to observe.
+/// [`TimelineView::reload`] がそもそも `config.min_fetch_interval_seconds`
+/// (#10) を尊重すべきかどうか｡この interval は *polling* を抑えるために
+/// あり､ユーザーが意図してやったことの結果を確認するのを阻むためのもので
+/// はない｡#57 はまさにそのバグだった: post やサインインはそれぞれすでに
+/// 自分のリクエストを使っているのに､守る理由の無い interval で即座に
+/// 阻まれていた｡
 #[derive(Debug, Clone, Copy)]
 enum ReloadTrigger {
-    /// An unsolicited reload — the startup cache-miss path, or the "Reload"
-    /// button. Subject to the configured interval like any other fetch that
-    /// wasn't a direct response to a user action.
+    /// 頼まれていない reload — 起動時の cache miss の経路か "Reload" ボタン｡
+    /// ユーザー操作への直接の応答ではない他の fetch と同じく､設定された
+    /// interval に従う｡
     Polling,
-    /// The direct result of a user action that already spent its own
-    /// request (a successful sign-in, a successful post): must never wait
-    /// out an interval meant for polling.
+    /// すでに自分のリクエストを使ったユーザー操作の直接の結果 (成功した
+    /// サインイン､成功した post): polling のための interval を待たされては
+    /// ならない｡
     UserAction,
 }
 
-/// What [`TimelineView::start`]'s background half found, carried back across
-/// the executor boundary to the `update` closure that applies it to `self`.
+/// [`TimelineView::start`] の背景側が見つけたもの｡executor の境界を越えて､
+/// それを `self` へ適用する `update` クロージャまで運ばれる｡
 ///
-/// A local enum rather than a tuple because `Home` carries the resolved
-/// [`cache::MeEntry`] alongside the posts, so the header and `home_user_id`
-/// are populated even on a pure cache hit without a second round trip
-/// through `/me`. It had a third variant until #33 — `SingleUser`, the
-/// shape an app-only bearer token resolved to.
+/// タプルではなくローカルな enum にしてあるのは､`Home` が post と一緒に
+/// 解決済みの [`cache::MeEntry`] を運ぶからで､純粋な cache hit のときでも
+/// `/me` への二度目の往復なしに header と `home_user_id` が埋まる｡#33 まで
+/// は三つ目の variant があった — `SingleUser`､app-only の bearer token が
+/// 解決した先の形である｡
 enum StartOutcome {
     NotAuthenticated {
         session_notice: Option<String>,
@@ -198,344 +198,344 @@ enum StartOutcome {
     },
 }
 
-/// Where the window's first screenful comes from (#146).
+/// ウィンドウの最初の一画面がどこから来るか (#146)｡
 ///
-/// The seam this enum draws is the point: until it existed,
-/// [`TimelineView::new`] always went straight to [`TimelineView::start`],
-/// which resolves a credential, reads the response cache and fetches when
-/// that comes back empty. There was no way to hand the view a timeline —
-/// the view went and got one.
+/// この enum が引く継ぎ目こそが要点である: これができるまで
+/// [`TimelineView::new`] はいつも [`TimelineView::start`] へ直行していて､
+/// そこで credential を解決し､レスポンスの cache を読み､空で返って
+/// きたら fetch していた｡view へ timeline を渡す方法は無かった — view が
+/// 自分で取りに行っていた｡
 ///
-/// So `main` now decides where the data comes from and the view renders
-/// whatever it is given, which is what makes a screen reproducible without
-/// an account.
+/// そこで今は `main` がデータの出どころを決め､view は渡されたものを
+/// 描く｡これがアカウント無しで画面を再現可能にしている
+/// ものである｡
 #[derive(Debug)]
 pub(crate) enum Startup {
-    /// Resolve a credential, read the cache, fetch if there is nothing on
-    /// file. What every launch did before #146 and what an ordinary launch
-    /// still does.
+    /// credential を解決し､cache を読み､ファイルに何も無ければ fetch する｡
+    /// #146 より前はすべての起動がこうしていたし､普通の起動は今もこう
+    /// している｡
     Live,
-    /// Draw these posts and stop.
+    /// この post を描いて終わる｡
     ///
-    /// **No `XClient` is ever built in this mode**, which is not a
-    /// convention but the reason a fixture cannot cost anything: every
-    /// paid path in this view is behind `self.client`, and there is
-    /// nothing there to reach.
+    /// **このモードでは `XClient` を一切組み立てない**｡これは慣習ではなく､
+    /// fixture が何の課金も起こしえない理由そのものである: この view の
+    /// 課金される経路はすべて `self.client` の向こうにあり､そこには
+    /// 届く先が何も無い｡
     Fixture(Box<Fixture>),
 }
 
 pub(crate) struct TimelineView {
     config: Config,
     paths: Paths,
-    /// Resolved once at construction from `config.theme` — see
-    /// [`TimelineView::new`]. `Copy`, so it's handed to the free render
-    /// helpers below without lifetime noise.
+    /// 構築時に `config.theme` から一度だけ解決する — [`TimelineView::new`]
+    /// を見よ｡`Copy` なので､下にある自由関数の render ヘルパーへ lifetime の
+    /// 雑音なしに渡せる｡
     theme: Theme,
-    /// `None` until a credential is available — see [`TimelineState::NotAuthenticated`].
+    /// credential が使えるようになるまで `None` — [`TimelineState::NotAuthenticated`] を見よ｡
     client: Option<XClient>,
     state: TimelineState,
-    /// Holding the task keeps the in-flight fetch (or startup credential
-    /// resolution) alive; dropping it cancels.
+    /// この task を保持している間は進行中の fetch (あるいは起動時の
+    /// credential 解決) が生きつづける; drop すると取り消される｡
     fetch: Option<Task<()>>,
-    /// Holding this keeps the interactive sign-in flow alive; assigning a
-    /// new one (a second click) drops and so cancels whatever was running,
-    /// which also closes the loopback socket — see `oauth::callback`.
+    /// これを保持している間は対話的なサインイン導線が生きつづける; 新しい
+    /// ものを代入する (二度目のクリック) と走っていたものが drop され取り
+    /// 消され､loopback の socket も閉じる — `oauth::callback` を見よ｡
     sign_in_flow: Option<Task<()>>,
-    /// When the last reload was kicked off, so [`Self::reload`] can enforce
-    /// `config.min_fetch_interval_seconds` (#10) as a client-side throttle
-    /// on the button itself — independent of, and in addition to, whatever
-    /// the tracked API rate-limit state says via `rate_limit::decision`.
-    /// `None` until the first reload, which is therefore never throttled.
+    /// 直近の reload をいつ始めたか｡[`Self::reload`] が
+    /// `config.min_fetch_interval_seconds` (#10) をボタン自体へのクライアント
+    /// 側 throttle として効かせるために使う — 追跡している API の rate-limit
+    /// 状態が `rate_limit::decision` 経由で言うこととは独立で､それに上乗せ
+    /// される｡最初の reload までは `None` で､だから決して throttle されない｡
     last_reload_at: Option<i64>,
-    /// Whether a [`Self::reload`] is currently in flight (#57). Distinct
-    /// from `state == TimelineState::Loading`: that variant means *nothing
-    /// is displayed yet*, whereas this stays `true` while a reload runs even
-    /// when `state` is `Loaded` and keeps showing the previous posts — see
-    /// [`reload_start_state`]. Drives the header's busy label; `body` needs
-    /// no equivalent check since it renders straight off `state`, which this
-    /// flag deliberately leaves untouched.
+    /// [`Self::reload`] が今進行中かどうか (#57)｡
+    /// `state == TimelineState::Loading` とは別物である: あの variant は
+    /// *まだ何も表示されていない* を意味するが､こちらは `state` が `Loaded`
+    /// で前の post を出しつづけている間も reload が走っていれば `true` の
+    /// ままになる — [`reload_start_state`] を見よ｡header の busy ラベルを
+    /// 駆動する; `body` は `state` から直接描くので同等の判定は要らず､この
+    /// フラグは意図的に `state` に手を触れない｡
     reloading: bool,
-    /// Whether the credential in `client` came from an OAuth session rather
-    /// than the app-only bearer token (#31). Drives whether the header keeps
-    /// offering "Sign in with X": running on a bearer token is a working
-    /// state, but a strictly narrower one, so the offer has to stay
-    /// reachable instead of only appearing when there is no credential at
-    /// all.
+    /// `client` の credential が app-only の bearer token ではなく OAuth
+    /// session から来たものかどうか (#31)｡header が "Sign in with X" を
+    /// 出しつづけるかを決める: bearer token で動いているのは機能している
+    /// 状態ではあるが厳密により狭い状態なので､credential が一つも無いとき
+    /// にだけ現れるのではなく､この誘導は届くところに置いておかねば
+    /// ならない｡
     signed_in_with_oauth: bool,
-    /// The signed-in user's own id, resolved via `GET /2/users/me`. Needed
-    /// to call the home-timeline endpoint and to page further back with
-    /// [`Self::load_older`]. `None` until `/me` has resolved once.
+    /// サインインしたユーザー自身の id｡`GET /2/users/me` で解決する｡
+    /// home-timeline の endpoint を呼ぶのと [`Self::load_older`] でさらに
+    /// 遡るのに要る｡`/me` が一度解決するまでは `None`｡
     home_user_id: Option<String>,
-    /// The signed-in user's own screen name (also from `/me`), shown in the
-    /// header — see [`header_title`].
+    /// サインインしたユーザー自身の screen name (これも `/me` から)｡header に
+    /// 出る — [`header_title`] を見よ｡
     home_username: Option<String>,
-    /// Which timeline fills the window (#161): decided in [`Self::new`]
-    /// by [`list_picker::initial_source`], reassigned only by
-    /// [`Self::switch_source`] (#164), which also resets everything below
-    /// that belongs to one source rather than to the window.
+    /// どの timeline がウィンドウを埋めるか (#161): [`Self::new`] の中で
+    /// [`list_picker::initial_source`] が決め､再代入するのは
+    /// [`Self::switch_source`] (#164) だけで､そこではウィンドウではなく
+    /// 一つの source に属する下記のものもすべてリセットする｡
     ///
-    /// Read by every path that touches the timeline: [`Self::start`],
-    /// [`Self::reload`], [`Self::load_older`] and [`Self::confirm_delete`]
-    /// all take it so the cache file they read, the endpoint they spend a
-    /// request on, and the file a delete rewrites are the same source.
+    /// timeline に触る経路はすべてこれを読む: [`Self::start`]､
+    /// [`Self::reload`]､[`Self::load_older`]､[`Self::confirm_delete`] は
+    /// どれもこれを取り､読む cache ファイル､リクエストを使う endpoint､
+    /// delete が書き換えるファイルが同じ source になるようにしている｡
     source: cache::TimelineSource,
-    /// The lists the picker can name (#164), from its cache or its last
-    /// fetch. Empty until the fetch button has been pressed once.
+    /// picker が名前を挙げられる list (#164)｡cache か直近の fetch から来る｡
+    /// fetch ボタンが一度押されるまでは空｡
     owned_lists: Vec<crate::x_api::ListSummary>,
-    /// The in-flight fetch of `owned_lists`, if any; `fetch`'s
-    /// cancel-on-drop contract, and what stops a second click.
+    /// 進行中の `owned_lists` の fetch があればそれ; `fetch` と同じ drop で
+    /// 取り消す契約であり､二度目のクリックを止めるものでもある｡
     lists_fetch: Option<Task<()>>,
-    /// Where a switch is remembered ([`Paths::selection_file`]), or `None`
-    /// for a fixture window — see [`list_picker::saved_selection_for`].
+    /// 切り替えを覚えておく場所 ([`Paths::selection_file`])｡fixture の
+    /// ウィンドウでは `None` — [`list_picker::saved_selection_for`] を見よ｡
     selection_file: Option<PathBuf>,
-    /// `meta.next_token` from the most recent home-timeline response, if
-    /// any (#11). Drives whether the "Load older" button appears — see
-    /// [`offers_load_older`]. `None` whenever there is nothing further back
-    /// to fetch, or nothing has come from the network yet: a cache-only
-    /// render carries no token, since the cursor is not itself persisted.
+    /// 直近の home-timeline レスポンスの `meta.next_token` があればそれ
+    /// (#11)｡"Load older" ボタンが出るかを決める — [`offers_load_older`] を
+    /// 見よ｡これ以上遡って取るものが無いとき､またはまだネットワークから
+    /// 何も来ていないときは `None`: cursor 自体は永続化しないので､cache
+    /// だけの描画は token を持たない｡
     next_page_token: Option<String>,
-    /// "Show thread" fetches (#12), keyed by the reply's own post id — a
-    /// map rather than a single slot since more than one visible reply can
-    /// have its thread open at once. Absent means "not requested yet".
+    /// "Show thread" の fetch (#12)｡reply 自身の post id を鍵にする — 見えて
+    /// いる reply が複数同時に thread を開けるので､単一のスロットではなく
+    /// map にしてある｡無いことは「まだ要求していない」を意味する｡
     threads: HashMap<String, ThreadFetchState>,
-    /// In-flight thread walks, keyed the same way as `threads`, mirroring
-    /// `fetch`'s cancel-on-drop contract: dropping the view cancels every
-    /// still-running walk along with it.
+    /// 進行中の thread の辿り｡`threads` と同じ鍵で持ち､`fetch` の drop で
+    /// 取り消す契約に倣う: view を drop すると､まだ走っている辿りも一緒に
+    /// すべて取り消される｡
     thread_fetches: HashMap<String, Task<()>>,
-    /// The post composer's draft text and submit status (#14) — see
-    /// `compose.rs`'s module doc for why this is its own pure type rather
-    /// than fields scattered across this struct. This stays the
-    /// authoritative *text* for everything downstream (the counter,
-    /// `can_submit`, `submit_post`): it is mirrored from `compose_input`'s
-    /// own buffer on every `InputEvent::Change` (#38) — see
-    /// [`Self::on_compose_input_event`] — rather than read directly, so
-    /// `compose.rs`'s pure logic keeps operating on a plain `&str` and stays
-    /// testable without gpui at all, exactly as before this widget existed.
+    /// post composer の下書き本文と submit の状態 (#14) — これがこの struct
+    /// に散らばったフィールドではなく独立した純粋な型である理由は
+    /// `compose.rs` のモジュール doc を見よ｡下流のすべて (カウンタ､
+    /// `can_submit`､`submit_post`) にとって権威ある *本文* はこちらであり､
+    /// 直接読むのではなく `InputEvent::Change` のたびに `compose_input`
+    /// 自身のバッファから写す (#38) — [`Self::on_compose_input_event`] を
+    /// 見よ｡こうすれば `compose.rs` の純粋なロジックは素の `&str` を相手に
+    /// しつづけ､このウィジェットができる前とまったく同じく gpui 無しで
+    /// テストできる｡
     compose: ComposeState,
-    /// The composer's real text-entry widget (#38), replacing the
-    /// raw-keystroke reading a `div().on_key_down()` used to do: this is a
-    /// `gpui_component::input::InputState`, which implements
-    /// `EntityInputHandler` properly, so IME composition (Japanese, Chinese,
-    /// Korean), cursor movement, selection, and copy/paste all work. Its
-    /// buffer is the one the user actually sees and types into; `compose`
-    /// above is kept in sync with it, not the other way around, except for
-    /// one deliberate exception — see [`Self::submit_post`]'s success path,
-    /// which clears this explicitly since a successful submit's `text.clear()`
-    /// on `compose` alone would leave the widget still showing the old draft.
+    /// composer の本物のテキスト入力ウィジェット (#38)｡`div().on_key_down()`
+    /// でやっていた生のキーストローク読みを置き換えたもの: 実体は
+    /// `gpui_component::input::InputState` で､`EntityInputHandler` を
+    /// きちんと実装しているため､IME の変換 (日本語､中国語､韓国語)､カーソル
+    /// 移動､選択､コピー/ペーストがすべて動く｡ユーザーが実際に見て打ち込む
+    /// のはこのバッファであり､上の `compose` がこちらへ追従する｡逆ではない｡
+    /// 意図的な例外が一つだけある — [`Self::submit_post`] の成功経路を見よ｡
+    /// そこではこれを明示的に消している｡submit 成功時に `compose` だけを
+    /// `text.clear()` しても､ウィジェットは古い下書きを表示したままに
+    /// なるからである｡
     compose_input: Entity<InputState>,
-    /// Keeps `compose_input`'s change subscription alive — dropping it would
-    /// silently stop `compose` above from ever being mirrored again. Same
-    /// cancel/keep-alive convention as `fetch` and this struct's other
-    /// `Task`-holding fields, just for a `Subscription` instead; the leading
-    /// underscore (never read, only held) matches how gpui-component names
-    /// this exact pattern for its own search-input subscription.
+    /// `compose_input` の change subscription を生かしておく — drop すると
+    /// 上の `compose` が二度と写されなくなるのに､何も言わない｡`fetch` や
+    /// この struct の他の `Task` 保持フィールドと同じ取り消し/生存維持の
+    /// 慣習で､対象が `Subscription` に変わっただけである; 先頭の
+    /// アンダースコア (決して読まず､保持するだけ) は gpui-component が自身の
+    /// search-input subscription でこの同じパターンに付けている名前に倣う｡
     _compose_input_subscription: Subscription,
-    /// Holding this keeps an in-flight `POST /2/tweets` alive, mirroring
-    /// `fetch`'s cancel-on-drop contract. In practice this is only ever
-    /// assigned once per submit cycle: [`ComposeState::can_submit`] is
-    /// false for the entire time one is outstanding, and it's checked
-    /// synchronously at the top of [`Self::submit_post`] before anything
-    /// here is touched — see that method's doc for why that's what actually
-    /// rules out a second submission reaching this field at all.
+    /// これを保持している間は進行中の `POST /2/tweets` が生きつづける｡
+    /// `fetch` の drop で取り消す契約に倣っている｡実際には submit の
+    /// サイクル一回につき一度しか代入されない: 一つ未完了の間ずっと
+    /// [`ComposeState::can_submit`] は false で､それはここに手を付ける前に
+    /// [`Self::submit_post`] の先頭で同期的に確認される — なぜそれが二度目の
+    /// 送信がこのフィールドに届くことを実際に排除するのかは､そのメソッドの
+    /// doc を見よ｡
     submit_task: Option<Task<()>>,
-    /// The signed-in session's granted scope, mirrored from the resolved
-    /// credential (#14) — `None` for a bearer credential or an OAuth
-    /// session whose scope wasn't recorded. Feeds [`offers_reauthorize`]
-    /// and [`Self::submit_post`]'s own scope check.
+    /// サインインした session に与えられた scope｡解決済みの credential から
+    /// 写す (#14) — bearer の credential や scope が記録されていない OAuth
+    /// session では `None`｡[`offers_reauthorize`] と [`Self::submit_post`]
+    /// 自身の scope 判定へ渡る｡
     oauth_scope: Option<String>,
-    /// A human-readable explanation of why a stored OAuth session couldn't
-    /// be used as-is at the most recent credential resolution (#54) — `None`
-    /// when nothing degraded (a fresh or successfully refreshed session, no
-    /// stored session at all, or no OAuth involved to begin with). Rendered
-    /// as a persistent banner regardless of `state` — see
-    /// [`session_notice_banner`] — since the defect this field exists to fix
-    /// is precisely that the timeline otherwise renders as if nothing
-    /// happened. Set once, in [`Self::start`] (mirroring how the credential
-    /// itself is only resolved at startup — see that method's doc); cleared
-    /// the moment a fresh sign-in or re-authorize succeeds, in
-    /// [`Self::sign_in`].
+    /// 直近の credential 解決で､保存済みの OAuth session をそのままでは
+    /// 使えなかった理由を人間が読める形で説明したもの (#54) — 何も劣化して
+    /// いなければ `None` (新鮮な session､更新に成功した session､保存済み
+    /// session が無い場合､そもそも OAuth が関わらない場合)｡`state` に
+    /// 関わらず消えないバナーとして描く — [`session_notice_banner`] を
+    /// 見よ — このフィールドが直すために在る欠陥が､まさに timeline が何も
+    /// 起きなかったかのように描かれてしまうことだからである｡設定するのは
+    /// [`Self::start`] で一度だけ (credential 自体が起動時にしか解決され
+    /// ないのに倣う — そのメソッドの doc を見よ); 新規サインインか再認可が
+    /// 成功した瞬間に [`Self::sign_in`] で
+    /// 消される｡
     session_notice: Option<SharedString>,
-    /// A cooldown or a failed reload, kept independent of `state` (#57) —
-    /// see [`ReloadNotice`]'s doc for why. `None` whenever the most recent
-    /// reload attempt (if any) hasn't been blocked or hasn't failed; set in
-    /// [`Self::reload`]'s early-return, [`Self::load_older`]'s, and
-    /// [`Self::apply_reload_failure`]'s result-handling paths, cleared the
-    /// moment a reload starts or succeeds.
+    /// cooldown か失敗した reload｡`state` から独立に保つ (#57) — 理由は
+    /// [`ReloadNotice`] の doc を見よ｡直近の reload の試み (あれば) が
+    /// 阻まれても失敗してもいないときは `None`; [`Self::reload`] の早期
+    /// return､[`Self::load_older`] の同じ経路､
+    /// [`Self::apply_reload_failure`] の結果処理で設定し､reload が始まるか
+    /// 成功した瞬間に消す｡
     reload_notice: Option<ReloadNotice>,
-    /// Ticks `reload_notice`'s countdown once a second while it holds a live
-    /// `ReloadNotice::Cooldown` (#57's item 3) — [`cooldown_label`] only
-    /// recomputes its text at render time, so without a periodic
-    /// `cx.notify()` the banner would freeze at whatever second happened to
-    /// be showing when it was last drawn. `None` whenever no cooldown is
-    /// currently ticking. Same cancel-on-drop convention as `fetch`/
-    /// `sign_in_flow`: reassigning this (a fresh cooldown superseding a
-    /// still-running one) or clearing it (an immediate stop on success or on
-    /// a plain failure — see [`Self::apply_reload_failure`]) drops and so
-    /// cancels whatever loop was running. See
-    /// [`Self::start_cooldown_ticker`] for the loop itself.
+    /// `reload_notice` が生きた `ReloadNotice::Cooldown` を持っている間､
+    /// そのカウントダウンを毎秒刻む (#57 の項目 3) —
+    /// [`cooldown_label`] は描画時にしか文言を計算し直さないので､定期的な
+    /// `cx.notify()` が無ければバナーは最後に描かれたときの秒数で固まる｡
+    /// 今 cooldown が刻まれていないときは `None`｡`fetch`/`sign_in_flow` と
+    /// 同じ drop で取り消す慣習: これを代入し直す (まだ走っているものを
+    /// 新しい cooldown が置き換える) か消す (成功時や素の失敗時の即時
+    /// 停止 — [`Self::apply_reload_failure`] を見よ) と､走っていたループは
+    /// drop され取り消される｡ループ自体は
+    /// [`Self::start_cooldown_ticker`] を
+    /// 見よ｡
     cooldown_ticker: Option<Task<()>>,
-    /// Request-count totals across every tracked endpoint (#18), shown in
-    /// the header — see [`Self::refresh_usage`]. Zero until the first
-    /// refresh completes, which is a truthful "nothing observed yet" rather
-    /// than a placeholder, since `usage::Totals::default()` is exactly what
-    /// an empty `usage.json` reads as too.
+    /// 追跡しているすべての endpoint を通じたリクエスト数の合計 (#18)｡header
+    /// に出る — [`Self::refresh_usage`] を見よ｡最初の refresh が終わるまで
+    /// ゼロだが､これはプレースホルダではなく正直な「まだ何も観測していない」
+    /// である｡空の `usage.json` を読んでも `usage::Totals::default()` と
+    /// まったく同じになるからだ｡
     usage_totals: usage::Totals,
-    /// Holding this keeps the header's usage refresh alive; mirrors `fetch`'s
-    /// cancel-on-drop contract. Reassigning it (another refresh) drops and
-    /// so cancels whatever read was still running.
+    /// これを保持している間は header の usage refresh が生きつづける;
+    /// `fetch` の drop で取り消す契約に倣う｡代入し直す (別の refresh) と､
+    /// まだ走っていた読み取りは drop され取り消される｡
     usage_refresh: Option<Task<()>>,
-    /// Holds the background list sync alive — the loop that keeps
-    /// `config.list_id`'s membership mirroring the accounts this app
-    /// follows. Started from [`Self::start`] and again from
-    /// [`Self::sign_in`], since a re-authorization is what grants the
-    /// scopes the sync may have been refused for. Reassigning drops the
-    /// previous loop — `usage_refresh`'s cancel-on-drop contract — so
-    /// there is never more than one of them working the same plan file,
-    /// and the last one retires with the window.
+    /// 背景の list sync を生かしておく — `config.list_id` のメンバーを
+    /// このアプリがフォローしているアカウントに合わせつづけるループである｡
+    /// [`Self::start`] から始め､[`Self::sign_in`] からも始める｡sync が
+    /// 拒まれていたかもしれない scope を与えるのは再認可だからだ｡代入し
+    /// 直すと前のループが drop される — `usage_refresh` の drop で取り消す
+    /// 契約 — ので､同じ plan ファイルを扱うものが二つ以上になることは
+    /// 無く､最後の一つはウィンドウと一緒に
+    /// 退く｡
     auto_sync: Option<Task<()>>,
-    /// What the list sync is doing, for the status bar to report (#174).
+    /// list sync が何をしているか｡status bar が報告するためのもの (#174)｡
     ///
-    /// Written by the loop after every tick and by the gates before it
-    /// starts; read only by [`Self::status_bar`]. Until #174 the whole
-    /// feature was invisible from the window: a stopped sync, a sync
-    /// eleven hundred writes behind, and a sync with nothing to do all
-    /// looked exactly alike, which is to say like nothing at all.
+    /// ループが tick のたびに書き､始まる前には gate が書く; 読むのは
+    /// [`Self::status_bar`] だけ｡#174 まではこの機能はウィンドウから
+    /// まったく見えなかった: 止まった sync も､1100 件の書き込みだけ遅れた
+    /// sync も､やることの無い sync も､見た目はどれも同じ､つまり何も
+    /// 無いのと同じだった｡
     sync_status: SyncStatus,
-    /// Whether the status bar is asking to confirm a manual sync (#174) —
-    /// the two-step behind the most expensive click in this window, in
-    /// the shape `pending_delete` uses. See `list_sync`'s module doc.
+    /// status bar が手動 sync の確認を求めているかどうか (#174) — この
+    /// ウィンドウで最も高くつくクリックの背後にある二段構えで､形は
+    /// `pending_delete` と同じ｡`list_sync` のモジュール doc を見よ｡
     pending_sync: bool,
-    /// Holds the auto-refresh loop alive (#21) — the timer that polls the
-    /// timeline for new posts while the window is open. Its own slot
-    /// rather than `fetch`'s, deliberately: assigning `fetch` from here
-    /// would cancel whatever reload the reader had just started, and the
-    /// two are not alternatives. Same cancel-on-drop contract as
-    /// `auto_sync`, and never spawned at all when `config.auto_refresh` is
-    /// off — see [`Self::start_auto_refresh`], which is what makes #21's
-    /// "switch it off and the app sends nothing" a guarantee rather than a
-    /// tendency.
+    /// auto-refresh のループを生かしておく (#21) — ウィンドウが開いている間､
+    /// timeline に新しい post が無いか polling するタイマーである｡`fetch`
+    /// ではなく専用のスロットを持つのは意図的だ: ここから `fetch` に代入
+    /// すると､読み手が始めたばかりの reload を取り消してしまうし､二つは
+    /// 択一ではない｡`auto_sync` と同じ drop で取り消す契約で､
+    /// `config.auto_refresh` が off のときはそもそも spawn しない —
+    /// [`Self::start_auto_refresh`] を見よ｡これが #21 の「切れば
+    /// アプリは何も送らない」を傾向ではなく保証にしている
+    /// ものである｡
     auto_refresh: Option<Task<()>>,
-    /// What the most recent poll fetched, held back from the screen until
-    /// the reader asks for it (#21) — see [`Pending`] and
-    /// [`pending_after_poll`].
+    /// 直近の poll が取ってきたもの｡読み手が求めるまで画面へ出さずに
+    /// 抑えておく (#21) — [`Pending`] と
+    /// [`pending_after_poll`] を見よ｡
     ///
-    /// The whole reason auto-refresh does not simply replace `state`: a
-    /// fetch nobody asked for must not move the text under a reader's
-    /// eyes. `keep_the_reader_in_place` compensates the scroll for a
-    /// reload they pressed, which is a different situation — they are
-    /// expecting the list to change. Here nothing changes until the pill
-    /// is pressed.
+    /// auto-refresh が単に `state` を置き換えない理由のすべてがこれだ: 誰も
+    /// 頼んでいない fetch が､読み手の目の下で文字を動かしてはならない｡
+    /// `keep_the_reader_in_place` は読み手が押した reload のために scroll を
+    /// 補正するが､あれは別の状況だ — そのときは一覧が変わることを期待して
+    /// いる｡ここでは pill が押されるまで何も
+    /// 変わらない｡
     ///
-    /// `None` whenever there is nothing waiting: no poll has landed, the
-    /// last one brought nothing new, or something has since replaced the
-    /// timeline from a fresher source — see [`Self::clear_pending`] for
-    /// which paths do that and why a stale buffer is not merely useless
-    /// but wrong.
+    /// 待っているものが何も無いときは `None`: poll がまだ着いていない､
+    /// 直前の poll が新しいものを持ってこなかった､あるいはその後何かが
+    /// より新しい source から timeline を置き換えた — どの経路がそうする
+    /// のか､そして古くなったバッファがなぜ単に無駄なだけでなく誤りなのかは
+    /// [`Self::clear_pending`] を見よ｡
     pending: Option<Pending>,
-    /// Whether a poll that finds the reader at the top may flow its new
-    /// posts straight onto the screen (#22) — see [`auto_refresh::follows`]
-    /// and [`FollowMode`] for who sets it and when.
+    /// 読み手が最上部にいると分かった poll が､新しい post をそのまま画面へ
+    /// 流し込んでよいかどうか (#22) — 誰がいつ設定するのかは
+    /// [`auto_refresh::follows`] と [`FollowMode`] を見よ｡
     follow: FollowMode,
-    /// Holds the glide alive (#22) — the frame timer walking the scroll
-    /// offset back to the top after a follow prepends posts above it. Its
-    /// own slot for `auto_refresh`'s reason: none of the other task slots
-    /// is something a glide should cancel. Dropped (cancelling the loop)
-    /// by every path that replaces the timeline or moves the scroll
-    /// itself; the loop also stops on its own the moment the offset is
-    /// not where it left it, which is the reader grabbing the wheel.
+    /// glide を生かしておく (#22) — follow が上へ post を差し込んだあと､
+    /// scroll の offset を最上部へ戻していくフレームタイマーである｡専用の
+    /// スロットなのは `auto_refresh` と同じ理由だ: 他のどの task スロットも､
+    /// glide が取り消してよいものではない｡timeline を置き換えるか scroll
+    /// 自体を動かす経路はすべてこれを drop する (ループを取り消す); ループ
+    /// 自身も､offset が置いていった場所に無いと分かった瞬間に止まる｡それは
+    /// 読み手がホイールを握った合図である｡
     glide: Option<Task<()>>,
-    /// Holds a fixture's simulated poll alive (#22): the delay between
-    /// the window opening and its held-back posts walking through
-    /// [`Self::present_poll`], so the follow can be watched by hand
-    /// without a paid request. `None` in every live window — see
-    /// [`Self::show_fixture`].
+    /// fixture の模擬 poll を生かしておく (#22): ウィンドウが開いてから､
+    /// 抑えてあった post が [`Self::present_poll`] を通っていくまでの遅延で､
+    /// 課金されるリクエスト無しに follow を手で観察できる｡live の
+    /// ウィンドウでは常に `None` — [`Self::show_fixture`] を
+    /// 見よ｡
     fixture_arrival: Option<Task<()>>,
-    /// Every post id this app has reposted, per the local record (#15) —
-    /// refreshed from disk whenever the visible timeline changes (see
-    /// [`Self::refresh_reposted_ids`]). The default source for
-    /// [`Self::repost_state_for`]; `repost_overrides` below takes
-    /// precedence for any post already touched this session.
+    /// ローカルの記録によれば､このアプリが repost したすべての post id
+    /// (#15) — 見えている timeline が変わるたびにディスクから読み直す
+    /// ([`Self::refresh_reposted_ids`] を見よ)｡[`Self::repost_state_for`]
+    /// の既定の出どころである; このセッションですでに触れた post について
+    /// は下の `repost_overrides` が優先する｡
     reposted_ids: HashSet<String>,
-    /// Holds the in-flight read from [`Self::refresh_reposted_ids`] alive;
-    /// mirrors `usage_refresh`'s cancel-on-drop contract.
+    /// [`Self::refresh_reposted_ids`] の進行中の読み取りを生かしておく;
+    /// `usage_refresh` の drop で取り消す契約に倣う｡
     reposted_ids_refresh: Option<Task<()>>,
-    /// Per-post repost button state (#15) for any post touched this
-    /// session — pending, failed, or a value a finished request has already
-    /// confirmed and so is authoritative over `reposted_ids` until the next
-    /// refresh catches up. Absent means "use `reposted_ids`'s plain on/off
-    /// value" — see [`Self::repost_state_for`].
+    /// このセッションで触れた post についての post ごとの repost ボタンの
+    /// 状態 (#15) — 進行中､失敗､あるいは完了したリクエストがすでに確定
+    /// させた値であり､次の refresh が追いつくまでは `reposted_ids` より
+    /// 権威がある｡無いことは「`reposted_ids` の素の on/off の値を使う」を
+    /// 意味する — [`Self::repost_state_for`] を見よ｡
     repost_overrides: HashMap<String, ToggleState>,
-    /// In-flight create/delete repost requests, keyed by post id, mirroring
-    /// `thread_fetches`'s cancel-on-drop contract: dropping the view
-    /// cancels every still-running toggle along with it.
+    /// 進行中の repost の作成/削除リクエスト｡post id を鍵にし､
+    /// `thread_fetches` の drop で取り消す契約に倣う: view を drop すると､
+    /// まだ走っている toggle も一緒にすべて取り消される｡
     repost_tasks: HashMap<String, Task<()>>,
-    /// Every post id this app has liked, per the local record (#68) — the
-    /// like-side counterpart of `reposted_ids`, kept as its own set because
-    /// the two records are separate files written by independent toggles.
+    /// ローカルの記録によれば､このアプリが like したすべての post id (#68)
+    /// — `reposted_ids` の like 側の対応物｡二つの記録は独立した toggle が
+    /// 書く別々のファイルなので､それぞれ別の set にしてある｡
     liked_ids: HashSet<String>,
-    /// Holds the in-flight read from [`Self::refresh_liked_ids`] alive;
-    /// mirrors `reposted_ids_refresh`.
+    /// [`Self::refresh_liked_ids`] の進行中の読み取りを生かしておく;
+    /// `reposted_ids_refresh` に倣う｡
     liked_ids_refresh: Option<Task<()>>,
-    /// Per-post like button state (#68) — see `repost_overrides`, which
-    /// this mirrors exactly.
+    /// post ごとの like ボタンの状態 (#68) — これがそのまま倣っている
+    /// `repost_overrides` を見よ｡
     like_overrides: HashMap<String, ToggleState>,
-    /// In-flight create/delete like requests, keyed by post id — see
-    /// `repost_tasks`.
+    /// 進行中の like の作成/削除リクエスト｡post id を鍵にする —
+    /// `repost_tasks` を見よ｡
     like_tasks: HashMap<String, Task<()>>,
-    /// Holds the in-flight `open(1)` spawn alive (#70); mirrors
-    /// `usage_refresh`'s cancel-on-drop contract. Only one is kept: opening
-    /// a second link while the first is still spawning is not something
-    /// worth queueing.
-    /// Downloaded avatars (#64), keyed by the API's own `profile_image_url`
-    /// — the key is the URL as it arrived, not the larger variant actually
-    /// fetched, so a row can look itself up without repeating
-    /// `avatar::preferred_url`'s guess. Absent means "not downloaded yet",
-    /// which renders the placeholder.
+    /// 進行中の `open(1)` の spawn を生かしておく (#70); `usage_refresh` の
+    /// drop で取り消す契約に倣う｡保持するのは一つだけだ: 最初のものがまだ
+    /// spawn 中に二つ目のリンクを開くのは､待ち行列に入れる価値のある話では
+    /// ない｡
+    /// ダウンロード済みのアバター (#64)｡API 自身の `profile_image_url` を
+    /// 鍵にする — 鍵は届いたままの URL であって実際に取得したより大きい
+    /// variant ではないので､行は `avatar::preferred_url` の推測を繰り返さず
+    /// に自分を引ける｡無いことは「まだダウンロードしていない」を意味し､
+    /// プレースホルダが描かれる｡
     avatar_paths: HashMap<String, PathBuf>,
-    /// Downloaded post media (#65), keyed by the media URL — the same
-    /// shape as `avatar_paths`, kept as its own map because the two live
-    /// in different cache directories and come from different fields.
+    /// ダウンロード済みの post の media (#65)｡media の URL を鍵にする —
+    /// `avatar_paths` と同じ形だが､二つは別の cache ディレクトリに置かれ
+    /// 別のフィールドから来るので､それぞれ別の map にしてある｡
     media_paths: HashMap<String, PathBuf>,
-    /// Holds the in-flight avatar downloads alive (#64). One task walks the
-    /// whole visible timeline rather than one per row; reassigning it (a
-    /// reload) cancels whatever was still downloading, which the next call
-    /// re-collects from the new timeline anyway.
+    /// 進行中のアバターのダウンロードを生かしておく (#64)｡行ごとに一つでは
+    /// なく､一つの task が見えている timeline 全体を辿る; 代入し直す
+    /// (reload) とまだダウンロード中のものは取り消されるが､次の呼び出しが
+    /// 新しい timeline から集め直すのでかまわない｡
     avatar_fetch: Option<Task<()>>,
-    /// Holds the in-flight media downloads alive (#65) — see
-    /// `avatar_fetch`, which this mirrors.
+    /// 進行中の media のダウンロードを生かしておく (#65) — これが倣って
+    /// いる `avatar_fetch` を見よ｡
     media_fetch: Option<Task<()>>,
-    /// The post whose delete confirmation is currently showing (#72), if
-    /// any. One at a time: a second "Delete" click elsewhere moves the
-    /// prompt rather than opening two. `None` means no row is asking.
+    /// 今 delete の確認を出している post があればそれ (#72)｡一度に一つ
+    /// だけ: 別の場所で二度目の "Delete" をクリックすると､二つ開くのでは
+    /// なく確認が移る｡`None` はどの行も尋ねていないことを意味する｡
     ///
-    /// A two-step click rather than a modal because deleting is
-    /// irreversible and this app has no dialog machinery — what matters is
-    /// that no single click can destroy a post, which this guarantees.
+    /// modal ではなく二段構えのクリックにしたのは､delete が取り返しの
+    /// つかない操作で､このアプリに dialog の仕掛けが無いからだ — 肝心なのは
+    /// 一度のクリックで post を壊せないことで､これはそれを保証する｡
     pending_delete: Option<String>,
-    /// Holds an in-flight delete alive (#72).
+    /// 進行中の delete を生かしておく (#72)｡
     delete_task: Option<Task<()>>,
-    /// Why the last delete failed (#72), shown on the row that asked.
-    /// Keyed by post id so a failure stays attached to its own row.
+    /// 直近の delete が失敗した理由 (#72)｡尋ねた行の上に出る｡失敗が自分の
+    /// 行に付いたままになるよう post id を鍵にする｡
     delete_failures: HashMap<String, String>,
     open_task: Option<Task<()>>,
-    /// Why the last open attempt failed (#70), shown in the header until
-    /// the next attempt clears it. `None` is the ordinary case — a
-    /// successful open leaves the app with nothing to say.
+    /// 直近の open の試みが失敗した理由 (#70)｡次の試みが消すまで header に
+    /// 出る｡`None` が普通の場合である — open に成功すればアプリには言う
+    /// ことが何も無い｡
     open_failure: Option<String>,
-    /// Scroll position of the timeline list (#22).
+    /// timeline の一覧のスクロール位置 (#22)｡
     ///
-    /// Read before a reload replaces the list and used afterwards to put
-    /// the reader back on the row they were on: prepending posts to a
-    /// scrolled list otherwise slides everything down under them.
+    /// reload が一覧を置き換える前に読み､あとで読み手を元いた行へ戻すのに
+    /// 使う: そうしないと､スクロール済みの一覧へ post を差し込んだときに
+    /// すべてが読み手の下へずり下がる｡
     list_scroll: ScrollHandle,
-    /// Focus for the timeline's own root element (#118).
+    /// timeline 自身の root 要素の focus (#118)｡
     ///
-    /// gpui resolves an action against the focused element's ancestry, so
-    /// without this nothing here is reachable until the composer is
-    /// clicked: `cmd-r` matched nothing and the menu bar's Reload / New
-    /// Post / Submit Post greyed out or dispatched into nowhere. `Quit`
-    /// escaped only by living on the `App`. Focused at startup and
-    /// returned to when the composer is left.
+    /// gpui は focus されている要素の祖先を辿って action を解決するので､
+    /// これが無いと composer をクリックするまでここには何も届かない:
+    /// `cmd-r` は何にも一致せず､メニューバーの Reload / New Post /
+    /// Submit Post は灰色になるか行き先の無い dispatch になっていた｡`Quit`
+    /// だけが `App` の上に居ることで逃れていた｡起動時に focus され､
+    /// composer を離れたときに戻ってくる｡
     focus_handle: FocusHandle,
 }
 
@@ -547,16 +547,16 @@ impl TimelineView {
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) -> Self {
-        // Resolved once, here, rather than on every render: `system` needs a
-        // live `Window` to read the OS appearance from, and `Theme` is
-        // `Copy`, so there is no cost to keeping it around instead of
-        // re-resolving it. A `light`/`dark` config value never depends on
-        // the window at all.
+        // 毎回の render ではなく､ここで一度だけ解決する: `system` は OS の
+        // appearance を読むのに生きた `Window` を要るし､`Theme` は `Copy`
+        // なので､解決し直す代わりに持ち回っても何の代償も無い｡
+        // `light`/`dark` の config 値はそもそもウィンドウに一切
+        // 依存しない｡
         let theme = config.theme.resolve(window.appearance());
-        // #38: point gpui-component's own global theme at the same resolved
-        // palette before its `Input` widget is constructed below — see
-        // `theme::sync_gpui_component_theme`'s doc for why this is needed at
-        // all (its colors live in a completely separate global).
+        // #38: 下で `Input` ウィジェットを組み立てる前に､gpui-component 自身
+        // の global theme を同じ解決済みパレットへ向ける — そもそもなぜこれ
+        // が要るのかは `theme::sync_gpui_component_theme` の doc を見よ
+        // (その色はまったく別の global に居る)｡
         theme::sync_gpui_component_theme(theme, window, cx);
 
         let compose_input = cx.new(|cx| {
@@ -566,14 +566,14 @@ impl TimelineView {
         });
         let compose_input_subscription = cx.subscribe(&compose_input, Self::on_compose_input_event);
 
-        // #161/#164: taken before `config` is moved below.
+        // #161/#164: 下で `config` が move される前に取っておく｡
         let source = list_picker::initial_source(
             list_picker::saved_selection_for(&startup, &paths),
             config.list_id.as_deref(),
         );
         let owned_lists = list_picker::cached_lists_or_empty(&paths);
         let selection_file = matches!(startup, Startup::Live).then(|| paths.selection_file());
-        // #22: taken before `config` is moved below, like `source`.
+        // #22: `source` と同じく､下で `config` が move される前に取る｡
         let follow = FollowMode::from_config(config.follow_new_posts);
 
         let mut this = Self {
@@ -607,9 +607,9 @@ impl TimelineView {
             usage_totals: usage::Totals::default(),
             usage_refresh: None,
             auto_sync: None,
-            // #174: the truthful starting point. Nothing is signed in
-            // yet, which is one of the gates, and saying so beats an
-            // "idle" that has never run.
+            // #174: 正直な出発点｡まだ何もサインインしておらず､それは
+            // gate の一つでもある｡そう言うほうが､一度も走っていない
+            // "idle" よりましだ｡
             sync_status: SyncStatus::Off(SyncOff::NotSignedIn),
             pending_sync: false,
             auto_refresh: None,
@@ -637,8 +637,8 @@ impl TimelineView {
             list_scroll: ScrollHandle::new(),
             focus_handle: cx.focus_handle(),
         };
-        // #118: before anything else, so the very first frame has the
-        // timeline on the focus path rather than an empty one.
+        // #118: 何よりも先に｡最初のフレームから focus の経路に空のものでは
+        // なく timeline が乗るようにするため｡
         window.focus(&this.focus_handle);
         match startup {
             Startup::Live => this.start(cx),
@@ -648,31 +648,31 @@ impl TimelineView {
         this
     }
 
-    /// How long a fixture holds its unseen posts back before simulating
-    /// the poll that would have brought them (#22). Long enough to get
-    /// the window on screen and the hands off the wheel; short enough
-    /// that watching it is not a chore.
+    /// fixture が未読の post を抑えておく時間｡それを運んできたはずの poll
+    /// を模擬するまでの長さである (#22)｡ウィンドウを画面に出して手を
+    /// ホイールから離すには十分に長く､眺めるのが面倒にならない程度には
+    /// 短く｡
     const FIXTURE_ARRIVAL_SECONDS: u64 = 5;
 
-    /// Render a fixture and nothing else (#146).
+    /// fixture だけを描き､他は何も描かない (#146)｡
     ///
-    /// `client` stays `None`, which is what makes this free rather than
-    /// merely cheap: every request in this view goes through it, so there
-    /// is no path from here to a charge — not a reload, not a like, not a
-    /// thread walk. Buttons that need a client are simply inert.
+    /// `client` は `None` のままで､これがこれを単に安いのではなく無料に
+    /// している: この view のリクエストはすべてそこを通るので､ここから
+    /// 課金へ至る経路が無い — reload も､like も､thread の辿りも｡client を
+    /// 要るボタンは単に何もしない｡
     ///
-    /// `signed_in_with_oauth` and the scope are set anyway, because the
-    /// affordances they gate are most of what there is to look at. A
-    /// fixture drawn as a signed-out timeline would be missing the rows
-    /// worth checking.
+    /// それでも `signed_in_with_oauth` と scope は設定する｡それらが門番を
+    /// している affordance こそが､見るものの大半だからだ｡サインアウト状態の
+    /// timeline として描かれた fixture では､確かめる価値のある行が
+    /// 欠けてしまう｡
     fn show_fixture(&mut self, fixture: Fixture, cx: &mut Context<'_, Self>) {
         self.signed_in_with_oauth = true;
-        // Every scope the app requests, so no affordance is withheld for
-        // want of one. `list.read` (#161) belongs here even though a
-        // fixture never fetches: `offers_reauthorize` reads the scope, not
-        // the network, so leaving it out put a "Re-authorize" button on
-        // every list-mode fixture — a permanent fixture of a screen meant
-        // for comparing layouts.
+        // アプリが要求するすべての scope｡scope が足りないせいで affordance
+        // が引っ込むことのないようにする｡fixture は決して fetch しないが
+        // `list.read` (#161) はここに要る: `offers_reauthorize` が読むのは
+        // ネットワークではなく scope なので､これを外すと list モードの
+        // fixture すべてに "Re-authorize" ボタンが出た — レイアウトを
+        // 見比べるための画面に常駐する備品である｡
         self.oauth_scope = Some(format!(
             "{} {} {}",
             oauth::tokens::TWEET_WRITE_SCOPE,
@@ -683,11 +683,11 @@ impl TimelineView {
         self.home_username = Some(fixture.signed_in_as.username);
         self.owned_lists = fixture.lists;
         self.state = TimelineState::Loaded(fixture.items);
-        // #21: built the same way a real poll's buffer is, from the same
-        // pure function — the fixture supplies the posts, not the count,
-        // so the bar cannot say something a poll could not. The buffer
-        // holds the whole list it would display, which is the fixture's
-        // unseen posts followed by the ones already on screen.
+        // #21: 本物の poll のバッファと同じやり方で､同じ純粋関数から組む —
+        // fixture が供給するのは件数ではなく post なので､bar が poll には
+        // 言えないことを言うことはありえない｡バッファは表示することになる
+        // 一覧の全体を持つ｡それは fixture の未読の post に､すでに画面に
+        // 出ているものが続いたものである｡
         if !fixture.pending.is_empty() {
             let displayed: Vec<&str> = match &self.state {
                 TimelineState::Loaded(items) => items.iter().map(|item| item.id.as_str()).collect(),
@@ -704,12 +704,12 @@ impl TimelineView {
                 .collect();
             let waiting = pending_after_poll(&displayed, combined);
             if self.follow.is_following() {
-                // #22: with follow on, what a fixture is asked to show is
-                // the arrival itself — so instead of pre-filling the pill,
-                // hold the posts back and walk them through the door a
-                // real poll uses. Launch, keep the hands off, and watch
-                // them flow in; scroll down first and the same delivery
-                // lands in the pill instead.
+                // #22: follow が on のとき､fixture に見せてほしいのは到着
+                // そのものだ — だから pill をあらかじめ埋めるのではなく､
+                // post を抑えておき､本物の poll が使う戸口を通らせる｡
+                // 起動して手を触れずにいれば流れ込んでくるのが見える;
+                // 先に下へスクロールしておけば､同じ配達が代わりに pill へ
+                // 着く｡
                 self.fixture_arrival = waiting.map(|waiting| {
                     cx.spawn(async move |this, cx| {
                         cx.background_executor()
@@ -722,17 +722,17 @@ impl TimelineView {
                 self.pending = waiting;
             }
         }
-        // Avatars and attached images still download, from `pbs.twimg.com`
-        // rather than the API — no quota, no credits (see `avatar`). A
-        // fixture whose URLs are unreachable renders the same frames it
-        // would while they were still in flight, which is what a layout
-        // check needs anyway.
+        // アバターと添付画像は今もダウンロードされる｡API ではなく
+        // `pbs.twimg.com` からで､quota も credit も要らない (`avatar` を
+        // 見よ)｡URL に届かない fixture は､まだ取得中のときと同じ枠を
+        // 描く｡レイアウトの確認に要るのはどのみち
+        // それである｡
         self.refresh_images(cx);
         cx.notify();
     }
 
-    /// The like button state to render for `post_id` (#68) — see
-    /// [`Self::repost_state_for`], which this mirrors.
+    /// `post_id` について描く like ボタンの状態 (#68) — これが倣っている
+    /// [`Self::repost_state_for`] を見よ｡
     fn like_state_for(&self, post_id: &str) -> ToggleState {
         self.like_overrides
             .get(post_id)
@@ -740,13 +740,13 @@ impl TimelineView {
             .unwrap_or_else(|| ToggleState::new(self.liked_ids.contains(post_id)))
     }
 
-    /// The attached-media grid under one post's body (#65).
+    /// 一つの post の本文の下に置く添付 media のグリッド (#65)｡
     ///
-    /// At most [`MAX_RENDERED_MEDIA`] thumbnails, in [`media_columns`]
-    /// columns. Each cell is a fixed height so a row's height cannot depend
-    /// on which images have finished downloading — a timeline that reflows
-    /// under the reader as images land is worse than one showing frames
-    /// waiting to be filled.
+    /// サムネイルは最大 [`MAX_RENDERED_MEDIA`] 枚､[`media_columns`] 列で
+    /// 並べる｡各セルは固定の高さなので､行の高さがどの画像のダウンロードを
+    /// 終えたかに依存することはありえない — 画像が着くたびに読み手の下で
+    /// 組み直される timeline は､埋まるのを待つ枠を見せる timeline より
+    /// 悪い｡
     fn media_grid(&self, media: &[PostMedia], cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = self.theme;
         let shown: Vec<&PostMedia> = media.iter().take(MAX_RENDERED_MEDIA).collect();
@@ -763,9 +763,9 @@ impl TimelineView {
         grid.into_any_element()
     }
 
-    /// [`Self::media_grid`], or nothing when there is no media to draw
-    /// (#123) — what a quote card needs, since most quotes have none and
-    /// an empty grid would still add its gap to the card.
+    /// [`Self::media_grid`]｡描く media が無いときは何も返さない (#123) —
+    /// quote card に要るものである｡ほとんどの quote は media を持たず､
+    /// 空のグリッドでも card に gap を足してしまうからだ｡
     fn media_grid_for(
         &self,
         media: &[PostMedia],
@@ -774,11 +774,11 @@ impl TimelineView {
         (!media.is_empty()).then(|| self.media_grid(media, cx))
     }
 
-    /// One thumbnail: the downloaded image once it has arrived, else a
-    /// frame of the same size (#65). Clicking it opens the full image in
-    /// the browser (#70) — this app has no lightbox, and a thumbnail with
-    /// no way to see it properly is half a feature. A video or animated GIF
-    /// shows its still with a badge saying which it is; neither plays here.
+    /// サムネイル一つ: ダウンロードした画像が着いていればそれ､無ければ同じ
+    /// 大きさの枠 (#65)｡クリックすると原寸の画像をブラウザで開く (#70) —
+    /// このアプリに lightbox は無く､ちゃんと見る手段の無いサムネイルは機能
+    /// の半分でしかない｡動画やアニメーション GIF は静止画と､それがどちらか
+    /// を示す badge を出す; どちらもここでは再生されない｡
     fn media_cell(
         &self,
         media: &PostMedia,
@@ -814,9 +814,9 @@ impl TimelineView {
             cell = cell.child(div().text_color(rgb(theme.text_muted)).child(badge));
         }
         if let Some(alt) = media.alt_text.as_ref() {
-            // Shown rather than hidden behind a hover: this app has no
-            // screen-reader path of its own, and alt text a sighted reader
-            // can see is more use than alt text nobody ever reaches.
+            // hover の裏に隠さず出す: このアプリ自身には screen reader の
+            // 経路が無く､目の見える読み手が読める alt text のほうが､誰も
+            // たどり着けない alt text より役に立つ｡
             cell = cell.child(
                 div()
                     .text_color(rgb(theme.text_muted))
@@ -826,9 +826,9 @@ impl TimelineView {
         cell.into_any_element()
     }
 
-    /// One post's author avatar (#64): the downloaded image once it is on
-    /// disk, else [`avatar_placeholder`] — the two are the same size, so a
-    /// row does not reflow when the image lands.
+    /// 一つの post の著者のアバター (#64): ディスクに落ちていればその画像､
+    /// 無ければ [`avatar_placeholder`] — 二つは同じ大きさなので､画像が
+    /// 着いても行は組み直されない｡
     fn avatar(&self, item: &TimelineItem, theme: Theme) -> AnyElement {
         let cached = item
             .author_avatar_url
@@ -845,24 +845,24 @@ impl TimelineView {
         }
     }
 
-    /// Ask for confirmation before deleting `post_id` (#72) — the first
-    /// click of the two-step. Replaces any other row's pending prompt, so
-    /// only one post is ever a click away from being deleted.
+    /// `post_id` を削除する前に確認を求める (#72) — 二段構えの一度目の
+    /// クリック｡他の行の確認待ちを置き換えるので､削除まであと一クリックの
+    /// post は常に一つだけである｡
     fn ask_to_delete(&mut self, post_id: String, cx: &mut Context<'_, Self>) {
         self.delete_failures.remove(&post_id);
         self.pending_delete = Some(post_id);
         cx.notify();
     }
 
-    /// Dismiss the delete prompt without deleting anything (#72).
+    /// 何も削除せずに delete の確認を引っ込める (#72)｡
     fn cancel_delete(&mut self, cx: &mut Context<'_, Self>) {
         self.pending_delete = None;
         cx.notify();
     }
 
-    /// The delete affordance for one post (#72): "Delete", or the
-    /// confirmation pair once it has been clicked, plus whatever the last
-    /// attempt failed with.
+    /// 一つの post の delete の affordance (#72): "Delete"､あるいは
+    /// クリックされたあとの確認の二つ組｡直近の試みが失敗していれば､その
+    /// 理由も添える｡
     fn delete_row(&self, item: &TimelineItem, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = self.theme;
         let asking = self.pending_delete.as_deref() == Some(item.id.as_str());
@@ -915,21 +915,21 @@ impl TimelineView {
         }
     }
 
-    /// The like/unlike toggle for one post (#68), rendered whenever
-    /// [`offers_like`] allows it for `item`.
+    /// 一つの post の like/unlike の toggle (#68)｡[`offers_like`] が `item`
+    /// について許すときに描く｡
     fn like_button(&self, item: &TimelineItem, cx: &mut Context<'_, Self>) -> AnyElement {
-        // #52: the row is keyed by its own id (unique per row, so two
-        // reposts of one original don't collide as elements), but the
-        // request acts on the original.
+        // #52: 行は自分自身の id を鍵にするが (行ごとに一意なので､一つの
+        // 原文への二つの repost が要素として衝突しない)､リクエストが作用
+        // するのは原文のほうである｡
         let target = action_post_id(item);
         let state = self.like_state_for(target);
         like_row(&item.id, target, &state, self.theme, cx)
     }
 
-    /// The button state to render for `post_id` (#15): whatever this
-    /// session already knows (in flight, failed, or a value a finished
-    /// request already confirmed) if there is one, else the plain on/off
-    /// value from the local record `refresh_reposted_ids` last read.
+    /// `post_id` について描くボタンの状態 (#15): このセッションがすでに
+    /// 知っていること (進行中､失敗､あるいは完了したリクエストが確定させた
+    /// 値) があればそれ｡無ければ `refresh_reposted_ids` が最後に読んだ
+    /// ローカルの記録の素の on/off の値｡
     fn repost_state_for(&self, post_id: &str) -> ToggleState {
         self.repost_overrides
             .get(post_id)
@@ -937,24 +937,24 @@ impl TimelineView {
             .unwrap_or_else(|| ToggleState::new(self.reposted_ids.contains(post_id)))
     }
 
-    /// The repost/un-repost toggle for one post (#15), rendered whenever
-    /// [`offers_repost`] allows it for `item`.
+    /// 一つの post の repost/un-repost の toggle (#15)｡[`offers_repost`] が
+    /// `item` について許すときに描く｡
     fn repost_button(&self, item: &TimelineItem, cx: &mut Context<'_, Self>) -> AnyElement {
-        // #52: element id from the row, request target from the original.
+        // #52: 要素の id は行から､リクエストの対象は原文から取る｡
         let target = action_post_id(item);
         let state = self.repost_state_for(target);
         repost_row(&item.id, target, &state, self.theme, cx)
     }
 
-    /// Mirror `compose_input`'s buffer into `self.compose` on every
-    /// `InputEvent::Change` (#38) — see the `compose_input` field doc for
-    /// why the mirror exists at all rather than `compose.rs` reading the
-    /// widget directly. `PressEnter`/`Focus`/`Blur` carry nothing this view
-    /// needs: multi-line mode already turns Enter into a newline inside the
-    /// widget itself (`InputState::enter`), so `PressEnter` here would only
-    /// ever fire for a plain scroll-into-view, not a submit.
-    // `Context::subscribe`'s callback bound requires `Entity<T2>` by value,
-    // not `&Entity<T2>` — there's nothing to change on this end.
+    /// `InputEvent::Change` のたびに `compose_input` のバッファを
+    /// `self.compose` へ写す (#38) — `compose.rs` がウィジェットを直接読む
+    /// のではなくそもそもこの写しが在る理由は､`compose_input` フィールドの
+    /// doc を見よ｡`PressEnter`/`Focus`/`Blur` はこの view に要るものを何も
+    /// 運ばない: 複数行モードではウィジェット自身の中ですでに Enter が改行に
+    /// なる (`InputState::enter`) ので､ここでの `PressEnter` は submit では
+    /// なく素の scroll-into-view でしか発火しない｡
+    // `Context::subscribe` のコールバックの境界は `&Entity<T2>` ではなく
+    // `Entity<T2>` を値で要求する — こちら側で変えられるものは無い｡
     #[allow(clippy::needless_pass_by_value)]
     fn on_compose_input_event(
         &mut self,
@@ -968,12 +968,12 @@ impl TimelineView {
         }
     }
 
-    /// The quote target shown inside the composer, if `compose.quote()` has
-    /// one (#16). Reuses #13's [`quote_card`] rendering rather than a second
-    /// one, with a "Remove quote" control added below it so a mis-click on
-    /// "Quote" doesn't force discarding the whole draft — that goes through
-    /// `ComposeState::clear_quote`, never `submit_post`, so the draft text
-    /// is untouched either way.
+    /// `compose.quote()` が持っていれば､composer の中に出す quote の対象
+    /// (#16)｡二つ目を作らず #13 の [`quote_card`] の描画を再利用し､その下に
+    /// "Remove quote" の操作を足してある｡"Quote" の押し間違いで下書き全体を
+    /// 捨てずに済むようにするためだ — それは `submit_post` ではなく必ず
+    /// `ComposeState::clear_quote` を通るので､どちらにせよ下書きの本文には
+    /// 手が触れない｡
     fn composer_quote_card(
         &self,
         target: &compose::QuoteTarget,
@@ -997,13 +997,13 @@ impl TimelineView {
             )
     }
 
-    /// The reply target shown inside the composer, if `compose.reply()` has
-    /// one (#71).
+    /// `compose.reply()` が持っていれば､composer の中に出す reply の対象
+    /// (#71)｡
     ///
-    /// Uses the same [`quote_card`] rendering as a quote target, with an
-    /// explicit "Replying to" heading above it — the card alone cannot say
-    /// which of the two a draft is, and the difference is not visible after
-    /// the fact: a reply lands under a conversation, a quote does not.
+    /// quote の対象と同じ [`quote_card`] の描画を使い､その上に明示的な
+    /// "Replying to" の見出しを置く — card だけでは下書きが二つのどちらな
+    /// のか言えないし､その違いは後からでは見えない: reply は会話の下に
+    /// 着くが､quote はそうではない｡
     fn composer_reply_card(
         &self,
         target: &compose::ReplyTarget,
@@ -1032,11 +1032,11 @@ impl TimelineView {
             )
     }
 
-    /// The post composer (#14): a real text input (#38), character counter,
-    /// and submit button. Shown whenever the session is signed in with
-    /// OAuth — see [`Render::render`]'s doc on why a missing `tweet.write`
-    /// scope doesn't hide this entirely. #16 adds the quote target card, when
-    /// one is set — see [`Self::composer_quote_card`].
+    /// post の composer (#14): 本物のテキスト入力 (#38)､文字数カウンタ､
+    /// submit ボタン｡session が OAuth でサインインしていれば出る —
+    /// `tweet.write` scope が無くてもこれを丸ごと隠さない理由は
+    /// [`Render::render`] の doc を見よ｡#16 で quote の対象の card が
+    /// 設定されていれば加わる — [`Self::composer_quote_card`] を見よ｡
     fn composer(&self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let theme = self.theme;
         let text = self.compose.text().to_string();
@@ -1049,15 +1049,15 @@ impl TimelineView {
         } else {
             theme.text_muted
         };
-        // #95: the counter and the Post button appear once the field is
-        // being used, so an idle window shows one quiet line instead of a
-        // count and a button for a post nobody is writing.
+        // #95: カウンタと Post ボタンは入力欄が使われはじめてから現れる｡
+        // 何もしていないウィンドウには､誰も書いていない post のための
+        // 件数とボタンではなく､静かな一行だけが出るようにするためだ｡
         //
-        // A non-empty draft keeps them regardless of focus. Hiding the
-        // button while a draft exists would leave the only way to send it
-        // behind clicking back into the field — and #14 treats never
-        // losing a draft as the composer's main promise, which a hidden
-        // send button quietly breaks.
+        // 空でない下書きがあれば focus に関わらず出しつづける｡下書きが
+        // あるのにボタンを隠すと､それを送る唯一の道が入力欄をクリック
+        // し直す先に隠れてしまう — #14 は下書きを決して失わないことを
+        // composer の主たる約束としているのに､隠れた送信ボタンはそれを
+        // 黙って破る｡
         let showing_controls = self.compose_input.focus_handle(cx).is_focused(window)
             || !text.trim().is_empty()
             || is_submitting;
@@ -1070,17 +1070,17 @@ impl TimelineView {
             .py(theme::ROW_PAD_Y)
             .border_b_1()
             .border_color(rgb(theme.border))
-            // Refuses edits while a submit is in flight, mirroring the
-            // submit button's own disabled state below — see
-            // `ComposeState::can_submit`'s doc for why that matters.
+            // submit が進行中の間は編集を拒む｡下の submit ボタン自身の
+            // 無効状態に倣う — なぜそれが大事なのかは
+            // `ComposeState::can_submit` の doc を見よ｡
             .child(Input::new(&self.compose_input).disabled(is_submitting))
-            // #16: the quote target, when "Quote" set one — see
-            // `composer_quote_card`'s doc.
+            // #16: "Quote" が設定していれば quote の対象 —
+            // `composer_quote_card` の doc を見よ｡
             .when_some(self.compose.quote(), |column, target| {
                 column.child(self.composer_quote_card(target, cx))
             })
-            // #71: the reply target, when "Reply" set one. Never both — see
-            // `ComposeState::set_reply`.
+            // #71: "Reply" が設定していれば reply の対象｡両方になることは
+            // 決してない — `ComposeState::set_reply` を見よ｡
             .when_some(self.compose.reply(), |column, target| {
                 column.child(self.composer_reply_card(target, cx))
             })
@@ -1096,8 +1096,8 @@ impl TimelineView {
                         .justify_between()
                         .child(
                             div()
-                                // #95: a readout beside a control, not body
-                                // text.
+                                // #95: 本文ではなく､操作の脇に添える
+                                // 読み取り値｡
                                 .text_size(theme::TEXT_META)
                                 .text_color(rgb(counter_color))
                                 .child(format!("{length}/{}", compose::MAX_WEIGHTED_LENGTH)),
@@ -1108,14 +1108,14 @@ impl TimelineView {
                                 .px_2()
                                 .py_1()
                                 .rounded(theme::RADIUS_CONTROL)
-                                // #95: this one *is* a default button — it is
-                                // the composer's whole point — so it keeps the
-                                // accent fill while it can be pressed. What
-                                // changes is the other state: an unpressable
-                                // button used to be a solid dark grey block,
-                                // which reads as a control that is merely a
-                                // different color rather than one that is off.
-                                // macOS drains the fill instead.
+                                // #95: これは *本当に* default ボタンである
+                                // — composer の存在意義そのものだ — ので､
+                                // 押せる間は accent の塗りを保つ｡変えたのは
+                                // もう一方の状態だ: 押せないボタンは以前
+                                // 濃い灰色の塗りつぶしで､それは off の操作
+                                // ではなく単に色が違う操作に見える｡macOS は
+                                // 代わりに塗りを
+                                // 抜く｡
                                 .when(can_submit, |button| {
                                     button
                                         .bg(rgb(theme.accent))
@@ -1129,13 +1129,13 @@ impl TimelineView {
                                 })
                                 .text_size(theme::TEXT_META)
                                 .child(if is_submitting { "Posting…" } else { "Post" })
-                                // #14's double-submit guard, part two: while a
-                                // submit is in flight (or the draft is blank/
-                                // over-length) the button carries no click
-                                // handler at all, not just a disabled-looking
-                                // style — `submit_post` re-checks the same
-                                // condition regardless, but this is what stops
-                                // the click from ever reaching it.
+                                // #14 の二重送信ガード､その二: submit が
+                                // 進行中の間 (あるいは下書きが空か長さ超過
+                                // のとき) ボタンは無効に見える見た目だけで
+                                // なく､click ハンドラをそもそも持たない —
+                                // `submit_post` はどのみち同じ条件を再確認
+                                // するが､click がそこへ届くこと自体を
+                                // 止めているのはこちらである｡
                                 .when(can_submit, |button| {
                                     button.on_click(cx.listener(|this, _event, window, cx| {
                                         this.submit_post(window, cx);
@@ -1147,10 +1147,10 @@ impl TimelineView {
     }
 
     fn header(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
-        // #57: checked ahead of `state` rather than folded into its match —
-        // a reload in flight while posts are already showing leaves `state`
-        // as `Loaded` (see `reload_start_state`), so this is the only signal
-        // that a fetch is running in that case.
+        // #57: `state` の match に畳み込まず､その手前で判定する — post が
+        // すでに出ている間の進行中の reload は `state` を `Loaded` のままに
+        // する (`reload_start_state` を見よ) ので､その場合に fetch が走って
+        // いることを示す信号はこれだけである｡
         let (label, busy, action) = if self.reloading {
             ("Loading…".to_string(), true, PrimaryAction::Reload)
         } else {
@@ -1162,9 +1162,9 @@ impl TimelineView {
                 TimelineState::NotAuthenticated => {
                     ("Sign in with X".to_string(), false, PrimaryAction::SignIn)
                 }
-                // Still wired to `PrimaryAction::Reload`: re-clicking just
-                // re-runs the (network-free) rate-limit decision — #10 forbids
-                // sleeping out the window, not retrying the cheap local check.
+                // 今も `PrimaryAction::Reload` に繋ぐ: クリックし直しても
+                // (ネットワーク不要の) rate-limit 判定が走り直るだけだ — #10 が
+                // 禁じるのは window を寝て過ごすことで､安い判定の再実行ではない｡
                 TimelineState::RateLimited { reset_at, cooldown } => (
                     cooldown_label(cooldown, reset_at, oauth::unix_now()),
                     true,
@@ -1182,23 +1182,23 @@ impl TimelineView {
             .flex()
             .items_center()
             .gap_3()
-            // #95: a toolbar, not a two-line masthead. The request count
-            // that used to sit under the title moved to `status_bar`, which
-            // leaves one line — so the strip is sized like a macOS toolbar
-            // rather than padded to whatever two stacked lines needed.
+            // #95: 二行の masthead ではなく toolbar である｡タイトルの下に
+            // 居たリクエスト数は `status_bar` へ移り､残るのは一行 — なので
+            // この帯は､二行を積んだときに要る高さへ詰め物をするのではなく､
+            // macOS の toolbar と同じ寸法にしてある｡
             .h(theme::TOOLBAR_HEIGHT)
             .px(theme::ROW_PAD_X)
             .bg(rgb(theme.bg_header))
             .border_b_1()
             .border_color(rgb(theme.border))
-            // #95's frame, #164's segments: Home and every owned list —
-            // wrapped so that a picker wider than the window shrinks and
-            // clips instead of pushing the right-hand controls (sign-in,
-            // reload) off the screen. `min_w(0)` is what allows a flex
-            // item to become narrower than its content wants; without it
-            // eleven tabs at 560px shoved "Sign in with X" out of the
-            // window while the body's text said to click it. Presenting
-            // the clipped tabs better (scroll, dropdown) is #192's job.
+            // #95 の枠に #164 の segment: Home と所有するすべての list —
+            // ウィンドウより広い picker が右側の操作 (サインイン､reload) を
+            // 画面の外へ押し出すのではなく､縮んで切り取られるように包んで
+            // ある｡flex item を中身が望むより狭くできるのが `min_w(0)` で､
+            // これが無いと 560px で 11 個のタブが "Sign in with X" を
+            // ウィンドウの外へ追い出し､body の文はそれをクリックせよと
+            // 言っていた｡切り取られたタブをもっとうまく見せること
+            // (スクロール､ドロップダウン) は #192 の仕事｡
             .child(
                 div()
                     .flex()
@@ -1216,11 +1216,11 @@ impl TimelineView {
                     .items_center()
                     .gap_2()
                     .ml_auto()
-                    // #14: an already-signed-in session from before #14
-                    // holds no `tweet.write` scope — #31's exact lesson
-                    // repeats here (an already-active session hides its own
-                    // upgrade path) unless this stays reachable regardless
-                    // of what the primary button currently says.
+                    // #14: #14 より前からサインイン済みの session は
+                    // `tweet.write` scope を持たない — 主ボタンが今何と
+                    // 言っていようとこれが届くところに残らないかぎり､#31 の
+                    // 教訓がそのまま繰り返される (すでに有効な session が
+                    // 自分の格上げ経路を隠してしまう)｡
                     .when(
                         offers_reauthorize(
                             self.signed_in_with_oauth,
@@ -1233,20 +1233,20 @@ impl TimelineView {
             )
     }
 
-    /// The toolbar's one action: reload, or sign in when there is no
-    /// session yet (#95).
+    /// toolbar の唯一の action: reload､あるいはまだ session が無いときは
+    /// サインイン (#95)｡
     ///
-    /// The two look nothing alike on purpose. Reload is an icon — the
-    /// action is constant, frequent, and named by a symbol every app
-    /// shares, so spelling it out in a bordered button made the corner of
-    /// every frame louder than the timeline. Its `label` still exists for
-    /// the states that have something to say ("Loading…", a rate-limit
-    /// countdown), but those already reach the reader through `body` and
-    /// #57's banner, so here they only dim the icon.
+    /// 二つがまったく似ていないのは意図的だ｡reload はアイコンである —
+    /// この操作は不変で頻繁で､どのアプリも共有する記号で名指されるので､
+    /// 枠付きのボタンに書き下すと毎フレームの隅が timeline より騒がしく
+    /// なった｡言うことのある状態 ("Loading…"､rate limit のカウントダウン)
+    /// のために `label` は今も在るが､それらはすでに `body` と #57 のバナー
+    /// 経由で読み手に届くので､ここではアイコンを暗くする
+    /// だけである｡
     ///
-    /// Sign-in keeps its words and its fill: with no session there is
-    /// nothing else to do in the window, and an unlabelled glyph would be
-    /// a puzzle at exactly the moment the app has to explain itself.
+    /// サインインは言葉と塗りを保つ: session が無ければウィンドウで他に
+    /// できることは無いし､ラベルの無い字形は､アプリが自分を説明せねば
+    /// ならないまさにその瞬間に謎かけになる｡
     fn primary_action_control(
         &self,
         label: &str,
@@ -1300,25 +1300,25 @@ impl TimelineView {
         }
     }
 
-    /// The strip along the bottom of the window (#95).
+    /// ウィンドウの下端に沿う帯 (#95)｡
     ///
-    /// Until #95 the request count sat under the window title, where it
-    /// competed with the account name to be the first thing read on every
-    /// frame. macOS keeps a window's running totals in a status bar
-    /// instead — Finder's item count is the same idea — so that is where
-    /// this one goes. #18's escalating color survives the move unchanged:
-    /// the count still turns `warning` as it approaches
-    /// `daily_request_budget` and `danger` once it is past.
+    /// #95 まではリクエスト数がウィンドウのタイトルの下に居て､毎フレーム
+    /// 最初に読まれる座をアカウント名と奪い合っていた｡macOS はウィンドウの
+    /// 累計を代わりに status bar に置く — Finder の項目数が同じ考えだ —
+    /// ので､こちらもそこへ置く｡#18 の段階的な色づけは移動しても変わらない:
+    /// 数は今も `daily_request_budget` へ近づけば `warning` になり､
+    /// 超えれば `danger` に
+    /// なる｡
     ///
-    /// The kept-post count is only shown once a timeline has loaded. While
-    /// signing in or fetching there is no number to give, and "0 / 200"
-    /// would read as an empty cache rather than an unanswered question.
+    /// 保持している post の数は timeline が読み込まれてからしか出さない｡
+    /// サインイン中や取得中には出せる数が無いし､"0 / 200" は答えの無い
+    /// 問いではなく空の cache のように読めてしまう｡
     fn status_bar(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let theme = self.theme;
 
-        // #18: request counts are always shown; an estimated amount is
-        // appended only when `request_price` is configured (see
-        // `usage_label`'s doc).
+        // #18: リクエスト数は常に出す; 見積り金額は `request_price` が
+        // 設定されているときだけ後ろに足す (`usage_label` の doc を
+        // 見よ)｡
         let usage_status =
             usage::budget_status(self.usage_totals.today, self.config.daily_request_budget);
         let usage_text = usage_label(
@@ -1347,26 +1347,26 @@ impl TimelineView {
                     .text_color(rgb(usage_color(usage_status, theme)))
                     .child(usage_text),
             )
-            // #174: what the list sync is doing, and — when it is
-            // something to press — the way to start one. Beside the
-            // request count rather than off in the toolbar because it is
-            // the same kind of fact: a running total about the app rather
-            // than about the timeline.
+            // #174: list sync が何をしているか､そして — 押せるものである
+            // ときは — それを始める手段｡toolbar の側ではなくリクエスト数の
+            // 隣に置いたのは､同じ種類の事実だからだ: timeline についてでは
+            // なくアプリについての累計である｡
             //
-            // The margin is not redundant with the row's `gap_3`, however
-            // it reads. This is the only place in the window where two
-            // bare text spans are siblings — everywhere else the children
-            // carry their own padding — and on screen the gap does not
-            // separate them at all: "Total: 11 req" and "List sync: …"
-            // render touching, as "11 reqList sync". Raising the gap to
-            // `gap_8` changes nothing, so the spacing has to come from
-            // somewhere that demonstrably works here.
+            // この margin は､どう読めようとも行の `gap_3` と重複しては
+            // いない｡ここはウィンドウで唯一､裸のテキスト span が二つ兄弟に
+            // なる場所で — 他はどこも子が自分の padding を持つ — 画面上で
+            // gap はそれらをまったく引き離さない: "Total: 11 req" と
+            // "List sync: …" は "11 reqList sync" のようにくっついて
+            // 描かれる｡gap を `gap_8` へ上げても何も変わらないので､間隔は
+            // ここで実際に効くと示せる場所から来なければ
+            // ならない｡
             //
-            // #184: the margin is now under a test. Both segments are
-            // named, so a window test can read their laid-out bounds back
-            // and require that they do not touch — which is the whole
-            // defect, and which nothing but a screenshot could catch when
-            // this comment was written.
+            // #184: この margin は今テストの下にある｡どちらの segment にも
+            // 名前が付いているので､ウィンドウのテストが配置後の bounds を
+            // 読み返して､それらが接していないことを要求できる — それこそが
+            // 欠陥そのもので､このコメントを書いた時点ではスクリーンショット
+            // 以外に捕まえる手が無かった
+            // ものである｡
             .child(
                 div()
                     .addressable("status-sync")
@@ -1389,28 +1389,28 @@ impl TimelineView {
 
         let counts = row_counts(item.metrics.as_ref());
 
-        // #64: the avatar sits in its own column to the left, so the body
-        // below is built separately and then placed beside it.
+        // #64: アバターは左の独立した列に座るので､下の body は別に組み立てて
+        // からその隣に置く｡
         let body = div()
             .flex()
             .flex_col()
             .flex_1()
-            // #140: `flex_1` takes the *spare* width; it does not permit
-            // shrinking below the content, because a flex child's
-            // `min-width` defaults to `auto`. Long text therefore pushed
-            // the column wider than the row and the overflow was clipped.
-            // `min_w_0` is what lets it wrap instead.
+            // #140: `flex_1` が取るのは *余った* 幅であって､中身より狭く
+            // 縮むことは許さない｡flex の子の `min-width` の既定が `auto`
+            // だからだ｡そのため長い文が列を行より広く押し広げ､はみ出しは
+            // 切り取られていた｡代わりに折り返させるのが `min_w_0` である｡
             //
-            // #103 is why this surfaced when it did: before the avatar got
-            // `flex_shrink_0`, the avatar absorbed the overrun by
-            // collapsing. Pinning it was right, and left the body as the
-            // only place the extra width could go.
+            // これがあの時点で表に出たのは #103 のせいだ: アバターが
+            // `flex_shrink_0` を得る前は､アバターが潰れることではみ出しを
+            // 吸収していた｡それを固定したのは正しく､そして余った幅の
+            // 行き先として body だけが
+            // 残った｡
             .min_w_0()
             .gap_1()
-            // #95: one meta line. The author, the byline, the timestamp,
-            // and whichever of "reposted" / "replying to" applies all sit
-            // together — until #95 the last two were their own full-width
-            // lines above the name, which pushed a two-line post to four.
+            // #95: meta 行は一本｡著者､byline､timestamp､そして "reposted" /
+            // "replying to" のうち当てはまるほうが､みな一緒に並ぶ — #95 まで
+            // は後ろの二つが名前の上の全幅の行を占めていて､二行の post が
+            // 四行に膨らんでいた｡
             .child(
                 div()
                     .flex()
@@ -1418,10 +1418,10 @@ impl TimelineView {
                     .items_center()
                     .gap_1()
                     .text_size(theme::TEXT_META)
-                    // #70: the author name and handle open the profile on
-                    // x.com. `profile_url` returns `None` when the username
-                    // never expanded, in which case they stay plain text
-                    // rather than becoming a link to nowhere.
+                    // #70: 著者名と handle は x.com のプロフィールを開く｡
+                    // username が展開されなかったときは `profile_url` が
+                    // `None` を返し､その場合は行き先の無いリンクにはならず
+                    // ただの文字のままになる｡
                     .child(author_link(item, theme, cx))
                     .child(div().text_color(rgb(theme.text_muted)).child(byline))
                     .child(
@@ -1429,10 +1429,10 @@ impl TimelineView {
                             .text_color(rgb(theme.text_tertiary))
                             .child(format_timestamp(item.created_at.as_deref())),
                     )
-                    // #13: a repost says who reposted it — the body by this
-                    // point already holds the *original* post (see
-                    // `TimelineResponse::into_items`'s join), not the outer
-                    // post's own author.
+                    // #13: repost は誰が repost したかを言う — この時点で
+                    // body が持っているのはすでに *原文* の post であって
+                    // (`TimelineResponse::into_items` の join を見よ)､外側の
+                    // post 自身の著者ではない｡
                     .when_some(item.reposted_by.as_deref(), |line, reposted_by| {
                         line.child(
                             div()
@@ -1440,9 +1440,9 @@ impl TimelineView {
                                 .child(format!("· {}", repost_banner_label(reposted_by))),
                         )
                     })
-                    // #12: who this post is replying to, shown at zero extra
-                    // request cost — the parent's author is already in
-                    // `includes` per #13's expansions.
+                    // #12: この post が誰に返信しているか｡追加のリクエスト
+                    // 費用ゼロで出せる — 親の著者は #13 の expansions により
+                    // すでに `includes` に入っている｡
                     .when_some(item.replied_to.as_ref(), |line, replied_to| {
                         line.child(
                             div()
@@ -1452,18 +1452,18 @@ impl TimelineView {
                     }),
             )
             .child(div().child(item.text.clone()))
-            // #70: the links in the body, expanded out of the `t.co`
-            // shortlinks the text carries — see `link_row`'s doc for why
-            // they sit under the text rather than inside it.
+            // #70: 本文中のリンク｡本文が持つ `t.co` の短縮リンクから展開
+            // したもの — 本文の中ではなく下に置く理由は `link_row` の doc を
+            // 見よ｡
             .when(!item.links.is_empty(), |column| {
                 column.child(link_row(&item.links, theme, cx))
             })
-            // #65: attached images, as thumbnails under the body.
+            // #65: 添付画像を､body の下のサムネイルとして出す｡
             .when(!item.media.is_empty(), |column| {
                 column.child(self.media_grid(&item.media, cx))
             })
-            // #13: a quote (including a repost of a quote) embeds its source
-            // as a bordered card under the text.
+            // #13: quote (quote の repost も含む) は引用元を本文の下に枠付き
+            // の card として埋め込む｡
             .when_some(item.quoted.as_ref(), |column, quoted| {
                 column.child(quote_card(
                     quoted,
@@ -1471,14 +1471,14 @@ impl TimelineView {
                     self.media_grid_for(&quoted.media, cx),
                 ))
             })
-            // #95: every action on one horizontal line, each carrying its
-            // own count. This is the issue's main complaint — the same set
-            // used to stack one label per line down the row.
+            // #95: すべての action を横一行に並べ､それぞれが自分の件数を
+            // 添える｡これがこの issue の主たる不満だ — 同じ一式が以前は
+            // 行の下へ一行一ラベルで積み上がっていた｡
             .child(self.action_row(item, &counts, cx))
-            // #12: "Show thread" — only offered for a reply, since that's
-            // the only case with a parent to walk. Deliberately not part of
-            // `action_row`: a loaded thread expands into a whole chain of
-            // posts, which cannot sit inside a one-line strip.
+            // #12: "Show thread" — 提示するのは reply のときだけだ｡辿る親が
+            // あるのはその場合だけだからである｡意図的に `action_row` の一部
+            // にしていない: 読み込まれた thread は post の連なり全体へ広がる
+            // ので､一行の帯の中には収まらない｡
             .when_some(item.replied_to.as_ref(), |column, replied_to| {
                 column.child(self.thread_section(&item.id, replied_to, cx))
             });
@@ -1495,11 +1495,11 @@ impl TimelineView {
                     .child(self.avatar(item, theme))
                     .child(body),
             )
-            // #95: the separator starts where the text does rather than
-            // running under the avatar, which is the inset macOS's own
-            // lists (Mail, Messages) use. It is a sibling of the row rather
-            // than the row's own bottom border so the inset does not have
-            // to be re-stated as padding.
+            // #95: 区切り線はアバターの下を走らず､本文が始まる位置から
+            // 始まる｡macOS 自身の一覧 (Mail､Messages) が使う inset である｡
+            // 行自身の下枠ではなく行の兄弟にしてあるのは､この inset を
+            // padding として言い直さずに
+            // 済ませるためだ｡
             .child(
                 div()
                     .h(px(1.0))
@@ -1509,14 +1509,14 @@ impl TimelineView {
             .into_any_element()
     }
 
-    /// Every action for one post on a single horizontal line (#95).
+    /// 一つの post のすべての action を横一行に (#95)｡
     ///
-    /// Which actions appear is unchanged — each `offers_*` predicate still
-    /// decides — but they now sit side by side with their engagement count
-    /// beside them instead of stacking one per line above a separate
-    /// metrics line. A like/repost whose request failed still renders its
-    /// message, which grows this strip downward for that one row; that is
-    /// `like_row`/`repost_row`'s own doing and is left alone here.
+    /// どの action が現れるかは変わっていない — 決めるのは今も各 `offers_*`
+    /// の述語である — が､今は一行一つずつ積み上がって別の metrics 行の上に
+    /// 並ぶのではなく､engagement の件数を脇に添えて横に並ぶ｡リクエストが
+    /// 失敗した like/repost は今もそのメッセージを描き､その行についてはこの
+    /// 帯が下へ伸びる; それは `like_row`/`repost_row` 自身の仕業で､ここでは
+    /// そのままにしてある｡
     fn action_row(
         &self,
         item: &TimelineItem,
@@ -1532,8 +1532,8 @@ impl TimelineView {
             .gap_4()
             .text_size(theme::TEXT_META)
             .text_color(rgb(theme.text_muted))
-            // #71: "Reply" — sets the composer's target; nothing is sent
-            // until the draft is submitted.
+            // #71: "Reply" — composer の対象を設定する; 下書きが submit
+            // されるまで何も送られない｡
             .when(offers_reply(self.signed_in_with_oauth, item), |row| {
                 row.child(with_count(
                     reply_row(item, theme, cx),
@@ -1541,8 +1541,8 @@ impl TimelineView {
                     theme,
                 ))
             })
-            // #15: repost/un-repost — see `offers_repost`'s doc for exactly
-            // which posts get one.
+            // #15: repost/un-repost — どの post に付くかは `offers_repost`
+            // の doc をきっちり見よ｡
             .when(
                 offers_repost(
                     self.signed_in_with_oauth,
@@ -1558,8 +1558,8 @@ impl TimelineView {
                     ))
                 },
             )
-            // #68: like/unlike — see `offers_like`'s doc for which posts
-            // get one. Unlike repost, this is offered on one's own posts.
+            // #68: like/unlike — どの post に付くかは `offers_like` の doc を
+            // 見よ｡repost と違い､これは自分自身の post にも提示される｡
             .when(
                 offers_like(
                     self.signed_in_with_oauth,
@@ -1574,15 +1574,15 @@ impl TimelineView {
                     ))
                 },
             )
-            // #16: "Quote" — see `offers_quote`'s doc for exactly which
-            // posts get one (a repost row is withheld for the same reason
-            // `offers_repost` withholds its own button).
+            // #16: "Quote" — どの post に付くかは `offers_quote` の doc を
+            // きっちり見よ (repost の行が控えられるのは､`offers_repost` が
+            // 自分のボタンを控えるのと同じ理由による)｡
             .when(offers_quote(self.signed_in_with_oauth, item), |row| {
                 row.child(quote_row(item, theme, cx))
             })
-            // #70: the post itself, on x.com.
+            // #70: post そのものを x.com で開く｡
             .child(open_post_link(item, theme, cx))
-            // #72: delete — own posts only, and never in one click.
+            // #72: delete — 自分の post のみ､そして決して一クリックでは行わない｡
             .when(
                 offers_delete(
                     self.signed_in_with_oauth,
@@ -1595,10 +1595,10 @@ impl TimelineView {
             .into_any_element()
     }
 
-    /// The "Show thread" toggle, loading/error state, or assembled chain for
-    /// one reply (#12) — whichever `self.threads.get(reply_post_id)` says is
-    /// current. Split out from [`Self::post_row`] only for readability; it
-    /// still needs `cx` for the toggle's click handler.
+    /// 1 つの返信 (#12) についての "Show thread" のトグル､読み込み中/エラーの
+    /// 状態､あるいは組み上がったチェーン — `self.threads.get(reply_post_id)` が
+    /// 今どれだと言うかによる｡[`Self::post_row`] から切り出したのは読みやすさの
+    /// ためだけで､トグルのクリックハンドラのために `cx` は依然として要る｡
     fn thread_section(
         &self,
         reply_post_id: &str,
@@ -1619,9 +1619,9 @@ impl TimelineView {
                 .into_any_element();
         }
 
-        // Reachable states here: `None` (never requested) and `Failed` —
-        // both offer a clickable toggle, just with different labels; see
-        // `thread_action_label`.
+        // ここへ届く状態: `None` (一度も要求していない) と `Failed` — どちらも
+        // クリックできるトグルを出す｡違うのはラベルだけで､詳しくは
+        // `thread_action_label` を見る｡
         let label = thread_action_label(state).unwrap_or_default();
         let toggle = thread_toggle_row(
             reply_post_id.to_string(),
@@ -1647,27 +1647,26 @@ impl TimelineView {
     fn body(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let theme = self.theme;
 
-        // `overflow_y_scroll` lives on StatefulInteractiveElement, so the
-        // element needs an id before it can scroll.
+        // `overflow_y_scroll` は StatefulInteractiveElement 側にあるので､
+        // スクロールさせるには要素に先に id が要る｡
         let content = div()
             .addressable("timeline")
             .flex()
             .flex_col()
             .flex_1()
             .overflow_y_scroll()
-            // #22: the handle is what makes the scroll position readable
-            // at all. Without it a reload can only ever leave the viewport
-            // where it was in *pixels*, which is the wrong place once rows
-            // have been inserted above it.
+            // #22: そもそもスクロール位置を読めるようにしているのがこの
+            // ハンドルだ｡これが無ければリロードはビューポートを*ピクセル*の
+            // 位置に留めることしかできず､上に行が挿入された後ではそこは
+            // 間違った場所になる｡
             .track_scroll(&self.list_scroll);
 
         match &self.state {
-            // The button itself, not a sentence pointing at the toolbar's
-            // copy: enough list tabs push that copy off the right edge
-            // (#192), and a signed-out window whose only advice names an
-            // invisible button cannot be recovered from the screen — the
-            // measured state of 2026-08-24, with a session X had refused
-            // to renew.
+            // ツールバー側のボタンを指す文ではなく､ボタンそのものを置く｡
+            // リストのタブが増えるとそのボタンは右端の外へ押し出されるし
+            // (#192)､唯一の案内が見えないボタンの名を挙げるだけのサインアウト
+            // 済みウィンドウは､画面からは復帰しようがない — X が更新を拒んだ
+            // セッションで 2026-08-24 に実測した状態だ｡
             TimelineState::NotAuthenticated => content.child(
                 div()
                     .flex()
@@ -1699,21 +1698,20 @@ impl TimelineView {
                 content.child(notice("No posts were returned.", theme.text_muted))
             }
             TimelineState::Loaded(items) => {
-                // A plain loop rather than `.children(items.iter().map(...))`:
-                // `post_row` needs `cx` (for #12's "Show thread" click
-                // handler), and a `FnMut` closure invoked by `.map` can't let
-                // a value borrowed from its own captured `cx` escape into the
-                // returned element.
+                // `.children(items.iter().map(...))` ではなく素のループにして
+                // ある｡`post_row` は (#12 の "Show thread" のクリック
+                // ハンドラのために) `cx` を要求するし､`.map` が呼ぶ `FnMut`
+                // クロージャは､自分が捕捉した `cx` から借りた値を返り値の要素へ
+                // 逃がせない｡
                 let mut rows: Vec<AnyElement> = Vec::with_capacity(items.len());
                 for item in items {
                     rows.push(self.post_row(item, cx));
                 }
                 content
                     .children(rows)
-                    // #11: only offered once a response has actually carried
-                    // a `meta.next_token` to resume from, and only while
-                    // there is room under the cap for the page it would
-                    // fetch.
+                    // #11: 再開に使う `meta.next_token` をレスポンスが実際に
+                    // 運んできて初めて出す｡しかも取得するページの分だけ上限の
+                    // 下に余地があるあいだだけだ｡
                     .when(
                         offers_load_older(self.next_page_token.as_deref(), &self.state),
                         |list| list.child(load_older_row(theme, cx)),
@@ -1733,9 +1731,9 @@ impl TimelineView {
     }
 }
 
-/// The "Load older" row appended after the list (#11), styled like
-/// [`notice`] but clickable — appending posts *behind* what's already shown
-/// via `cache::splice`, never merged ahead like a normal reload.
+/// リストの後ろに足す "Load older" の行 (#11)｡見た目は [`notice`] と同じだが
+/// クリックできる — `cache::splice` 経由で､すでに表示されているものの*後ろ*へ
+/// post を足すのであって､通常のリロードのように前へマージすることはない｡
 fn load_older_row(theme: Theme, cx: &mut Context<'_, TimelineView>) -> impl IntoElement {
     div()
         .addressable("load-older")
@@ -1751,19 +1749,19 @@ impl Render for TimelineView {
         let theme = self.theme;
 
         div()
-            // #58: every binding is scoped to this context rather than
-            // registered globally — see `init`.
+            // #58: どのバインディングもグローバルに登録するのではなく､この
+            // コンテキストへ閉じてある — `init` を見る｡
             .key_context(KEY_CONTEXT)
-            // #118: a context only counts while its element is on the
-            // window's focus path, and the real root is
-            // `gpui_component::Root` (see `main`) — so without this the
-            // path stopped above the context and every binding missed.
+            // #118: コンテキストが効くのは､その要素がウィンドウのフォーカス
+            // パス上にあるあいだだけで､本当のルートは
+            // `gpui_component::Root` だ (`main` を見る) — なのでこれが無いと
+            // パスがコンテキストの手前で止まり､全バインディングが外れた｡
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(|this, _: &Reload, _window, cx| {
-                // Same path the header's button takes, including #10's
-                // interval and #57's cooldown reporting: a shortcut must
-                // not be a way around the throttle that exists to stop
-                // this app spending money in a loop.
+                // ヘッダーのボタンが通るのと同じ経路｡#10 の間隔と #57 の
+                // クールダウン報告も含む｡ショートカットが､このアプリが
+                // ループで金を使うのを止めるためにあるスロットルの抜け道に
+                // なってはいけない｡
                 this.reload(ReloadTrigger::UserAction, cx);
             }))
             .on_action(cx.listener(|this, _: &FocusComposer, window, cx| {
@@ -1771,22 +1769,21 @@ impl Render for TimelineView {
                     .update(cx, |input, cx| input.focus(window, cx));
             }))
             .on_action(cx.listener(|this, _: &BlurComposer, window, _cx| {
-                // Focus only. The draft is left exactly as typed: losing it
-                // to a stray `esc` is unrecoverable, and #14 already treats
-                // never losing a draft as the composer's main promise.
+                // フォーカスだけ｡下書きは打ったとおりに残す｡誤爆した `esc` で
+                // 失うと取り返しがつかないし､#14 はすでに下書きを絶対に
+                // 失わないことを composer の主たる約束としている｡
                 //
-                // Back to the timeline rather than dropped with
-                // `window.blur()` (#118): an empty focus path took the
-                // `Timeline` context out of reach, so `esc` disabled the
-                // shortcuts and half the menu bar until the next click.
+                // `window.blur()` で落とすのではなく timeline へ戻す (#118)｡
+                // フォーカスパスが空になると `Timeline` コンテキストへ手が
+                // 届かなくなり､次のクリックまで `esc` がショートカットと
+                // メニューバーの半分を無効にしていた｡
                 window.focus(&this.focus_handle);
             }))
             .on_action(cx.listener(|_this, _: &ShowAbout, window, cx| {
-                // The receiver is dropped rather than awaited: there is one
-                // button, so which one was pressed carries no information.
-                // `Quit` is the action that has to reach the `App` — this
-                // one only has to reach a window, so it stays here with the
-                // rest of them.
+                // レシーバは待たずに落とす｡ボタンは 1 つしかないので､どれが
+                // 押されたかは何の情報も運ばない｡`App` まで届く必要がある
+                // アクションは `Quit` のほうで､こちらはウィンドウへ届けば
+                // よいだけなので､残りと一緒にここへ置いてある｡
                 drop(window.prompt(
                     gpui::PromptLevel::Info,
                     "twigpui",
@@ -1800,16 +1797,15 @@ impl Render for TimelineView {
                 ));
             }))
             .on_action(cx.listener(|this, _: &ShowNewPosts, _window, cx| {
-                // #21: the bar's click handler, reached by keyboard. Free
-                // — it shows a fetch the timer already paid for, and does
-                // nothing at all when there is none.
+                // #21: バーのクリックハンドラへキーボードから届く経路｡無料だ
+                // — タイマーがすでに払った取得を見せるだけで､無いときは何も
+                // しない｡
                 this.apply_pending(cx);
             }))
             .on_action(cx.listener(|this, _: &ToggleFollowNewPosts, _window, cx| {
-                // #22: the menu bar cannot draw a checkmark, so the flip
-                // reports which way it went through the banner a finished
-                // reload uses — `Outcome`, because it is the variant that
-                // is not a failure.
+                // #22: メニューバーはチェックマークを描けないので､切り替えが
+                // どちらへ倒れたかは､リロード完了時に使うバナーで報告する —
+                // 失敗ではないほうのバリアントなので `Outcome` を使う｡
                 this.follow = this.follow.flipped();
                 let outcome = if this.follow.is_following() {
                     "Following new posts."
@@ -1820,11 +1816,11 @@ impl Render for TimelineView {
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &ScrollToTop, _window, cx| {
-                // #22: purely local — no request, no gate, nothing to
-                // report. `scroll_to_top_of_item(0)` rather than a pixel
-                // offset so it lands on the newest row itself. A glide
-                // in flight is walking to the same place — the jump
-                // supersedes it.
+                // #22: 完全にローカル — リクエストもゲートも無いし､報告する
+                // ことも無い｡ピクセルのオフセットではなく
+                // `scroll_to_top_of_item(0)` にしてあるのは､最新の行そのものへ
+                // 着地させるためだ｡進行中の glide も同じ場所へ歩いている —
+                // ジャンプがそれに取って代わる｡
                 this.glide = None;
                 this.list_scroll.scroll_to_top_of_item(0);
                 cx.notify();
@@ -1833,10 +1829,10 @@ impl Render for TimelineView {
                 window.minimize_window();
             }))
             .on_action(cx.listener(|_this, _: &CloseWindow, window, _cx| {
-                // With one window this ends the app, exactly as `cmd-q`
-                // does, and like `cmd-q` it does not ask first (#109). An
-                // unsent draft goes with it — the same hazard `cmd-q` has
-                // always had, not a new one this introduces.
+                // ウィンドウが 1 つなのでこれはアプリを終える｡`cmd-q` と
+                // まったく同じで､`cmd-q` と同様に先に確認もしない (#109)｡
+                // 未送信の下書きも道連れになる — `cmd-q` が昔から持っていた
+                // 危険と同じもので､これが新しく持ち込むものではない｡
                 window.remove_window();
             }))
             .flex()
@@ -1846,45 +1842,42 @@ impl Render for TimelineView {
             .text_color(rgb(theme.text))
             .text_size(theme::TEXT_BODY)
             .child(self.header(cx))
-            // #54: shown regardless of `state` — the whole defect this
-            // fixes is a timeline that renders as if nothing happened, so
-            // this banner has to survive independently of whatever `body`
-            // below is currently showing.
+            // #54: `state` に関わらず出す — これが直す不具合はまさに､何も
+            // 起きなかったかのように描かれる timeline なので､このバナーは下の
+            // `body` が今何を出していようと独立して生き残らねばならない｡
             .when_some(self.session_notice.clone(), |column, message| {
                 column.child(session_notice_banner(message, theme))
             })
-            // #57: same reasoning as `session_notice` above — a cooldown or
-            // a failed reload must survive independently of `body`, which by
-            // this point may well still be showing the previous posts.
+            // #57: 上の `session_notice` と同じ理屈 — クールダウンや失敗した
+            // リロードは `body` とは独立に生き残らねばならない｡この時点の
+            // `body` は前の post を出したままである可能性が十分にある｡
             .when_some(self.reload_notice.clone(), |column, notice| {
                 column.child(reload_notice_banner(&notice, theme, oauth::unix_now()))
             })
-            // #21: what auto-refresh fetched and is holding back. Beside
-            // the banners rather than inside `body` for the same reason
-            // they are — see `new_posts_bar` — except that this one is the
-            // offer itself, not a report about one.
+            // #21: 自動更新が取得して抑えているもの｡`body` の中ではなく
+            // バナーの隣に置くのは､バナーがそうである理由と同じだ —
+            // `new_posts_bar` を見る — ただしこちらは報告ではなく､申し出
+            // そのものである点が違う｡
             .when_some(
                 self.pending.as_ref().map(|pending| pending.count),
                 |column, count| column.child(new_posts_bar(count, theme, cx)),
             )
-            // #70: a link that failed to open. Same banner treatment as the
-            // two above, for the same reason: a click that appears to do
-            // nothing is the outcome worth ruling out, and the timeline
-            // below has nothing to say about it.
+            // #70: 開けなかったリンク｡上の 2 つと同じバナーの扱いで､理由も
+            // 同じだ｡何も起きていないように見えるクリックこそ潰す価値のある
+            // 結末で､下の timeline はそれについて何も言えない｡
             .when_some(self.open_failure.clone(), |column, message| {
                 column.child(session_notice_banner(SharedString::from(message), theme))
             })
-            // #14: posting requires OAuth regardless of scope — a missing
-            // `tweet.write` scope is caught inside `submit_post` itself
-            // (with the header's "Re-authorize" button as the fix), rather
-            // than hiding the whole composer and leaving no way to
-            // discover why it's gone.
+            // #14: 投稿は scope に関わらず OAuth を要求する — `tweet.write`
+            // scope が欠けている場合は `submit_post` 自身の中で捕まえる
+            // (直し方はヘッダーの "Re-authorize" ボタン)｡composer ごと隠して
+            // なぜ消えたのかを知る手立てを残さない､という形は取らない｡
             .when(self.signed_in_with_oauth, |column| {
                 column.child(self.composer(window, cx))
             })
             .child(self.body(cx))
-            // #95: the status bar, which is where the running request
-            // count lives now that the header is a toolbar.
+            // #95: ステータスバー｡ヘッダーがツールバーになった今､累計の
+            // リクエスト数が住んでいるのはここだ｡
             .child(self.status_bar(cx))
     }
 }
@@ -1930,9 +1923,9 @@ mod tests {
 
     #[test]
     fn a_count_rides_beside_each_action() {
-        // #95: the counts used to be one line of prose under the body.
-        // They are now three separate labels, one per action, so each has
-        // to come back on its own.
+        // #95: 件数はかつて本文の下の 1 行の散文だった｡今はアクションごとに
+        // 1 つずつ､3 つの別々のラベルになっているので､それぞれが単独で
+        // 返ってこなければならない｡
         let counts = row_counts(Some(&PostMetrics {
             replies: 12,
             reposts: 34,
@@ -1945,8 +1938,8 @@ mod tests {
 
     #[test]
     fn a_zero_count_is_nothing_rather_than_a_zero() {
-        // #67's rule, carried over by #95: a row that only got likes shows
-        // one number, not two zeros beside the other actions.
+        // #67 の規則を #95 が引き継いだもの｡いいねしか付いていない行は数字を
+        // 1 つ出すのであって､他のアクションの横に 0 を 2 つ並べない｡
         let counts = row_counts(Some(&PostMetrics {
             replies: 0,
             reposts: 0,
@@ -1967,17 +1960,16 @@ mod tests {
 
     #[test]
     fn a_post_whose_metrics_never_expanded_carries_no_counts() {
-        // `metrics: None` is a different thing from all-zero metrics — the
-        // response simply did not include them — but the row renders the
-        // same either way, and this is the case that used to be handled by
-        // `when_some` at the call site.
+        // `metrics: None` は全部ゼロの metrics とは別物だ — レスポンスが
+        // そもそも含めていなかっただけ — が､どちらでも行の描画は同じになる｡
+        // これは以前は呼び出し側の `when_some` が扱っていたケースだ｡
         assert_eq!(row_counts(None), RowCounts::default());
     }
 
     #[test]
     fn a_large_count_is_abbreviated() {
-        // Still #67's rule: seven digits beside an action would push the
-        // rest of the strip around.
+        // これも #67 の規則｡アクションの横に 7 桁も並べば､ストリップの
+        // 残りを押しのけてしまう｡
         let counts = row_counts(Some(&PostMetrics {
             replies: 1000,
             reposts: 12_345,
@@ -1988,7 +1980,7 @@ mod tests {
         assert_eq!(counts.likes.as_deref(), Some("2.4M"));
     }
 
-    // --- #64: avatars ---
+    // --- #64: アバター ---
 
     #[test]
     fn an_avatar_initial_is_the_uppercased_first_character() {
@@ -1998,19 +1990,19 @@ mod tests {
 
     #[test]
     fn an_avatar_initial_handles_a_multi_byte_first_character() {
-        // Byte-slicing here would panic or produce mojibake.
+        // ここでバイト単位に切ると panic するか文字化けする｡
         assert_eq!(avatar_initial("うさだ"), "う");
         assert_eq!(avatar_initial("Émile"), "É");
     }
 
     #[test]
     fn there_is_no_avatar_initial_without_a_name() {
-        // An author whose name never expanded — the circle stands alone
-        // rather than showing an invented character.
+        // 名前が展開されなかった投稿者 — でっち上げた文字を出すのではなく､
+        // 円だけが残る｡
         assert_eq!(avatar_initial(""), "");
     }
 
-    // --- #70: opening links ---
+    // --- #70: リンクを開く ---
 
     #[test]
     fn a_post_permalink_uses_the_authors_handle() {
@@ -2022,8 +2014,8 @@ mod tests {
 
     #[test]
     fn a_post_permalink_falls_back_to_the_id_only_form() {
-        // A post whose author never expanded still has to be reachable —
-        // `x.com//status/…` would 404, X's own `/i/web/` form does not.
+        // 投稿者が展開されなかった post にも届けなければならない —
+        // `x.com//status/…` は 404 になるが､X 自身の `/i/web/` の形はならない｡
         assert_eq!(
             post_permalink("", "1700000000000000001"),
             "https://x.com/i/web/status/1700000000000000001"
@@ -2032,8 +2024,8 @@ mod tests {
 
     #[test]
     fn a_permalink_is_something_the_browser_helper_will_actually_open() {
-        // The two halves have to agree: a URL this builds and `browser`
-        // then refuses would be a click that does nothing.
+        // 両者は一致していなければならない｡こちらが組んだ URL を `browser` が
+        // 拒めば､それは何も起きないクリックになる｡
         assert!(crate::browser::is_openable(&post_permalink(
             "XDevelopers",
             "1"
@@ -2054,12 +2046,12 @@ mod tests {
 
     #[test]
     fn there_is_no_profile_url_without_a_handle() {
-        // Unlike a post there is no id-only fallback, so the affordance is
-        // withheld rather than pointed somewhere wrong.
+        // post と違って id だけのフォールバックが無いので､間違った先を指す
+        // のではなくアフォーダンス自体を出さない｡
         assert_eq!(profile_url(""), None);
     }
 
-    // --- #68: like ---
+    // --- #68: いいね ---
 
     #[test]
     fn offers_like_on_an_ordinary_post() {
@@ -2072,8 +2064,8 @@ mod tests {
 
     #[test]
     fn offers_like_on_ones_own_post() {
-        // #68 is explicit: X rejects reposting your own post but accepts
-        // liking it, so `is_own_post` must not be carried over from #15.
+        // #68 が明言している｡X は自分の post のリポストは拒むが､いいねは
+        // 受け入れる｡だから `is_own_post` を #15 から持ち越してはいけない｡
         assert!(offers_like(
             true,
             Some("me-id"),
@@ -2118,9 +2110,9 @@ mod tests {
 
     #[test]
     fn offers_reauthorize_for_a_session_that_predates_the_like_scope() {
-        // #68: `like.write` is granted separately, so a session from before
-        // it can post and repost but not like — and must be told how to fix
-        // that, since `toggle_like`'s refusal points at this very button.
+        // #68: `like.write` は別途付与されるので､それ以前のセッションは投稿と
+        // リポストはできてもいいねはできない — しかも直し方を伝えねばならない｡
+        // `toggle_like` の拒否がまさにこのボタンを指しているからだ｡
         assert!(offers_reauthorize(
             true,
             Some("tweet.read users.read tweet.write offline.access"),
@@ -2128,21 +2120,21 @@ mod tests {
         ));
     }
 
-    /// A repost row as #13's join builds one: the body is the original's,
-    /// `id` is the retweet activity's, and #52's `original_post_id` is what
-    /// every write endpoint should act on.
+    /// #13 の join が組むとおりのリポスト行｡本文は元投稿のもの､`id` は
+    /// リツイートのアクティビティのもの､そして書き込み系のエンドポイントが
+    /// 対象にすべきなのは #52 の `original_post_id` だ｡
     fn repost_row_item(row_id: &str, original_id: &str, original_author: &str) -> TimelineItem {
         let mut item = item_with(row_id, original_author, Some("bob"));
         item.original_post_id = Some(original_id.to_string());
         item
     }
 
-    // --- #141: saying what a reload did ---
+    // --- #141: リロードが何をしたかを言う ---
 
     #[test]
     fn a_reload_that_brought_nothing_says_so() {
-        // The case a reader is most likely to read as "my press did not
-        // register": the screen is identical before and after.
+        // 読み手が「押したのが効かなかった」と受け取りやすいのがこのケースだ｡
+        // 前後で画面が一致してしまう｡
         assert_eq!(reload_outcome_label(0), "No new posts.");
     }
 
@@ -2154,8 +2146,8 @@ mod tests {
 
     #[test]
     fn the_outcome_counts_the_same_posts_the_scroll_does() {
-        // Both read the leading run of unseen ids, so a reload cannot say
-        // "3 new posts" while scrolling past a different number of them.
+        // どちらも未見の id の先頭の連なりを読むので､リロードが
+        // "3 new posts" と言いながら別の数だけスクロールすることは起きない｡
         let previous = ["1", "2", "3"];
         let new_ids = ["a", "b", "1", "2", "3"];
 
@@ -2167,12 +2159,12 @@ mod tests {
         );
     }
 
-    // --- #22: keeping the reader in place across a reload ---
+    // --- #22: リロードをまたいで読み手をその場に留める ---
 
     #[test]
     fn a_reader_at_the_top_is_left_alone() {
-        // New posts arriving above nothing is what someone at the top
-        // wants to see, so this declines rather than scrolling.
+        // 何も無い上へ新しい post が届くのは､先頭にいる人が見たいものその
+        // ものなので､ここはスクロールせずに見送る｡
         assert_eq!(
             preserved_scroll_target(&["2", "3"], &["1", "2", "3"], 0),
             None
@@ -2181,8 +2173,8 @@ mod tests {
 
     #[test]
     fn a_scrolled_reader_is_moved_down_by_the_number_of_new_posts() {
-        // Twenty rows down, six posts arrive: without this the viewport
-        // stays put and the text under the reader's eyes changes.
+        // 20 行下にいるところへ post が 6 つ届く｡これが無いとビューポートは
+        // 動かず､読み手の目の下のテキストが入れ替わってしまう｡
         let previous: Vec<String> = (0..30).map(|n| n.to_string()).collect();
         let previous_ids: Vec<&str> = previous.iter().map(String::as_str).collect();
         let fresh = ["a", "b", "c", "d", "e", "f"];
@@ -2204,15 +2196,15 @@ mod tests {
 
     #[test]
     fn only_the_leading_run_of_new_ids_counts() {
-        // An id further down is a post that moved, not one that arrived.
-        // Scrolling for it would push the reader past what they were on.
+        // もっと下にある id は､届いた post ではなく動いた post だ｡それの分まで
+        // スクロールすると､読み手が見ていたものを行き過ぎてしまう｡
         assert_eq!(
             preserved_scroll_target(&["1", "2"], &["new", "1", "also-new", "2"], 5),
             Some(6)
         );
     }
 
-    // --- #65: attached media ---
+    // --- #65: 添付メディア ---
 
     #[test]
     fn one_image_is_laid_out_in_a_single_column() {
@@ -2221,8 +2213,8 @@ mod tests {
 
     #[test]
     fn two_or_more_images_are_laid_out_in_two_columns() {
-        // Three across would each be too narrow to read at the fixed cell
-        // height, and X's own maximum of four is two rows of two.
+        // 横 3 つでは固定のセル高では 1 枚 1 枚が細すぎて読めないし､X 自身の
+        // 上限である 4 枚は 2 つの行に 2 つずつだ｡
         assert_eq!(media_columns(2), 2);
         assert_eq!(media_columns(3), 2);
         assert_eq!(media_columns(4), 2);
@@ -2230,7 +2222,7 @@ mod tests {
 
     #[test]
     fn the_column_count_is_never_zero() {
-        // `media_grid` passes this straight to `chunks`, which panics on 0.
+        // `media_grid` はこれをそのまま `chunks` へ渡すが､あちらは 0 で panic する｡
         assert_eq!(media_columns(0), 1);
     }
 
@@ -2241,21 +2233,21 @@ mod tests {
 
     #[test]
     fn video_and_gif_say_which_they_are() {
-        // Neither plays here, so the badge is the only thing distinguishing
-        // a still from a photo.
+        // どちらもここでは再生されないので､静止画と写真を見分けられるのは
+        // バッジだけだ｡
         assert_eq!(media_badge(Some("video")), Some("Video"));
         assert_eq!(media_badge(Some("animated_gif")), Some("GIF"));
     }
 
     #[test]
     fn an_unrecognized_media_type_gets_no_badge() {
-        // Forward compatibility: something X invents later should render as
-        // a bare still, not as a label nobody can interpret.
+        // 前方互換のため｡X が後から作るものは､誰にも解釈できないラベルでは
+        // なく素の静止画として描かれるべきだ｡
         assert_eq!(media_badge(Some("hologram")), None);
         assert_eq!(media_badge(None), None);
     }
 
-    // --- #72: delete ---
+    // --- #72: 削除 ---
 
     #[test]
     fn offers_delete_on_ones_own_post() {
@@ -2269,8 +2261,8 @@ mod tests {
 
     #[test]
     fn does_not_offer_delete_on_someone_elses_post() {
-        // X rejects it, and this is irreversible — no reason to offer a
-        // click that can only fail.
+        // X が拒むうえに取り返しがつかない — 失敗しかしないクリックを出す
+        // 理由が無い｡
         assert!(!offers_delete(
             true,
             Some("me-id"),
@@ -2281,9 +2273,9 @@ mod tests {
 
     #[test]
     fn does_not_offer_delete_on_a_repost_row_even_of_ones_own_post() {
-        // Unlike every other action since #52, this one stays withheld: the
-        // row reads as "my repost", but the delete would destroy the
-        // original. Removing a repost is the repost toggle's job.
+        // #52 以降の他のすべてのアクションと違い､これだけは出さないままに
+        // する｡行は「自分のリポスト」として読めるが､削除は元投稿を壊して
+        // しまう｡リポストを取り消すのはリポストのトグルの仕事だ｡
         let mut item = item_with("activity-id", "bob", Some("bob"));
         item.original_post_id = Some("original-id".to_string());
         assert!(!offers_delete(true, Some("me-id"), Some("bob"), &item));
@@ -2301,8 +2293,8 @@ mod tests {
 
     #[test]
     fn does_not_offer_delete_before_the_signed_in_handle_resolves() {
-        // `is_own_post` treats an unresolved handle as "not mine", which is
-        // the safe direction for an irreversible action.
+        // `is_own_post` は解決していないハンドルを「自分のではない」として
+        // 扱う｡取り返しのつかないアクションにとっては安全な側だ｡
         assert!(!offers_delete(
             true,
             Some("me-id"),
@@ -2321,7 +2313,7 @@ mod tests {
         ));
     }
 
-    // --- #71: reply ---
+    // --- #71: 返信 ---
 
     #[test]
     fn offers_reply_once_signed_in_with_oauth() {
@@ -2330,15 +2322,14 @@ mod tests {
 
     #[test]
     fn does_not_offer_reply_without_oauth() {
-        // The composer itself isn't reachable without OAuth — nowhere for a
-        // reply to go.
+        // OAuth が無ければ composer 自体に手が届かない — 返信の行き先が無い｡
         assert!(!offers_reply(false, &item_with("1", "alice", None)));
     }
 
     #[test]
     fn offers_reply_on_ones_own_post() {
-        // X accepts replying to yourself, and self-threading is a normal
-        // way to write.
+        // X は自分への返信を受け入れるし､自分でスレッドを繋ぐのは普通の
+        // 書き方だ｡
         assert!(offers_reply(true, &item_with("1", "me", None)));
     }
 
@@ -2352,12 +2343,12 @@ mod tests {
 
     #[test]
     fn reply_target_label_without_a_handle() {
-        // Same gap `reply_banner_label` already handles: an author who
-        // never expanded.
+        // `reply_banner_label` がすでに扱っているのと同じ穴｡展開されなかった
+        // 投稿者のことだ｡
         assert_eq!(reply_target_label(""), "Replying to a post");
     }
 
-    // --- #52: a repost row acts on the original ---
+    // --- #52: リポスト行は元投稿に対して働く ---
 
     #[test]
     fn a_repost_row_acts_on_the_original_post_not_the_retweet_activity() {
@@ -2372,9 +2363,9 @@ mod tests {
 
     #[test]
     fn offers_repost_on_a_repost_row_now_that_the_original_id_is_carried() {
-        // The workaround this replaces withheld the button here, because
-        // `item.id` is the retweet activity's id. #52 carries the
-        // original's, so the button is safe to offer.
+        // これが置き換える回避策は､`item.id` がリツイートのアクティビティの
+        // id であるためにここでボタンを出さなかった｡#52 は元投稿の id を
+        // 運ぶので､ボタンを出しても安全だ｡
         let item = repost_row_item("activity-id", "original-id", "alice");
         assert!(offers_repost(true, Some("2244994945"), Some("bob"), &item));
     }
@@ -2393,18 +2384,18 @@ mod tests {
 
     #[test]
     fn a_repost_row_still_withholds_repost_when_the_original_is_ones_own_post() {
-        // The `is_own_post` guard now compares against the *original*
-        // author, which is whose post would actually be reposted — the
-        // reposter's handle is irrelevant to what the API would reject.
+        // `is_own_post` のガードは今や*元投稿の*投稿者と比べる｡実際に
+        // リポストされるのはその人の post だからだ — リポストした人の
+        // ハンドルは､API が何を拒むかとは関係が無い｡
         let item = repost_row_item("activity-id", "original-id", "bob");
         assert!(!offers_repost(true, Some("2244994945"), Some("bob"), &item));
     }
 
     #[test]
     fn replying_from_a_repost_row_answers_the_original_post() {
-        // The trap #71 calls out: `in_reply_to_tweet_id` pointing at the
-        // retweet activity would hang the reply off a different
-        // conversation, and nothing about that failure is visible.
+        // #71 が名指しする罠｡`in_reply_to_tweet_id` がリツイートの
+        // アクティビティを指すと､返信が別の会話にぶら下がってしまい､その失敗は
+        // 何ひとつ目に見えない｡
         let item = repost_row_item("activity-id", "original-id", "alice");
         assert_eq!(action_post_id(&item), "original-id");
         assert!(offers_reply(true, &item));
@@ -2423,8 +2414,8 @@ mod tests {
 
     #[test]
     fn offers_reauthorize_when_signed_in_with_oauth_but_missing_the_write_scope() {
-        // #14: the exact scenario #7's originally-minimal scope request
-        // creates — a real, working OAuth session that simply can't post.
+        // #14: #7 の当初の最小限の scope 要求が作り出すそのままの筋書き —
+        // 本物で動く OAuth セッションなのに､ただ投稿だけができない｡
         assert!(offers_reauthorize(
             true,
             Some("tweet.read users.read offline.access"),
@@ -2434,15 +2425,14 @@ mod tests {
 
     #[test]
     fn offers_reauthorize_when_the_scope_was_never_recorded() {
-        // A pre-#14 token: "unknown" is treated the same as "insufficient".
+        // #14 より前のトークン｡「不明」は「不足」と同じに扱う｡
         assert!(offers_reauthorize(true, None, false));
     }
 
     #[test]
     fn does_not_offer_reauthorize_once_every_write_scope_is_granted() {
-        // `like.write` joined the set in #68; a session holding only
-        // `tweet.write` is now genuinely under-scoped, which the test above
-        // pins down.
+        // `like.write` は #68 でこの集合に加わった｡`tweet.write` しか持たない
+        // セッションは今や本当に scope 不足で､それは上のテストが押さえている｡
         assert!(!offers_reauthorize(
             true,
             Some("tweet.read tweet.write like.write offline.access"),
@@ -2452,9 +2442,9 @@ mod tests {
 
     #[test]
     fn offers_reauthorize_for_a_session_that_predates_the_list_scope() {
-        // #161: configuring a list on a session authorized before #167
-        // added `list.read` gets a 403 from the only endpoint the window
-        // reads. The button is the whole explanation, so it has to appear.
+        // #161: #167 が `list.read` を足す前に認可されたセッションでリストを
+        // 設定すると､ウィンドウが読む唯一のエンドポイントから 403 が返る｡
+        // 説明はこのボタンがすべてなので､出さないわけにいかない｡
         assert!(offers_reauthorize(
             true,
             Some("tweet.read tweet.write like.write offline.access"),
@@ -2473,8 +2463,8 @@ mod tests {
 
     #[test]
     fn does_not_ask_for_list_read_when_no_list_is_configured() {
-        // Someone reading the home timeline can never reach the 403, so
-        // nagging them about a scope they do not use is noise.
+        // ホームタイムラインを読んでいる人はその 403 に届きようがないので､
+        // 使っていない scope をせっつくのはノイズでしかない｡
         assert!(!offers_reauthorize(
             true,
             Some("tweet.read tweet.write like.write offline.access"),
@@ -2484,8 +2474,8 @@ mod tests {
 
     #[test]
     fn does_not_offer_reauthorize_without_an_oauth_session() {
-        // Not signed in with OAuth at all — `offers_sign_in` is the
-        // relevant affordance here, not this one.
+        // そもそも OAuth でサインインしていない — ここで関係するアフォーダンス
+        // は `offers_sign_in` であって､こちらではない｡
         assert!(!offers_reauthorize(false, None, false));
     }
 
@@ -2512,18 +2502,18 @@ mod tests {
 
     #[test]
     fn header_title_names_the_signed_in_account() {
-        // Only the account. Which timeline is showing is the tab bar's to
-        // say since #95, and saying it twice in one 44px strip was how the
-        // toolbar ran out of room.
+        // アカウントだけ｡どの timeline を表示しているかは #95 以降タブバーが
+        // 言うことで､44px の帯の中で二度言ったせいでツールバーは場所を
+        // 使い果たした｡
         assert_eq!(header_title(Some("alice")), "@alice");
     }
 
     #[test]
     fn header_title_falls_back_before_me_has_resolved() {
-        // The only case left since #33: the window always shows the home
-        // timeline, so the only unknown is whose it is. Until `/me`
-        // answers there is no account to name, and the app's own name is
-        // what a macOS toolbar carries in its place.
+        // #33 以降に残った唯一のケース: ウィンドウは常にホームタイムラインを
+        // 表示するので､分からないのは誰のものかだけだ｡`/me` が答えるまでは
+        // 名指しできるアカウントが無く､macOS のツールバーがその代わりに
+        // 載せるのはアプリ自身の名前だ｡
         assert_eq!(header_title(None), "twigpui");
     }
 
@@ -2542,8 +2532,8 @@ mod tests {
 
     #[test]
     fn does_not_offer_load_older_at_the_post_cap() {
-        // `cache::splice` truncates back to the cap, so a click here
-        // would spend a real API request and discard everything it bought.
+        // `cache::splice` は上限まで切り詰めるので､ここでクリックすると本物の
+        // API リクエストを使ったうえで､買ったものをすべて捨てることになる｡
         let full: Vec<_> = (0..crate::cache::MAX_CACHED_POSTS)
             .map(|n| TimelineItem {
                 id: n.to_string(),
@@ -2564,8 +2554,7 @@ mod tests {
         let state = TimelineState::Loaded(full);
 
         assert!(!offers_load_older(Some("cursor-abc"), &state));
-        // ...and the body explains itself rather than the button just
-        // disappearing.
+        // ...そしてボタンがただ消えるのではなく､本文が自分で説明する｡
         assert!(at_the_post_cap(&state));
     }
 
@@ -2599,14 +2588,14 @@ mod tests {
 
     #[test]
     fn labels_a_repost_generically_when_the_reposter_is_missing() {
-        // Mirrors byline's empty-author fallback (#13): a bare "@ reposted"
-        // would read as broken.
+        // byline の著者が空のときのフォールバック (#13) に倣う: 素の
+        // "@ reposted" は壊れているように読める｡
         assert_eq!(repost_banner_label(""), "Reposted");
     }
 
     #[test]
     fn keeps_a_timestamp_too_short_to_slice() {
-        // `&time[..5]` would panic here, so the guard has to hold.
+        // ここでは `&time[..5]` が panic するので､ガードが効く必要がある｡
         assert_eq!(format_timestamp(Some("2026-08-16T09")), "2026-08-16T09");
     }
 
@@ -2638,8 +2627,8 @@ mod tests {
 
     #[test]
     fn cooldown_label_clamps_a_reset_time_already_passed() {
-        // #10: a countdown that's just crossed zero must read "0s", never a
-        // confusing negative number.
+        // #10: 0 を跨いだばかりのカウントダウンは "0s" と読めなければならず､
+        // 紛らわしい負の数は決して出さない｡
         assert_eq!(
             cooldown_label(Cooldown::ApiRateLimit, 1_000, 1_060),
             "Rate limited by X — retry in 0s"
@@ -2648,9 +2637,9 @@ mod tests {
 
     #[test]
     fn cooldown_label_does_not_blame_x_for_the_local_fetch_interval() {
-        // The self-imposed interval blocks a reload before anything is sent,
-        // so X has said nothing — calling it a rate limit would be a plain
-        // misstatement of what happened.
+        // 自分で課した間隔は何かを送る前にリロードを止めるので､X は何も
+        // 言っていない — これをレートリミットと呼ぶのは､起きたことの端的な
+        // 言い間違いになる｡
         let label = cooldown_label(Cooldown::LocalInterval, 1_060, 1_000);
         assert_eq!(label, "Waiting out the fetch interval — 60s");
         assert!(!label.contains("Rate limited"), "{label}");
@@ -2676,8 +2665,8 @@ mod tests {
 
     #[test]
     fn reload_gate_polling_blocks_within_the_configured_interval() {
-        // Same shape `reload_cooldown` itself blocks on — `Polling` must
-        // defer to it unchanged.
+        // `reload_cooldown` 自身が止めるのと同じ形 — `Polling` はそれに
+        // そのまま従わなければならない｡
         assert_eq!(
             reload_gate(ReloadTrigger::Polling, Some(1_000), 60, 1_030),
             Some(1_060)
@@ -2686,16 +2675,16 @@ mod tests {
 
     #[test]
     fn reload_gate_user_action_bypasses_the_interval_even_when_polling_would_block() {
-        // The core fix for #57's primary symptom: a post-submit reload must
-        // go through immediately, even though the exact same
-        // `last_reload_at`/`now` pair blocks a `Polling` reload above.
+        // #57 の主症状に対する中心的な修正: 送信後のリロードは即座に通らな
+        // ければならない｡上ではまったく同じ `last_reload_at`/`now` の組が
+        // `Polling` のリロードを止めているにもかかわらず｡
         assert_eq!(
             reload_gate(ReloadTrigger::UserAction, Some(1_000), 60, 1_030),
             None
         );
     }
 
-    // --- cooldown_tick (#57 item 3) ---
+    // --- cooldown_tick (#57 の項目 3) ---
 
     #[test]
     fn cooldown_tick_keeps_waiting_before_reset_at() {
@@ -2720,8 +2709,8 @@ mod tests {
 
     #[test]
     fn cooldown_tick_has_elapsed_exactly_at_reset_at() {
-        // Mirrors `reload_cooldown`'s own `>` boundary: blocked strictly
-        // before `reset_at`, allowed (here: elapsed) from `reset_at` on.
+        // `reload_cooldown` 自身の `>` の境界に倣う: `reset_at` より厳密に
+        // 前は止め､`reset_at` 以降は許す (ここでは経過扱い)｡
         let notice = ReloadNotice::Cooldown {
             reset_at: 1_060,
             cooldown: Cooldown::LocalInterval,
@@ -2736,8 +2725,8 @@ mod tests {
 
     #[test]
     fn cooldown_tick_is_not_ticking_for_a_failed_notice() {
-        // A `Failed` notice carries no countdown to advance — the ticker
-        // must stop rather than poll it forever.
+        // `Failed` の通知は進めるべきカウントダウンを持たない — ticker は
+        // 永久にポーリングするのではなく止まらなければならない｡
         let notice = ReloadNotice::Failed("boom".into());
         assert_eq!(
             cooldown_tick(Some(&notice), 1_000),
@@ -2808,8 +2797,8 @@ mod tests {
         let error = anyhow::anyhow!("network exploded");
         let (state, notice) = reload_failure_outcome(TimelineState::Loading, &error);
         assert!(matches!(state, TimelineState::Failed(_)));
-        // #57: the state itself already says what went wrong — a banner
-        // saying the exact same thing would be a duplicated failure.
+        // #57: 状態自身がすでに何が失敗したかを言っているので､まったく同じ
+        // ことを言うバナーは失敗の二重表示になる｡
         assert_eq!(notice, None);
     }
 
@@ -2828,24 +2817,24 @@ mod tests {
                 cooldown: Cooldown::ApiRateLimit,
             }
         ));
-        // Same reasoning as the plain-failure case above: `RateLimited`
-        // already carries the countdown, so no separate notice is needed.
+        // 上の素の失敗のケースと同じ理屈: `RateLimited` はすでにカウント
+        // ダウンを持っているので､別の通知は要らない｡
         assert_eq!(notice, None);
     }
 
-    // --- `TimelineView::load_older` reuses the same pure functions (#57) ---
+    // --- `TimelineView::load_older` は同じ純粋関数を使い回す (#57) ---
     //
-    // `load_older` only ever runs once `state` is already `Loaded` (see
-    // `offers_load_older`'s gate on the "Load older" row), so these pin the
-    // specific two-item, paging-backwards shape that call site actually
-    // hits, rather than re-asserting the single-item cases above.
+    // `load_older` は `state` がすでに `Loaded` のときにしか走らない
+    // ("Load older" の行に対する `offers_load_older` のゲートを参照)｡だから
+    // これらは上の単一要素のケースを assert し直すのではなく､その呼び出し箇所が
+    // 実際に踏む 2 要素で後ろへページングする形を押さえる｡
 
     #[test]
     fn load_older_keeps_the_current_page_visible_while_its_fetch_is_in_flight() {
-        // Before #57, `load_older` set `state = TimelineState::Loading`
-        // unconditionally, which — via `TimelineView::body`'s match — wiped
-        // the page the user was paging through, and the "Load older" row
-        // along with it, for the whole request.
+        // #57 より前は `load_older` が無条件に
+        // `state = TimelineState::Loading` を設定しており､`TimelineView::body`
+        // の match を通じて､リクエストのあいだじゅう､ユーザーがページングして
+        // いたページと "Load older" の行を一緒に消していた｡
         let items = vec![item_with("1", "alice", None), item_with("2", "bob", None)];
         match reload_start_state(TimelineState::Loaded(items.clone())) {
             TimelineState::Loaded(got) => assert_eq!(got, items),
@@ -2855,10 +2844,10 @@ mod tests {
 
     #[test]
     fn load_older_keeps_the_current_page_when_paging_backwards_fails() {
-        // Before #57, a failed "Load older" request replaced `state` via
-        // `map_reload_error`, discarding everything the user had already
-        // paged through — worse than a plain reload failure, since nothing
-        // about the posts already shown was actually wrong.
+        // #57 より前は､失敗した "Load older" のリクエストが `map_reload_error`
+        // 経由で `state` を置き換え､ユーザーがすでにページングしてきたものを
+        // すべて捨てていた — 素のリロードの失敗より悪い｡すでに表示されていた
+        // post には実際には何も間違いが無かったからだ｡
         let items = vec![item_with("1", "alice", None), item_with("2", "bob", None)];
         let error = anyhow::anyhow!("network exploded");
         let (state, notice) = reload_failure_outcome(TimelineState::Loaded(items.clone()), &error);
@@ -2884,8 +2873,8 @@ mod tests {
 
     #[test]
     fn labels_a_reply_generically_when_the_parent_author_is_missing() {
-        // Mirrors repost_banner_label's empty-author fallback (#12): a bare
-        // "Replying to @" would read as broken.
+        // repost_banner_label の著者が空のときのフォールバック (#12) に倣う:
+        // 素の "Replying to @" は壊れているように読める｡
         let replied_to = RepliedTo {
             post_id: "1".to_string(),
             author_name: String::new(),
@@ -2896,8 +2885,8 @@ mod tests {
 
     #[test]
     fn offers_to_show_the_thread_with_the_worst_case_cost_spelled_out() {
-        // #12: the cost must be predictable *before* spending it — the
-        // label itself says how many requests a click can cost.
+        // #12: コストは使う*前*に予測できなければならない — ラベル自身が､
+        // クリック 1 回で何リクエストかかりうるかを言う｡
         assert_eq!(
             thread_action_label(None),
             Some("Show thread (up to 5 requests)")
@@ -2982,8 +2971,8 @@ mod tests {
 
     #[test]
     fn does_not_offer_repost_before_home_user_id_resolves() {
-        // #11: the repost endpoints act as *this* account, whose id only
-        // `/me` resolves — nothing to call yet without it.
+        // #11: repost のエンドポイントは*この*アカウントとして作用し､その id は
+        // `/me` しか解決しない — それが無いうちは呼ぶものが無い｡
         let item = item_with("1", "alice", None);
         assert!(!offers_repost(true, None, Some("bob"), &item));
     }
@@ -3004,17 +2993,17 @@ mod tests {
 
     #[test]
     fn does_not_offer_quote_without_oauth() {
-        // The composer itself isn't reachable without OAuth (see
-        // `Render::render`'s gate) — nowhere for a quote to go.
+        // OAuth 無しではコンポーザー自体に届かない (`Render::render` のゲートを
+        // 参照) — 引用の行き先が無い｡
         let item = item_with("1", "alice", None);
         assert!(!offers_quote(false, &item));
     }
 
     #[test]
     fn offers_quote_on_ones_own_post() {
-        // Unlike `offers_repost`, quoting your own post is allowed — the
-        // API doesn't reject it, per #16's design decision, so this must
-        // stay `true` even though the equivalent repost case is `false`.
+        // `offers_repost` と違い､自分の post の引用は許される — #16 の設計
+        // 判断のとおり API が拒否しないので､repost の同等のケースが `false`
+        // であっても､ここは `true` のままでなければならない｡
         let item = item_with("1", "bob", None);
         assert!(offers_quote(true, &item));
     }
@@ -3058,24 +3047,25 @@ mod tests {
         assert_eq!(repost_action_label(&deleting), "Removing repost…");
     }
 
-    /// The startup path #55 fell straight through (#59).
+    /// #55 がまっすぐすり抜けた起動の経路 (#59)｡
     ///
-    /// Everything below `cargo run` built and unit-tested clean, but nobody
-    /// had opened the window, so a panic that only fires once something
-    /// renders reached `main` untouched. gpui's test platform draws to
-    /// nothing (`TestWindow::draw` is a no-op), so this needs neither a GPU
-    /// nor the window server -- yet it still walks the same element tree the
-    /// real window would, which is exactly where `gpui_component`'s widgets
-    /// reach back up for the window root.
-    /// #118: the timeline's own root has to sit on the window's focus
-    /// path from the first frame, with no click anywhere.
+    /// `cargo run` より下はすべてビルドも単体テストも通っていたが､誰も
+    /// ウィンドウを開いていなかったので､何かが描画されてはじめて発火する
+    /// panic が手つかずのまま `main` へ届いた｡gpui のテストプラットフォームは
+    /// 何も無いところへ描く (`TestWindow::draw` は no-op) ので､これには GPU も
+    /// ウィンドウサーバーも要らない -- それでいて本物のウィンドウと同じ要素の
+    /// ツリーを歩く｡そこがまさに `gpui_component` のウィジェットがウィンドウの
+    /// root を求めて遡る場所だ｡
+    /// #118: timeline 自身の root は､どこもクリックせずに最初のフレームから
+    /// ウィンドウのフォーカス経路に載っていなければならない｡
     ///
-    /// This is the property, not the mechanism: gpui resolves an action
-    /// against the focused element's ancestry, so an unfocused timeline
-    /// takes the `Timeline` key context and every handler under it out of
-    /// reach. `cmd-r` matched nothing and the menu bar's Reload / New Post
-    /// / Submit Post either greyed out or dispatched into nowhere. Only
-    /// `Quit` worked, because it lives on the `App`.
+    /// これは仕組みではなく性質のほうだ: gpui はフォーカスされた要素の祖先に
+    /// 対してアクションを解決するので､フォーカスされていない timeline は
+    /// `Timeline` のキーコンテキストと､その下のすべてのハンドラを手の届かない
+    /// ところへ持っていく｡`cmd-r` は何にも一致せず､メニューバーの Reload /
+    /// New Post / Submit Post はグレーアウトするか､どこへも届かないところへ
+    /// dispatch していた｡動いたのは `Quit` だけで､これは `App` に載っている
+    /// からだ｡
     #[gpui::test]
     fn the_timeline_is_focused_from_the_first_frame(cx: &mut gpui::TestAppContext) {
         use gpui::AppContext as _;
@@ -3103,8 +3093,8 @@ mod tests {
         let timeline = timeline_slot.borrow().clone().unwrap();
         cx.run_until_parked();
 
-        // Deliberately no click and no `input.focus(..)` before this: the
-        // bug was that the app needed one.
+        // この前でクリックも `input.focus(..)` も意図的に行わない: アプリが
+        // それを必要としていたことがバグだった｡
         cx.update_window(window.into(), |_, window, cx| {
             let _ = window.draw(cx);
             timeline.update(cx, |view, _cx| {
@@ -3117,12 +3107,12 @@ mod tests {
         .unwrap();
     }
 
-    /// #118: leaving the composer must hand focus back rather than drop it.
+    /// #118: コンポーザーから抜けるときは､フォーカスを落とすのではなく
+    /// 返さなければならない｡
     ///
-    /// `window.blur()` left the window with an empty focus path, which
-    /// disabled the shortcuts and half the menu bar until something was
-    /// clicked — the same failure as the startup one, reached by pressing
-    /// `esc`.
+    /// `window.blur()` はウィンドウのフォーカス経路を空のまま残し､何かが
+    /// クリックされるまでショートカットとメニューバーの半分を無効にして
+    /// いた — 起動時のものと同じ失敗に､`esc` を押して辿り着く｡
     #[gpui::test]
     fn leaving_the_composer_returns_focus_to_the_timeline(cx: &mut gpui::TestAppContext) {
         use gpui::AppContext as _;
@@ -3169,9 +3159,9 @@ mod tests {
                     "the composer should hold focus once focused"
                 );
             });
-            // The action itself, not `window.focus(..)` directly: the
-            // handler is what this is checking, and reproducing its body
-            // in the test would pass no matter what the handler did.
+            // `window.focus(..)` を直接ではなくアクション自体を使う: 検査して
+            // いるのはハンドラのほうで､その中身をテストの中で再現したら
+            // ハンドラが何をしようと通ってしまう｡
             window.dispatch_action(Box::new(crate::menu::BlurComposer), cx);
         })
         .unwrap();
@@ -3189,7 +3179,7 @@ mod tests {
         .unwrap();
     }
 
-    /// The `Config` the window smoke tests run against.
+    /// ウィンドウの smoke テストが対象にする `Config`｡
     fn smoke_config() -> crate::config::Config {
         crate::config::Config {
             oauth_client_id: "client-123".to_string(),
@@ -3201,55 +3191,55 @@ mod tests {
             request_price: None,
             daily_request_budget: None,
             list_id: None,
-            // Off in the smoke tests: they render a window, and a paid
-            // background loop is not part of what they are checking.
+            // smoke テストでは off: これらはウィンドウを描画するもので､
+            // 金のかかるバックグラウンドのループは検査の対象ではない｡
             auto_sync_list: false,
             sync_interval_seconds: 21_600,
             sync_prune_limit_percent: 10,
             sync_writes_per_minute: 2,
-            // Off for the same reason (#21).
+            // 同じ理由で off (#21)｡
             auto_refresh: false,
             auto_refresh_interval_seconds: 300,
-            // Off so the tests that exercise the pill path stay on it —
-            // a test harness always finds the scroll at the top, and the
-            // on-by-default follow (#22) would empty `pending` before a
-            // test could look at it. The follow tests switch it on
-            // per-view instead.
+            // pill の経路を通るテストがその経路に留まるように off にする —
+            // テストハーネスは常にスクロールが最上部にある状態を見つけるので､
+            // 既定で on の follow (#22) だと､テストが `pending` を覗く前に
+            // 空にしてしまう｡follow のテストは代わりにビューごとに on へ
+            // 切り替える｡
             follow_new_posts: false,
         }
     }
 
-    /// `Paths` rooted in a scratch directory, for the window smoke tests.
+    /// ウィンドウの smoke テスト用に､使い捨てのディレクトリを根に置いた
+    /// `Paths`｡
     fn smoke_paths() -> crate::paths::Paths {
         let home = std::env::temp_dir().join("twigpui-smoke");
         let home = home.display().to_string();
         crate::paths::Paths::from_vars(move |key| (key == "HOME").then(|| home.clone())).unwrap()
     }
 
-    // --- #146 層 3: what a window can be asked without drawing it ---
+    // --- #146 層 3: 描画せずにウィンドウへ問えること ---
     //
-    // gpui does not run layout on the test platform, so nothing about
-    // spacing, wrapping or size is assertable here — #182 is the standing
-    // reminder of what that costs, and `--fixture` plus a screenshot
-    // (#146's layer 2) is the only check that applies to those.
+    // gpui はテストプラットフォームでレイアウトを走らせないので､間隔・
+    // 折り返し・サイズについてはここでは何も assert できない — #182 が
+    // その代償についての恒常的な備忘で､`--fixture` とスクリーンショット
+    // (#146 の層 2) がそれらに当てはまる唯一の確認だ｡
     //
-    // What *is* observable is state and dispatch. So these tests cover
-    // the half of the window that has nothing to do with pixels: which
-    // action reaches which method, what a keystroke changes, and — since
-    // most of this file spends money — which paths are guaranteed not to.
+    // 観測*できる*のは状態と dispatch のほうだ｡だからこれらのテストは､
+    // ピクセルと関係のない側のウィンドウ半分をカバーする: どのアクションが
+    // どのメソッドへ届くか､キーストロークが何を変えるか､そして — この
+    // ファイルのほとんどは金を使うので — どの経路が使わないと保証されるか｡
     //
-    // Every one of them dispatches the real action rather than calling
-    // the handler's body, for the reason
-    // `leaving_the_composer_returns_focus_to_the_timeline` already
-    // states: a test that reproduces the body passes no matter what the
-    // handler is actually wired to.
+    // どれもハンドラの中身を呼ぶのではなく本物のアクションを dispatch する｡
+    // 理由は `leaving_the_composer_returns_focus_to_the_timeline` がすでに
+    // 述べているとおりだ: 中身を再現するテストは､ハンドラが実際に何へ
+    // 繋がっていようと通ってしまう｡
 
-    /// A window filled from `fixture`, and the view inside it.
+    /// `fixture` から埋めたウィンドウと､その中のビュー｡
     ///
-    /// Extracted because the three tests above already triplicate this
-    /// block and the ones below would have made it nine copies. Returns
-    /// the handle as well as the view: dispatching an action needs the
-    /// window, asserting the result needs the view.
+    /// 上の 3 つのテストがすでにこのブロックを 3 重に持っていて､下のものを
+    /// 足すと 9 つのコピーになったので切り出した｡ビューだけでなくハンドルも
+    /// 返す: アクションの dispatch にはウィンドウが要り､結果の assert には
+    /// ビューが要る｡
     fn fixture_window(
         cx: &mut gpui::TestAppContext,
         fixture: Fixture,
@@ -3265,10 +3255,10 @@ mod tests {
         )
     }
 
-    /// [`fixture_window`] with stick-to-top follow switched on (#22) —
-    /// the one knob whose real default the follow tests need at
-    /// construction time, since `show_fixture` reads it to decide whether
-    /// the held-back posts wait behind the pill or arrive by themselves.
+    /// 最上部へ貼り付く follow を on にした [`fixture_window`] (#22) —
+    /// follow のテストが構築の時点で本物の既定値を必要とする唯一のつまみだ｡
+    /// `show_fixture` がこれを読んで､抑えていた post を pill の裏で待たせるか
+    /// 自分から届かせるかを決めるからだ｡
     fn following_fixture_window(
         cx: &mut gpui::TestAppContext,
         fixture: Fixture,
@@ -3288,11 +3278,11 @@ mod tests {
         )
     }
 
-    /// A window started `startup` against `config` and `paths`, and the
-    /// view inside it — what [`fixture_window`] is, minus the things a
-    /// caller wants to choose (#164's `a_switch_is_remembered_on_disk_at_once`
-    /// starts live under its own directory so nothing else writes there;
-    /// #22's follow tests start with the switch on).
+    /// `config` と `paths` に対して `startup` で起動したウィンドウと､その中の
+    /// ビュー — [`fixture_window`] から､呼び出し側が選びたいものを引いたものだ
+    /// (#164 の `a_switch_is_remembered_on_disk_at_once` は他が書き込まない
+    /// ように自分のディレクトリの下で live 起動する｡#22 の follow のテストは
+    /// スイッチを on にして起動する)｡
     fn window_with(
         cx: &mut gpui::TestAppContext,
         config: crate::config::Config,
@@ -3322,8 +3312,8 @@ mod tests {
         (window, timeline)
     }
 
-    /// A fixture with `shown` already on screen and `waiting` held back —
-    /// the shape #21's "N new posts" bar exists for.
+    /// `shown` がすでに画面にあり､`waiting` を抑えてある fixture — #21 の
+    /// "N new posts" のバーが存在する理由になっている形だ｡
     fn fixture_with(shown: &[&str], waiting: &[&str]) -> Fixture {
         Fixture {
             signed_in_as: crate::fixture::FixtureUser {
@@ -3342,7 +3332,7 @@ mod tests {
         }
     }
 
-    /// The ids the window is currently rendering.
+    /// ウィンドウが現在描画している id｡
     fn shown_ids(view: &super::TimelineView) -> Vec<String> {
         match &view.state {
             TimelineState::Loaded(items) => items.iter().map(|item| item.id.clone()).collect(),
@@ -3350,12 +3340,12 @@ mod tests {
         }
     }
 
-    /// #146: a fixture window builds no `XClient` at all.
+    /// #146: fixture のウィンドウは `XClient` をまったく構築しない｡
     ///
-    /// `show_fixture`'s doc calls this "not a convention but the reason a
-    /// fixture cannot cost anything" — every paid path in this view goes
-    /// through `self.client`, so an absent one is what makes a screenshot
-    /// free. Until now that was a sentence; this is the enforcement.
+    /// `show_fixture` のドキュメントはこれを｢慣習ではなく､fixture がコストを
+    /// かけられない理由そのものだ｣と呼んでいる — このビューで金のかかる経路は
+    /// すべて `self.client` を通るので､それが無いことがスクリーンショットを
+    /// 無料にしている｡今まではそれが 1 文だっただけで､これはその強制だ｡
     #[gpui::test]
     fn a_fixture_window_holds_no_client_to_spend_with(cx: &mut gpui::TestAppContext) {
         let (_window, timeline) = fixture_window(cx, fixture_with(&["2", "1"], &[]));
@@ -3370,7 +3360,7 @@ mod tests {
         });
     }
 
-    /// #21: the fixture's held-back posts become the bar's count.
+    /// #21: fixture が抑えていた post が､そのままバーの件数になる｡
     #[gpui::test]
     fn a_fixtures_waiting_posts_fill_the_new_posts_buffer(cx: &mut gpui::TestAppContext) {
         let (_window, timeline) = fixture_window(cx, fixture_with(&["2", "1"], &["4", "3"]));
@@ -3387,14 +3377,13 @@ mod tests {
         });
     }
 
-    /// #21: pressing "Show New Posts" is what puts them on screen.
+    /// #21: "Show New Posts" を押すことが､それらを画面に出す操作だ｡
     ///
-    /// The gap this closes is a real one: the bar and its `cmd-shift-r`
-    /// binding could not be exercised by hand from a session with no way
-    /// to click a desktop window, so until #146 the whole click path was
-    /// unverified. `dispatch_action` covers it from `on_action` down — it
-    /// goes through the same registration a keystroke does. The step above
-    /// that, whether a coordinate lands on the bar, is #184's test below.
+    /// これが埋める穴は本物だ: デスクトップのウィンドウをクリックする手段の
+    /// 無いセッションからは､バーとその `cmd-shift-r` の割り当てを手で試せない
+    /// ので､#146 までクリックの経路はまるごと未検証だった｡`dispatch_action`
+    /// は `on_action` から下をカバーする — キーストロークと同じ登録を通る｡
+    /// その 1 つ上の段､座標がバーの上に落ちるかどうかは､下の #184 のテストだ｡
     #[gpui::test]
     fn showing_new_posts_moves_them_onto_the_timeline(cx: &mut gpui::TestAppContext) {
         use gpui::AppContext as _;
@@ -3419,20 +3408,20 @@ mod tests {
         });
     }
 
-    /// #184: the same reveal, reached by a click on the bar itself.
+    /// #184: 同じ表示を､バー自体へのクリックから辿る｡
     ///
-    /// This is the layer above #183. The test above dispatches the action
-    /// directly, which leaves one step unverified: whether a mouse at some
-    /// coordinate lands on the bar at all. Here nothing is dispatched — the
-    /// bar's own bounds are looked up from the frame that was just drawn,
-    /// a click is simulated at their centre, and gpui's hit test is what
-    /// has to find `on_click`. The assertions are deliberately identical
-    /// to the dispatch test's, so a pass means the two paths agree.
+    /// これは #183 の 1 つ上の層だ｡上のテストはアクションを直接 dispatch する
+    /// ので､1 段が未検証のまま残る: ある座標のマウスがそもそもバーの上に
+    /// 落ちるかどうかだ｡ここでは何も dispatch しない — 描かれたばかりの
+    /// フレームからバー自身の bounds を引き､その中心でクリックを模擬し､
+    /// `on_click` を見つけなければならないのは gpui の hit test のほうだ｡
+    /// assert は dispatch のテストのものと意図的に同一なので､通れば 2 つの
+    /// 経路が一致していることになる｡
     ///
-    /// The coordinate is never written down. `render::Addressable` gives
-    /// the bar one name, `debug_bounds` reads back where that name was
-    /// actually laid out, and the click follows — so moving the bar in
-    /// `render.rs` moves the click with it.
+    /// 座標はどこにも書き下さない｡`render::Addressable` がバーに名前を 1 つ
+    /// 与え､`debug_bounds` がその名前が実際にどこへ配置されたかを読み返し､
+    /// クリックはそれに従う — だから `render.rs` でバーを動かせば､クリックも
+    /// 一緒に動く｡
     #[gpui::test]
     fn clicking_the_new_posts_bar_moves_them_onto_the_timeline(cx: &mut gpui::TestAppContext) {
         let (window, timeline) = fixture_window(cx, fixture_with(&["2", "1"], &["4", "3"]));
@@ -3458,20 +3447,18 @@ mod tests {
         });
     }
 
-    /// #184: what makes the test above mean anything.
+    /// #184: 上のテストに意味を持たせているもの｡
     ///
-    /// A simulated click that reached `on_click` no matter where it
-    /// landed would pass the previous test while proving nothing about
-    /// the hit test. This clicks the middle of the timeline instead —
-    /// below the bar and clear of every row, since a fixture's two posts
-    /// sit at the top — and requires the buffer to still be waiting.
-    /// Together the pair says the coordinate is what decides, which is
-    /// the step #183's `dispatch_action` skips.
+    /// どこに落ちても `on_click` に届いてしまう模擬クリックは､hit test に
+    /// ついて何も証明しないまま前のテストを通してしまう｡そこでこちらは
+    /// timeline の真ん中をクリックする — バーより下で､どの行にも当たらない
+    /// 位置だ｡fixture の 2 件の post は最上部にあるからだ — そしてバッファが
+    /// まだ待っていることを要求する｡この 2 つで､決めているのは座標だと言える｡
+    /// それが #183 の `dispatch_action` が飛ばしている段だ｡
     ///
-    /// The miss is addressed the same way the hit is, rather than by
-    /// offsetting the bar's centre by some number of pixels: a literal
-    /// offset is a coordinate written down, and it would start landing on
-    /// the bar again the moment the window or the bar changed height.
+    /// 外れのほうも当たりと同じやり方で扱い､バーの中心を何ピクセルかずらす
+    /// やり方は採らない: 直値のオフセットは書き下された座標であり､ウィンドウか
+    /// バーの高さが変わった瞬間からまたバーの上に落ち始めるからだ｡
     #[gpui::test]
     fn clicking_the_timeline_below_the_bar_reveals_nothing(cx: &mut gpui::TestAppContext) {
         let (window, timeline) = fixture_window(cx, fixture_with(&["2", "1"], &["4", "3"]));
@@ -3498,10 +3485,10 @@ mod tests {
         });
     }
 
-    /// #22: a poll that finds the reader at the top flows straight on —
-    /// no pill, no press. An undrawn window reads as "at the top"
-    /// (`logical_scroll_top` answers `(0, 0px)` before any layout), which
-    /// is also what a freshly opened window is.
+    /// #22: 読み手が最上部にいるところへ来た poll はそのまま流れる — pill も
+    /// 押下も無い｡描画されていないウィンドウは「最上部」と読まれる
+    /// (`logical_scroll_top` はレイアウト前には `(0, 0px)` を答える)｡開いた
+    /// ばかりのウィンドウもまたそれだ｡
     #[gpui::test]
     fn a_poll_flows_onto_the_screen_when_the_reader_is_at_the_top(cx: &mut gpui::TestAppContext) {
         let (_window, timeline) = fixture_window(cx, fixture_with(&["2", "1"], &[]));
@@ -3528,13 +3515,12 @@ mod tests {
         });
     }
 
-    /// #22: following onto a screen with nothing on it — an empty List,
-    /// a fresh install — arrives at the top without arming a glide. There
-    /// is no row to keep in place, so the compensation would name an
-    /// index past the end of the list; gpui retains an unresolvable
-    /// anchor and retries it every prepaint, so a later "Load older"
-    /// growing the list past that index would jump the viewport under
-    /// the reader for no visible reason.
+    /// #22: 何も無い画面へ follow したとき — 空の List､入れたばかりの
+    /// インストール — は､glide を仕掛けずに最上部へ着く｡位置を保つべき行が
+    /// 無いので､補正はリストの末尾を越えた index を指してしまう｡gpui は解決
+    /// できない anchor を保持して prepaint のたびに再試行するため､後の
+    /// "Load older" でリストがその index を越えて伸びると､目に見える理由も
+    /// 無く読み手の下でビューポートが飛ぶことになる｡
     #[gpui::test]
     fn following_onto_an_empty_timeline_snaps_without_a_glide(cx: &mut gpui::TestAppContext) {
         let (_window, timeline) = fixture_window(cx, fixture_with(&[], &[]));
@@ -3559,8 +3545,8 @@ mod tests {
         });
     }
 
-    /// #22: the switch off means every poll waits behind the pill,
-    /// whatever the scroll position.
+    /// #22: スイッチが off なら､スクロール位置が何であれ､どの poll も pill の
+    /// 裏で待つ｡
     #[gpui::test]
     fn a_poll_waits_behind_the_pill_when_follow_is_off(cx: &mut gpui::TestAppContext) {
         let (_window, timeline) = fixture_window(cx, fixture_with(&["2", "1"], &[]));
@@ -3584,16 +3570,17 @@ mod tests {
         });
     }
 
-    /// #22: a reader partway down keeps their place — follow yields to the
-    /// pill, which is `preserved_scroll_target`'s rule seen from above.
+    /// #22: 途中まで下がっている読み手は位置を保つ — follow は pill に譲る｡
+    /// これは `preserved_scroll_target` のルールを上から見たものだ｡
     #[gpui::test]
     fn a_poll_waits_behind_the_pill_when_the_reader_is_scrolled_down(
         cx: &mut gpui::TestAppContext,
     ) {
         let (window, timeline) = fixture_window(cx, fixture_with(&["2", "1"], &[]));
 
-        // A real frame, so `logical_scroll_top` has row bounds to answer
-        // from — an undrawn window cannot be anywhere but the top.
+        // 本物のフレームを描く｡そうすれば `logical_scroll_top` が答える元に
+        // する行の bounds ができる — 描画されていないウィンドウは最上部以外に
+        // いられない｡
         let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
         visual.update(|window, cx| {
             let _ = window.draw(cx);
@@ -3630,11 +3617,10 @@ mod tests {
         });
     }
 
-    /// #22: with follow on, a fixture's held-back posts arrive by
-    /// themselves a few seconds in — the simulation of the poll that
-    /// would have brought them, so the flow can be watched by hand
-    /// (`cargo run -- --fixture fixtures/timeline.json`) without a paid
-    /// request.
+    /// #22: follow が on なら､fixture が抑えていた post は数秒後に自分から
+    /// 届く — それらを運んできたはずの poll の模擬だ｡おかげで金のかかる
+    /// リクエスト無しに､この流れを手で
+    /// (`cargo run -- --fixture fixtures/timeline.json`) 眺められる｡
     #[gpui::test]
     fn a_fixtures_waiting_posts_arrive_by_themselves_when_follow_is_on(
         cx: &mut gpui::TestAppContext,
@@ -3672,9 +3658,9 @@ mod tests {
         });
     }
 
-    /// #22: the View menu's toggle flips follow and says which way it
-    /// now points — the menu bar cannot show a checkmark, so the banner
-    /// is the only place the new state is visible.
+    /// #22: View メニューのトグルは follow を反転させ､今どちら向きかを言う —
+    /// メニューバーはチェックマークを出せないので､新しい状態が見えるのは
+    /// バナーだけだ｡
     #[gpui::test]
     fn toggling_follow_flips_the_switch_and_reports_itself(cx: &mut gpui::TestAppContext) {
         use gpui::AppContext as _;
@@ -3703,21 +3689,20 @@ mod tests {
         });
     }
 
-    /// #182, retroactively: the status bar's two segments do not touch.
+    /// #182 に遡って: ステータスバーの 2 つの区画は接触しない｡
     ///
-    /// This is the test #182 was merged without. `Total: 11 req` and
-    /// `List sync: …` rendered as `11 reqList sync` — the row's `gap_3`
-    /// does not separate two bare text spans, and raising it to `gap_8`
-    /// changed nothing, so the fix was an explicit margin. A screenshot
-    /// was the only way to see either the defect or the fix.
+    /// これは #182 が無いままマージされたテストだ｡`Total: 11 req` と
+    /// `List sync: …` が `11 reqList sync` と描画されていた — 行の `gap_3` は
+    /// 素のテキスト span 2 つを引き離さないし､`gap_8` へ上げても何も変わら
+    /// なかったので､修正は明示的な margin になった｡欠陥も修正も､見る手段は
+    /// スクリーンショットしか無かった｡
     ///
-    /// It was not the only way. Layout runs under the test platform;
-    /// what `TestWindow::draw` skips is turning a `Scene` into pixels.
-    /// So the laid-out bounds are real, and a spacing this test can read
-    /// is a spacing an assertion can hold (#184). Deliberately `>`, not a
-    /// specific gap: the defect was the two boxes meeting, and pinning
-    /// the exact margin would make every deliberate spacing change a test
-    /// failure.
+    /// それは唯一の手段ではなかった｡レイアウトはテストプラットフォームでも
+    /// 走る｡`TestWindow::draw` が飛ばすのは `Scene` をピクセルに変える段だ｡
+    /// だから配置された bounds は本物で､このテストが読める間隔は assert で
+    /// 押さえられる間隔だ (#184)｡特定の gap ではなく意図的に `>` にしてある:
+    /// 欠陥は 2 つの箱が接することであって､正確な margin を固定すると､
+    /// 意図的な間隔の変更がすべてテストの失敗になってしまう｡
     #[gpui::test]
     fn the_status_bars_segments_keep_apart(cx: &mut gpui::TestAppContext) {
         let (window, _timeline) = fixture_window(cx, fixture_with(&["2", "1"], &[]));
@@ -3743,12 +3728,12 @@ mod tests {
         );
     }
 
-    /// #21: pressing it again changes nothing.
+    /// #21: もう一度押しても何も変わらない｡
     ///
-    /// Asserts the timeline is *identical*, not merely that nothing
-    /// crashed. `apply_pending` early-returns on an empty buffer today;
-    /// the regression this guards is someone later making it set `state`
-    /// unconditionally, which would blank the screen on a second press.
+    /// 単に落ちなかったことではなく､timeline が*同一*であることを assert する｡
+    /// 今の `apply_pending` はバッファが空なら早期 return する｡ここで防いで
+    /// いる退行は､後から誰かがこれを無条件に `state` を設定する形にして､
+    /// 2 回目の押下で画面を空白にしてしまうことだ｡
     #[gpui::test]
     fn showing_new_posts_with_none_waiting_leaves_the_timeline_alone(
         cx: &mut gpui::TestAppContext,
@@ -3773,13 +3758,13 @@ mod tests {
         });
     }
 
-    /// #21: `cmd-shift-r` spends nothing.
+    /// #21: `cmd-shift-r` は何も使わない｡
     ///
-    /// The pairing with `cmd-r` is the whole design — one buys a fetch,
-    /// the other reveals one already paid for — and `menu.rs` says so in
-    /// prose. This is the part of that claim a test can hold: after the
-    /// dispatch there is still no client, and `last_reload_at` has not
-    /// moved, so nothing went out and nothing was even attempted.
+    /// `cmd-r` との対がこの設計のすべてだ — 一方は取得を買い､もう一方は
+    /// すでに支払い済みのものを見せる — そして `menu.rs` が文章でそう言って
+    /// いる｡これはその主張のうち､テストで押さえられる部分だ: dispatch の後も
+    /// client はまだ無く､`last_reload_at` も動いていない｡だから何も出ていない
+    /// し､試みられてすらいない｡
     #[gpui::test]
     fn showing_new_posts_sends_nothing(cx: &mut gpui::TestAppContext) {
         use gpui::AppContext as _;
@@ -3804,9 +3789,9 @@ mod tests {
         });
     }
 
-    // --- #164: the toolbar's list picker ---
+    // --- #164: ツールバーの list picker ---
 
-    /// A fixture whose picker has `lists` to name, on top of `shown`.
+    /// `shown` に加えて､picker が名前を出せる `lists` を持つ fixture｡
     fn fixture_with_lists(shown: &[&str], lists: &[(&str, &str)]) -> Fixture {
         let mut fixture = fixture_with(shown, &[]);
         fixture.lists = lists
@@ -3819,8 +3804,9 @@ mod tests {
         fixture
     }
 
-    /// Write `ids` as `list_id`'s cached timeline in the smoke directory,
-    /// so a switch to it has something to render without a client.
+    /// `ids` を `list_id` のキャッシュ済み timeline として smoke 用の
+    /// ディレクトリへ書く｡そこへ切り替えたときに､client 無しでも描くものが
+    /// あるようにするためだ｡
     fn cache_list(list_id: &str, ids: &[&str]) {
         let paths = smoke_paths();
         paths.ensure_dirs().unwrap();
@@ -3838,7 +3824,7 @@ mod tests {
         .unwrap();
     }
 
-    /// A drawn window and its visual context, for the click tests below.
+    /// 下のクリックのテスト用に､描画済みのウィンドウとその visual context｡
     fn drawn(
         cx: &mut gpui::TestAppContext,
         fixture: Fixture,
@@ -3851,9 +3837,9 @@ mod tests {
         (visual, timeline)
     }
 
-    /// #164: every segment is laid out, Home first, and none of them
-    /// overlap — the same claim `the_status_bars_segments_keep_apart`
-    /// makes about the status bar, for the reason it gives.
+    /// #164: どの区画も配置され､Home が先頭で､どれも重ならない —
+    /// `the_status_bars_segments_keep_apart` がステータスバーについて述べる
+    /// のと同じ主張を､同じ理由で述べている｡
     #[gpui::test]
     fn the_picker_lays_out_home_and_every_list_left_to_right(cx: &mut gpui::TestAppContext) {
         let (mut visual, _timeline) = drawn(
@@ -3873,8 +3859,8 @@ mod tests {
         assert!(first.left() >= home.right(), "{home:?} then {first:?}");
         assert!(second.left() >= first.right(), "{first:?} then {second:?}");
 
-        // #182 again, one strip up: `gap` on the toolbar row leaves the
-        // title flush against the trough, which reads as `List@usadamasa`.
+        // 1 段上でまた #182: ツールバーの行の `gap` はタイトルを溝に密着させた
+        // ままにするので､`List@usadamasa` と読めてしまう｡
         let title = visual
             .debug_bounds("header-title")
             .expect("the title is always shown");
@@ -3886,12 +3872,12 @@ mod tests {
         );
     }
 
-    /// The measured failure (2026-08-24): a window with eleven list tabs
-    /// at 560px put the toolbar's "Sign in with X" past the right edge,
-    /// and the body's only advice was to click it. A session X had just
-    /// refused to renew was therefore unrecoverable from the screen. The
-    /// body is where the "Not signed in" sentence lives, so the button
-    /// lives there too — reachable no matter what the toolbar is doing.
+    /// 実測した失敗 (2026-08-24): 560px でリストのタブが 11 個あるウィンドウは､
+    /// ツールバーの "Sign in with X" を右端の外へ押し出したうえ､本文の助言は
+    /// それをクリックしろというものだけだった｡X が更新を拒否したばかりの
+    /// セッションは､画面からは回復できなかったことになる｡"Not signed in" の
+    /// 文が居るのは本文なので､ボタンもそこに居る — ツールバーが何をして
+    /// いようと手が届く｡
     #[gpui::test]
     fn a_signed_out_window_offers_sign_in_in_the_body(cx: &mut gpui::TestAppContext) {
         let (mut visual, timeline) = drawn(cx, fixture_with(&["1"], &[]));
@@ -3915,12 +3901,11 @@ mod tests {
         );
     }
 
-    /// The other half of the same failure: the toolbar is one flex row,
-    /// and enough tabs pushed everything to their right — the title, the
-    /// sign-in / reload control — out of the window instead of shrinking.
-    /// The tabs' own overflow presentation is #192's; what this pins is
-    /// only that the row's right-hand control never leaves the window,
-    /// however many lists the account owns.
+    /// 同じ失敗のもう半分: ツールバーは 1 本の flex 行で､タブが十分に多いと､
+    /// その右にあるものすべて — タイトル､サインイン / リロードのコントロール —
+    /// を縮めるのではなくウィンドウの外へ押し出した｡タブ自身のあふれ方の見せ方は
+    /// #192 の担当で､ここが押さえるのは､アカウントがいくつリストを持って
+    /// いようと行の右端のコントロールがウィンドウから出ないことだけだ｡
     #[gpui::test]
     fn the_toolbar_action_stays_on_screen_under_a_dozen_tabs(cx: &mut gpui::TestAppContext) {
         let lists: [(&str, &str); 12] = [
@@ -3950,8 +3935,8 @@ mod tests {
         );
     }
 
-    /// #164: a fixture window has no client, so it must not offer the one
-    /// button in the toolbar that spends a request.
+    /// #164: fixture のウィンドウには client が無いので､ツールバーの中で
+    /// リクエストを使う唯一のボタンを出してはならない｡
     #[gpui::test]
     fn a_fixture_window_offers_no_list_fetch(cx: &mut gpui::TestAppContext) {
         let (mut visual, _timeline) = drawn(cx, fixture_with_lists(&["1"], &[("9101", "Rust")]));
@@ -3961,14 +3946,14 @@ mod tests {
         );
     }
 
-    /// #164: the same window with a client *does* offer it, laid out to
-    /// the right of the picker and inside the toolbar.
+    /// #164: client を持つ同じウィンドウはそれを*出す*｡picker の右､ツール
+    /// バーの内側に配置される｡
     ///
-    /// The one place the button is ever drawn is a signed-in live window,
-    /// which no test can build — so this hands a fixture window a client
-    /// (a token string; `XClient::new` sends nothing) and redraws. Without
-    /// it the button's first render is the user's first launch, which is
-    /// how "the button is missing" got reported.
+    /// このボタンが実際に描かれる唯一の場所はサインイン済みの live ウィンドウ
+    /// だが､それはどのテストにも構築できない — そこでここでは fixture の
+    /// ウィンドウに client を渡し (トークンの文字列｡`XClient::new` は何も
+    /// 送らない)､描き直す｡これが無いと､ボタンの最初の描画がユーザーの最初の
+    /// 起動になる｡「ボタンが無い」と報告されたのはそういう経緯だ｡
     #[gpui::test]
     fn a_signed_in_window_offers_the_list_fetch_beside_the_picker(cx: &mut gpui::TestAppContext) {
         let (mut visual, timeline) = drawn(cx, fixture_with_lists(&["1"], &[("9101", "Rust")]));
@@ -3992,8 +3977,8 @@ mod tests {
             button.left() >= last_segment.right(),
             "the button sits after the picker: {last_segment:?} then {button:?}"
         );
-        // The live window showed `Load lists (1 request)@usadamasa` — the
-        // same zero-gap #182 found in the status bar.
+        // live のウィンドウは `Load lists (1 request)@usadamasa` と表示して
+        // いた — #182 がステータスバーで見つけたのと同じ gap 0 だ｡
         let title = visual
             .debug_bounds("header-title")
             .expect("the title is always shown");
@@ -4009,14 +3994,14 @@ mod tests {
         );
     }
 
-    /// #164, the issue's second completion criterion: switching between
-    /// timelines that are already cached sends nothing.
+    /// #164 の 2 つ目の完了条件: すでにキャッシュ済みの timeline どうしの
+    /// 切り替えでは何も送らない｡
     ///
-    /// Two lists, both cached ahead of time; the window is clicked from
-    /// one to the other and back, and after each click it shows exactly
-    /// the cached rows. There is still no client and `last_reload_at` has
-    /// not moved, so nothing went out and nothing was attempted — the
-    /// same evidence `showing_new_posts_sends_nothing` relies on.
+    /// リストが 2 つ､どちらも前もってキャッシュしてある｡ウィンドウは一方から
+    /// もう一方へ､そしてまた戻るようにクリックされ､各クリックの後にはきっかり
+    /// キャッシュ済みの行を表示する｡client はまだ無く `last_reload_at` も
+    /// 動いていないので､何も出ていないし試みられてもいない —
+    /// `showing_new_posts_sends_nothing` が頼るのと同じ証拠だ｡
     #[gpui::test]
     fn switching_between_cached_sources_sends_nothing(cx: &mut gpui::TestAppContext) {
         cache_list("9111", &["12", "11"]);
@@ -4047,17 +4032,17 @@ mod tests {
                     );
                 });
             });
-            // Redraw so the next lookup sees the segment lifted where it
-            // now is, not where the previous frame put it.
+            // 次の参照が､前のフレームが置いた場所ではなく今ある場所で区画を
+            // 拾えるように描き直す｡
             visual.update(|window, cx| {
                 let _ = window.draw(cx);
             });
         }
     }
 
-    /// #164: the click lands on the segment, and the switch resets what
-    /// belonged to the previous source — here, the poll buffer, which
-    /// would otherwise offer the old list's posts over the new one.
+    /// #164: クリックは区画の上に落ち､切り替えは前の取得元に属していたものを
+    /// リセットする — ここでは poll のバッファで､そうしなければ古いリストの
+    /// post を新しいリストに被せて出してしまう｡
     #[gpui::test]
     fn clicking_a_segment_switches_the_source_and_drops_the_old_buffer(
         cx: &mut gpui::TestAppContext,
@@ -4096,14 +4081,13 @@ mod tests {
         });
     }
 
-    /// #164: the choice outlives the window — it is on disk the moment
-    /// the segment is clicked, not at some later save point that a crash
-    /// could skip.
+    /// #164: 選択はウィンドウより長生きする — 区画がクリックされたその瞬間に
+    /// ディスク上にあり､クラッシュが飛ばしうる後の保存点ではない｡
     ///
-    /// A *live* window, under its own directory: a fixture never writes
-    /// the file (the test after this one), and the smoke directory is
-    /// shared with every other window test, so a file asserted on there
-    /// would be raced by whichever test clicked last.
+    /// *live* のウィンドウを､自分のディレクトリの下で使う: fixture はこの
+    /// ファイルを決して書かない (この次のテスト) し､smoke 用のディレクトリは
+    /// 他のすべてのウィンドウのテストと共有しているので､そこにあるファイルを
+    /// assert すると､最後にクリックしたテストと競合してしまう｡
     #[gpui::test]
     fn a_switch_is_remembered_on_disk_at_once(cx: &mut gpui::TestAppContext) {
         let home = std::env::temp_dir().join("twigpui-smoke-live-switch");
@@ -4123,9 +4107,9 @@ mod tests {
         )
         .unwrap();
 
-        // No token under this HOME, so startup settles at
-        // `NotAuthenticated` with no client — past the startup gate, and
-        // still unable to spend anything on the cache miss that follows.
+        // この HOME の下に token は無いので､起動は client を持たない
+        // `NotAuthenticated` へ落ち着く — 起動のゲートは越えていて､なお
+        // この後のキャッシュミスに何も使えない｡
         let (window, timeline) = window_with(cx, smoke_config(), paths.clone(), Startup::Live);
         let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
         visual.update(|window, cx| {
@@ -4154,10 +4138,10 @@ mod tests {
         std::fs::remove_dir_all(&home).unwrap();
     }
 
-    /// #164: a fixture's segments name lists that do not exist, so a click
-    /// on one must leave no file behind — or the next live launch would
-    /// open on a list it cannot read and pay for the reload that finds
-    /// out.
+    /// #164: fixture のセグメントは存在しない list を名指すので､そこへの
+    /// クリックはファイルを 1 つも残してはならない — さもないと次の live の
+    /// 起動が､読めない list を開き､それが分かるまでのリロードを支払うことに
+    /// なる｡
     #[gpui::test]
     fn a_fixture_switch_leaves_no_selection_behind(cx: &mut gpui::TestAppContext) {
         cache_list("9151", &["51"]);
@@ -4183,8 +4167,8 @@ mod tests {
         );
     }
 
-    /// #164: clicking the segment that is already lifted is a no-op — the
-    /// timeline is identical afterwards, not merely still loaded.
+    /// #164: すでに持ち上がっているセグメントをクリックしても何も起きない —
+    /// 後の timeline は､単に読み込まれたままなのではなく同一だ｡
     #[gpui::test]
     fn clicking_the_showing_segment_changes_nothing(cx: &mut gpui::TestAppContext) {
         let (mut visual, timeline) =
@@ -4204,13 +4188,13 @@ mod tests {
         });
     }
 
-    /// #174: the sync segment cannot be armed while the sync is stopped.
+    /// #174: sync が止まっているあいだ､sync の区画は起動待ちにできない｡
     ///
-    /// A money guard, not a tidiness one. `ask_to_sync` is the first of
-    /// the two clicks that spend a full read of both the follow list and
-    /// the list membership; a fixture window is stopped at
-    /// `SyncOff::NotSignedIn`, and arming there would put a "Sync anyway?"
-    /// button on a window that has no credential to sync with.
+    /// 整頓のためではなく金のためのガードだ｡`ask_to_sync` は､フォロー一覧と
+    /// list のメンバーシップの両方をまるごと読むことに費やす 2 回のクリックの
+    /// 1 つ目だ｡fixture のウィンドウは `SyncOff::NotSignedIn` で止まっていて､
+    /// そこで起動待ちにすれば､sync する資格情報を持たないウィンドウに
+    /// "Sync anyway?" のボタンを置くことになる｡
     #[gpui::test]
     fn a_stopped_sync_cannot_be_armed(cx: &mut gpui::TestAppContext) {
         let (_window, timeline) = fixture_window(cx, fixture_with(&["1"], &[]));
@@ -4246,28 +4230,28 @@ mod tests {
             request_price: None,
             daily_request_budget: None,
             list_id: None,
-            // Off in the smoke tests: they render a window, and a paid
-            // background loop is not part of what they are checking.
+            // smoke テストでは off: これらはウィンドウを描画するもので､
+            // 金のかかるバックグラウンドのループは検査の対象ではない｡
             auto_sync_list: false,
             sync_interval_seconds: 21_600,
             sync_prune_limit_percent: 10,
             sync_writes_per_minute: 2,
-            // Off for the same reason (#21).
+            // 同じ理由で off (#21)｡
             auto_refresh: false,
             auto_refresh_interval_seconds: 300,
-            // Off for `smoke_config`'s reason (#22).
+            // `smoke_config` と同じ理由で off (#22)｡
             follow_new_posts: false,
         };
 
         cx.update(gpui_component::init);
-        // #58: `KeyBinding::new` panics on a keystroke it cannot parse, so
-        // running this here turns a typo in a binding into a failing test
-        // rather than a crash on the user's first launch.
+        // #58: `KeyBinding::new` はパースできないキーストロークで panic する
+        // ので､ここで走らせておくと､割り当ての打ち間違いがユーザーの最初の
+        // 起動でのクラッシュではなく､失敗するテストになる｡
         cx.update(crate::menu::init);
 
-        // Held so the composer's input can be focused below: `add_window`
-        // hands back a handle to the *root* view, which is deliberately the
-        // `Root` wrapper here, not the timeline inside it.
+        // 下でコンポーザーの input をフォーカスできるように保持しておく:
+        // `add_window` が返すのは*ルート*のビューへのハンドルで､ここでは
+        // 意図的に中の timeline ではなく `Root` のラッパーになっている｡
         let timeline_slot = std::rc::Rc::new(std::cell::RefCell::new(None));
         let window = {
             let slot = timeline_slot.clone();
@@ -4275,27 +4259,26 @@ mod tests {
                 let timeline = cx.new(|cx| {
                     let mut view =
                         super::TimelineView::new(config, paths, Startup::Live, window, cx);
-                    // #55 hid behind this flag: the composer -- the one widget
-                    // that reaches back up for the window root -- is only
-                    // rendered for an OAuth session, so every run on a bearer
-                    // token missed it.
+                    // #55 はこのフラグの裏に隠れていた: コンポーザー --
+                    // ウィンドウの root を求めて遡る唯一のウィジェット -- は
+                    // OAuth のセッションでしか描画されないので､bearer token での
+                    // 実行はすべてこれを見逃していた｡
                     view.signed_in_with_oauth = true;
-                    // Resolving the signed-in id is what unlocks the
-                    // per-row action buttons (`offers_repost`,
-                    // `offers_like`), so without it the walk below skips
-                    // them entirely.
+                    // サインイン中の id が解決されることが､行ごとのアクション
+                    // ボタン (`offers_repost`, `offers_like`) を解禁するので､
+                    // それが無いと下の walk はそれらを丸ごと飛ばす｡
                     view.home_user_id = Some("2244994945".to_string());
                     view
                 });
                 *slot.borrow_mut() = Some(timeline.clone());
-                // The line whose absence aborted the app at startup (#55).
+                // これが無かったせいでアプリが起動時に落ちた､その 1 行 (#55)｡
                 gpui_component::Root::new(timeline, window, cx)
             })
         };
         let timeline = timeline_slot.borrow().clone().unwrap();
 
-        // The composer only reaches for the window root once its input is
-        // focused, which is what the app does as soon as the user clicks it.
+        // composer がウィンドウの root を辿るのは input にフォーカスが当たって
+        // からで､アプリはユーザーがクリックした時点でそれを行う｡
         cx.update_window(window.into(), |_, window, cx| {
             timeline.update(cx, |view, cx| {
                 view.compose_input
@@ -4306,13 +4289,12 @@ mod tests {
 
         cx.run_until_parked();
 
-        // Give the body a post to draw. An empty timeline renders none of
-        // `post_row`, so without this the walk below never reaches the
-        // banners, the quote card, the action buttons or #67's metrics line
-        // -- exactly the kind of blind spot #59 was written to close. It has
-        // to happen *after* the startup task settles: that task ends by
-        // assigning `state` itself (`NotAuthenticated`, with no credential
-        // configured here) and would otherwise wipe this.
+        // 本文に描く post を与える｡空の timeline は `post_row` を 1 つも描か
+        // ないので､これが無ければ下の走査はバナーにも quote のカードにも操作
+        // ボタンにも #67 の metrics の行にも届かない -- まさに #59 が塞ぐため
+        // に書かれた種類の死角だ｡起動タスクが落ち着いた *後* でなければ
+        // ならない: そのタスクは最後に `state` 自身を代入して終わり (ここでは
+        // 資格情報が無いので `NotAuthenticated`)､さもなければこれを消す｡
         cx.update(|cx| {
             timeline.update(cx, |view, cx| {
                 view.state = TimelineState::Loaded(vec![TimelineItem {
@@ -4349,8 +4331,8 @@ mod tests {
             });
         });
 
-        // Opening a window is not enough: nothing has rendered yet, and the
-        // panic #55 is about only fires once the element tree is walked.
+        // ウィンドウを開くだけでは足りない: まだ何も描画されていないし､#55 が
+        // 扱う panic は element のツリーが走査されて初めて起きる｡
         for _ in 0..2 {
             cx.update_window(window.into(), |_, window, cx| {
                 let _ = window.draw(cx);

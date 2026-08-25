@@ -1,201 +1,201 @@
-# Operations: logging, metrics, tests
+# 運用: ログ､メトリクス､テスト
 
-## Building the `.app` bundle
+## `.app` バンドルのビルド
 
-Moved to the `app-bundle` skill
-(`.claude/skills/app-bundle/SKILL.md`), which is where this repository keeps
-its operational how-to — alongside `code-metrics-ratchet` and
-`fixture-visual-check`.
+`app-bundle` スキル (`.claude/skills/app-bundle/SKILL.md`) へ移した｡この
+リポジトリが運用の手順を置いている場所で､`code-metrics-ratchet` や
+`fixture-visual-check` と並ぶ｡
 
 ```sh
-./scripts/build-app-bundle.sh          # dist/twigpui.app     (release)
-./scripts/build-app-bundle.sh --dev    # dist/twigpui-dev.app (development, #169)
+./scripts/build-app-bundle.sh          # dist/twigpui.app     (リリース)
+./scripts/build-app-bundle.sh --dev    # dist/twigpui-dev.app (開発用, #169)
 ```
 
-The skill covers the icon pipeline, what a Finder launch does and does not
-inherit, and why the development bundle is a debug build on purpose. For
-what the two profiles differ in beyond the bundle itself, see [Development
-builds](../README.md#development-builds).
+スキルが扱うのは､アイコンのパイプライン､Finder からの起動が何を引き継ぎ何を
+引き継がないか､そして開発用バンドルが意図的に debug ビルドである理由だ｡
+バンドル自体の外で 2 つのプロファイルが何を違えているかは [Development
+builds](../README.md#development-builds) を参照｡
 
-## Logs
+## ログ
 
-`$XDG_STATE_HOME/twigpui/logs/twigpui.log`, with one rotated predecessor at
-`twigpui.log.1`. `state`, not `cache`: a log deleted on the next boot
-answers no questions about what happened yesterday.
+`$XDG_STATE_HOME/twigpui/logs/twigpui.log` と､ローテートした 1 世代前の
+`twigpui.log.1`｡`cache` ではなく `state` だ: 次の起動で消えるログは､昨日
+何が起きたかの問いに何も答えられない｡
 
-A debug build writes under `twigpui-dev` instead (#169), so a `cargo run`
-you are trying to read the log of is not in the file above.
+debug ビルドは代わりに `twigpui-dev` の下へ書く (#169) ので､ログを読もうと
+している `cargo run` は上のファイルには無い｡
 
 ```sh
 tail -f ~/.local/state/twigpui/logs/twigpui.log
 ```
 
-**This exists because a `.app` has no stderr.** Launched from Finder or
-Spotlight, everything the app has to say goes nowhere (#40, #45). The
-startup alert covers exactly one case — "it did not start" — and nothing at
-all for a session that starts fine and then misbehaves. Run from a terminal,
-messages still go to stderr *as well*, so `cargo run` behaves as it always
-did.
+**これがあるのは `.app` に stderr が無いからだ｡** Finder や Spotlight から
+起動すると､アプリが言うことはすべてどこにも届かない (#40, #45)｡起動時の
+アラートがカバーするのはちょうど 1 つのケース — 「起動しなかった」 — だけで､
+問題なく起動してから挙動がおかしくなるセッションには何も無い｡ターミナルから
+実行したときはメッセージが stderr にも*引き続き*流れるので､`cargo run` は
+今までどおりに振る舞う｡
 
-**Tokens never reach the file.** Every message is redacted before it is
-written: `Bearer <token>`, and any `access_token` / `refresh_token` /
-`client_secret` / `token` / `code` / `state` value in a query string or JSON
-body, all become `[redacted]`. The redactor is deliberately blunt —
-over-redacting costs a confusing log line, missing costs a credential on
-disk, and that failure is silent and permanent. Tests are the guarantee, not
-the care of whoever writes the next call site. The file is also created
-`0600`, matching the token store (#7).
+**トークンがファイルへ届くことはない｡** どのメッセージも書き込む前に伏せ字に
+する: `Bearer <token>`､およびクエリ文字列や JSON ボディ中の `access_token` /
+`refresh_token` / `client_secret` / `token` / `code` / `state` の値は､すべて
+`[redacted]` になる｡この伏せ字処理は意図的に大雑把だ — 伏せすぎの代償は
+分かりにくいログ 1 行だが､取りこぼしの代償はディスク上の認証情報で､その
+失敗は静かで永続的だ｡保証するのはテストであって､次の呼び出し箇所を書く者の
+注意深さではない｡ファイルは `0600` で作成し､トークンストアに合わせている
+(#7)｡
 
-**It cannot grow without bound.** At 1 MiB the current log is moved to
-`.log.1` and a fresh one starts; exactly one previous generation is kept.
-`~/.local/state` is not swept by macOS, so an uncapped log is a slow leak —
-the same reasoning as #9's cache cap.
+**際限なく大きくはならない｡** 1 MiB になった時点で現在のログを `.log.1` へ
+移し､新しいものを始める｡保持する前の世代はちょうど 1 つだ｡`~/.local/state`
+は macOS が掃除しないので､上限の無いログは緩やかなリークになる — #9 の
+キャッシュ上限と同じ理屈だ｡
 
-**Level** comes from `TWIGPUI_LOG` (`error`, `warn`, `info`, `debug`), or
-from `log_level` in `config.toml` when that is unset, defaulting to `info`.
-The `config.toml` setting is the one that matters for a bundled `.app`,
-which never sees an environment variable set in a shell. An unrecognized
-value warns and falls back rather than blocking startup, exactly like
-`theme`.
+**レベル**は `TWIGPUI_LOG` (`error`, `warn`, `info`, `debug`) から取り､未設定
+なら `config.toml` の `log_level` から取る｡既定は `info`｡バンドルされた
+`.app` はシェルで設定した環境変数を見ることが無いので､効いてくるのは
+`config.toml` の設定のほうだ｡認識できない値は起動を止めるのではなく警告して
+フォールバックする｡`theme` とまったく同じだ｡
 
-**No logging framework.** `tracing` plus a subscriber and an appender is a
-large tree to compile on every build (#46 is an open issue about exactly
-that) for a line with a level, a timestamp and a size cap. The headless
-`--fetch-only` / `--fetch-post` / `--usage` paths keep writing to stderr
-directly: they only ever run from a terminal, and a one-shot command has no
-business leaving a file behind.
+**ロギングフレームワークは使わない｡** `tracing` に subscriber と appender を
+足したものは､レベルとタイムスタンプとサイズ上限を持つ 1 行のために毎回の
+ビルドでコンパイルするには大きすぎる木だ (#46 はまさにそれについての未解決の
+issue)｡ヘッドレスの `--fetch-only` / `--fetch-post` / `--usage` の経路は
+今までどおり stderr へ直接書く: これらはターミナルからしか実行されないし､
+一度きりのコマンドがファイルを残していく筋合いは無い｡
 
-## Code metrics
+## コードメトリクス
 
 ```sh
 bash scripts/code-metrics.sh
 ```
 
-Prints file sizes (split into implementation and test lines), the fifteen
-longest functions, and any `clippy::cognitive_complexity` hits. CI runs it
-in the Lint job and writes the output to the run summary.
+ファイルのサイズ (実装の行数とテストの行数に分けたもの)､最も長い関数 15 個､
+そして `clippy::cognitive_complexity` の検出があればそれを出力する｡CI は
+Lint ジョブでこれを実行し､出力を run summary へ書く｡
 
-**One metric gates: file size.** `scripts/code-metrics.sh --check` compares
-each file's implementation lines against `metrics-baseline.tsv` and fails if
-one is over its ceiling — or missing from the baseline entirely, so new code
-cannot dodge the check by living in a new file. CI runs it.
+**ゲートするメトリクスは 1 つ､ファイルサイズだ｡**
+`scripts/code-metrics.sh --check` は各ファイルの実装行数を
+`metrics-baseline.tsv` と突き合わせ､天井を超えていれば落ちる — baseline に
+そもそも載っていないときも落ちるので､新しいファイルに住むことで新しいコードが
+検査をすり抜けることはできない｡CI がこれを実行する｡
 
-The ceilings are today's numbers rounded up to the next 50, not targets.
-Growth stays possible; it just cannot be silent, because crossing a ceiling
-means editing `metrics-baseline.tsv` in the same pull request, where a
-reviewer sees it. Lower a ceiling whenever a file shrinks below it.
+天井は目標ではなく､今日の数字を次の 50 の倍数へ切り上げたものだ｡成長は
+引き続き可能で､ただ黙って行えないだけだ｡天井を越えるには同じ pull request の
+中で `metrics-baseline.tsv` を編集することになり､そこでレビュアーの目に
+入る｡ファイルが天井を下回るまで縮んだら､そのつど天井を下げる｡
 
-The other two metrics report only. Function length is already enforced by
-`clippy::too_many_lines` (denied via `pedantic`, #47) and cognitive
-complexity has no hits at clippy's default threshold — gating either would
-add a second check for something already checked, or for nothing.
+残り 2 つのメトリクスは報告のみだ｡関数の長さはすでに
+`clippy::too_many_lines` (`pedantic` 経由で deny､#47) が強制しているし､
+認知的複雑度は clippy の既定の閾値では検出が無い — どちらをゲートしても､
+すでに検査済みのものに 2 つ目の検査を足すか､何も無いものに足すかにしか
+ならない｡
 
-Built from bash, awk and clippy alone rather than a metrics tool, because
-every such tool needs an install step on every CI run and build time is a
-live concern (#46). When one earns that time, this script is what it
-replaces.
+メトリクスのツールではなく bash と awk と clippy だけで組んである｡その種の
+ツールはどれも CI の実行のたびにインストールの手順を要するし､ビルド時間は
+現に懸案だからだ (#46)｡どれかがその時間に見合うようになったとき､それが
+置き換えるのがこのスクリプトだ｡
 
-## Looking at the window without an account
+## アカウント無しでウィンドウを見る
 
 ```sh
 cargo run -- --fixture fixtures/timeline.json
 ```
 
-Fills the window from a file instead of from X. **No credential is used and
-no API request is made** — `--fixture` never builds an `XClient`, and every
-paid path in the view goes through one, so a reload, a like, or a thread
-walk has nothing to reach. The buttons are drawn and inert.
+X からではなくファイルからウィンドウを埋める｡**認証情報を使わず､API
+リクエストも投げない** — `--fixture` は `XClient` を決して構築しないし､
+ビューの中で金のかかる経路はすべてそれを通るので､リロードも like も
+スレッドを辿ることも､届く先が無い｡ボタンは描画されるが動かない｡
 
-The point is that the screen is the same every run. Until this existed the
-window could only be filled from the response cache or from a paid request,
-both of which differ run to run, so "is this laid out correctly?" had no
-fixed thing to ask it of and every UI check ended up on #115 as a sentence
-for a human to act out.
+肝心なのは､実行のたびに画面が同じであることだ｡これができるまで､ウィンドウを
+埋められるのはレスポンスキャッシュか金のかかるリクエストからだけで､どちらも
+実行ごとに違っていた｡だから「これは正しくレイアウトされているか?」と問う
+相手が定まらず､UI の確認はどれも人間が演じる 1 文として #115 に積まれた｡
 
-`fixtures/timeline.json` is built to put the awkward cases on one screen:
+`fixtures/timeline.json` は､扱いにくいケースを 1 画面に載せるように作って
+ある:
 
-| Row | What it is there to show |
+| 行 | 何を見せるために置いてあるか |
 | --- | --- |
-| Long unbroken paragraph | Body wraps; the avatar stays a 44px square (#140, #103) |
-| A URL with no spaces in it | Whether a single long token still overflows |
-| Four attachments | The media grid at its widest, with badges (#65) |
-| A quote carrying an image | The quote card's own media (#123) |
-| A repost carrying an image | The original's media on the outer row (#104) |
-| A reply | The "Show thread" toggle and its cost warning (#12) |
-| One of your own posts | The only row offering Delete, the one withholding Repost (#15, #72) |
-| An author with no name | No bare `@` (#13) |
+| 途切れない長い段落 | 本文が折り返す｡アバターは 44px の正方形のまま (#140, #103) |
+| 空白を含まない URL | 長いトークン 1 つがまだあふれるかどうか |
+| 添付 4 件 | メディアグリッドの最も広い形と､バッジ (#65) |
+| 画像を持つ引用 | 引用カード自身のメディア (#123) |
+| 画像を持つ repost | 外側の行に出る元の post のメディア (#104) |
+| 返信 | "Show thread" のトグルとそのコスト警告 (#12) |
+| 自分の post | Delete を出す唯一の行で､Repost を出さない行 (#15, #72) |
+| 名前の無い著者 | 素の `@` を出さないこと (#13) |
 
-A test loads this file and asserts those rows are still in it, so an edit
-cannot quietly drop the one somebody was relying on.
+テストがこのファイルを読み込んで､それらの行がまだ入っていることを assert
+するので､編集が誰かの頼りにしていた行を黙って落とすことはできない｡
 
-**Media and avatars still download**, from `pbs.twimg.com` rather than the
-API — no quota, no credits. A fixture whose URLs are unreachable draws the
-same fixed-size frames it would while they were in flight, which is what a
-layout check needs anyway.
+**メディアとアバターは変わらずダウンロードする｡** API ではなく
+`pbs.twimg.com` からで — quota も credit も無い｡URL に届かない fixture は､
+取得中に描くのと同じ固定サイズの枠を描く｡レイアウトの確認に要るのは
+どのみちそれだ｡
 
-Write your own by copying the bundled one. The `items` are
-`x_api::TimelineItem` verbatim, so every field added since #9 is optional
-and a fixture can spell out only the case it is about.
+自分用のものは同梱のものをコピーして書く｡`items` は `x_api::TimelineItem`
+そのままなので､#9 以降に足したフィールドはすべて省略可能で､fixture は対象と
+しているケースだけを書けばよい｡
 
-## Tests
+## テスト
 
 ```sh
 cargo test
 ```
 
-Tests cover response parsing and error mapping against fixture JSON, the
-OAuth PKCE math, callback parsing, and token-file handling, the local
-cache's TTL, merge, and corruption-recovery logic (including #11's
-merge-ahead-vs-append-behind distinction between a normal reload and "Load
-older", and that the home-timeline and single-user caches for the same id
-never collide), which timeline mode a credential resolves to (#11), the
-repost/quote join against `includes.tweets`/`includes.users` and its
-precedence when a post carries more than one reference, including a missing
-referenced post and a repost-of-a-quote (#13), the reply-context join and its
-own repost interaction, the `GET /2/tweets?ids=` URL and its independently
-tracked rate-limit endpoint, the thread cache's roundtrip and corruption
-recovery, and `thread::assemble_chain`'s ordering, dedup, and 5-level cutoff
-— including a partial walk stopped by a missing parent — entirely without
-network or disk (#12), and the rate-limit tracker's header parsing,
-send/don't-send decision, `429` classification, jittered backoff schedule,
-and persistence (#10), the scope check behind #14's "Re-authorize" button
-(sufficient / insufficient / never-recorded scope), that an old-format
-`TokenSet` with no `scope` field at all still deserializes rather than
-logging the user out, which of #54's three reasons a stale stored session
-gets demoted for (no `oauth_client_id` configured, no refresh token on the
-session, or X rejecting an attempted refresh outright) and the message
-`describe_demotion` builds for each (including that it names the resolved
-`config.toml` path for the no-client-id case, since that's the one with an
-actual file to point at), the composer's weighted-length character counter and
-draft validation (boundary length, over-limit, empty, whitespace-only), its
-submit state machine (a failed submit keeps the draft and stays retryable;
-a successful one clears it), the `POST /2/tweets` request body, the local
-repost record's roundtrip and corruption recovery, the create/delete repost
-URLs and their independently tracked rate-limit endpoints, the repost
-button's optimistic-update state machine (including that a failed toggle
-rolls back to exactly its pre-click value, and that a reconciled outcome
-can commit a value that disagrees with the optimistic guess), the
-conflict-message interpretation behind #15's "already reposted"/"not
-reposted" recovery, #16's `quote_tweet_id` request body (both with and
-without a quote, since the field must be entirely absent — not `null` —
-for an ordinary post), the composer's quote-target state machine (setting,
-clearing without touching the draft, and that a failed submit keeps the
-draft and the quote target together while a successful one clears both),
-and which posts offer the "Quote" action (withheld on a repost row, for the
-same `item.id`-ambiguity reason as #15's repost button, but allowed on
-one's own post unlike reposting), so they make no network calls, open no
-browser, and spend no credits. The actual code exchange, X's live response
-shapes (including `/users/me`, the home timeline's `meta.next_token`, #13's
-`referenced_tweets` expansion, #12's `GET /2/tweets?ids=` response shape,
-#14's live `POST /2/tweets` response, #15's live repost/un-repost responses
-and their exact conflict-error wording, and #16's live response to a
-`quote_tweet_id`-carrying post — including whether X accepts quoting your
-own post the way its documentation implies), refresh-token rotation, and
-the real rate-limit header values X sends aren't covered by tests — those
-need a real Developer Portal registration, a one-time manual sign-in, and
-(for repost) actually hitting a live rate limit or a live already-reposted
-conflict. X actually rejecting a refresh attempt (#54's `SessionDemotion::Rejected`
-branch inside `resolve_credential` itself, as opposed to `describe_demotion`'s
-formatting of it, which is tested) is in the same boat — it needs the token
-endpoint to actually answer with a revoked-or-expired-beyond-recovery error,
-which nothing in this test suite can trigger without a live session.
+テストがカバーするのは､fixture の JSON に対するレスポンスのパースとエラーの
+変換､OAuth PKCE の計算､callback のパース､トークンファイルの扱い､ローカル
+キャッシュの TTL・マージ・破損からの回復のロジック (通常のリロードと "Load
+older" のあいだの､前へマージするか後ろへ追記するかという #11 の区別や､同じ
+id のホームタイムラインのキャッシュと単一ユーザーのキャッシュが決して衝突
+しないことを含む)､認証情報がどの timeline モードに解決されるか (#11)､
+`includes.tweets`/`includes.users` に対する repost/引用の join と､post が
+複数の参照を持つときの優先順位 (参照先の post が欠けている場合と､引用の
+repost を含む) (#13)､返信の文脈の join とその repost との相互作用､
+`GET /2/tweets?ids=` の URL と独立に追跡されるそのレートリミットの
+エンドポイント､スレッドキャッシュの往復と破損からの回復､そして
+`thread::assemble_chain` の順序付け・重複排除・5 階層での打ち切り — 親が
+欠けて途中で止まった walk を含む — を､ネットワークにもディスクにも一切
+触れずに行うこと (#12)､レートリミットのトラッカーのヘッダーのパース・
+送る/送らないの判断・`429` の分類・ジッタ付きバックオフのスケジュール・
+永続化 (#10)､#14 の "Re-authorize" ボタンの裏にあるスコープの確認 (十分 /
+不十分 / 一度も記録されたことが無い スコープ)､`scope` フィールドがまったく
+無い旧形式の `TokenSet` が､ユーザーをログアウトさせるのではなく今も
+デシリアライズできること､保存された古いセッションが #54 の 3 つの理由の
+どれで格下げされるか (`oauth_client_id` が設定されていない､セッションに
+リフレッシュトークンが無い､X がリフレッシュの試みを正面から拒否した) と､
+それぞれについて `describe_demotion` が組み立てるメッセージ (client id が
+無いケースでは解決済みの `config.toml` のパスを名指しすることを含む｡
+指し示せる実際のファイルがあるのはそれだけだからだ)､コンポーザーの weighted
+length による文字数カウンターと下書きの検証 (境界の長さ､上限超過､空､
+空白のみ)､その送信のステートマシン (失敗した送信は下書きを保って再試行
+可能なままにし､成功した送信はそれを消す)､`POST /2/tweets` のリクエスト
+ボディ､ローカルな repost の記録の往復と破損からの回復､repost の作成/削除の
+URL と独立に追跡されるそれぞれのレートリミットのエンドポイント､repost
+ボタンの楽観的更新のステートマシン (失敗したトグルがクリック前の値へ
+きっかり巻き戻ること､および調停された結果が楽観的な推測と食い違う値を
+確定しうることを含む)､#15 の "already reposted"/"not reposted" の回復の裏に
+ある衝突メッセージの解釈､#16 の `quote_tweet_id` のリクエストボディ (引用が
+あるときと無いときの両方｡普通の post ではこのフィールドが `null` ではなく
+完全に無くなっていなければならないからだ)､コンポーザーの引用対象の
+ステートマシン (設定すること､下書きに触れずに解除すること､失敗した送信は
+下書きと引用対象を一緒に保ち､成功した送信は両方を消すこと)､そしてどの post
+が "Quote" のアクションを出すか (#15 の repost ボタンと同じ `item.id` の
+曖昧さの理由で repost の行では出さないが､repost と違って自分の post では
+許す) だ｡だからテストはネットワークを呼ばず､ブラウザを開かず､credit も
+使わない｡実際のコードの交換､X の生きたレスポンスの形 (`/users/me`､ホーム
+タイムラインの `meta.next_token`､#13 の `referenced_tweets` expansion､#12 の
+`GET /2/tweets?ids=` のレスポンスの形､#14 の生きた `POST /2/tweets` の
+レスポンス､#15 の生きた repost / repost 取り消しのレスポンスとその衝突
+エラーの正確な文言､そして #16 の `quote_tweet_id` を持つ post への生きた
+レスポンス — X がドキュメントの示唆どおりに自分の post の引用を受け付けるか
+どうかを含む)､リフレッシュトークンのローテーション､そして X が実際に送る
+レートリミットのヘッダーの値は､テストではカバーしていない — それらには
+本物の Developer Portal への登録と､一度きりの手動のサインインと､(repost に
+ついては) 実際に生きたレートリミットや生きた「すでに repost 済み」の衝突に
+当たることが要る｡X が実際にリフレッシュの試みを拒否すること (`describe_demotion`
+によるその整形 — こちらはテストしてある — ではなく､`resolve_credential` 自身の
+中の #54 の `SessionDemotion::Rejected` の分岐のほう) も同じ立場だ｡
+トークンのエンドポイントが実際に「失効した､あるいは回復不能なほど期限切れ」の
+エラーで答える必要があり､このテストスイートの中に､生きたセッション無しに
+それを起こせるものは何も無い｡

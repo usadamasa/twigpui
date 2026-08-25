@@ -1,44 +1,43 @@
-//! The pieces that turn one timeline item into elements, and the pure
-//! functions that decide what those elements say.
+//! 一つの timeline item を要素へ変える部品と､それらの要素が何と言うかを
+//! 決める純粋関数｡
 //!
-//! Split out of `ui` (#126) because `src/ui.rs` had reached its size
-//! ceiling with no headroom left, and this is the half that never touches
-//! `TimelineView`'s state: free functions over the data a row already
-//! holds. Everything here is `pub(super)` rather than `pub(crate)` — only
-//! `ui` calls it, and widening the visibility would undo the split.
+//! `ui` から切り出した (#126) のは `src/ui.rs` がサイズの天井に達して
+//! 余裕が無くなったからで､こちらは `TimelineView` の状態に一切触れない
+//! 側だ: 行がすでに持っているデータの上の自由関数である｡ここのすべてが
+//! `pub(crate)` ではなく `pub(super)` なのは — 呼ぶのは `ui` だけであり､
+//! 可視性を広げれば分割が台無しになるからだ｡
 //!
-//! The judgements about *whether* a reload may run, and what to say when
-//! one fails, live in [`super::reload_policy`] instead.
+//! reload を走らせてよい *かどうか* の判断と､失敗したとき何と言うかは
+//! 代わりに [`super::reload_policy`] に住む｡
 
 use super::*;
 
-/// Gives one element a single name that both gpui and a test can use.
+/// 一つの要素に､gpui とテストの双方が使える名前を一つ与える｡
 ///
-/// This is *test* addressability, not accessibility. gpui 0.2.2 ships no
-/// accessibility tree at all — no AccessKit, no roles, no way to ask a
-/// window where the button called X is — so nothing here reaches a screen
-/// reader, and calling it an ARIA equivalent would overstate it by a long
-/// way.
+/// これは accessibility ではなく *テスト* のための addressability だ｡
+/// gpui 0.2.2 は accessibility tree をまったく持たない — AccessKit も
+/// role も無く､X というボタンがどこにあるかをウィンドウへ尋ねる手段も
+/// 無い — のでここから screen reader へ届くものは何も無く､ARIA 相当と
+/// 呼ぶのは大幅に言い過ぎになる｡
 ///
-/// What the crate does have is `debug_selector`, which records where an
-/// element was actually laid out under a name a test can look up
-/// ([`gpui::VisualTestContext::debug_bounds`]), and which compiles to
-/// nothing outside `cargo test`. Every interactive element in this module
-/// already carries a unique `.id(..)`; without this trait, naming one for
-/// a test means writing that string a second time, and two names for one
-/// element drift apart the first time either is edited. `addressable`
-/// writes it once.
+/// crate が実際に持っているのは `debug_selector` で､テストが引ける名前
+/// ([`gpui::VisualTestContext::debug_bounds`]) の下に要素が実際どこへ
+/// 配置されたかを記録し､`cargo test` の外では何にもコンパイルされない｡
+/// このモジュールの対話的な要素はどれもすでに一意な `.id(..)` を持って
+/// いる; この trait が無いとテスト用に名前を付けるにはその文字列をもう
+/// 一度書くことになり､一つの要素に二つの名前があれば､どちらかが編集され
+/// た最初の瞬間にずれる｡`addressable` は一度だけ書く｡
 ///
-/// The point of having the bounds at all is #184: a test can click their
-/// centre, which puts gpui's hit test — the one step `dispatch_action`
-/// skips — under assertion, without a coordinate written down anywhere.
+/// そもそも bounds を持つ意義は #184 にある: テストはその中心をクリック
+/// でき､それによって `dispatch_action` が飛ばす唯一の段である gpui の
+/// hit test を､座標をどこにも書かずに assert 下へ置ける｡
 pub(super) trait Addressable: InteractiveElement + Sized {
-    /// Names this element for gpui's interactivity and for a test lookup.
+    /// この要素に gpui の対話性のための名前と､テストが引く名前を与える｡
     fn addressable(self, name: impl Into<SharedString>) -> gpui::Stateful<Self> {
         let name = name.into();
-        // Selector first: it returns `Self`, while `id` consumes into
-        // `Stateful`. Both write the same `Interactivity`, so the order
-        // changes nothing else.
+        // selector が先: これは `Self` を返すが､`id` は消費して
+        // `Stateful` にする｡どちらも同じ `Interactivity` へ書くので､
+        // 順序は他に何も変えない｡
         self.debug_selector({
             let name = name.clone();
             move || name.to_string()
@@ -49,12 +48,12 @@ pub(super) trait Addressable: InteractiveElement + Sized {
 
 impl<E: InteractiveElement> Addressable for E {}
 
-/// An outlined pill in the header that starts the sign-in flow.
+/// sign-in flow を始める､ヘッダの輪郭だけの pill｡
 ///
-/// #31 (upgrade away from the app-only bearer token) and #14 (the session
-/// predates `tweet.write`) are different reasons to reach the same place, so
-/// the two buttons differ only in their label — worth one helper rather than
-/// two near-identical builder chains that have to be kept in step.
+/// #31 (app-only の bearer token からの脱却) と #14 (セッションが
+/// `tweet.write` より前のもの) は同じ場所へ至る別々の理由なので､二つの
+/// ボタンはラベルだけが違う — 歩調を合わせつづけねばならないほぼ同一の
+/// builder chain を二つ持つより､helper を一つ持つ価値がある｡
 pub(super) fn sign_in_pill(
     id: &'static str,
     label: &'static str,
@@ -81,12 +80,11 @@ pub(super) fn notice(message: impl Into<SharedString>, color: u32) -> impl IntoE
         .child(message.into())
 }
 
-/// The persistent "your session expired" banner (#54): a distinct row
-/// between the header and everything else, rather than folded into
-/// [`TimelineView::body`]'s `state`-keyed match — the whole point is that it
-/// has to keep showing even while `body` renders a perfectly normal loaded
-/// timeline (on the bearer-token fallback), which is exactly the state #54
-/// was filed from.
+/// 常設の「セッションが切れた」バナー (#54): [`TimelineView::body`] の
+/// `state` を鍵にした match へ畳み込むのではなく､ヘッダと他のすべての
+/// 間にある独立した行だ — 眼目は､`body` がまったく正常に読み込まれた
+/// timeline を描いている間 (bearer token への fallback 時) でも出しつづけ
+/// ねばならない点で､それこそ #54 が起票された状態そのものだ｡
 pub(super) fn session_notice_banner(message: SharedString, theme: Theme) -> impl IntoElement {
     div()
         .px_4()
@@ -98,20 +96,19 @@ pub(super) fn session_notice_banner(message: SharedString, theme: Theme) -> impl
         .child(message)
 }
 
-/// The reload cooldown/failure banner (#57) — styled identically to, and
-/// drawn right next to, [`session_notice_banner`] for the same reason that
-/// one is independent of `body`: a cooldown or a failed refresh describes
-/// the most recent *request*, not whatever posts are (or aren't) currently
-/// shown, and must never read as "there is nothing here" when there is.
+/// reload の cooldown/失敗のバナー (#57) — [`session_notice_banner`] と
+/// まったく同じ体裁で､そのすぐ隣に描く｡あちらが `body` から独立している
+/// のと同じ理由だ: cooldown や失敗した refresh が説明するのは直近の
+/// *リクエスト* であって､いま表示されている (されていない) post ではなく､
+/// 何かある時に「ここには何も無い」と読めては決してならない｡
 pub(super) fn reload_notice_banner(
     notice: &ReloadNotice,
     theme: Theme,
     now: i64,
 ) -> impl IntoElement {
-    // #141: the color says which kind of line this is before the words do.
-    // `Outcome` is the only variant that reports success, and painting it
-    // `danger` alongside the other two would make a finished reload look
-    // like a failed one.
+    // #141: 言葉より先に色がこの行の種類を告げる｡成功を報じる variant は
+    // `Outcome` だけで､他の二つと並べて `danger` で塗ると､終わった reload
+    // が失敗したもののように見えてしまう｡
     let (message, color) = match *notice {
         ReloadNotice::Cooldown { reset_at, cooldown } => {
             (cooldown_label(cooldown, reset_at, now), theme.danger)
@@ -129,20 +126,18 @@ pub(super) fn reload_notice_banner(
         .child(message)
 }
 
-/// The "N new posts" bar auto-refresh offers (#21).
+/// auto-refresh が差し出す「N new posts」のバー (#21)｡
 ///
-/// A bar between the header and the timeline rather than a row inside it,
-/// which is the difference between an offer and an interruption. Inside
-/// the scrolling list it would sit at the very top — out of sight for
-/// anyone scrolled down, which is precisely the reader auto-refresh exists
-/// for. Here it stays put, next to the two banners above it, and the
-/// timeline underneath does not move at all until it is pressed.
+/// timeline の中の行ではなくヘッダと timeline の間のバーにしてある｡それ
+/// が差し出しと割り込みの違いだ｡scroll する一覧の中なら一番上に座ること
+/// になり — 下へ scroll した人からは見えない｡auto-refresh はまさにその
+/// 読み手のために在る｡ここなら動かず､上の二つのバナーの隣にいて､下の
+/// timeline は押されるまでまったく動かない｡
 ///
-/// Painted in `accent` on the header's own background, unlike its two
-/// neighbours: `session_notice_banner` and `reload_notice_banner` report
-/// something that happened, and this is the one strip in the column that
-/// is a button. The upward arrow says which direction pressing it goes,
-/// since it also takes the reader back to the top.
+/// 隣の二つと違い､ヘッダ自身の背景の上に `accent` で塗る:
+/// `session_notice_banner` と `reload_notice_banner` は起きたことを報じる
+/// が､この列の中でボタンなのはこの帯だけだ｡上向きの矢印は､押したらどの
+/// 方向へ行くかを告げる｡読み手を先頭へ戻しもするからだ｡
 pub(super) fn new_posts_bar(
     count: usize,
     theme: Theme,
@@ -160,8 +155,8 @@ pub(super) fn new_posts_bar(
         .on_click(cx.listener(|this, _event, _window, cx| this.apply_pending(cx)))
 }
 
-/// `@name`, or nothing at all when the author was missing from the expansion —
-/// a bare `@` would read as a broken row.
+/// `@name`｡expansion に著者が居なければ何も返さない — 裸の `@` は壊れた
+/// 行に見えてしまう｡
 pub(super) fn byline(author_username: &str) -> String {
     if author_username.is_empty() {
         String::new()
@@ -170,9 +165,9 @@ pub(super) fn byline(author_username: &str) -> String {
     }
 }
 
-/// "@name reposted", or "Reposted" alone when the reposting user's screen
-/// name was missing from the expansion — mirrors [`byline`]'s empty-author
-/// fallback rather than rendering a bare `@`.
+/// "@name reposted"､repost したユーザーの screen name が expansion に
+/// 無ければ "Reposted" だけ — 裸の `@` を描くのではなく [`byline`] の
+/// 著者不在時の fallback を写している｡
 pub(super) fn repost_banner_label(reposted_by: &str) -> String {
     if reposted_by.is_empty() {
         "Reposted".to_string()
@@ -181,16 +176,16 @@ pub(super) fn repost_banner_label(reposted_by: &str) -> String {
     }
 }
 
-/// The quoted source, embedded as a bordered card under a quote's own text
-/// (#13). Reuses `bg_header` for the fill rather than adding a new color
-/// slot — it's already the app's "distinct region" background (the header
-/// bar), and the card sits directly on `theme.bg`, so it reads as a clearly
-/// separate block without needing its own palette entry.
+/// quote 元を､quote 自身のテキストの下に枠付きのカードとして埋め込む
+/// (#13)｡塗りは新しい色のスロットを足さず `bg_header` を使い回す — これ
+/// はすでにアプリの「区別された領域」の背景 (ヘッダのバー) であり､カード
+/// は `theme.bg` の上に直に載るので､自前のパレット項目を持たずとも明確に
+/// 別のブロックとして読める｡
 ///
-/// `media` is the quoted post's thumbnail grid (#123), or `None` where the
-/// card is a small preview rather than the thing being read: the
-/// composer's "replying to" and "quoting" strips both sit directly under
-/// the row whose images are already on screen.
+/// `media` は quote された post のサムネイルの格子 (#123)｡カードが読む
+/// 対象ではなく小さな preview である場所では `None` になる: composer の
+/// "replying to" と "quoting" の帯はどちらも､画像がすでに画面にある行の
+/// 直下に座る｡
 pub(super) fn quote_card(
     quoted: &QuotedPost,
     theme: Theme,
@@ -223,10 +218,10 @@ pub(super) fn quote_card(
         .children(media)
 }
 
-/// "Replying to @name", or a generic fallback when the parent's author
-/// wasn't resolvable (deleted, protected, or simply not expanded) — mirrors
-/// [`repost_banner_label`]'s empty-author fallback rather than rendering a
-/// bare "Replying to @" (#12).
+/// "Replying to @name"｡親の著者が解決できなければ (削除済み､保護済み､
+/// あるいは単に expand されていない) 一般的な fallback になる — 裸の
+/// "Replying to @" を描くのではなく [`repost_banner_label`] の著者不在時
+/// の fallback を写している (#12)｡
 pub(super) fn reply_banner_label(replied_to: &RepliedTo) -> String {
     if replied_to.author_username.is_empty() {
         "Replying to a post".to_string()
@@ -235,12 +230,12 @@ pub(super) fn reply_banner_label(replied_to: &RepliedTo) -> String {
     }
 }
 
-/// The clickable label for [`thread_toggle_row`], or `None` when the current
-/// state (nothing yet loaded but a fetch is running) has no toggle at all —
-/// [`TimelineView::thread_section`] renders a plain "Loading thread…" notice
-/// for that case instead. `state: None` means "never requested" (offer to
-/// fetch, spelling out the worst-case cost up front per #12's "cost must be
-/// predictable" requirement); `Some(Failed(_))` offers a retry.
+/// [`thread_toggle_row`] のクリックできるラベル｡いまの状態 (まだ何も
+/// 読めていないが fetch は走っている) に toggle が無ければ `None` — その
+/// 場合は代わりに [`TimelineView::thread_section`] が素の "Loading thread…"
+/// の notice を描く｡`state: None` は「一度も要求していない」で (取得を
+/// 差し出し､#12 の「費用は予測できねばならない」要件に従い最悪の費用を
+/// 先に明示する); `Some(Failed(_))` は再試行を差し出す｡
 pub(super) fn thread_action_label(state: Option<&ThreadFetchState>) -> Option<&'static str> {
     match state {
         None => Some("Show thread (up to 5 requests)"),
@@ -249,9 +244,9 @@ pub(super) fn thread_action_label(state: Option<&ThreadFetchState>) -> Option<&'
     }
 }
 
-/// The clickable "Show thread" / "Retry" row (#12), styled like
-/// [`load_older_row`] — a link-colored, clickable line rather than a full
-/// button, since it's a secondary action on an already-rendered post.
+/// クリックできる "Show thread" / "Retry" の行 (#12)｡[`load_older_row`]
+/// と同じ体裁だ — すでに描かれた post に対する二次的な操作なので､完全な
+/// ボタンではなくリンク色のクリックできる行にしてある｡
 pub(super) fn thread_toggle_row(
     reply_post_id: String,
     first_parent_id: String,
@@ -268,12 +263,12 @@ pub(super) fn thread_toggle_row(
         }))
 }
 
-/// The assembled parent chain (#12), oldest ancestor first, each rendered
-/// like [`quote_card`] for visual consistency with the other "embedded post"
-/// treatment already in this file. An empty, uncapped chain only happens
-/// when the very first parent fetch found nothing (deleted, protected, or
-/// otherwise absent) — #12's "must render sensibly" requirement — so that
-/// case gets its own message rather than silently showing nothing.
+/// 組み上がった親の chain (#12)｡最も古い祖先が先頭で､このファイルに
+/// すでにある他の「埋め込まれた post」の扱いと見た目を揃えるため､どれも
+/// [`quote_card`] と同じように描く｡空で cap もされていない chain は､
+/// 最初の親の fetch が何も見つけなかったとき (削除済み､保護済み､その他
+/// 不在) にだけ起きる — #12 の「まともに描けねばならない」要件だ — ので､
+/// その場合は黙って何も出さず専用のメッセージを出す｡
 pub(super) fn render_thread_chain(chain: &ThreadChain, theme: Theme) -> AnyElement {
     if chain.items.is_empty() && !chain.capped {
         return div()
@@ -328,10 +323,9 @@ pub(super) fn thread_row(thread_item: &thread::ThreadItem, theme: Theme) -> impl
         .child(div().child(thread_item.text.clone()))
 }
 
-/// The header's compact usage summary (#18): request counts are always
-/// shown, unconditionally — an estimated amount is appended only once
-/// `request_price` is configured, per the issue's core rule that a guessed
-/// price is worse than showing no price at all.
+/// ヘッダの簡潔な usage 要約 (#18): リクエスト数は無条件に必ず出す —
+/// 見積り金額を添えるのは `request_price` が設定されてからだけで､推測の
+/// 価格は価格を出さないより悪い､という issue の中核の規則に従う｡
 pub(super) fn usage_label(today: u64, total: u64, request_price: Option<f64>) -> String {
     match usage::estimated_amount(today, request_price) {
         Some(amount) => format!("Today: {today} req (~{amount:.2}) · Total: {total} req"),
@@ -339,10 +333,10 @@ pub(super) fn usage_label(today: u64, total: u64, request_price: Option<f64>) ->
     }
 }
 
-/// Which theme slot the usage line renders in: `warning`/`danger` as
-/// today's count approaches or crosses `daily_request_budget`, matching the
-/// severities [`usage::budget_status`] returns; the same muted slot
-/// timestamps and bylines already use once there is nothing to flag.
+/// usage の行をどの theme のスロットで描くか: 今日の件数が
+/// `daily_request_budget` に近づくか超えると `warning`/`danger` になり､
+/// [`usage::budget_status`] が返す深刻度に対応する; 立てる旗が無ければ､
+/// timestamp や byline がすでに使っているのと同じ muted のスロットだ｡
 pub(super) fn usage_color(status: usage::BudgetStatus, theme: Theme) -> u32 {
     match status {
         usage::BudgetStatus::Ok => theme.text_muted,
@@ -351,9 +345,9 @@ pub(super) fn usage_color(status: usage::BudgetStatus, theme: Theme) -> u32 {
     }
 }
 
-/// The composer's error line, if its status has one to show (#14) — `None`
-/// for `Idle`/`Submitting`, so the composer renders no extra row in either
-/// of those states.
+/// composer のエラー行｡status が見せるものを持つときだけ出す (#14) —
+/// `Idle`/`Submitting` では `None` なので､そのどちらの状態でも composer
+/// は余分な行を描かない｡
 pub(super) fn compose_error_message(status: &ComposeStatus) -> Option<SharedString> {
     match status {
         ComposeStatus::Failed(message) => Some(SharedString::from(message.clone())),
@@ -361,35 +355,34 @@ pub(super) fn compose_error_message(status: &ComposeStatus) -> Option<SharedStri
     }
 }
 
-// #31's separate "Sign in with X" button is gone with #33. It existed for
-// exactly one situation: running on an app-only bearer token, which was a
-// working state whose primary button therefore said "Reload", leaving the
-// OAuth flow otherwise unreachable. Without that credential the only
-// unsigned state is `NotAuthenticated`, where the *primary* button already
-// says "Sign in with X" — and two identical buttons side by side is what
-// #31 was avoiding in the first place.
+// #31 の独立した "Sign in with X" ボタンは #33 とともに消えた｡在ったのは
+// ただ一つの状況のためだ: app-only の bearer token での動作｡これは動いて
+// いる状態なので主ボタンは "Reload" と言い､結果として OAuth flow へ他に
+// 到達できなくなっていた｡あの credential が無ければ未署名の状態は
+// `NotAuthenticated` だけで､そこでは *主* ボタンがすでに "Sign in with X"
+// と言っている — そして同一のボタンが二つ並ぶことこそ､#31 がそもそも
+// 避けようとしていたものだ｡
 
-/// Whether the header should offer to re-authorize (#14): the session
-/// exists, but its recorded scope doesn't include what writing needs.
+/// ヘッダが再認可を差し出すべきかどうか (#14): セッションは在るが､記録
+/// された scope に書き込みが要るものが含まれていない､という状態だ｡
 ///
-/// Distinct from the primary "Sign in with X" button by construction — this
-/// requires a session, that one appears only when there isn't one — and
-/// they read differently ("Sign in" vs "Re-authorize"). #31's actual lesson
-/// was "don't hide the affordance", not "there must be only one button".
+/// 主ボタンの "Sign in with X" とは構造上べつものだ — こちらはセッション
+/// を要求し､あちらはセッションが無いときにだけ現れる — し､読み方も違う
+/// ("Sign in" と "Re-authorize")｡#31 の本当の教訓は「導線を隠すな」で
+/// あって「ボタンは一つでなければならない」ではない｡
 ///
-/// Checks every write scope the app can need, not just #14's: #68 added
-/// `like.write`, which X grants separately, so a session authorized before
-/// #68 holds `tweet.write` alone. Without this, `toggle_like`'s refusal
-/// would point at a "Re-authorize" button that was not being rendered.
+/// #14 のものだけでなく､アプリが要りうる write scope をすべて確認する:
+/// #68 が `like.write` を足し､X はこれを別に許可するので､#68 より前に
+/// 認可されたセッションは `tweet.write` しか持たない｡これが無いと
+/// `toggle_like` の拒否は､描かれていない "Re-authorize" ボタンを指す｡
 ///
-/// `list.read` (#167) joins them, but only while a list is configured
-/// (#161). It is the first *read* scope here, and the first one whose
-/// absence stops the window filling at all rather than disabling a button:
-/// a session authorized before #167 gets a 403 from
-/// `GET /2/lists/:id/tweets` and nothing else to go on. Gating it on
-/// `reads_a_list` rather than asking for it unconditionally keeps the
-/// button off the toolbar for someone who never configured a list and so
-/// can never hit that 403.
+/// `list.read` (#167) もそこへ加わるが､list が設定されている間だけだ
+/// (#161)｡ここで最初の *read* の scope であり､欠けるとボタンが無効に
+/// なるのではなくウィンドウがそもそも埋まらなくなる最初のものでもある:
+/// #167 より前に認可されたセッションは `GET /2/lists/:id/tweets` から
+/// 403 を受け取り､他に手掛かりは無い｡無条件に要求せず `reads_a_list` を
+/// 条件にすれば､list を一度も設定せずその 403 に当たりようのない人の
+/// toolbar からはボタンを外しておける｡
 pub(super) fn offers_reauthorize(
     signed_in_with_oauth: bool,
     oauth_scope: Option<&str>,
@@ -403,19 +396,18 @@ pub(super) fn offers_reauthorize(
             && list_read_satisfied)
 }
 
-/// Whether post `item` should offer a repost/un-repost toggle (#15).
+/// post `item` が repost/un-repost の toggle を差し出すべきか (#15)｡
 ///
-/// Requires a signed-in OAuth session whose own id has resolved
-/// (`home_user_id`, via `/me` — #11): the repost endpoints act as *this*
-/// account, and there is nothing to call without it. Withheld for one's own
-/// post, matching the API's own rejection (#15) — see [`is_own_post`],
-/// which for a repost row compares against the *original* author, since
-/// that is whose post the row displays and whose post would be reposted.
+/// sign in 済みの OAuth セッションと､解決済みの自分の id (`/me` 経由の
+/// `home_user_id` — #11) を要求する: repost の endpoint は *この* アカ
+/// ウントとして振る舞い､それが無ければ呼ぶ先が無い｡自分の post には出さ
+/// ない｡API 自身の拒否に合わせたものだ (#15) — [`is_own_post`] を見よ｡
+/// repost 行では *元の* 著者と比べる｡行が表示しているのも repost される
+/// のもその人の post だからだ｡
 ///
-/// A repost row used to be withheld too, because `item.id` is the retweet
-/// activity's id rather than the original content's. #52 closed that: the
-/// original's id is carried on the item now, and `x_api::action_post_id`
-/// is what every caller sends.
+/// repost 行にも以前は出していなかった｡`item.id` が元の内容ではなく
+/// retweet という活動の id だからだ｡#52 がそれを閉じた: 元の id はいま
+/// item に載っており､どの呼び出し側も `x_api::action_post_id` を送る｡
 pub(super) fn offers_repost(
     signed_in_with_oauth: bool,
     home_user_id: Option<&str>,
@@ -427,26 +419,25 @@ pub(super) fn offers_repost(
         && !is_own_post(home_username, &item.author_username)
 }
 
-/// Whether `author_username` is the signed-in account's own (#15) — the API
-/// rejects reposting your own post, and checking here saves a
-/// guaranteed-failing request, mirroring #14's client-side character-limit
-/// check. `home_username: None` (not yet resolved) never withholds the
-/// button: safer to let an occasional same-account repost through to the
-/// API's own rejection than to hide the button for every post before the
-/// signed-in identity is known. Case-insensitive since `home_username`
-/// (from `/me`) and `author_username` (from the timeline expansion) are
-/// resolved independently.
+/// `author_username` が sign in 済みアカウント自身のものか (#15) — API は
+/// 自分の post の repost を拒むので､ここで確認すれば確実に失敗するリク
+/// エストを節約できる｡#14 のクライアント側の文字数確認を写したものだ｡
+/// `home_username: None` (まだ未解決) はボタンを引っ込めない: sign in した
+/// 身元が判る前にすべての post でボタンを隠すより､同一アカウントの repost
+/// がたまに API 自身の拒否まで通る方が安全だ｡`home_username` (`/me` 由来)
+/// と `author_username` (timeline の expansion 由来) は独立に解決されるの
+/// で大文字小文字は区別しない｡
 pub(super) fn is_own_post(home_username: Option<&str>, author_username: &str) -> bool {
     home_username.is_some_and(|home| home.eq_ignore_ascii_case(author_username))
 }
 
-/// The repost/un-repost toggle for one post (#15): "Repost" when not
-/// reposted, "Reposted" once it is — both clickable (a repost is
-/// reversible, so the button doubles as its own undo), styled like
-/// [`thread_toggle_row`]. Disabled — no click handler at all, matching
-/// #14's double-submit guard — while a request is in flight; a failed
-/// attempt shows its message above the (still clickable) toggle, offering a
-/// retry.
+/// 一つの post の repost/un-repost の toggle (#15): repost していなければ
+/// "Repost"､していれば "Reposted" — どちらもクリックできる (repost は
+/// 取り消せるので､ボタンは自身の undo も兼ねる)｡体裁は
+/// [`thread_toggle_row`] と同じ｡リクエストが飛んでいる間は無効になる —
+/// click handler がまったく無く､#14 の二重送信の守りに合わせてある; 失敗
+/// した試みは (依然クリックできる) toggle の上にメッセージを出し､再試行を
+/// 差し出す｡
 pub(super) fn repost_row(
     row_id: &str,
     post_id: &str,
@@ -455,7 +446,7 @@ pub(super) fn repost_row(
     cx: &mut Context<'_, TimelineView>,
 ) -> AnyElement {
     let label = repost_action_label(state);
-    // #95, as in `like_row`.
+    // #95｡`like_row` と同じ｡
     let color = if state.is_on() {
         theme.repost
     } else {
@@ -486,8 +477,8 @@ pub(super) fn repost_row(
     }
 }
 
-/// The clickable label for [`repost_row`] (#15): the pending direction
-/// while a request is in flight, else the plain on/off label.
+/// [`repost_row`] のクリックできるラベル (#15): リクエストが飛んでいる間
+/// は pending 中の向き､そうでなければ素の on/off のラベル｡
 pub(super) fn repost_action_label(state: &ToggleState) -> &'static str {
     if matches!(state.status(), ToggleStatus::Pending) {
         if state.is_on() {
@@ -502,10 +493,10 @@ pub(super) fn repost_action_label(state: &ToggleState) -> &'static str {
     }
 }
 
-/// The like/unlike toggle for one post (#68): "Like" when not liked,
-/// "Liked" once it is — both clickable, styled like [`repost_row`], which
-/// this mirrors down to the disabled-while-pending rule and the failure
-/// message rendered above a still-clickable toggle.
+/// 一つの post の like/unlike の toggle (#68): like していなければ "Like"､
+/// していれば "Liked" — どちらもクリックできる｡体裁は [`repost_row`] と
+/// 同じで､pending 中は無効という規則も､依然クリックできる toggle の上に
+/// 失敗のメッセージを描くところまで写している｡
 pub(super) fn like_row(
     row_id: &str,
     post_id: &str,
@@ -514,8 +505,8 @@ pub(super) fn like_row(
     cx: &mut Context<'_, TimelineView>,
 ) -> AnyElement {
     let label = like_action_label(state);
-    // #95: an "on" action is colored by what it means, not by the link
-    // color every clickable thing in the row already wears.
+    // #95: "on" の操作は､行のクリックできるものがすでに着ているリンク色
+    // ではなく､その意味に応じて色を付ける｡
     let color = if state.is_on() {
         theme.like
     } else {
@@ -546,8 +537,8 @@ pub(super) fn like_row(
     }
 }
 
-/// The clickable label for [`like_row`] (#68): the pending direction while
-/// a request is in flight, else the plain on/off label.
+/// [`like_row`] のクリックできるラベル (#68): リクエストが飛んでいる間は
+/// pending 中の向き､そうでなければ素の on/off のラベル｡
 pub(super) fn like_action_label(state: &ToggleState) -> &'static str {
     if matches!(state.status(), ToggleStatus::Pending) {
         if state.is_on() {
@@ -562,17 +553,17 @@ pub(super) fn like_action_label(state: &ToggleState) -> &'static str {
     }
 }
 
-/// Whether post `item` should offer a like/unlike toggle (#68).
+/// post `item` が like/unlike の toggle を差し出すべきか (#68)｡
 ///
-/// Requires a signed-in OAuth session whose own id has resolved
-/// (`home_user_id`, via `/me` — #11), for the same reason [`offers_repost`]
-/// does: the likes endpoints act as *this* account.
+/// [`offers_repost`] と同じ理由で､sign in 済みの OAuth セッションと解決
+/// 済みの自分の id (`/me` 経由の `home_user_id` — #11) を要求する:
+/// likes の endpoint は *この* アカウントとして振る舞うからだ｡
 ///
-/// The one departure from [`offers_repost`]: no [`is_own_post`] check. X
-/// rejects reposting your own post but accepts liking it, so #68
-/// explicitly instructs against carrying #15's guard over. A repost row is
-/// offered a button like any other since #52 — the like lands on the
-/// original, via `x_api::action_post_id`.
+/// [`offers_repost`] からの唯一の逸脱: [`is_own_post`] の確認が無い｡X は
+/// 自分の post の repost は拒むが like は受け入れるので､#68 は #15 の
+/// 守りを持ち越さないよう明示的に指示している｡#52 以降 repost 行にも他と
+/// 同じくボタンを出す — like は `x_api::action_post_id` を通して元の post
+/// に着く｡
 pub(super) fn offers_like(
     signed_in_with_oauth: bool,
     home_user_id: Option<&str>,
@@ -581,9 +572,8 @@ pub(super) fn offers_like(
     signed_in_with_oauth && home_user_id.is_some()
 }
 
-/// The author's name, as a link to their profile on x.com (#70) — or as
-/// plain bold text when the username never expanded and [`profile_url`]
-/// has nowhere to point.
+/// 著者の名前を x.com の profile へのリンクとして描く (#70) — username が
+/// expand されず [`profile_url`] の指す先が無いときは､素の太字にする｡
 pub(super) fn author_link(
     item: &TimelineItem,
     theme: Theme,
@@ -605,16 +595,16 @@ pub(super) fn author_link(
     }
 }
 
-/// The "Open in X" affordance on one post's byline row (#70) — always
-/// offered, since [`post_permalink`] has an id-only fallback for a post
-/// whose author never expanded.
+/// 一つの post の byline 行にある "Open in X" の導線 (#70) — 著者が
+/// expand されなかった post 用に [`post_permalink`] が id だけの fallback
+/// を持つので､常に差し出す｡
 pub(super) fn open_post_link(
     item: &TimelineItem,
     theme: Theme,
     cx: &mut Context<'_, TimelineView>,
 ) -> impl IntoElement {
-    // #52: a repost row's permalink is the original post's — that is what
-    // the row displays, and x.com would only redirect there anyway.
+    // #52: repost 行の permalink は元の post のものだ — 行が表示している
+    // のもそれだし､どのみち x.com はそこへ redirect するだけだ｡
     let url = post_permalink(&item.author_username, action_post_id(item));
     div()
         .addressable(format!("open-{}", item.id))
@@ -625,17 +615,17 @@ pub(super) fn open_post_link(
         }))
 }
 
-/// The links from one post's text, as clickable chips under the body (#70).
+/// 一つの post のテキストに含まれるリンクを､本文の下のクリックできる chip
+/// として並べる (#70)｡
 ///
-/// Under the text rather than inside it: X's own text carries `t.co`
-/// shortlinks, so making the link clickable *in place* would mean splitting
-/// the body into interleaved text and link elements, and gpui lays each
-/// child out as its own block — the paragraph would stop wrapping as one
-/// piece. A row of chips beneath keeps the body intact and still gets the
-/// user to the destination, which is what the issue asks for. Each chip is
-/// labelled with X's own `display_url` (`example.com/a/b…`), so what is
-/// shown matches what the text says even though what is opened is the
-/// expanded destination.
+/// テキストの中ではなく下に置く: X 自身のテキストは `t.co` の短縮リンクを
+/// 運ぶので､リンクを *その場で* クリックできるようにするには本文をテキスト
+/// とリンクの要素へ交互に分割することになり､gpui は子をそれぞれ独立した
+/// ブロックとして配置する — 段落は一続きに折り返さなくなる｡下に chip を
+/// 並べれば本文は無傷のままで､それでもユーザーを行き先へ連れていける｡
+/// issue が求めているのはそれだ｡各 chip には X 自身の `display_url`
+/// (`example.com/a/b…`) をラベルにしてあるので､開かれるのが展開後の
+/// 行き先であっても､見えるものはテキストが言うものと一致する｡
 pub(super) fn link_row(
     links: &[PostLink],
     theme: Theme,
@@ -657,14 +647,12 @@ pub(super) fn link_row(
     row.into_any_element()
 }
 
-/// The "Reply" action for one post (#71), rendered whenever
-/// [`offers_reply`] allows it.
+/// 一つの post の "Reply" 操作 (#71)｡[`offers_reply`] が許すときに描く｡
 ///
-/// Sets the composer's reply target and nothing else — no request goes out
-/// until the draft is submitted, mirroring how [`quote_row`] works. The id
-/// it carries is `action_post_id`'s (#52): replying from a repost row must
-/// answer the *original* post, or the reply lands under a different
-/// conversation entirely.
+/// composer の reply の対象を据えるだけで他は何もしない — [`quote_row`]
+/// の働きを写したもので､下書きが送られるまでリクエストは出ない｡運ぶ id は
+/// `action_post_id` のもの (#52): repost 行からの reply は *元の* post に
+/// 答えねばならない｡さもないと reply はまったく別の会話の下に着く｡
 pub(super) fn reply_row(
     item: &TimelineItem,
     theme: Theme,
@@ -675,8 +663,8 @@ pub(super) fn reply_row(
         author_name: item.author_name.clone(),
         author_username: item.author_username.clone(),
         text: item.text.clone(),
-        // The composer's preview of what is being replied to shows text
-        // only (#123): its images are already on screen in the row above.
+        // composer が出す返信先の preview はテキストだけを見せる (#123):
+        // その画像は上の行ですでに画面にある｡
         media: Vec::new(),
     };
 
@@ -694,19 +682,19 @@ pub(super) fn reply_row(
         .into_any_element()
 }
 
-/// Whether post `item` should offer a delete affordance (#72).
+/// post `item` が削除の導線を差し出すべきか (#72)｡
 ///
-/// Own posts only — X rejects deleting anyone else's, and [`is_own_post`]
-/// already answers that question for #15. Requires a resolved
-/// `home_user_id` for the same reason the other write actions do: without
-/// `/me` the app does not yet know whose posts these are.
+/// 自分の post だけだ — X は他人のものの削除を拒むし､[`is_own_post`] が
+/// #15 のためにすでにその問いへ答えている｡他の write 操作と同じ理由で
+/// 解決済みの `home_user_id` を要求する: `/me` が無ければアプリはこれらが
+/// 誰の post なのかをまだ知らない｡
 ///
-/// **Withheld on a repost row**, unlike every other action since #52. A
-/// repost row displays someone's original post; `is_own_post` compares
-/// against that original's author, so a repost of your own post would
-/// otherwise offer to delete the original from a row the user is reading
-/// as "my repost". Removing a repost is [`offers_repost`]'s toggle, and
-/// conflating the two on an irreversible action is not a risk worth taking.
+/// #52 以降の他のすべての操作と違い､**repost 行では出さない**｡repost 行は
+/// 誰かの元の post を表示する; `is_own_post` はその元の著者と比べるので､
+/// そうしないと自分の post の repost では､ユーザーが「自分の repost」と
+/// 読んでいる行から元の post の削除を差し出してしまう｡repost を消すのは
+/// [`offers_repost`] の toggle であり､取り返しのつかない操作で二つを混同
+/// するのは冒す価値のある危険ではない｡
 pub(super) fn offers_delete(
     signed_in_with_oauth: bool,
     home_user_id: Option<&str>,
@@ -719,19 +707,19 @@ pub(super) fn offers_delete(
         && is_own_post(home_username, &item.author_username)
 }
 
-/// Whether post `item` should offer a "Reply" action (#71).
+/// post `item` が "Reply" 操作を差し出すべきか (#71)｡
 ///
-/// Requires the composer to be reachable at all — `signed_in_with_oauth`,
-/// the same gate [`offers_quote`] uses, since a reply has nowhere to go
-/// without one. Nothing else: X accepts a reply to your own post, and a
-/// repost row is fine now that #52 resolves it to the original.
+/// composer にそもそも辿り着けることを要求する — [`offers_quote`] が使う
+/// のと同じ条件 `signed_in_with_oauth` だ｡それが無ければ reply の行き先が
+/// 無い｡他には何も要らない: X は自分の post への reply を受け入れるし､
+/// #52 が元の post へ解決するようになったいま repost 行でも問題ない｡
 pub(super) fn offers_reply(signed_in_with_oauth: bool, _item: &TimelineItem) -> bool {
     signed_in_with_oauth
 }
 
-/// The composer's heading above a reply target (#71) — "Replying to
-/// @someone", or the handle-less form when the author never expanded,
-/// mirroring [`reply_banner_label`]'s own treatment of the same gap.
+/// composer が reply 対象の上に出す見出し (#71) — "Replying to @someone"､
+/// 著者が expand されなかったときは handle 無しの形になる｡同じ欠落に対する
+/// [`reply_banner_label`] 自身の扱いを写したものだ｡
 pub(super) fn reply_target_label(author_username: &str) -> String {
     if author_username.is_empty() {
         "Replying to a post".to_string()
@@ -740,39 +728,38 @@ pub(super) fn reply_target_label(author_username: &str) -> String {
     }
 }
 
-/// Whether post `item` should offer a "Quote" action (#16).
+/// post `item` が "Quote" 操作を差し出すべきか (#16)｡
 ///
-/// Requires the composer to even be reachable — `signed_in_with_oauth`,
-/// mirroring [`Render::render`]'s own gate on `self.composer` — since
-/// quoting has nowhere to go without one. A repost row is offered one like
-/// any other since #52 — `x_api::action_post_id` resolves it to the
-/// original, which is also the text and author the quote card would carry.
-/// Unlike [`offers_repost`], quoting one's own post *is* allowed (#16's
-/// design decision — the API doesn't reject it the way it rejects
-/// reposting yourself), so there is no `is_own_post` check here.
+/// composer にそもそも辿り着けることを要求する — `signed_in_with_oauth`
+/// で､[`Render::render`] 自身の `self.composer` に対する条件を写している
+/// — それが無ければ quote の行き先が無いからだ｡#52 以降 repost 行にも他と
+/// 同じく出す — `x_api::action_post_id` が元の post へ解決し､それが quote
+/// カードの運ぶテキストと著者でもある｡[`offers_repost`] と違い､自分の post
+/// を quote するのは許されている (#16 の設計上の判断 — API は自分を repost
+/// するときのようには拒まない) ので､ここに `is_own_post` の確認は無い｡
 pub(super) fn offers_quote(signed_in_with_oauth: bool, _item: &TimelineItem) -> bool {
     signed_in_with_oauth
 }
 
-/// The "Quote" action for one post (#16), rendered whenever [`offers_quote`]
-/// allows it for `item`. Unlike #15's repost toggle this is a one-shot,
-/// purely local action, not a per-post request: clicking it only loads the
-/// composer's quote target (`ComposeState::set_quote`) so the card renders
-/// there — nothing is sent to X until the composer's own "Post" button is
-/// clicked, exactly like an ordinary draft.
+/// 一つの post の "Quote" 操作 (#16)｡[`offers_quote`] が `item` に対して
+/// 許すときに描く｡#15 の repost の toggle と違い､これは post ごとの
+/// リクエストではなく一度きりの純粋にローカルな操作だ: クリックしても
+/// composer の quote 対象 (`ComposeState::set_quote`) を読み込んでそこへ
+/// カードを描くだけで — 普通の下書きとまったく同じく､composer 自身の
+/// "Post" ボタンが押されるまで X へは何も送らない｡
 pub(super) fn quote_row(
     item: &TimelineItem,
     theme: Theme,
     cx: &mut Context<'_, TimelineView>,
 ) -> AnyElement {
-    // #52: quoting a repost row quotes the original, which is also the text
-    // and author the card below already shows.
+    // #52: repost 行を quote すると元の post を quote する｡それは下の
+    // カードがすでに見せているテキストと著者でもある｡
     let post_id = action_post_id(item).to_string();
     let quoted = QuotedPost {
         author_name: item.author_name.clone(),
         author_username: item.author_username.clone(),
         text: item.text.clone(),
-        // As above: the row this quote button belongs to is right there.
+        // 上と同じ: この quote ボタンが属する行はすぐそこにある｡
         media: Vec::new(),
     };
 
@@ -790,35 +777,35 @@ pub(super) fn quote_row(
         .into_any_element()
 }
 
-/// The header's title (#11): which account's posts these are, and — since
-/// #11 introduces a second mode — which mode is showing, so the user is
-/// never left guessing whether they're looking at their own home timeline or
-/// one account's posts.
+/// ヘッダの表題 (#11): これが誰のアカウントの post か､そして — #11 が
+/// 二つ目のモードを持ち込んだので — どのモードを出しているか｡自分の home
+/// timeline を見ているのか一つのアカウントの post を見ているのかを､
+/// ユーザーが推し量る羽目にならないようにするためだ｡
 ///
-/// `home_username` is `None` only for the brief window before `/me` has
-/// resolved even once (never true once anything is cached or has loaded),
-/// which is the one case where the title cannot name the account.
+/// `home_username` が `None` になるのは `/me` が一度も解決していない短い
+/// 間だけで (何かがキャッシュされたか読み込まれたら二度と起きない)､表題
+/// がアカウントを名指せない唯一の場合だ｡
 ///
-/// It took a `TimelineSource` until #33, when the window stopped being able
-/// to show anything but the home timeline — the single-user view existed
-/// because an app-only bearer token could not read the home one.
+/// #33 までは `TimelineSource` を取っていた｡#33 でウィンドウは home
+/// timeline 以外を出せなくなった — single-user の view が在ったのは
+/// app-only の bearer token が home を読めなかったからだ｡
 pub(super) fn header_title(home_username: Option<&str>) -> String {
     match home_username {
         Some(username) => format!("@{username}"),
-        // Before `/me` resolves there is no account to name, and the app's
-        // own name is what a macOS toolbar shows in its place.
+        // `/me` が解決するまで名指せるアカウントは無く､macOS のツールバーが
+        // その場所に見せるのはアプリ自身の名前だ｡
         None => "twigpui".to_string(),
     }
 }
 
-/// [`header_title`] as the toolbar draws it (#95).
+/// ツールバーが描くままの [`header_title`] (#95)｡
 ///
-/// Carries its own left margin rather than relying on the toolbar row's
-/// `gap`: that gap leaves the title flush against whatever precedes it —
-/// the picker's trough, or #164's fetch button, which the first live
-/// window showed as `Load lists (1 request)@usadamasa`. #182 found the
-/// same thing in the status bar and fixed it the same way. Named so the
-/// window tests can measure the space.
+/// ツールバー行の `gap` に頼らず自前の左マージンを持つ: あの gap では
+/// タイトルが直前にあるものへぴたりと付いたままになる — picker の trough
+/// や #164 の取得ボタンがそれで､最初の実機ウィンドウでは
+/// `Load lists (1 request)@usadamasa` と出た｡#182 がステータスバーで同じ
+/// ものを見つけ､同じやり方で直した｡ウィンドウのテストがこの間隔を測れる
+/// よう名前を付けてある｡
 pub(super) fn header_title_element(home_username: Option<&str>, theme: Theme) -> impl IntoElement {
     div()
         .addressable("header-title")
@@ -828,14 +815,14 @@ pub(super) fn header_title_element(home_username: Option<&str>, theme: Theme) ->
         .child(header_title(home_username))
 }
 
-/// The trough of the toolbar's timeline switcher (#95), shaped like a
-/// macOS segmented control: one track that [`tab_segment`]s sit in, the
-/// selected one lifted out of it in the window's own background color.
+/// ツールバーの timeline 切り替えの trough (#95)｡macOS の segmented
+/// control の形をしている: [`tab_segment`] が収まる一本のトラックがあり､
+/// 選択中のものだけがウィンドウ自身の背景色でそこから持ち上がる｡
 ///
-/// Split from the segments (they used to be one function taking a slice
-/// of labels) because #164's segments carry a click each, and a click
-/// handler needs the view's `cx` — which is `ui::list_picker`'s to hold,
-/// not this file's. What stays here is only how the control looks.
+/// segment と分けた (かつてはラベルのスライスを取る一つの関数だった) のは､
+/// #164 の segment が各々クリックを担い､クリックハンドラには view の `cx`
+/// が要るからだ — それは `ui::list_picker` が持つものであって､この
+/// ファイルのものではない｡ここに残るのは control の見た目だけである｡
 pub(super) fn tab_trough(theme: Theme) -> Div {
     div()
         .flex()
@@ -846,17 +833,16 @@ pub(super) fn tab_trough(theme: Theme) -> Div {
         .text_size(theme::TEXT_META)
 }
 
-/// One segment of the switcher — see [`tab_trough`].
+/// 切り替えの segment 一つ — [`tab_trough`] を見よ｡
 pub(super) fn tab_segment(label: &str, selected: bool, theme: Theme) -> Div {
     div()
         .px_2()
         .py_0p5()
         .rounded(px(4.0))
         .when(selected, |segment| {
-            // Lifted out of the track rather than merely tinted:
-            // without the shadow the segment reads as a bordered
-            // chip beside plain text, which is a different control
-            // entirely.
+            // 色を付けるだけでなくトラックから持ち上げる: 影が無いと
+            // segment は素のテキストの傍らに置かれた枠付きの chip に
+            // 読め､それはまったく別の control になってしまう｡
             segment
                 .bg(rgb(theme.bg))
                 .shadow_sm()
@@ -869,31 +855,29 @@ pub(super) fn tab_segment(label: &str, selected: bool, theme: Theme) -> Div {
         .child(label.to_string())
 }
 
-/// How many attached images one row will render (#65). X allows up to four
-/// per post, which is also as many as fit before a timeline row stops being
-/// a timeline row.
+/// 一つの行が描く添付画像の数 (#65)｡X は post あたり四枚まで許し､それは
+/// timeline の行が timeline の行でなくなる手前に収まる限度でもある｡
 pub(super) const MAX_RENDERED_MEDIA: usize = 4;
 
-/// How tall one thumbnail is (#65). Fixed rather than derived from the
-/// media's own `width`/`height`: a row's height must not depend on which
-/// images have finished downloading, or the timeline reflows under the
-/// reader as they land.
+/// サムネイル一枚の高さ (#65)｡media 自身の `width`/`height` から導かず
+/// 固定にしてある: 行の高さが､どの画像のダウンロードを終えたかに依っては
+/// ならない｡さもなくば画像が届くたびに timeline が読み手の下で組み直る｡
 ///
-/// The value lives in `theme` with the rest of #95's dimensions.
+/// 値は #95 の他の寸法と一緒に `theme` にある｡
 pub(super) use crate::theme::MEDIA_CELL_HEIGHT;
 
-/// How many columns to lay `count` thumbnails out in (#65): one across for
-/// a single image, two for anything more. Three across would each be too
-/// narrow to read at this height, and X's own maximum of four is two rows
-/// of two. Never returns 0 — `chunks` would panic.
+/// `count` 枚のサムネイルを何列に並べるか (#65): 一枚なら一列､それ以上は
+/// 二列｡三列にすると この高さでは一枚ずつが読むには狭すぎ､X 自身の上限で
+/// ある四枚は二列二行にちょうど収まる｡0 は決して返さない — `chunks` が
+/// panic するからだ｡
 pub(super) fn media_columns(count: usize) -> usize {
     if count <= 1 { 1 } else { 2 }
 }
 
-/// The badge shown under a non-photo thumbnail (#65), or `None` for a plain
-/// photo — and for any `type` this app doesn't recognize, which is the
-/// forward-compatible direction: a media type X invents later should render
-/// as a bare still rather than as a label nobody can interpret.
+/// 写真でないサムネイルの下に見せるバッジ (#65)｡素の写真なら `None` で､
+/// このアプリが知らない `type` でも `None` だ｡そちらが前方互換の向きで
+/// ある: X が後から生む media type は､誰にも解せないラベルとしてではなく
+/// 素の静止画として描かれるべきだ｡
 pub(super) fn media_badge(kind: Option<&str>) -> Option<&'static str> {
     match kind {
         Some("video") => Some("Video"),
@@ -902,30 +886,28 @@ pub(super) fn media_badge(kind: Option<&str>) -> Option<&'static str> {
     }
 }
 
-/// How big an author avatar renders (#64). One constant because the
-/// placeholder has to match the image exactly — a row that reflows when the
-/// download lands is worse than no avatar at all.
+/// 投稿者のアバターを描く大きさ (#64)｡定数が一つなのは､placeholder が
+/// 画像と厳密に一致せねばならないからだ — ダウンロードが届いた瞬間に組み
+/// 直る行は､アバターがまったく無いよりも悪い｡
 ///
-/// Matching sizes alone isn't enough (#103): `post_row` sits the avatar next
-/// to a `flex_1` body, and flex's default `flex-shrink: 1` squishes a plain
-/// `.size(AVATAR_SIZE)` element once the body's content pushes past the
-/// available width. Both the `img` and the placeholder `div` need
-/// `flex_shrink_0` alongside this size, not just the size itself. Shape is
-/// the third thing the two must agree on, which is why it is
-/// [`theme::AVATAR_RADIUS`] and not a literal (#98).
+/// 大きさを揃えるだけでは足りない (#103): `post_row` はアバターを `flex_1`
+/// の本文の隣に据えるので､本文の内容が使える幅を越えると flex の既定の
+/// `flex-shrink: 1` が素の `.size(AVATAR_SIZE)` 要素を潰す｡`img` と
+/// placeholder の `div` には､大きさそのものだけでなく､この大きさと並べて
+/// `flex_shrink_0` も要る｡両者が一致せねばならない三つ目が形であり､だから
+/// こそリテラルではなく [`theme::AVATAR_RADIUS`] なのだ (#98)｡
 ///
-/// The value itself lives in `theme` alongside the radius and the row
-/// separator's inset, both of which are derived from it (#95).
+/// 値そのものは､どちらもそこから導かれる radius と行の区切り線の inset と
+/// 一緒に `theme` にある (#95)｡
 pub(super) use crate::theme::AVATAR_SIZE;
 
-/// What stands in for an avatar that hasn't downloaded, failed, or never
-/// existed (#64): a filled circle carrying the author's initial.
+/// まだダウンロードされていない､失敗した､あるいはそもそも存在しなかった
+/// アバターの代わりに立つもの (#64): 投稿者の頭文字を載せた塗り潰しの円｡
 ///
-/// An initial rather than a blank disc, since it already distinguishes most
-/// consecutive authors in a timeline — which is the whole point of #64 —
-/// before any image arrives. An author whose name never expanded gets the
-/// bare circle; there is no character to show and inventing one would be
-/// worse than the gap.
+/// 空の円盤ではなく頭文字にしたのは､画像が一枚も届く前から timeline の
+/// 連続する投稿者をおおむね見分けられるからで — それが #64 の眼目である｡
+/// 名前が展開されなかった投稿者には素の円が出る; 見せる文字が無く､
+/// でっち上げれば空白よりも悪くなる｡
 pub(super) fn avatar_placeholder(author_name: &str, theme: Theme) -> AnyElement {
     let initial = avatar_initial(author_name);
 
@@ -942,16 +924,15 @@ pub(super) fn avatar_placeholder(author_name: &str, theme: Theme) -> AnyElement 
         .into_any_element()
 }
 
-/// The character an avatar placeholder shows for `author_name` (#64):
-/// its first, uppercased. Empty for an author whose name never expanded —
-/// the circle then stands alone rather than showing a made-up initial.
+/// アバターの placeholder が `author_name` に対して見せる文字 (#64):
+/// 先頭の一文字を大文字にしたもの｡名前が展開されなかった投稿者では空に
+/// なる — そのとき円は､でっち上げた頭文字を見せるのではなく単独で立つ｡
 ///
-/// `char`-wise, not byte-wise, so a name starting with a multi-byte
-/// character (which plenty do) is neither split mid-character nor skipped.
-/// `to_uppercase` is the Unicode one, which can yield more than one
-/// character for some scripts; that is left as-is rather than truncated,
-/// since cutting a cased expansion in half produces something wrong rather
-/// than something short.
+/// バイト単位ではなく `char` 単位なので､マルチバイト文字で始まる名前
+/// (そういうものは多い) が文字の途中で切られることも飛ばされることも
+/// ない｡`to_uppercase` は Unicode のそれで､字体によっては一文字より多くを
+/// 生みうる; それは切り詰めずそのままにしてある｡大文字化した結果を半分で
+/// 断てば､短いものではなく誤ったものが出るからだ｡
 pub(super) fn avatar_initial(author_name: &str) -> String {
     author_name
         .chars()
@@ -960,15 +941,14 @@ pub(super) fn avatar_initial(author_name: &str) -> String {
         .unwrap_or_default()
 }
 
-/// x.com's canonical URL for one post (#70), built from what
-/// [`TimelineItem`] already carries — no request, no API involvement at
-/// all.
+/// post 一つに対する x.com の正準 URL (#70)｡[`TimelineItem`] がすでに
+/// 持っているものから組み立てる — リクエストは無く､API は一切関わらない｡
 ///
-/// `author_username` is empty for a post whose author never expanded (see
-/// `x_api::model::build_item`), and `x.com//status/…` would 404. X's own
-/// id-only form, `x.com/i/web/status/:id`, resolves the author server-side,
-/// so the link still works rather than being withheld exactly when the app
-/// knows least about the post.
+/// 投稿者が展開されなかった post では `author_username` が空で
+/// (`x_api::model::build_item` を見よ)､`x.com//status/…` は 404 になる｡
+/// X 自身の id だけの形 `x.com/i/web/status/:id` はサーバ側で投稿者を
+/// 解決するので､アプリがその post について最も知らないまさにそのときに
+/// 導線を取り下げるのではなく､リンクは働きつづける｡
 pub(super) fn post_permalink(author_username: &str, post_id: &str) -> String {
     if author_username.is_empty() {
         format!("https://x.com/i/web/status/{post_id}")
@@ -977,38 +957,37 @@ pub(super) fn post_permalink(author_username: &str, post_id: &str) -> String {
     }
 }
 
-/// x.com's URL for one account (#70), or `None` when the username never
-/// resolved — unlike a post there is no id-only fallback to reach for, so
-/// the affordance is withheld instead of pointing somewhere wrong.
+/// アカウント一つに対する x.com の URL (#70)｡username が解決しなかった
+/// ときは `None` — post と違い id だけの逃げ道が無いので､誤った先を指す
+/// 代わりにその導線を取り下げる｡
 pub(super) fn profile_url(author_username: &str) -> Option<String> {
     (!author_username.is_empty()).then(|| format!("https://x.com/{author_username}"))
 }
 
-/// The engagement counts a row shows beside its actions (#67, reshaped by
-/// #95).
+/// 行がアクションの傍らに見せるエンゲージメントの件数 (#67､#95 で作り
+/// 直した)｡
 ///
-/// Until #95 these were one standalone line under the body — "12 replies ·
-/// 34 reposts · 56 likes" — sitting above a column of stacked action
-/// labels that named the very same three things. #95 folds the two
-/// together: the count now rides next to the action it belongs to, and the
-/// separate line is gone, which is one row of height back on every post.
+/// #95 までは本文の下の独立した一行 — "12 replies · 34 reposts ·
+/// 56 likes" — で､まさに同じ三つを名指すアクションのラベルが縦に並んだ列
+/// の上に載っていた｡#95 は二つを畳み込む: 件数は今や属するアクションの隣に
+/// 乗り､独立した行は消えた｡どの post でも一行分の高さが戻ってくる｡
 ///
-/// Each field is `None` when that count is zero, or when the post carried
-/// no metrics at all, so a fresh post renders bare actions rather than a
-/// run of zeros — the same rule the old line followed by dropping zero
-/// parts. The counts are a snapshot from when the row was fetched (see
-/// [`PostMetrics`]); nothing here re-reads them.
+/// 各フィールドは､その件数が零のとき､または post が metrics をまったく
+/// 持たないとき `None` になる｡だから新しい post は零の連なりではなく素の
+/// アクションを描く — 零の部分を落としていた古い一行と同じ規則だ｡件数は
+/// 行を取得した時点のスナップショットであり ([`PostMetrics`] を見よ)､
+/// ここで読み直すものは何も無い｡
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(super) struct RowCounts {
-    /// Beside "Reply".
+    /// "Reply" の傍ら｡
     pub(super) replies: Option<String>,
-    /// Beside "Repost" / "Reposted".
+    /// "Repost" / "Reposted" の傍ら｡
     pub(super) reposts: Option<String>,
-    /// Beside "Like" / "Liked".
+    /// "Like" / "Liked" の傍ら｡
     pub(super) likes: Option<String>,
 }
 
-/// Build one row's [`RowCounts`] from whatever metrics it carries.
+/// 行が持つ metrics から､その行の [`RowCounts`] を組み立てる｡
 pub(super) fn row_counts(metrics: Option<&PostMetrics>) -> RowCounts {
     let Some(metrics) = metrics else {
         return RowCounts::default();
@@ -1020,19 +999,19 @@ pub(super) fn row_counts(metrics: Option<&PostMetrics>) -> RowCounts {
     }
 }
 
-/// One count, abbreviated, or `None` for zero — see [`RowCounts`] for why
-/// zero is nothing rather than "0".
+/// 件数一つを略記したもの｡零なら `None` — 零が "0" ではなく無である理由は
+/// [`RowCounts`] を見よ｡
 fn non_zero_count(count: u64) -> Option<String> {
     (count > 0).then(|| compact_count(count))
 }
 
-/// One action with its engagement count beside it (#95), or the action on
-/// its own when there is no count to show.
+/// アクション一つと､その傍らのエンゲージメント件数 (#95)｡見せる件数が
+/// 無ければアクション単独｡
 ///
-/// The count is a sibling rather than part of the action's own element so
-/// that clicking the number does nothing: the actions are toggles that
-/// spend a request, and a count that looks like part of the button would
-/// widen the target for an action the reader only meant to read.
+/// 件数をアクション自身の要素の一部ではなく兄弟にしてあるのは､数字を
+/// クリックしても何も起きないようにするためだ: アクションはリクエストを
+/// 費やすトグルであり､ボタンの一部に見える件数は､読み手がただ読むだけの
+/// つもりだったアクションの的を広げてしまう｡
 pub(super) fn with_count(action: AnyElement, count: Option<&str>, theme: Theme) -> AnyElement {
     let Some(count) = count else {
         return action;
@@ -1051,10 +1030,10 @@ pub(super) fn with_count(action: AnyElement, count: Option<&str>, theme: Theme) 
         .into_any_element()
 }
 
-/// Abbreviate a count the way X's own UI does — `12345` becomes `12.3K` —
-/// so a popular post cannot push the timestamp and byline around by being
-/// seven digits wide. A trailing `.0` is dropped (`1000` is `1K`, not
-/// `1.0K`); below 1000 the number is shown as-is.
+/// X 自身の UI と同じやり方で件数を略記する — `12345` は `12.3K` になる —
+/// 人気の post が七桁の幅でタイムスタンプと byline を押しのけられない
+/// ように｡末尾の `.0` は落とす (`1000` は `1.0K` ではなく `1K`); 1000 未満
+/// はそのままの数字を見せる｡
 pub(super) fn compact_count(count: u64) -> String {
     #[expect(
         clippy::cast_precision_loss,
@@ -1062,8 +1041,8 @@ pub(super) fn compact_count(count: u64) -> String {
     )]
     fn scaled(count: u64, unit: u64, suffix: char) -> String {
         let value = count as f64 / unit as f64;
-        // One decimal, truncated rather than rounded, so the label never
-        // claims more engagement than the post actually has.
+        // 小数一桁を､丸めずに切り捨てる｡ラベルが post の実際より多くの
+        // エンゲージメントを主張しないようにするためだ｡
         let tenths = (value * 10.0).floor() / 10.0;
         if (tenths.fract()).abs() < f64::EPSILON {
             format!("{}{suffix}", tenths.trunc())
@@ -1079,18 +1058,18 @@ pub(super) fn compact_count(count: u64) -> String {
     }
 }
 
-/// Turn `2026-08-16T09:00:00.000Z` into `2026-08-16 09:00`.
+/// `2026-08-16T09:00:00.000Z` を `2026-08-16 09:00` にする｡
 ///
-/// The API always returns UTC in RFC 3339, so slicing beats pulling in a date
-/// library for a label this small.
+/// API は常に RFC 3339 の UTC を返すので､これほど小さなラベルのために日付
+/// ライブラリを引き込むより切り出すほうがよい｡
 pub(super) fn format_timestamp(created_at: Option<&str>) -> String {
     let Some(raw) = created_at else {
         return String::new();
     };
-    // `get`, not `&time[..5]` (#47, `clippy::string_slice`): that is a byte
-    // range, and a `time` half whose fifth byte falls inside a multi-byte
-    // character would panic rather than fall through to the raw string.
-    // `created_at` comes from the API, so this is remote input.
+    // `&time[..5]` ではなく `get` (#47, `clippy::string_slice`): あれは
+    // バイト範囲であり､五バイト目がマルチバイト文字の内側に落ちる `time`
+    // 側は､生の文字列へ落ちるのではなく panic する｡`created_at` は API
+    // から来るので､これは遠隔からの入力だ｡
     match raw.split_once('T') {
         Some((date, time)) => match time.get(..5) {
             Some(hhmm) => format!("{date} {hhmm}"),

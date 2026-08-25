@@ -1,9 +1,9 @@
-//! PKCE verifier/challenge generation (RFC 7636) and authorize-URL building.
+//! PKCE の verifier/challenge 生成 (RFC 7636) と authorize URL の組み立て｡
 //!
-//! Every function here is pure over its inputs — including randomness, which
-//! arrives through an injected [`RandomSource`] the same way [`crate::config`]
-//! and [`crate::paths`] inject a variable lookup. Tests supply a fixed byte
-//! sequence; [`OsRandom`] is the only implementation used outside tests.
+//! ここの関数はどれも入力に対して純粋だ — 乱数も含めて｡乱数は注入された
+//! [`RandomSource`] を通って届く｡[`crate::config`] や [`crate::paths`] が
+//! 変数の参照を注入するのと同じやり方だ｡テストは固定のバイト列を渡す｡
+//! テスト以外で使う実装は [`OsRandom`] だけだ｡
 
 use anyhow::{Context as _, Result, bail};
 use base64::Engine as _;
@@ -12,35 +12,35 @@ use sha2::{Digest as _, Sha256};
 
 use crate::url::Url;
 
-/// Scopes requested at authorize time. `tweet.write` was added by #14,
-/// `like.write` by #68, and `list.read` by #161 — #7 deliberately left them
-/// out until posting, liking and reading a List needed them. Already-signed-in
-/// users from before each addition hold a token without it, which is exactly
-/// what `oauth::tokens::has_scope` plus the header's "Re-authorize" button
-/// (#14) exist to detect and fix.
+/// authorize 時に要求する scope｡`tweet.write` は #14 が､`like.write` は #68
+/// が､`list.read` は #161 が足した — #7 は post・like・List の読み取りが
+/// それらを必要とするまで意図して外していた｡各追加より前からサインインして
+/// いる人はそれを持たない token を握っており､まさにそれを検知して直すために
+/// `oauth::tokens::has_scope` とヘッダーの "Re-authorize" ボタン (#14) が
+/// ある｡
 ///
-/// `list.write` is **not** requested. Creating and populating a List is #163;
-/// asking for write access the app cannot yet use would be a permission
-/// granted for nothing.
+/// `list.write` は要求し **ない**｡List を作って中身を入れるのは #163 だ｡
+/// アプリがまだ使えない書き込み権限を求めるのは､何のためでもない権限を
+/// 与えられることになる｡
 const SCOPES: &str = "tweet.read users.read tweet.write like.write list.read list.write follows.read \
      offline.access";
 
-/// `https://x.com/i/oauth2/authorize` per the issue's confirmed design.
+/// `https://x.com/i/oauth2/authorize`｡issue で確定した設計に従う｡
 const AUTHORIZE_URL: &str = "https://x.com/i/oauth2/authorize";
 
-/// Bytes of entropy behind the code verifier and the CSRF `state` value. 32
-/// random bytes base64url-encode to 43 characters — the minimum length RFC
-/// 7636 §4.1 allows for a code verifier, and enough for an unguessable state.
+/// code verifier と CSRF の `state` 値を支えるエントロピーのバイト数｡32
+/// バイトの乱数は base64url で 43 文字になる — RFC 7636 §4.1 が code verifier
+/// に許す最小の長さであり､推測できない state には十分だ｡
 const RANDOM_BYTES: usize = 32;
 
-/// Source of cryptographically random bytes, injected so PKCE generation can
-/// be tested with a fixed sequence instead of the OS RNG — the same seam
-/// [`crate::config::Config::resolve`] uses for environment lookups.
+/// 暗号論的乱数バイトの供給源｡PKCE の生成を OS の RNG ではなく固定の列で
+/// テストできるよう注入する — [`crate::config::Config::resolve`] が環境変数の
+/// 参照に使うのと同じ継ぎ目だ｡
 pub(crate) trait RandomSource {
     fn fill(&self, buf: &mut [u8]) -> Result<()>;
 }
 
-/// The real source, backed by the OS CSPRNG via `getrandom`.
+/// 実際の供給源｡`getrandom` 経由で OS の CSPRNG を使う｡
 pub(crate) struct OsRandom;
 
 impl RandomSource for OsRandom {
@@ -49,31 +49,31 @@ impl RandomSource for OsRandom {
     }
 }
 
-/// Generate a PKCE code verifier: 32 random bytes, base64url-encoded without
-/// padding (RFC 7636 §4.1).
+/// PKCE の code verifier を生成する: 32 バイトの乱数を､パディング無しの
+/// base64url でエンコードしたもの (RFC 7636 §4.1)｡
 pub(crate) fn generate_code_verifier(random: &impl RandomSource) -> Result<String> {
     let mut bytes = [0u8; RANDOM_BYTES];
     random.fill(&mut bytes)?;
     Ok(URL_SAFE_NO_PAD.encode(bytes))
 }
 
-/// Derive the S256 code challenge from a verifier (RFC 7636 §4.2):
-/// `BASE64URL-ENCODE(SHA256(ASCII(code_verifier)))`.
+/// verifier から S256 の code challenge を導く (RFC 7636 §4.2):
+/// `BASE64URL-ENCODE(SHA256(ASCII(code_verifier)))`｡
 pub(crate) fn code_challenge(verifier: &str) -> String {
     let digest = Sha256::digest(verifier.as_bytes());
     URL_SAFE_NO_PAD.encode(digest)
 }
 
-/// Generate the CSRF `state` parameter. Random bytes are enough here too —
-/// there's no RFC-mandated shape the way there is for the code verifier.
+/// CSRF の `state` パラメータを生成する｡ここも乱数バイトで十分だ —
+/// code verifier と違い RFC が定める形は無い｡
 pub(crate) fn generate_state(random: &impl RandomSource) -> Result<String> {
     let mut bytes = [0u8; RANDOM_BYTES];
     random.fill(&mut bytes)?;
     Ok(URL_SAFE_NO_PAD.encode(bytes))
 }
 
-/// Reject a `state` echoed back by the callback that doesn't match what was
-/// sent — the CSRF check RFC 6749 §10.12 requires of the client.
+/// callback が返してきた `state` が送ったものと一致しなければ拒否する —
+/// RFC 6749 §10.12 がクライアントに要求する CSRF の検査だ｡
 pub(crate) fn verify_state(expected: &str, received: &str) -> Result<()> {
     if expected == received {
         Ok(())
@@ -82,19 +82,19 @@ pub(crate) fn verify_state(expected: &str, received: &str) -> Result<()> {
     }
 }
 
-/// Build the `https://x.com/i/oauth2/authorize` URL for the interactive
-/// sign-in step.
+/// 対話的なサインイン手順のための `https://x.com/i/oauth2/authorize` URL を
+/// 組み立てる｡
 ///
-/// [`Url::form`] rather than [`Url::api`] (#165): OAuth 2.0 §3.1 asks for
-/// `application/x-www-form-urlencoded` parameters, so nothing outside RFC
-/// 3986's `unreserved` set survives — the space between scopes travels as
-/// `%20` and `redirect_uri`'s `:` and `/` travel escaped. The X API's own
-/// query values keep their commas; these do not. See `url`'s module doc.
+/// [`Url::api`] ではなく [`Url::form`] を使う (#165): OAuth 2.0 §3.1 は
+/// `application/x-www-form-urlencoded` のパラメータを求めるので､RFC 3986 の
+/// `unreserved` 集合の外は何も残らない — scope の間の空白は `%20` として､
+/// `redirect_uri` の `:` と `/` はエスケープされて送られる｡X API 自身の
+/// クエリ値はカンマを保つが､こちらは保たない｡`url` のモジュール doc を参照｡
 ///
-/// Until #165 this had a hand-written `percent_encode` and a format string
-/// that called it once per value. Nothing checked that every value got the
-/// call, and #161 showed what that costs: adding one scope meant editing a
-/// URL literal in a test by hand.
+/// #165 まではここに手書きの `percent_encode` と､値ごとにそれを 1 回ずつ
+/// 呼ぶフォーマット文字列があった｡すべての値がその呼び出しを受けたことは
+/// 何も検査していなかった｡#161 がその代償を見せた: scope を 1 つ足すのに
+/// テスト内の URL リテラルを手で編集することになった｡
 pub(crate) fn build_authorize_url(
     client_id: &str,
     redirect_uri: &str,
@@ -116,8 +116,8 @@ pub(crate) fn build_authorize_url(
 mod tests {
     use super::*;
 
-    /// A `RandomSource` that always returns a fixed byte sequence, so PKCE
-    /// generation is deterministic in tests.
+    /// 常に固定のバイト列を返す `RandomSource`｡テストで PKCE の生成を
+    /// 決定的にするためのものだ｡
     struct FixedRandom<'a>(&'a [u8]);
 
     impl RandomSource for FixedRandom<'_> {
@@ -185,12 +185,12 @@ mod tests {
         assert!(error.to_lowercase().contains("csrf"), "{error}");
     }
 
-    // The two `percent_encode` tests that were here moved to `url` with
-    // the function itself (#165), assertion for assertion:
-    // `both_policies_leave_the_unreserved_set_alone` and
-    // `both_policies_escape_a_space_and_a_slash` check the same inputs
-    // against the same expected output, now for both policies rather than
-    // the one this file used to own.
+    // ここにあった 2 つの `percent_encode` のテストは､関数そのものと一緒に
+    // `url` へ移した (#165)｡assert は 1 つずつそのままだ:
+    // `both_policies_leave_the_unreserved_set_alone` と
+    // `both_policies_escape_a_space_and_a_slash` は同じ入力を同じ期待値と
+    // 突き合わせる｡ただし今は､このファイルが持っていた 1 つの方針ではなく
+    // 両方の方針について検査する｡
 
     #[test]
     fn build_authorize_url_includes_every_required_parameter() {
@@ -214,8 +214,8 @@ mod tests {
 
     #[test]
     fn scopes_include_what_68s_like_button_needs() {
-        // #68: liking requires `like.write`. Split rather than substring-
-        // matched for the same reason as the check below.
+        // #68: like には `like.write` が要る｡部分文字列ではなく split して
+        // 照合するのは､下の検査と同じ理由だ｡
         assert!(
             SCOPES.split_whitespace().any(|scope| scope == "like.write"),
             "SCOPES must request like.write"
@@ -224,10 +224,10 @@ mod tests {
 
     #[test]
     fn scopes_include_what_163s_list_sync_needs() {
-        // #163 mirrors the accounts this app follows into a List, which
-        // takes one scope per side: reading `GET /2/users/:id/following`
-        // needs `follows.read`, and adding or removing a member needs
-        // `list.write`. `list.read` (#161) covers only the reads.
+        // #163 はこのアプリがフォローしているアカウントを List へ写す｡
+        // これには両側に 1 つずつ scope が要る: `GET /2/users/:id/following`
+        // を読むには `follows.read` が､メンバーの追加や削除には
+        // `list.write` が要る｡`list.read` (#161) は読み取りしか覆わない｡
         for required in ["follows.read", "list.write"] {
             assert!(
                 SCOPES.split_whitespace().any(|scope| scope == required),
@@ -238,8 +238,8 @@ mod tests {
 
     #[test]
     fn scopes_include_what_161s_list_timeline_needs() {
-        // #161: `GET /2/lists/:id/tweets` requires `list.read`. Split rather
-        // than substring-matched for the same reason as the checks around it.
+        // #161: `GET /2/lists/:id/tweets` には `list.read` が要る｡部分文字列
+        // ではなく split して照合するのは､周りの検査と同じ理由だ｡
         assert!(
             SCOPES.split_whitespace().any(|scope| scope == "list.read"),
             "SCOPES must request list.read"
@@ -248,11 +248,11 @@ mod tests {
 
     #[test]
     fn scopes_leave_out_access_nothing_uses_yet() {
-        // The rule this pins is #7's: never ask for what the app cannot
-        // use. `list.write` and `follows.read` left this list when #163
-        // gave them a caller; these three still have none, so requesting
-        // them would put capabilities on the consent screen that no code
-        // reaches.
+        // これが固定する規則は #7 のものだ: アプリが使えないものを決して
+        // 求めない｡`list.write` と `follows.read` は #163 が呼び出し元を
+        // 与えたときにこのリストを離れた｡この 3 つにはまだ呼び出し元が
+        // 無いので､要求すれば同意画面に､どのコードも到達しない権限を
+        // 並べることになる｡
         for unused in ["bookmark.read", "like.read", "mute.read"] {
             assert!(
                 !SCOPES.split_whitespace().any(|scope| scope == unused),
@@ -263,9 +263,9 @@ mod tests {
 
     #[test]
     fn scopes_include_what_14s_composer_needs() {
-        // #14: posting requires `tweet.write`, added on top of #7's
-        // originally-minimal request — a substring check would false-match
-        // e.g. a hypothetical `tweet.write.extra`, so this splits first.
+        // #14: post には `tweet.write` が要る｡#7 の元々最小だった要求の上に
+        // 足した — 部分文字列の検査では､たとえば仮の `tweet.write.extra` に
+        // 誤って一致してしまうので､先に split する｡
         assert!(
             SCOPES
                 .split_whitespace()

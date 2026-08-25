@@ -15,9 +15,9 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Single required check: it runs only when one of `needs` failed, and then
-  # fails on purpose. Branch protection can point at this one job instead of
-  # tracking every job below.
+  # 唯一の required check: `needs` のどれかが失敗したときだけ動き､そのとき
+  # 意図的に失敗する｡branch protection は下の全ジョブを追う代わりに､この
+  # 1 つのジョブを指せばよい｡
   ci-status-check:
     runs-on: ubuntu-latest
     if: failure()
@@ -31,8 +31,8 @@ jobs:
 
   test:
     name: Test
-    # gpui is built with `macos-blade` and without the x11/wayland stacks, so
-    # this crate only compiles on macOS.
+    # gpui は `macos-blade` で､x11/wayland のスタック無しでビルドしている｡
+    # だからこの crate は macOS でしかコンパイルできない｡
     runs-on: macos-latest
     timeout-minutes: 30
 
@@ -49,10 +49,10 @@ jobs:
       - name: Run tests
         run: cargo test --locked --all-targets
 
-  # Dependabot alerts watch the default branch. This complementary check
-  # prevents a pull request from introducing a dependency with a known
-  # vulnerability. Dependency review compares the base and head dependency
-  # graphs supplied by pull request and merge queue events.
+  # Dependabot の alert が見るのは default branch である｡こちらはそれを
+  # 補うチェックで､既知の脆弱性を持つ依存を pull request が持ち込むのを
+  # 防ぐ｡dependency review は pull request と merge queue のイベントが
+  # 渡す base と head の依存グラフを比べる｡
   dependency-review:
     name: Dependency Review
     runs-on: ubuntu-latest
@@ -70,14 +70,14 @@ jobs:
           license-check: false
           show-openssf-scorecard: false
 
-  # Report-only, and deliberately absent from `ci-status-check`'s `needs`:
-  # it cannot block a merge. `metrics-baseline.tsv` explains the rule — a
-  # check that fails from day one gets disabled instead of fixed — and a
-  # coverage floor has a second problem the file-size ratchet does not.
-  # This app's untestable surface is real and documented (#115: menus, and
-  # everything past the `Scene`), so a PR that adds rendering code lowers
-  # the percentage through no fault of its own. The numbers come first; a
-  # ratchet can follow once there are some, exactly as #48 was phased.
+  # 報告のみで､意図的に `ci-status-check` の `needs` から外してある:
+  # マージを止められない｡ルールは `metrics-baseline.tsv` が説明している —
+  # 初日から落ちるチェックは直されずに無効化される — し､カバレッジの下限には
+  # ファイルサイズのラチェットには無いもう一つの問題がある｡このアプリの
+  # テスト不能な面は実在し文書化もされている (#115: メニューと､`Scene` から
+  # 先のすべて)｡描画コードを足す PR は､それ自体に落ち度が無くても割合を
+  # 下げる｡まず数字が先だ｡数字が揃えばラチェットは後から足せる｡#48 が
+  # そう段階を踏んだのとまったく同じだ｡
   coverage:
     name: Coverage
     runs-on: macos-latest
@@ -92,13 +92,13 @@ jobs:
         with:
           components: llvm-tools-preview
 
-      # No `rust-cache` here, on purpose. An instrumented build uses its own
-      # target directory (2.4 GB locally), and this repository's Actions
-      # cache already sits at 9 GB against GitHub's 10 GB limit — caching
-      # this would evict the Test and Lint caches and make *those* jobs
-      # slower to speed up a report. A cold instrumented build is ~1m40s
-      # locally; the runner is the slower machine but this job blocks
-      # nothing.
+      # ここに `rust-cache` を置かないのは意図的だ｡計測付きのビルドは専用の
+      # target ディレクトリを使い (手元で 2.4 GB)､このリポジトリの Actions
+      # キャッシュは GitHub の 10 GB 上限に対してすでに 9 GB ある — ここで
+      # キャッシュすると Test と Lint のキャッシュを追い出し､レポートを速く
+      # するために *それらの* ジョブを遅くすることになる｡冷えた状態の計測付き
+      # ビルドは手元で約 1m40s｡ランナーはもっと遅いマシンだが､このジョブは
+      # 何も止めない｡
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@6cd13508893c0e7eab5f273c2575d3859bd7229a  # v2.86.6
         with:
@@ -107,9 +107,9 @@ jobs:
       - name: Report coverage
         run: bash scripts/coverage.sh >> "$GITHUB_STEP_SUMMARY"
 
-      # The measurement above is reused rather than re-run: `coverage.sh`
-      # leaves the profile in place and `COVERAGE_REUSE` skips straight to
-      # the report, so the uncovered list costs no second build.
+      # 上の計測は測り直さず使い回す: `coverage.sh` は profile をその場に
+      # 残し､`COVERAGE_REUSE` はレポートまで直行するので､未カバー一覧に
+      # 2 回目のビルドの代金はかからない｡
       - name: List uncovered functions
         env:
           COVERAGE_REUSE: "1"
@@ -120,9 +120,9 @@ jobs:
             printf '```\n\n</details>\n'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      # lcov as well as the json the script reads, so that pointing this at
-      # Codecov or anything else later needs no change here. Both come from
-      # the profile already on disk.
+      # スクリプトが読む json に加えて lcov も出す｡後で Codecov なり何なりに
+      # 向けるときに､ここへ手を入れずに済むようにだ｡どちらもすでにディスクに
+      # ある profile から作られる｡
       - name: Export lcov
         run: cargo llvm-cov report --lcov --output-path tmp/coverage/lcov.info
 
@@ -158,22 +158,21 @@ jobs:
       - name: Run clippy
         run: cargo clippy --locked --all-targets -- -D warnings
 
-      # #48: structural metrics, reported into the run summary rather than
-      # gated on. The existing code is already over any threshold worth
-      # setting, and a check that fails from day one gets disabled instead
-      # of fixed — so this establishes the baseline first, which is what
-      # #48 asks for. It rides in the lint job rather than a new one
-      # because it reuses that job's already-warm clippy cache; a separate
-      # runner would rebuild the crate from scratch (#46).
+      # #48: 構造メトリクス｡ゲートにはせず run summary へ報告する｡既存の
+      # コードは設定する価値のあるどの閾値もすでに超えているし､初日から
+      # 落ちるチェックは直されずに無効化される — だからまず baseline を
+      # 立てる｡それが #48 の求めるものだ｡新しいジョブではなく lint ジョブに
+      # 相乗りするのは､そのジョブの温まった clippy キャッシュを使い回せる
+      # からだ｡別のランナーなら crate を一から建て直すことになる (#46)｡
       - name: Report code metrics
         run: bash scripts/code-metrics.sh >> "$GITHUB_STEP_SUMMARY"
 
-      # #48's gate, and the only metric that is one. Function length is
-      # already enforced by `clippy::too_many_lines` (denied via `pedantic`,
-      # #47) and cognitive complexity has no hits to gate on; file size has
-      # a real problem and no existing check. It ratchets against
-      # `metrics-baseline.tsv` rather than an absolute limit, so growth is
-      # possible but never silent — crossing a ceiling fails here, and the
-      # only way through is to raise it in the same pull request.
+      # #48 のゲートであり､ゲートである唯一のメトリクスだ｡関数の長さは
+      # すでに `clippy::too_many_lines` (`pedantic` 経由で deny､#47) が
+      # 強制しているし､認知的複雑度はゲートにするヒットが無い｡ファイル
+      # サイズには実際の問題があり､既存のチェックが無い｡絶対値の上限では
+      # なく `metrics-baseline.tsv` に対してラチェットするので､成長は
+      # 可能だが決して黙ってはいない — 天井を超えるとここで落ち､通す道は
+      # 同じ pull request で天井を上げることだけだ｡
       - name: Check file sizes against the baseline
         run: bash scripts/code-metrics.sh --check

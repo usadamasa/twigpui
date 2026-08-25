@@ -1,154 +1,146 @@
-//! The background sync's memory: everything it knows about *when* it may
-//! spend, in one file, moved only by one pure function (#197, #198).
+//! background sync の記憶: *いつ* 支出してよいかについて知っていることの
+//! すべてを 1 ファイルにまとめ､純粋関数 1 つだけが動かす (#197, #198)｡
 //!
-//! # Why one struct
+//! # なぜ 1 つの struct なのか
 //!
-//! Before this, the sync's pacing lived in four places: the last diff time
-//! here, the rate-limit deadline in a loop variable in `ui::list_sync`, the
-//! outstanding count in another, and the 15-minute window in
-//! `rate_limit.json`. The hand-offs between them lost information. #198 is
-//! the plainest case: the loop wakes every minute to re-decide, and the
-//! tick that found nothing to do — because it was told to wait — returned
-//! `Idle`, and settling `Idle` cleared the deadline it had just waited on.
-//! Two minutes after every refusal the loop sent again. Relaunching the
-//! app cleared it too: the release build was started eight times in the
-//! twenty hours #197 covers, and each launch sent into the same cap
-//! straight away.
+//! 以前は sync のペース配分が 4 箇所に散っていた: 最後の diff 時刻はここ､
+//! rate limit の期限は `ui::list_sync` の loop 変数､残件数はまた別の変数､
+//! そして 15 分 window は `rate_limit.json`｡そのあいだの受け渡しが情報を
+//! 落としていた｡#198 が最も分かりやすい例だ: loop は毎分起きて決め直すが､
+//! 待てと言われたせいで何もすることが無かった tick は `Idle` を返し､
+//! `Idle` を settle するとたった今待っていたその期限が消えていた｡refusal の
+//! 2 分後には loop がまた送っていた｡アプリの再起動でも消えた: #197 が扱う
+//! 20 時間のあいだに release build は 8 回起動されており､どの起動も即座に
+//! 同じ上限へ送り込んでいた｡
 //!
-//! So the deadline is a field of the state on disk, and [`settle`] is the
-//! only thing that changes any field. What it does not know about — an
-//! `Idle` tick — it leaves alone.
+//! そこで期限は disk 上の state のフィールドにし､どのフィールドを変えるのも
+//! [`settle`] だけにした｡それが知らないもの — `Idle` の tick — には手を
+//! 触れない｡
 //!
-//! # Backing away from a cap that will not say when it lifts
+//! # いつ明けるか言わない上限から後退する
 //!
-//! #193 measured `POST /2/lists/:id/members` refusing with `remaining`
-//! 299 of 300: a limit the `x-rate-limit-*` headers do not describe. The
-//! 900-second wait it introduced was a guess at one refusal; #197 then
-//! saw the same refusal repeat for over twenty hours, and a fixed wait
-//! meant a rejected — and, for a write, possibly billed — request every
-//! fifteen minutes for all of them. [`opaque_backoff_seconds`] doubles the
-//! wait on every consecutive opaque refusal and caps it at six hours: at
-//! most four wasted requests a day against a cap that stays down, and at
-//! most six hours before one that has lifted is noticed.
+//! #193 は `POST /2/lists/:id/members` が `remaining` 300 のうち 299 で
+//! 拒否するのを実測した: `x-rate-limit-*` ヘッダが記述しない制限だ｡そこで
+//! 入れた 900 秒の待機は refusal 1 回への当て推量だった｡その後 #197 で
+//! 同じ refusal が 20 時間以上繰り返すのを見たが､固定待機ではその間ずっと
+//! 15 分ごとに拒否される — しかも write なので課金されうる — request を
+//! 投げることになる｡[`opaque_backoff_seconds`] は連続する opaque な refusal
+//! ごとに待機を倍にし､6 時間で頭打ちにする: 下がったままの上限に対しては
+//! 1 日あたり無駄な request が最大 4 回､明けた上限に気づくまでが最大 6 時間だ｡
 //!
-//! The streak is reset by a write that lands, and by nothing else. Reads
-//! keep working while the write cap is down (#197: the diff succeeded, the
-//! adds did not), so a diff must not count as evidence the cap has lifted.
+//! 連続回数を戻すのは届いた write だけで､それ以外では戻らない｡write の
+//! 上限が下がっていても read は動き続ける (#197: diff は成功し､add は
+//! しなかった) ので､diff の成功を上限が明けた証拠に数えてはならない｡
 //!
-//! # Sending slowly to begin with
+//! # そもそもゆっくり送る
 //!
-//! The lock in #197 followed roughly 100–140 additions in about eighteen
-//! minutes — seven a minute, sent in batches of twenty a second apart.
-//! [`APPLY_PAUSE_SECONDS`] with `sync_writes_per_minute` (default 2, a
-//! config knob since the cap's 24-hour recovery was measured) holds the
-//! sustained rate down. Whether the default is under the cap is unknown;
-//! what it is for is not to be the thing that trips it. Raising the knob
-//! after a clean run is the sanctioned way to probe the cap's size — the
-//! ladder absorbs the answer either way.
+//! #197 のロックは 18 分ほどでおよそ 100〜140 件の addition のあとに来た —
+//! 毎分 7 件､1 秒間隔で 20 件ずつの batch で送っていた｡
+//! [`APPLY_PAUSE_SECONDS`] と `sync_writes_per_minute` (既定 2､上限の
+//! 24 時間での回復を実測して以来 config のつまみ) が持続レートを抑える｡
+//! 既定値が上限より下かどうかは分かっていない｡狙いは､それが上限を踏む
+//! 当のものにならないことだ｡きれいに走ったあとにつまみを上げるのが上限の
+//! 大きさを探る公認のやり方で — 答えがどちらでも梯子が吸収する｡
 
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
 
 use super::schedule::Outcome;
 
-/// How long the loop waits between one batch of writes and the next when
-/// the plan still has more. With `sync_writes_per_minute` this is the
-/// sustained write rate — see the module docs for where the figure comes
-/// from. The pause is the fixed half on purpose: one knob ("writes per
-/// minute") is legible in a way a batch-size-and-interval pair is not.
+/// plan にまだ続きがあるとき､loop が write の batch と次の batch のあいだ
+/// で待つ長さ｡`sync_writes_per_minute` と合わせて持続的な write レートに
+/// なる — 数字の出どころは module doc を見よ｡意図的にこちらを固定側に
+/// してある: つまみが 1 つ (「毎分の write 数」) の方が､batch サイズと
+/// interval の対よりも読み取りやすい｡
 pub(crate) const APPLY_PAUSE_SECONDS: i64 = 60;
 
-/// The most a single opaque refusal is backed away from: six hours. Long
-/// enough that a cap which stays down for a day costs four requests, not
-/// ninety-six; short enough that one which lifts is noticed the same
-/// quarter-day.
+/// opaque な refusal 1 回で後退する上限: 6 時間｡1 日下がったままの上限が
+/// 96 回ではなく 4 回の request で済むだけ長く､明けた上限に同じ 6 時間の
+/// うちに気づけるだけ短い｡
 pub(crate) const OPAQUE_BACKOFF_CEILING_SECONDS: i64 = 21_600;
 
-/// The background sync's clock and pacing, as written to
-/// [`crate::paths::Paths::sync_state_file`].
+/// background sync の時計とペース配分｡
+/// [`crate::paths::Paths::sync_state_file`] に書かれる｡
 ///
-/// Every field is `#[serde(default)]`: the file on a machine that ran the
-/// previous version has only `last_diff_at`, and must load rather than
-/// cost a diff.
+/// どのフィールドも `#[serde(default)]` だ: 前のバージョンを走らせた
+/// マシンのファイルは `last_diff_at` しか持たず､diff を 1 回払うのではなく
+/// 読み込めなければならない｡
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub(crate) struct SyncState {
-    /// When the last diff was *attempted*. See [`super::auto`] for why a
-    /// failed attempt still moves this.
+    /// 最後に diff を *試みた* 時刻｡失敗した試行でもこれが動く理由は
+    /// [`super::auto`] を見よ｡
     #[serde(default)]
     pub last_diff_at: Option<i64>,
-    /// Until when nothing may be sent — a rate limit's deadline, the
-    /// backoff after an opaque refusal, or the interval a failed tick
-    /// earned. Persisted so a relaunch honours it (#198).
+    /// いつまで何も送ってはならないか — rate limit の期限､opaque な
+    /// refusal のあとの backoff､あるいは失敗した tick が得た interval｡
+    /// 再起動でも守られるよう永続化してある (#198)｡
     #[serde(default)]
     pub blocked_until: Option<i64>,
-    /// Consecutive opaque refusals with no write landing in between. Drives
-    /// [`opaque_backoff_seconds`], and is what the status bar shows when a
-    /// catch-up has been refused for hours (#197).
+    /// あいだに write が 1 件も届いていない opaque な refusal の連続回数｡
+    /// [`opaque_backoff_seconds`] を駆動し､catch-up が何時間も拒否されて
+    /// いるときに status bar が出すのがこれだ (#197)｡
     #[serde(default)]
     pub refusals: u32,
 }
 
 impl SyncState {
-    /// Whether `blocked_until` is still ahead of `now`.
+    /// `blocked_until` がまだ `now` より先かどうか｡
     pub(crate) fn is_blocked(&self, now: i64) -> bool {
         self.blocked_until.is_some_and(|until| until > now)
     }
 }
 
-/// How long to wait after the `refusals`-th consecutive opaque refusal.
+/// 連続 `refusals` 回目の opaque な refusal のあと､どれだけ待つか｡
 ///
-/// Doubles from `rate_limit::OPAQUE_LIMIT_BACKOFF_SECONDS` (15 minutes)
-/// and stops at [`OPAQUE_BACKOFF_CEILING_SECONDS`]: 15m, 30m, 1h, 2h, 4h,
-/// then 6h for every refusal after. A `refusals` of 0 is treated as the
-/// first — the function answers "how long now", and there is no such
-/// thing as a zeroth wait.
+/// `rate_limit::OPAQUE_LIMIT_BACKOFF_SECONDS` (15 分) から倍々にし､
+/// [`OPAQUE_BACKOFF_CEILING_SECONDS`] で止まる: 15m, 30m, 1h, 2h, 4h､
+/// 以降の refusal はすべて 6h｡`refusals` が 0 なら 1 回目として扱う —
+/// この関数が答えるのは「今どれだけ待つか」であり､0 回目の待機など
+/// 存在しないからだ｡
 pub(crate) fn opaque_backoff_seconds(refusals: u32) -> i64 {
     let floor = crate::rate_limit::OPAQUE_LIMIT_BACKOFF_SECONDS;
     let doublings = refusals.saturating_sub(1);
-    // Past a handful of doublings the ceiling has long since won, so the
-    // shift is bounded rather than trusted to a u32 from a file.
+    // 数回倍にした時点で天井がとうに勝っているので､shift はファイル由来の
+    // u32 に任せず境界を付けてある｡
     let factor = 1i64 << doublings.min(16);
     floor
         .saturating_mul(factor)
         .min(OPAQUE_BACKOFF_CEILING_SECONDS)
 }
 
-/// What [`settle`] leaves behind: the state to persist, and when the loop
-/// should wake up next.
+/// [`settle`] が残すもの: 永続化する state と､loop が次に起きるべき時刻｡
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Settled {
     pub state: SyncState,
-    /// The soonest the next tick may run. The caller is free to wake
-    /// earlier and re-decide — `schedule::next_step` reads `state` and
-    /// will say `Wait` — but must not run a tick before this.
+    /// 次の tick を走らせてよい最も早い時刻｡呼び出し側はこれより早く
+    /// 起きて決め直してよい — `schedule::next_step` は `state` を読んで
+    /// `Wait` と言う — が､これより前に tick を走らせてはならない｡
     pub wake_at: i64,
 }
 
-/// Move the state on from what the last tick did. The only function that
-/// writes to a [`SyncState`] after it is loaded.
+/// 直前の tick がしたことを踏まえて state を進める｡読み込んだあとの
+/// [`SyncState`] に書き込む唯一の関数だ｡
 ///
-/// `outcome` is `None` when the tick failed outright. That earns a full
-/// interval rather than a quick retry, because the failures that reach
-/// here have already survived `rate_limit`'s own network retries — a
-/// revoked scope, a list that has been deleted, a plan file that will not
-/// parse — and none of them gets better by being asked again in a second.
-/// The interval is recorded in `blocked_until`, so a relaunch does not
-/// retry it either.
+/// tick が完全に失敗したとき `outcome` は `None` になる｡それはすぐの
+/// 再試行ではなく interval 丸ごとを得る｡ここまで来る失敗は `rate_limit`
+/// 自身のネットワーク再試行を既にくぐり抜けているからで — scope の失効､
+/// 削除された list､parse できない plan ファイル — そのどれも 1 秒後に
+/// もう一度訊いてよくなるものではない｡interval は `blocked_until` に
+/// 記録するので､再起動もそれを再試行しない｡
 ///
-/// An `Idle` tick changes nothing (#198). It is the loop re-deciding on a
-/// deadline this state already holds; the deadline is not its to clear.
+/// `Idle` の tick は何も変えない (#198)｡それはこの state が既に持って
+/// いる期限に対して loop が決め直しているだけで､期限を消す権限は無い｡
 ///
-/// A refusal moves `blocked_until`. An opaque one also lengthens the
-/// streak and waits [`opaque_backoff_seconds`] of it; one the window
-/// explains waits for the window and leaves the streak alone, because a
-/// window that reopens on schedule is not evidence about the hidden cap
-/// either way. A write that landed just before the refusal (`sent > 0`)
-/// resets the streak first: the cap was demonstrably up a moment ago, so
-/// this is refusal one, not refusal five.
+/// refusal は `blocked_until` を動かす｡opaque なものは連続回数も伸ばし､
+/// その [`opaque_backoff_seconds`] だけ待つ｡window が説明できるものは
+/// window の分だけ待ち､連続回数には触れない｡予定どおり開き直す window は
+/// 隠れた上限についてどちらの証拠にもならないからだ｡refusal の直前に
+/// write が届いていた場合 (`sent > 0`) は先に連続回数を戻す: 上限は
+/// 少し前に明らかに開いていたので､これは 5 回目ではなく 1 回目の refusal だ｡
 ///
-/// A batch that sent something clears both — the cap took a write — and
-/// comes back after [`APPLY_PAUSE_SECONDS`] if the plan has more. A diff
-/// comes straight back to drain what it found.
+/// 何かを送れた batch は両方を消し — 上限が write を受け付けた — plan に
+/// 続きがあれば [`APPLY_PAUSE_SECONDS`] 後に戻ってくる｡diff は見つけた
+/// ものを流し切るためにすぐ戻ってくる｡
 pub(crate) fn settle(
     state: SyncState,
     outcome: Option<&Outcome>,
@@ -200,14 +192,13 @@ pub(crate) fn settle(
     }
 }
 
-/// Read the state back from `path`.
+/// `path` から state を読み戻す｡
 ///
-/// Unlike `load_plan`, a corrupt file is `Ok(default)` rather than an
-/// error. The two failures are not symmetric: an unreadable *plan* would
-/// send an apply back to paying for both full reads, whereas an unreadable
-/// *clock* costs exactly one diff that was going to happen within the
-/// interval anyway. Failing the whole loop over it would be the more
-/// expensive answer, because the loop is the feature.
+/// `load_plan` と違い､壊れたファイルはエラーではなく `Ok(default)` だ｡
+/// 二つの失敗は対称ではない: 読めない *plan* は apply を両側の全 read を
+/// 支払うところまで押し戻すが､読めない *時計* はどのみち interval 内に
+/// 起きるはずだった diff ちょうど 1 回分で済む｡それで loop 全体を落とす
+/// 方が高くつく｡loop こそがこの機能だからだ｡
 pub(crate) fn load_state(path: &std::path::Path) -> SyncState {
     let Ok(contents) = std::fs::read_to_string(path) else {
         return SyncState::default();
@@ -215,7 +206,7 @@ pub(crate) fn load_state(path: &std::path::Path) -> SyncState {
     serde_json::from_str(&contents).unwrap_or_default()
 }
 
-/// Write the state to `path`.
+/// state を `path` へ書く｡
 pub(crate) fn save_state(path: &std::path::Path, state: &SyncState) -> Result<()> {
     let json = serde_json::to_string_pretty(state).context("could not serialize the sync state")?;
     std::fs::write(path, json).with_context(|| format!("could not write {}", path.display()))
@@ -229,8 +220,8 @@ mod tests {
 
     const INTERVAL: u32 = 21_600;
 
-    /// A settled sync: a diff has run, nothing is blocked, nothing has been
-    /// refused. Tests override the one field they are about.
+    /// 落ち着いた sync: diff は走り済み､block も refusal も無い｡各テストは
+    /// 自分が扱う 1 フィールドだけを上書きする｡
     fn calm() -> SyncState {
         SyncState {
             last_diff_at: Some(1_000),
@@ -248,7 +239,7 @@ mod tests {
         }
     }
 
-    // --- the ladder ---
+    // --- 梯子 ---
 
     #[test]
     fn the_first_opaque_refusal_waits_the_floor() {
@@ -265,7 +256,7 @@ mod tests {
 
     #[test]
     fn the_wait_stops_growing_at_six_hours() {
-        // 900 × 2⁵ = 28,800 would be the sixth; the ceiling wins.
+        // 6 回目は 900 × 2⁵ = 28,800 になるはずだが､天井が勝つ｡
         assert_eq!(opaque_backoff_seconds(6), OPAQUE_BACKOFF_CEILING_SECONDS);
         assert_eq!(opaque_backoff_seconds(40), OPAQUE_BACKOFF_CEILING_SECONDS);
         assert_eq!(
@@ -279,7 +270,7 @@ mod tests {
         assert_eq!(opaque_backoff_seconds(0), OPAQUE_LIMIT_BACKOFF_SECONDS);
     }
 
-    // --- settle: refusals ---
+    // --- settle: refusal ---
 
     #[test]
     fn an_opaque_refusal_starts_a_streak_and_blocks_for_the_floor() {
@@ -294,8 +285,8 @@ mod tests {
 
     #[test]
     fn a_second_opaque_refusal_waits_twice_as_long() {
-        // #197's failure: the same 429 every fifteen minutes for twenty
-        // hours. The second one must not wait the same fifteen minutes.
+        // #197 の失敗: 20 時間にわたり 15 分ごとに同じ 429｡2 回目が同じ
+        // 15 分を待ってはならない｡
         let state = SyncState {
             refusals: 1,
             ..calm()
@@ -307,8 +298,8 @@ mod tests {
 
     #[test]
     fn a_write_that_landed_before_the_refusal_restarts_the_streak() {
-        // The cap took a write a moment ago, so this refusal is the first
-        // of a new streak, not the sixth of the old one.
+        // 少し前に上限が write を受け付けたので､この refusal は古い連続の
+        // 6 回目ではなく新しい連続の 1 回目だ｡
         let state = SyncState {
             refusals: 5,
             ..calm()
@@ -323,9 +314,8 @@ mod tests {
 
     #[test]
     fn a_refusal_the_window_explains_waits_for_the_window_and_is_not_a_streak() {
-        // The 15-minute window is exhausted and says when it reopens. That
-        // is not the hidden cap, so it neither lengthens the streak nor
-        // waits the ladder.
+        // 15 分 window を使い切り､いつ開き直すかも言っている｡これは隠れた
+        // 上限ではないので､連続回数も伸ばさなければ梯子の分も待たない｡
         let state = SyncState {
             refusals: 3,
             ..calm()
@@ -342,7 +332,7 @@ mod tests {
         assert_eq!(settled.wake_at, 1_500);
     }
 
-    // --- settle: the streak ends only with a write ---
+    // --- settle: 連続が終わるのは write のときだけ ---
 
     #[test]
     fn a_batch_that_sent_something_ends_the_streak_and_the_block() {
@@ -362,9 +352,9 @@ mod tests {
 
     #[test]
     fn a_diff_does_not_end_the_streak() {
-        // Reads work while the write cap is down (#197: the diff went
-        // through; the adds did not). A diff succeeding says nothing
-        // about whether writes would.
+        // write の上限が下がっていても read は動く (#197: diff は通り､
+        // add は通らなかった)｡diff の成功は write が通るかどうかについて
+        // 何も言わない｡
         let state = SyncState {
             refusals: 4,
             ..calm()
@@ -382,8 +372,8 @@ mod tests {
 
     #[test]
     fn a_batch_that_sent_nothing_changes_nothing() {
-        // Cannot happen from a plan with entries, but if it does it is not
-        // evidence the cap has lifted.
+        // entry のある plan からは起こりえないが､起きたとしても上限が
+        // 明けた証拠にはならない｡
         let state = SyncState {
             refusals: 2,
             blocked_until: Some(900),
@@ -396,11 +386,11 @@ mod tests {
         assert_eq!(settle(state, Some(&outcome), 1_000, INTERVAL).state, state);
     }
 
-    // --- settle: pacing ---
+    // --- settle: ペース配分 ---
 
     #[test]
     fn a_batch_with_more_to_send_pauses_before_the_next() {
-        // Two a minute, not twenty a second — see the module docs.
+        // 1 秒に 20 件ではなく毎分 2 件 — module doc を見よ｡
         let outcome = Outcome::Applied {
             sent: 2,
             remaining: 2_155,
@@ -411,8 +401,8 @@ mod tests {
 
     #[test]
     fn the_batch_that_finishes_the_plan_comes_straight_back() {
-        // Nothing left to pace; the next tick decides whether a diff is
-        // due.
+        // ペースを配る相手がもういない｡diff が来るかどうかは次の tick が
+        // 決める｡
         let outcome = Outcome::Applied {
             sent: 2,
             remaining: 0,
@@ -437,12 +427,12 @@ mod tests {
         );
     }
 
-    // --- settle: idle and failure ---
+    // --- settle: idle と失敗 ---
 
     #[test]
     fn an_idle_tick_leaves_the_state_exactly_as_it_found_it() {
-        // #198. The loop re-decides every minute; the tick that was told
-        // to wait must not clear what it was told to wait for.
+        // #198｡loop は毎分決め直す｡待てと言われた tick が､待つ理由その
+        // ものを消してはならない｡
         let state = SyncState {
             refusals: 2,
             blocked_until: Some(5_000),
@@ -459,8 +449,8 @@ mod tests {
 
     #[test]
     fn a_failed_tick_earns_a_full_interval_and_records_it() {
-        // Recorded rather than only waited: relaunching the app must not
-        // retry a revoked scope or a deleted list straight away.
+        // 待つだけでなく記録する: アプリを再起動しても､失効した scope や
+        // 削除された list を即座に再試行してはならない｡
         let settled = settle(calm(), None, 1_000, INTERVAL);
         assert_eq!(settled.wake_at, 1_000 + i64::from(INTERVAL));
         assert_eq!(
@@ -470,10 +460,10 @@ mod tests {
         assert_eq!(settled.state.refusals, 0);
     }
 
-    // #198 end to end: refused, woken a minute later and told to wait,
-    // woken a minute after that — still waiting. This is the sequence the
-    // old `settle` lost on the second step, and the one the release build
-    // was observed playing out every two minutes.
+    // #198 の端から端まで: 拒否され､1 分後に起きて待てと言われ､その 1 分
+    // 後に起きて — まだ待っている｡古い `settle` が 2 歩目で失っていたのが
+    // この並びで､release build が 2 分ごとに演じているのを観測したのも
+    // これだ｡
     #[test]
     fn a_refusal_still_holds_two_wake_ups_later() {
         let refused_at = 1_000;
@@ -505,7 +495,7 @@ mod tests {
         assert_eq!(next_step(&situation(second.state), until), Step::Apply);
     }
 
-    // --- the file ---
+    // --- ファイル ---
 
     #[test]
     fn the_state_survives_a_round_trip_through_the_file() {
@@ -526,8 +516,8 @@ mod tests {
 
     #[test]
     fn a_missing_file_reads_as_never_synced() {
-        // Which makes the first launch diff immediately — the behavior the
-        // schedule wants from a fresh install.
+        // その結果､初回起動は即座に diff する — 新規インストールに対して
+        // schedule が望む挙動だ｡
         let path =
             std::env::temp_dir().join(format!("twigpui-no-state-{}.json", std::process::id()));
         let _ = std::fs::remove_file(&path);
@@ -536,9 +526,9 @@ mod tests {
 
     #[test]
     fn a_corrupt_file_reads_as_never_synced_rather_than_failing_the_loop() {
-        // The opposite of `load_plan`'s rule, on purpose: a bad clock costs
-        // one diff that was due within the interval anyway, whereas failing
-        // the loop over it would stop the feature outright.
+        // `load_plan` の規則とは意図的に逆だ: 壊れた時計はどのみち
+        // interval 内に来るはずだった diff 1 回分で済むが､それで loop を
+        // 落とせば機能そのものが止まる｡
         let path =
             std::env::temp_dir().join(format!("twigpui-bad-state-{}.json", std::process::id()));
         std::fs::write(&path, "{ not json").unwrap();
@@ -548,9 +538,8 @@ mod tests {
 
     #[test]
     fn a_file_from_before_the_backoff_fields_still_loads() {
-        // What every machine that ran the previous version has on disk.
-        // Losing the clock here would cost a diff on the first launch
-        // after upgrading.
+        // 前のバージョンを走らせたどのマシンも disk に持っているもの｡
+        // ここで時計を失えば､更新後の初回起動で diff 1 回分かかる｡
         let state: SyncState = serde_json::from_str(r#"{"last_diff_at":1787470513}"#).unwrap();
         assert_eq!(state.last_diff_at, Some(1_787_470_513));
         assert_eq!(state.blocked_until, None);

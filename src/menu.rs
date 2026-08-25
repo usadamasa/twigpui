@@ -1,95 +1,95 @@
-//! The keyboard bindings (#58) and the macOS menu bar (#99).
+//! キーバインド (#58) と macOS のメニューバー (#99)｡
 //!
-//! Split out of `ui` because it is the one part of the front end that is
-//! not about rendering a timeline: `main` registers all of it before the
-//! window exists, and the menu bar outlives any particular window. Keeping
-//! it here also keeps every place a keystroke is named inside one file.
+//! `ui` から切り出してあるのは､ここがフロントエンドのうち timeline の描画に
+//! 関わらない唯一の部分だからだ: `main` はこのすべてをウィンドウが存在する
+//! 前に登録し､メニューバーは個々のウィンドウより長く生きる｡ここに置くこと
+//! で､キーストロークが名指される場所がすべて一つのファイルに収まる｡
 
 gpui::actions!(
     twigpui,
     [
-        /// Reload the timeline (#58). Spends API requests, so it is bound
-        /// to `cmd-r` — the reload gesture every app shares, and not a key
-        /// anyone hits by accident.
+        /// timeline をリロードする (#58)｡API リクエストを費やすので `cmd-r`
+        /// に割り当ててある — どのアプリも共有するリロードの所作であり､誰かが
+        /// 誤って叩く鍵ではない｡
         Reload,
-        /// Move focus into the composer (#58).
+        /// composer へフォーカスを移す (#58)｡
         FocusComposer,
-        /// Move focus out of the composer (#58), leaving the draft alone.
+        /// composer からフォーカスを外す (#58)｡下書きには触れない｡
         BlurComposer,
-        /// Quit the application (#99). gpui ships no quit action of its
-        /// own, and without one the app menu has nothing to hang `cmd-q`
-        /// on — which is how twigpui ended up quittable only from the
-        /// Dock. Handled in `main`, at the `App` level rather than on the
-        /// window's root: a global handler still fires when no window
-        /// holds focus, which is exactly when someone reaches for `cmd-q`.
+        /// アプリケーションを終了する (#99)｡gpui は独自の quit アクションを
+        /// 持たず､それが無いとアプリメニューには `cmd-q` を吊るす先が無い —
+        /// twigpui が Dock からしか終了できなくなっていたのはそのためだ｡
+        /// ウィンドウの root ではなく `App` の層で `main` が扱う: グローバル
+        /// なハンドラはどのウィンドウもフォーカスを持たないときにも発火し､
+        /// まさにそのときこそ人は `cmd-q` に手を伸ばす｡
         Quit,
-        /// Show the About panel (#99) — the other half of the app menu
-        /// every macOS application has.
+        /// About パネルを見せる (#99) — どの macOS アプリケーションにもある
+        /// アプリメニューのもう半分｡
         ShowAbout,
-        /// Minimise the window to the Dock (#109), bound to `cmd-m`.
+        /// ウィンドウを Dock へしまう (#109)｡`cmd-m` に割り当て｡
         Minimize,
-        /// Close the window (#109), bound to `cmd-w`. With one window,
-        /// this ends the app just as `cmd-q` does — see [`CLOSE_WINDOW`].
+        /// ウィンドウを閉じる (#109)｡`cmd-w` に割り当て｡ウィンドウが一枚なら
+        /// `cmd-q` と同じくアプリが終わる — [`CLOSE_WINDOW`] を見よ｡
         CloseWindow,
-        /// Jump the timeline back to the newest post (#22), bound to
-        /// `cmd-up`. Purely local — it spends nothing.
+        /// timeline を最新の post まで戻す (#22)｡`cmd-up` に割り当て｡
+        /// 完全にローカルで — 何も費やさない｡
         ScrollToTop,
-        /// Show the posts auto-refresh has already fetched (#21), bound to
-        /// `cmd-shift-r`. The pair to [`Reload`] and its deliberate
-        /// opposite where money is concerned: `cmd-r` buys a fetch,
-        /// `cmd-shift-r` reveals one that has already been bought and
-        /// paid for. Spends nothing.
+        /// auto-refresh が既に取得した post を見せる (#21)｡`cmd-shift-r` に
+        /// 割り当て｡[`Reload`] の対であり､金の話では意図的にその逆だ:
+        /// `cmd-r` は取得を買い､`cmd-shift-r` は既に買って支払い済みのものを
+        /// 明かす｡何も費やさない｡
         ShowNewPosts,
-        /// Flip whether a poll's new posts flow onto a reader at the top
-        /// by themselves (#22), bound to `cmd-shift-f`. Purely
-        /// presentational — polling itself is `auto_refresh`'s switch, so
-        /// this spends nothing either way.
+        /// poll が拾った新しい post が､先頭にいる読み手のところへひとりでに
+        /// 流れ込むかどうかを切り替える (#22)｡`cmd-shift-f` に割り当て｡
+        /// 純粋に見せ方の話で — poll そのものは `auto_refresh` のスイッチな
+        /// ので､どちらに倒しても何も費やさない｡
         ToggleFollowNewPosts,
     ]
 );
 
-/// The key context the timeline's root element carries (#58) — every
-/// binding below except [`QUIT`] (#99) is scoped to it rather than
-/// registered globally, so a future single-key binding cannot fire while
-/// another view has focus.
+/// timeline の root 要素が担うキーコンテキスト (#58) — 下のバインドは
+/// [`QUIT`] (#99) を除きすべて､グローバルに登録するのではなくこれへスコープ
+/// してある｡将来の単一キーのバインドが､別の view がフォーカスを持つ間に
+/// 発火しないようにするためだ｡
 pub(crate) const KEY_CONTEXT: &str = "Timeline";
 
-/// One binding, defined once (#99).
+/// 一つのバインドを､一度だけ定義する (#99)｡
 ///
-/// Before the menu bar existed, a keystroke was written in `init` and its
-/// glyphs in [`shortcuts`], and nothing tied the two together. A menu item
-/// would have been a third copy, so the three now read the same constant:
-/// `init` binds [`Shortcut::keystroke`], the header prints
-/// [`Shortcut::glyphs`], and [`menus`] labels the item. The menu's own key
-/// equivalent is not written here at all — macOS resolves it from the
-/// keymap, so `keystroke` remains the only place a key is named.
+/// メニューバーができる前は､キーストロークは `init` に､そのグリフは
+/// [`shortcuts`] に書かれ､両者を結ぶものは何も無かった｡メニュー項目は三つ目
+/// の写しになるはずだったので､今は三者が同じ定数を読む: `init` が
+/// [`Shortcut::keystroke`] を bind し､ヘッダが [`Shortcut::glyphs`] を印字
+/// し､[`menus`] が項目にラベルを付ける｡メニュー自身の key equivalent はここ
+/// には一切書かない — macOS が keymap から解決するので､`keystroke` がキーを
+/// 名指す唯一の場所であり続ける｡
 struct Shortcut {
-    /// The keystroke as `gpui::KeyBinding::new` parses it.
+    /// `gpui::KeyBinding::new` が parse する形のキーストローク｡
     keystroke: &'static str,
-    /// The key context the binding is scoped to, or `None` to register it
-    /// globally. Only [`QUIT`] is global — see [`init`].
+    /// このバインドをスコープするキーコンテキスト｡グローバルに登録するなら
+    /// `None`｡グローバルなのは [`QUIT`] だけ — [`init`] を見よ｡
     context: Option<&'static str>,
-    /// Builds this shortcut's key binding, closing over the action (#119).
+    /// このショートカットのキーバインドを､アクションを閉じ込めて組み立てる
+    /// (#119)｡
     ///
-    /// A `const` cannot hold an `impl Action`, but a closure capturing
-    /// nothing coerces to a function pointer — enough to name the action
-    /// here instead of at every use. Before this, `init` and [`menus`]
-    /// paired shortcut with action by hand, and
-    /// `menu_item(&RELOAD, FocusComposer)` type-checked into a menu item
-    /// labelled Reload that focused the composer under `cmd-n`.
+    /// `const` は `impl Action` を持てないが､何も捕捉しないクロージャは関数
+    /// ポインタへ coerce する — 使うたびにではなくここでアクションを名指す
+    /// にはそれで足りる｡以前は `init` と [`menus`] がショートカットと
+    /// アクションを手で対にしており､`menu_item(&RELOAD, FocusComposer)` は
+    /// Reload というラベルの下で `cmd-n` が composer にフォーカスするメニュー
+    /// 項目として型検査を通ってしまった｡
     bind: fn(&'static str, Option<&'static str>) -> gpui::KeyBinding,
-    /// Builds this shortcut's menu item, closing over the same action as
-    /// [`Shortcut::bind`] — the pairing is written once, in this constant.
+    /// このショートカットのメニュー項目を､[`Shortcut::bind`] と同じアクション
+    /// を閉じ込めて組み立てる — 対応はこの定数に一度だけ書く｡
     item: fn(&'static str) -> gpui::MenuItem,
-    /// How the menu bar names the action, or `None` to keep it out of the
-    /// menu bar. The wordings differ on purpose: a menu item is read on
-    /// its own ("New Post"), while the header's strip is read as a row of
-    /// hints under a heading ("⌘N Focus the composer").
+    /// メニューバーがアクションをどう名乗るか｡メニューバーに出さないなら
+    /// `None`｡言い回しが違うのは意図的だ: メニュー項目は単独で読まれ
+    /// ("New Post")､ヘッダの帯は見出しの下のヒントの列として読まれる
+    /// ("⌘N Focus the composer")｡
     menu_label: Option<&'static str>,
 }
 
-/// Reload the timeline. Spends API requests, so it takes the reload
-/// gesture every app shares rather than a key anyone hits by accident.
+/// timeline をリロードする｡API リクエストを費やすので､誰かが誤って叩く鍵で
+/// はなく､どのアプリも共有するリロードの所作を取る｡
 const RELOAD: Shortcut = Shortcut {
     keystroke: "cmd-r",
     context: Some(KEY_CONTEXT),
@@ -98,7 +98,7 @@ const RELOAD: Shortcut = Shortcut {
     menu_label: Some("Reload"),
 };
 
-/// Move focus into the composer.
+/// composer へフォーカスを移す｡
 const FOCUS_COMPOSER: Shortcut = Shortcut {
     keystroke: "cmd-n",
     context: Some(KEY_CONTEXT),
@@ -107,8 +107,8 @@ const FOCUS_COMPOSER: Shortcut = Shortcut {
     menu_label: Some("New Post"),
 };
 
-/// Leave the composer. Absent from the menu bar: "put focus back" is a
-/// gesture, not a command anyone goes looking for in a menu.
+/// composer から出る｡メニューバーには無い: 「フォーカスを戻す」は所作で
+/// あって､誰かがメニューに探しに行くコマンドではない｡
 const BLUR_COMPOSER: Shortcut = Shortcut {
     keystroke: "escape",
     context: Some(KEY_CONTEXT),
@@ -117,8 +117,8 @@ const BLUR_COMPOSER: Shortcut = Shortcut {
     menu_label: None,
 };
 
-/// Quit (#99). The only binding registered with no key context, and the
-/// only one the header does not advertise — see [`init`].
+/// 終了する (#99)｡キーコンテキスト無しで登録される唯一のバインドで､ヘッダが
+/// 宣伝しない唯一のものでもある — [`init`] を見よ｡
 const QUIT: Shortcut = Shortcut {
     keystroke: "cmd-q",
     context: None,
@@ -127,8 +127,8 @@ const QUIT: Shortcut = Shortcut {
     menu_label: Some("Quit twigpui"),
 };
 
-/// Minimise (#109). Off the header strip for the same reason as [`QUIT`]:
-/// it is a macOS gesture, not something this app invented.
+/// しまう (#109)｡ヘッダの帯から外してあるのは [`QUIT`] と同じ理由だ: これは
+/// macOS の所作であって､このアプリが発明したものではない｡
 const MINIMIZE: Shortcut = Shortcut {
     keystroke: "cmd-m",
     context: Some(KEY_CONTEXT),
@@ -137,12 +137,12 @@ const MINIMIZE: Shortcut = Shortcut {
     menu_label: Some("Minimize"),
 };
 
-/// Close the window (#109).
+/// ウィンドウを閉じる (#109)｡
 ///
-/// With a single window this ends the app, the same as [`QUIT`] — which is
-/// what `cmd-w` does in any one-window macOS app, so it is not worth
-/// making it behave differently here. It shares `cmd-q`'s hazard of
-/// discarding an unsent draft (#14) and, like `cmd-q`, does not prompt.
+/// ウィンドウが一枚なら [`QUIT`] と同じくアプリが終わる — 一枚ウィンドウの
+/// macOS アプリで `cmd-w` がするのはそれなので､ここで違う振る舞いにする値打
+/// ちは無い｡未送信の下書きを捨てるという `cmd-q` の危うさ (#14) を共有し､
+/// `cmd-q` と同じく確認もしない｡
 const CLOSE_WINDOW: Shortcut = Shortcut {
     keystroke: "cmd-w",
     context: Some(KEY_CONTEXT),
@@ -151,11 +151,11 @@ const CLOSE_WINDOW: Shortcut = Shortcut {
     menu_label: Some("Close Window"),
 };
 
-/// Back to the newest post (#22).
+/// 最新の post へ戻る (#22)｡
 ///
-/// On the header strip, unlike the other additions since #58: it is the
-/// one binding here that answers a question the reader actually has while
-/// scrolled a long way down, and it costs nothing to press.
+/// #58 以降の他の追加と違い､ヘッダの帯に載っている: ずっと下までスクロール
+/// した読み手が実際に抱く問いに答える､ここで唯一のバインドであり､押しても
+/// 費用がかからないからだ｡
 const SCROLL_TO_TOP: Shortcut = Shortcut {
     keystroke: "cmd-up",
     context: Some(KEY_CONTEXT),
@@ -164,14 +164,13 @@ const SCROLL_TO_TOP: Shortcut = Shortcut {
     menu_label: Some("Back to Top"),
 };
 
-/// Show what auto-refresh already fetched (#21).
+/// auto-refresh が既に取得したものを見せる (#21)｡
 ///
-/// `cmd-shift-r` because it is `cmd-r`'s pair and the pairing is the point:
-/// the two do the same thing to the screen and opposite things to the
-/// balance. Reload buys a fetch; this one reveals a fetch the timer already
-/// bought, so a reader who sees the count has a way to take it that never
-/// spends. Whether it is offered at all is the bar's business, not this
-/// binding's — with nothing pending the action is a no-op.
+/// `cmd-shift-r` なのは `cmd-r` の対だからで､対であることこそが要点だ: 二つ
+/// は画面に対して同じことを､残高に対して逆のことをする｡Reload は取得を買い､
+/// こちらはタイマーが既に買った取得を明かす｡件数を目にした読み手には､決して
+/// 費やさずにそれを受け取る道があるわけだ｡そもそも差し出すかどうかはバーの
+/// 仕事でこのバインドの仕事ではない — 保留が無ければアクションは no-op だ｡
 const SHOW_NEW_POSTS: Shortcut = Shortcut {
     keystroke: "cmd-shift-r",
     context: Some(KEY_CONTEXT),
@@ -180,12 +179,12 @@ const SHOW_NEW_POSTS: Shortcut = Shortcut {
     menu_label: Some("Show New Posts"),
 };
 
-/// Flip stick-to-top follow (#22).
+/// 先頭に貼り付く follow を切り替える (#22)｡
 ///
-/// The label is a statement, not a state — macOS gets no checkmark from
-/// this menu API, so the flip reports which way it went through the same
-/// banner a finished reload uses. Spends nothing either way: whether the
-/// app polls at all is `auto_refresh`'s switch, not this one.
+/// ラベルは状態ではなく言明である — このメニュー API から macOS へチェック
+/// マークは渡らないので､どちらへ倒れたかは､リロード完了が使うのと同じバナー
+/// で報告する｡どちらに倒しても何も費やさない: そもそもアプリが poll するか
+/// どうかは `auto_refresh` のスイッチで､こちらではない｡
 const TOGGLE_FOLLOW_NEW_POSTS: Shortcut = Shortcut {
     keystroke: "cmd-shift-f",
     context: Some(KEY_CONTEXT),
@@ -194,23 +193,23 @@ const TOGGLE_FOLLOW_NEW_POSTS: Shortcut = Shortcut {
     menu_label: Some("Follow New Posts"),
 };
 
-/// Every binding, in the order [`init`] registers them (#99).
+/// すべてのバインドを､[`init`] が登録する順で並べたもの (#99)｡
 ///
-/// [`init`] registers exactly this list, [`shortcuts`] filters it to what
-/// the header advertises, and [`menus`] draws its items from the same
-/// entries. Since #119 every entry also carries its own action, so a
-/// shortcut added here is bound to the right thing or not bound at all —
-/// there is no longer a second table to keep in step.
+/// [`init`] はまさにこの一覧を登録し､[`shortcuts`] はヘッダが宣伝するものへ
+/// 絞り込み､[`menus`] は同じ項目からメニュー項目を描く｡#119 以降はどの項目
+/// も自身のアクションを持つので､ここに足したショートカットは正しい先へ bind
+/// されるか､まったく bind されないかのどちらかだ — 歩調を合わせるべき二つ目
+/// の表はもう無い｡
 ///
-/// [`menus`] still chooses which menu each item belongs to, so a new
-/// shortcut with a `menu_label` and no place in `menus` remains possible.
-/// That is what `every_menu_labelled_shortcut_is_in_the_menu_bar` catches.
+/// どの項目がどのメニューに属すかは今も [`menus`] が選ぶので､`menu_label` を
+/// 持ちながら `menus` に居場所の無い新しいショートカットはあり得る｡それを
+/// 捕まえるのが `every_menu_labelled_shortcut_is_in_the_menu_bar` だ｡
 ///
-/// **A `Shortcut` left out of this array is not bound to anything**, and
-/// nothing about the constant itself says so — which is how `MINIMIZE`,
-/// `CLOSE_WINDOW` and `SCROLL_TO_TOP` sat here unbound after #109 and #22
-/// added them everywhere except this list. `every_menu_item_has_a_binding`
-/// is the test that now catches it.
+/// **この配列から漏れた `Shortcut` は何にも bind されない**｡そして定数自体は
+/// そのことを何も語らない — #109 と #22 が `MINIMIZE`､`CLOSE_WINDOW`､
+/// `SCROLL_TO_TOP` をこの一覧以外のあらゆる場所へ足した後､三つがここで bind
+/// されないまま座っていたのはそのためだ｡今それを捕まえるテストが
+/// `every_menu_item_has_a_binding` である｡
 const ALL_SHORTCUTS: [&Shortcut; 9] = [
     &RELOAD,
     &FOCUS_COMPOSER,
@@ -223,32 +222,30 @@ const ALL_SHORTCUTS: [&Shortcut; 9] = [
     &TOGGLE_FOLLOW_NEW_POSTS,
 ];
 
-/// Register #58's key bindings. Called once at startup, next to
-/// `gpui_component::init` (which registers its own).
+/// #58 のキーバインドを登録する｡起動時に一度､`gpui_component::init` (こちら
+/// は自身のものを登録する) の隣で呼ばれる｡
 ///
-/// **No binding here is a bare printable key.** The issue's central hazard
-/// is a bare `j`/`k`/`n` firing while the user is typing a post; nothing
-/// bound here can, because every binding either carries `cmd` or is a
-/// named key that types nothing (`escape`). When post selection arrives
-/// and bare letters become worth having, they will need a second key
-/// context that the composer's focus removes — [`KEY_CONTEXT`] is where
-/// that starts.
+/// **ここのどのバインドも裸の印字可能キーではない｡** この issue の中心的な
+/// 危うさは､利用者が post を打っている最中に裸の `j`/`k`/`n` が発火すること
+/// だ｡ここで bind されたものにそれはできない｡どのバインドも `cmd` を伴うか､
+/// 何も打たない名前付きキー (`escape`) だからだ｡post の選択が入り裸の文字が
+/// 持つに値するようになったら､composer のフォーカスが外すような二つ目のキー
+/// コンテキストが要る — その起点が [`KEY_CONTEXT`] である｡
 ///
-/// Walks [`ALL_SHORTCUTS`] rather than listing the bindings again (#119):
-/// each entry already names its own action through [`Shortcut::bind`], so
-/// there is no second place where a shortcut and an action are paired up.
+/// バインドを並べ直すのではなく [`ALL_SHORTCUTS`] を歩く (#119): 各項目は
+/// [`Shortcut::bind`] を通して既に自身のアクションを名指しているので､
+/// ショートカットとアクションが対にされる二つ目の場所は無い｡
 ///
-/// [`QUIT`] is the one entry with no key context (#99). The others answer
-/// a question about the timeline and belong to the view that answers it;
-/// quitting is not the window's business, and scoping it would mean
-/// `cmd-q` doing nothing whenever focus sat anywhere else.
+/// キーコンテキストを持たない唯一の項目が [`QUIT`] だ (#99)｡他は timeline に
+/// ついての問いに答えるものであり､答える view に属する｡終了はウィンドウの
+/// 仕事ではなく､スコープすればフォーカスが他のどこかにあるときの `cmd-q` が
+/// 何もしなくなる｡
 ///
-/// **Nothing here submits a post (#142).** `cmd-enter` did from #58 until
-/// the composer's button turned out to be the only way anyone reached for.
-/// Plain `enter` was never bound and still is not, for the reason that
-/// outlives the removal: it has to keep inserting a newline, and a post is
-/// not undoable. Should a keyboard route ever come back, that is still the
-/// constraint it has to satisfy.
+/// **ここには post を送信するものは何も無い (#142)｡** `cmd-enter` は #58 か
+/// ら送信していたが､結局みんなが手を伸ばすのは composer のボタンだけだと
+/// 分かった｡素の `enter` は bind されたことがなく､今も bind しない｡削除を
+/// 越えて残る理由がある: `enter` は改行を入れ続けねばならず､post は取り消せ
+/// ない｡キーボードの経路がいつか戻るとしても､満たすべき制約はやはりこれだ｡
 pub(crate) fn init(cx: &mut gpui::App) {
     cx.bind_keys(
         ALL_SHORTCUTS
@@ -257,11 +254,11 @@ pub(crate) fn init(cx: &mut gpui::App) {
     );
 }
 
-/// The application's menu bar (#99), registered by `main` before the
-/// window opens.
+/// アプリケーションのメニューバー (#99)｡ウィンドウが開く前に `main` が
+/// 登録する｡
 ///
-/// Every item's key equivalent comes from the keymap [`init`] registered,
-/// so this names actions and wordings only — never a keystroke.
+/// 各項目の key equivalent は [`init`] が登録した keymap から来るので､ここが
+/// 名指すのはアクションと言い回しだけだ — キーストロークは決して名指さない｡
 pub(crate) fn menus() -> Vec<gpui::Menu> {
     vec![
         gpui::Menu {
@@ -290,12 +287,12 @@ pub(crate) fn menus() -> Vec<gpui::Menu> {
             .flatten()
             .collect(),
         },
-        // The name is load-bearing (#109): gpui's macOS platform hands a
-        // menu to AppKit's `setWindowsMenu_` only when it is called
-        // exactly "Window" (`gpui/src/platform/mac/platform.rs`'s
-        // `create_menu_bar`). Rename it and `cmd-w`/`cmd-m` keep working —
-        // they are ordinary bindings — but the menu stops being the one
-        // macOS treats as the window list.
+        // この名前は荷重を負っている (#109): gpui の macOS プラットフォーム
+        // がメニューを AppKit の `setWindowsMenu_` へ渡すのは､それが厳密に
+        // "Window" と呼ばれるときだけだ (`gpui/src/platform/mac/platform.rs`
+        // の `create_menu_bar`)｡改名しても `cmd-w`/`cmd-m` は動き続けるが —
+        // ただのバインドだからだ — そのメニューは macOS がウィンドウ一覧と
+        // して扱うものではなくなる｡
         gpui::Menu {
             name: "Window".into(),
             items: [MINIMIZE.menu_item(), CLOSE_WINDOW.menu_item()]
@@ -306,14 +303,14 @@ pub(crate) fn menus() -> Vec<gpui::Menu> {
     ]
 }
 
-/// The menu item for one shortcut, or nothing when [`Shortcut::menu_label`]
-/// says it is deliberately absent from the menu bar (#99).
+/// 一つのショートカットに対応するメニュー項目｡[`Shortcut::menu_label`] が
+/// 意図的にメニューバーから外していると言うなら､何も返さない (#99)｡
 impl Shortcut {
-    /// This shortcut's menu item, or nothing when [`Shortcut::menu_label`]
-    /// says it is deliberately absent from the menu bar (#99).
+    /// このショートカットのメニュー項目｡[`Shortcut::menu_label`] が意図的に
+    /// メニューバーから外していると言うなら､何も返さない (#99)｡
     ///
-    /// Takes no action argument (#119): it comes from the same constant
-    /// as the label, so there is no second place to get it wrong.
+    /// アクションの引数を取らない (#119): ラベルと同じ定数から来るので､
+    /// 間違えうる二つ目の場所が無い｡
     fn menu_item(&self) -> Option<gpui::MenuItem> {
         self.menu_label.map(self.item)
     }
@@ -323,17 +320,17 @@ impl Shortcut {
 mod tests {
     use super::{ALL_SHORTCUTS, menus};
 
-    // --- #58: keyboard shortcuts ---
+    // --- #58: キーボードショートカット ---
 
     #[test]
     fn no_shortcut_is_a_bare_letter() {
-        // The issue's central hazard: a bare `j`/`k`/`n` firing while the
-        // user is typing a post. It compares `keystroke` because that is
-        // what `init` hands to `KeyBinding::new`, so that is what decides
-        // whether gpui fires the binding while someone is typing.
+        // この issue の中心的な危うさ: 利用者が post を打っている最中に裸の
+        // `j`/`k`/`n` が発火すること｡`keystroke` を比べるのは､それが `init`
+        // の `KeyBinding::new` へ渡すものだからで､誰かが打っている間に gpui
+        // がバインドを発火させるかを決めるのもそれだからだ｡
         //
-        // `"escape"` is allowed with no modifier: it is a named special
-        // key, not a letter that ordinary typing would produce.
+        // `"escape"` は修飾キー無しでも許す: 名前付きの特殊キーであって､
+        // 普通の打鍵が生む文字ではない｡
         for shortcut in ALL_SHORTCUTS {
             let keystroke = shortcut.keystroke;
             assert!(
@@ -345,11 +342,10 @@ mod tests {
 
     #[test]
     fn load_older_has_no_shortcut() {
-        // Each press pages backwards for one paid request. A key that
-        // spends money on a mis-hit is not a convenience (#58). Checked
-        // against `menu_label` since #95 removed the header's hint strip,
-        // and with it the separate human label every shortcut used to
-        // carry.
+        // 押すたびに有料のリクエスト一つで後ろへページする｡打ち間違いで金を
+        // 使う鍵は便利ではない (#58)｡`menu_label` に対して確かめているのは､
+        // #95 がヘッダのヒントの帯を､そして各ショートカットが持っていた人間
+        // 向けの別ラベルを一緒に取り去ったからだ｡
         assert!(
             !ALL_SHORTCUTS.iter().any(|shortcut| shortcut
                 .menu_label
@@ -358,9 +354,9 @@ mod tests {
         );
     }
 
-    // --- #99: the menu bar ---
+    // --- #99: メニューバー ---
 
-    /// The names of every action item in the menu bar, submenus included.
+    /// メニューバーにあるすべてのアクション項目の名前｡サブメニューも含む｡
     fn menu_action_names() -> Vec<String> {
         menus()
             .into_iter()
@@ -374,28 +370,27 @@ mod tests {
 
     #[test]
     fn every_menu_item_has_a_binding() {
-        // The direction the other tests missed. They all start from
-        // `ALL_SHORTCUTS` and check what is in it, so a `Shortcut` left out
-        // of that array is invisible to every one of them -- while still
-        // appearing in `menus()`, since that names its constants directly.
+        // 他のテストが見落としていた向き｡どれも `ALL_SHORTCUTS` から出発
+        // して中身を確かめるので､その配列から漏れた `Shortcut` はどのテスト
+        // からも見えない -- それでいて `menus()` には現れる｡あちらは定数を
+        // 直に名指すからだ｡
         //
-        // Which is exactly what happened: #109's Minimize and Close Window
-        // and #22's Back to Top reached the menu bar and never reached the
-        // keymap, so `cmd-m`, `cmd-w` and `cmd-up` did nothing and macOS
-        // drew no key equivalent beside any of them. The menu item worked,
-        // because it carries its own action; the keystroke had nothing to
-        // match against.
+        // まさにそれが起きた: #109 の Minimize と Close Window､#22 の
+        // Back to Top はメニューバーへは届き､keymap へは届かなかった｡だから
+        // `cmd-m`､`cmd-w`､`cmd-up` は何もせず､macOS はどれの傍にも
+        // key equivalent を描かなかった｡メニュー項目は自身のアクションを
+        // 持つので働いた｡キーストロークには照合する先が無かった｡
         //
-        // Walking from the menu inward is what makes the omission visible.
+        // メニューから内側へ歩くことが､この漏れを見えるようにする｡
         let bound: Vec<&str> = ALL_SHORTCUTS
             .iter()
             .filter_map(|shortcut| shortcut.menu_label)
             .collect();
 
         for name in menu_action_names() {
-            // `About twigpui` is a menu item with no shortcut by design --
-            // the only one, and it is spelled out here rather than skipped
-            // by a rule, so a second one cannot slip past.
+            // `About twigpui` は設計上ショートカットの無いメニュー項目だ --
+            // 唯一のもので､規則で飛ばすのではなくここに書き下してあるので､
+            // 二つ目がすり抜けることはない｡
             if name == "About twigpui" {
                 continue;
             }
@@ -408,10 +403,10 @@ mod tests {
 
     #[test]
     fn no_keystroke_is_bound_twice() {
-        // `no_key_is_bound_twice` covers the header's four. This covers
-        // every binding `init` registers, including the ones the header
-        // does not advertise (#99's `cmd-q`), and it compares the
-        // keystrokes gpui actually parses rather than their glyphs.
+        // `no_key_is_bound_twice` はヘッダの四つを覆う｡こちらは `init` が
+        // 登録するすべてのバインドを覆う｡ヘッダが宣伝しないもの (#99 の
+        // `cmd-q`) も含み､グリフではなく gpui が実際に parse する
+        // キーストロークを比べる｡
         let mut keystrokes: Vec<&str> = ALL_SHORTCUTS
             .iter()
             .map(|shortcut| shortcut.keystroke)
@@ -424,15 +419,15 @@ mod tests {
 
     #[test]
     fn every_menu_labelled_shortcut_is_in_the_menu_bar() {
-        // The drift #99 asks to prevent: a binding gaining a menu label
-        // and never reaching a menu.
+        // #99 が防ごうとする drift: バインドがメニューラベルを得ながら
+        // メニューには届かないこと｡
         //
-        // Only this direction is checked. The reverse — a menu item with
-        // no shortcut behind it — is not drift but the design: `menus()`
-        // also carries About, which is an action with no binding. #99
-        // checked it by name until #95 removed the separate human label
-        // every shortcut used to carry for the header's hint strip, and a
-        // count would fail on About rather than on real drift.
+        // 確かめるのはこの向きだけだ｡逆 — 裏にショートカットの無いメニュー
+        // 項目 — は drift ではなく設計である: `menus()` は About も載せて
+        // おり､これはバインドの無いアクションだ｡#95 が､各ショートカットが
+        // ヘッダのヒントの帯のために持っていた人間向けの別ラベルを取り去る
+        // までは #99 が名前で確かめていた｡件数で見ると本当の drift ではなく
+        // About で落ちてしまう｡
         let names = menu_action_names();
         for label in ALL_SHORTCUTS
             .iter()
@@ -447,8 +442,8 @@ mod tests {
 
     #[test]
     fn the_menu_bar_can_quit() {
-        // #99's whole reason for existing: before it, the only way out of
-        // the app was the Dock's context menu.
+        // #99 が存在するすべての理由: それ以前､アプリから出る唯一の道は
+        // Dock のコンテキストメニューだった｡
         assert!(
             menu_action_names()
                 .iter()
@@ -459,10 +454,10 @@ mod tests {
 
     #[test]
     fn the_window_menu_is_named_exactly_window() {
-        // gpui hands a menu to AppKit's `setWindowsMenu_` only on an exact
-        // name match (#109). A rename would leave `cmd-w`/`cmd-m` working
-        // while quietly demoting the menu to an ordinary one, which is not
-        // the kind of regression anyone notices from a diff.
+        // gpui がメニューを AppKit の `setWindowsMenu_` へ渡すのは名前が
+        // 厳密に一致するときだけだ (#109)｡改名すると `cmd-w`/`cmd-m` は
+        // 働いたまま､メニューだけが静かにただのメニューへ格下げされる｡
+        // diff から誰かが気づく類の regression ではない｡
         assert!(
             menus().iter().any(|menu| menu.name.as_ref() == "Window"),
             "no menu is named \"Window\""
@@ -482,9 +477,9 @@ mod tests {
 
     #[test]
     fn no_menu_carries_a_keystroke_in_its_label() {
-        // macOS draws the key equivalent from the keymap. Writing "⌘R"
-        // into the label would put it on screen twice and make the
-        // keystroke a second thing to keep in sync (#99).
+        // macOS は key equivalent を keymap から描く｡ラベルに "⌘R" と書け
+        // ば画面に二度出るうえ､キーストロークが同期を保つべき二つ目のもの
+        // になる (#99)｡
         for name in menu_action_names() {
             assert!(!name.contains('⌘'), "{name} spells out its own keystroke");
         }

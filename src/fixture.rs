@@ -1,23 +1,23 @@
-//! A timeline read from a file instead of from X (#146).
+//! X からではなくファイルから読んだ timeline (#146)｡
 //!
-//! The window could only ever be filled two ways: from the response cache,
-//! or from a paid request. Both depend on a real account, and neither is
-//! reproducible — the rows differ every run, so "is this laid out right?"
-//! had no fixed thing to ask it of. Every UI check ended up on #115 as a
-//! sentence for a human to act out.
+//! ウィンドウを埋める手段はこれまで 2 つしか無かった: レスポンス
+//! キャッシュからか､課金されるリクエストからか｡どちらも本物のアカウント
+//! に依存し､どちらも再現性が無い — 行は実行のたびに変わるので､
+//! 「レイアウトは正しいか?」を問う相手が定まらなかった｡UI の確認は
+//! ことごとく #115 に､人間が演じるための一文として積み上がった｡
 //!
-//! A fixture is the third way: a file naming exactly which posts to draw.
-//! No credential, no request, the same screen every time.
+//! フィクスチャが 3 つめの手段だ: どの post を描くかをそのまま書いた
+//! ファイル｡認証情報も要らず､リクエストも飛ばず､毎回同じ画面が出る｡
 //!
-//! ## What it deliberately is not
+//! ## 意図してそうではないもの
 //!
-//! Not a mock of the API. It carries [`TimelineItem`]s — the type the
-//! parser already produces and the renderer already consumes — so it
-//! cannot describe a timeline the real join could not. A fixture that
-//! drifts from what X returns would test the renderer against a fiction.
+//! API の mock ではない｡運ぶのは [`TimelineItem`] — parser がすでに生成し､
+//! renderer がすでに消費する型 — なので､本物の join が作れない timeline を
+//! 記述することはできない｡X が返すものから離れたフィクスチャは､renderer を
+//! 作り話に対して試すことになる｡
 //!
-//! It also does not stand in for `--fetch-only`. That one exists to prove
-//! the *network* path works; this one exists to hold the network still.
+//! `--fetch-only` の代わりにもならない｡あちらは *ネットワーク* の経路が
+//! 動くことを示すために存在し､こちらはネットワークを止めておくために存在する｡
 
 use std::path::Path;
 
@@ -26,56 +26,55 @@ use serde::{Deserialize, Serialize};
 
 use crate::x_api::{ListSummary, TimelineItem};
 
-/// Who the fixture says is signed in.
+/// フィクスチャがサインインしていると言っている人物｡
 ///
-/// Present because several affordances are withheld until the app knows
-/// its own id — a repost button is not offered on your own post (#15), and
-/// deleting is offered only on it (#72). Without this the fixture would
-/// draw a timeline nobody is looking at, and exactly the rows that differ
-/// per viewer would be the ones missing.
+/// アプリが自分の id を知るまで差し出されない操作がいくつかあるので必要だ
+/// — repost ボタンは自分の post には出ないし (#15)､削除は自分の post に
+/// しか出ない (#72)｡これが無いとフィクスチャは誰も見ていない timeline を
+/// 描くことになり､まさに閲覧者ごとに変わる行こそが欠ける｡
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub(crate) struct FixtureUser {
     pub id: String,
     pub username: String,
 }
 
-/// The whole contents of a fixture file.
+/// フィクスチャファイルの全内容｡
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub(crate) struct Fixture {
     pub signed_in_as: FixtureUser,
-    /// Newest first, as everywhere else in this crate.
+    /// このクレートの他の場所と同じく､新しい順｡
     pub items: Vec<TimelineItem>,
-    /// Posts a poll has fetched but not yet shown (#21), newest first —
-    /// what the "N new posts" bar is offering.
+    /// poll が取得済みでまだ表示していない post (#21)､新しい順 —
+    /// "N new posts" のバーが差し出しているものだ｡
     ///
-    /// Real [`TimelineItem`]s rather than a bare count, for this module's
-    /// own rule: a fixture describes a timeline, never a widget. So the
-    /// bar counts these the way it counts a real poll's, and pressing it
-    /// prepends exactly these rows — the interaction is checkable, not
-    /// only its resting state.
+    /// 素の件数ではなく本物の [`TimelineItem`] なのは､このモジュール自身の
+    /// 規則による: フィクスチャが記述するのは timeline であって､widget では
+    /// 決してない｡だからバーは本物の poll のものと同じようにこれらを数え､
+    /// 押せばまさにこれらの行が先頭に付く — 静止状態だけでなく､操作も
+    /// 確かめられる｡
     ///
-    /// Empty (and absent from a fixture file) means no bar, which is every
-    /// fixture written before this field existed.
+    /// 空 (およびフィクスチャファイルに記載が無い) ならバーは出ない｡この
+    /// フィールドができる前に書かれたフィクスチャはすべてそうだ｡
     #[serde(default)]
     pub pending: Vec<TimelineItem>,
-    /// The lists the toolbar's picker names (#164), as the owned-lists
-    /// cache would hold them. Real [`ListSummary`]s for this module's
-    /// rule again: the fixture describes what the account owns, and the
-    /// segments are drawn from that the way they are drawn from a fetch.
+    /// toolbar の picker が挙げるリスト (#164)｡所有リストのキャッシュが
+    /// 保持するのと同じ形だ｡ここでも本物の [`ListSummary`] なのはこの
+    /// モジュールの規則による: フィクスチャはアカウントの所有物を記述し､
+    /// セグメントは fetch から描かれるのと同じようにそこから描かれる｡
     ///
-    /// Empty (and absent) means a picker with only Home in it, which is
-    /// every fixture written before this field existed.
+    /// 空 (および記載が無い) なら picker には Home しか入らない｡この
+    /// フィールドができる前に書かれたフィクスチャはすべてそうだ｡
     #[serde(default)]
     pub lists: Vec<ListSummary>,
 }
 
-/// Read and parse a fixture file.
+/// フィクスチャファイルを読んでパースする｡
 ///
-/// Errors rather than falling back, unlike `cache::load_json`. A cache
-/// miss means "fetch it again" and a broken cache file must never stop the
-/// app; a fixture is what was explicitly asked for on the command line, so
-/// silently opening an empty window instead would answer a question nobody
-/// asked.
+/// `cache::load_json` と違い､fallback せずにエラーにする｡キャッシュミスは
+/// 「取り直せ」の意味だし､壊れたキャッシュファイルがアプリを止めては
+/// ならない｡一方フィクスチャはコマンドラインで明示的に指定されたものだ｡
+/// 代わりに黙って空のウィンドウを開けば､誰も訊いていない問いに答えて
+/// しまう｡
 pub(crate) fn load(path: &Path) -> Result<Fixture> {
     let contents = std::fs::read_to_string(path)
         .with_context(|| format!("could not read the fixture {}", path.display()))?;
@@ -120,18 +119,18 @@ mod tests {
 
     #[test]
     fn a_fixture_omitting_the_optional_fields_still_parses() {
-        // Every field added since #9 is `#[serde(default)]` on
-        // `TimelineItem`, which is what lets a fixture stay readable: it
-        // spells out the case it is about and nothing else.
+        // #9 以降に足したフィールドはすべて `TimelineItem` 上で
+        // `#[serde(default)]` になっている｡これがフィクスチャを読みやすい
+        // ままにしている: 扱う case だけを書き､それ以外は書かない｡
         let path = write("minimal", SAMPLE);
         let fixture = load(&path).unwrap();
 
         assert!(fixture.items[0].media.is_empty());
         assert!(fixture.items[0].quoted.is_none());
         assert!(fixture.items[0].author_avatar_url.is_none());
-        // #21's field is `#[serde(default)]` for the same reason: every
-        // fixture written before it existed must keep loading, and "no
-        // pending posts" is the right reading of its absence.
+        // #21 のフィールドが `#[serde(default)]` なのも同じ理由だ: それが
+        // できる前に書かれたフィクスチャはすべて読めつづけねばならないし､
+        // 記載が無いことは「pending な post は無い」と読むのが正しい｡
         assert!(fixture.pending.is_empty());
 
         std::fs::remove_file(&path).unwrap();
@@ -150,10 +149,10 @@ mod tests {
 
     #[test]
     fn the_bundled_fixture_parses_and_covers_what_it_claims_to() {
-        // A fixture that no longer loads is worse than none: the whole
-        // point is being able to reach for it without checking it first.
-        // This also pins the cases it exists to show, so a later edit
-        // cannot quietly drop the row someone was relying on.
+        // 読み込めなくなったフィクスチャは無いより悪い: 先に確かめずに
+        // 手を伸ばせることが要点だからだ｡見せるために存在している case も
+        // ここで固定しているので､後の編集が誰かの頼っていた行を黙って
+        // 落とせない｡
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/timeline.json");
         let fixture = load(&path).expect("fixtures/timeline.json must load");
 
@@ -200,10 +199,9 @@ mod tests {
             "lists for the picker, more than one so the trough has \
              unselected segments beside Home (#164)"
         );
-        // The bar counts new arrivals against what is displayed, so a
-        // pending post that is already in `items` would be counted and
-        // then reveal nothing — a fixture that quietly stops showing what
-        // it was written to show.
+        // バーは表示中のものに対して新着を数えるので､すでに `items` に
+        // ある pending な post は数えられたうえで何も現さない — 見せる
+        // ために書かれたものを黙って見せなくなるフィクスチャだ｡
         for pending in &fixture.pending {
             assert!(
                 !fixture.items.iter().any(|item| item.id == pending.id),
@@ -215,8 +213,8 @@ mod tests {
 
     #[test]
     fn a_malformed_fixture_is_an_error() {
-        // The failure a hand-edited fixture actually has. Falling back to
-        // an empty timeline would look like the app working.
+        // 手で編集したフィクスチャが実際に起こす失敗｡空の timeline へ
+        // fallback すると､アプリが動いているように見えてしまう｡
         let path = write("broken", r#"{ "signed_in_as": {} }"#);
         assert!(load(&path).is_err());
 

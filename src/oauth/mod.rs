@@ -1,11 +1,11 @@
-//! OAuth 2.0 Authorization Code + PKCE (#7).
+//! OAuth 2.0 Authorization Code + PKCE (#7)｡
 //!
-//! Ties the three seams together: [`pkce`] generates the verifier/challenge
-//! and state, [`callback`] runs the loopback listener that catches the
-//! redirect, and [`tokens`] persists what comes back. [`sign_in`] is the only
-//! entry point `ui.rs` calls to run the interactive flow; [`resolve_credential`]
-//! is what both `ui.rs` (at startup) and `--fetch-only` use to find a usable
-//! credential without opening a browser.
+//! 3 つの継ぎ目を束ねる: [`pkce`] が verifier/challenge と state を生成し､
+//! [`callback`] がリダイレクトを受けるループバックリスナを動かし､
+//! [`tokens`] が返ってきたものを永続化する｡[`sign_in`] は対話フローを
+//! 走らせるために `ui.rs` が呼ぶ唯一の入口で､[`resolve_credential`] は
+//! `ui.rs` (起動時) と `--fetch-only` の両方が､ブラウザを開かずに使える
+//! credential を見つけるのに使う｡
 
 mod callback;
 mod pkce;
@@ -22,13 +22,13 @@ use crate::paths::Paths;
 use crate::profile::Profile;
 use tokens::{TokenResponse, TokenSet};
 
-/// `https://api.x.com/2/oauth2/token`, per the issue's confirmed design.
+/// `https://api.x.com/2/oauth2/token`｡issue で確定した設計に従う｡
 const TOKEN_URL: &str = "https://api.x.com/2/oauth2/token";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 
-/// Current time as a Unix timestamp — the one real clock read in this
-/// module. Every function below it takes `now` as a parameter instead, the
-/// same seam `config.rs` uses for environment lookups.
+/// 現在時刻を Unix タイムスタンプで — このモジュールで実際に時計を読む
+/// 唯一の箇所｡以下の関数はどれも代わりに `now` を引数で受け取る｡
+/// `config.rs` が環境変数の参照に使うのと同じ継ぎ目だ｡
 pub(crate) fn unix_now() -> i64 {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -37,10 +37,9 @@ pub(crate) fn unix_now() -> i64 {
 }
 
 fn agent() -> Agent {
-    // Mirrors `x_api::client::XClient::new`'s config: read the body
-    // ourselves on a non-2xx status so the token endpoint's own error text
-    // makes it into the message, and cap the wait like every other request
-    // this app makes.
+    // `x_api::client::XClient::new` の設定に倣う: 2xx でないステータスでも
+    // body を自分で読み､token エンドポイント自身のエラーテキストをメッセージ
+    // に載せる｡待ち時間はこのアプリの他のリクエストと同じく上限を設ける｡
     let config = Agent::config_builder()
         .timeout_global(Some(REQUEST_TIMEOUT))
         .http_status_as_error(false)
@@ -48,21 +47,21 @@ fn agent() -> Agent {
     config.into()
 }
 
-/// Run the interactive sign-in flow end to end: build the PKCE pair and
-/// state, open the system browser at the authorize URL, wait for the
-/// loopback redirect, and exchange the code for tokens.
+/// 対話的なサインインフローを端から端まで走らせる: PKCE のペアと state を
+/// 作り､authorize URL をシステムのブラウザで開き､ループバックのリダイレクト
+/// を待ち､code を token に交換する｡
 ///
-/// Runs on `executor` so the loopback listener's poll loop can yield
-/// between accept attempts — see `callback::await_authorization_code`. Not
-/// unit-tested directly: it opens a real browser and binds a real socket.
+/// `executor` の上で走るので､ループバックリスナのポーリングループが accept
+/// の試行の合間に譲れる — `callback::await_authorization_code` を参照｡直接の
+/// ユニットテストは無い: 実際にブラウザを開き実際のソケットを bind する｡
 pub(crate) async fn sign_in(executor: &BackgroundExecutor, client_id: &str) -> Result<TokenSet> {
     let random = pkce::OsRandom;
     let verifier = pkce::generate_code_verifier(&random)?;
     let challenge = pkce::code_challenge(&verifier);
     let state = pkce::generate_state(&random)?;
-    // #169: the port, and so the redirect URI, belong to whichever
-    // installation this binary is — a development build must not send the
-    // real app's redirect URI, nor bind the port the real one listens on.
+    // #169: port は､ひいては redirect URI は､このバイナリがどのインストール
+    // かに属する — development ビルドが本番アプリの redirect URI を送っては
+    // ならないし､本番が listen する port を bind してもならない｡
     let profile = Profile::current();
     let redirect_uri = callback::redirect_uri(profile);
 
@@ -100,10 +99,10 @@ fn refresh_access_token(client_id: &str, refresh_token: &str) -> Result<TokenRes
     ])
 }
 
-/// POST one token-endpoint request. This is a **public client** (#7's
-/// confirmed design): `client_id` travels in the body alongside the grant,
-/// never as HTTP Basic auth, because there is no client secret to pair it
-/// with.
+/// token エンドポイントへのリクエストを 1 つ POST する｡これは
+/// **public client** だ (#7 で確定した設計): `client_id` は grant と並んで
+/// body に載り､HTTP Basic auth としては決して送らない｡対になる client
+/// secret が無いからだ｡
 fn request_token(form: &[(&str, &str)]) -> Result<TokenResponse> {
     let mut response = agent()
         .post(TOKEN_URL)
@@ -123,70 +122,68 @@ fn request_token(form: &[(&str, &str)]) -> Result<TokenResponse> {
     serde_json::from_str(&body).context("could not parse the token response")
 }
 
-/// A user-context access token from a stored (or just-refreshed) OAuth
-/// session, plus the scope X granted it (#14).
+/// 保存された (あるいは今 refresh した) OAuth セッション由来の user-context
+/// access token と､X がそれに与えた scope (#14)｡
 ///
-/// A struct rather than the enum this was until #33: the app-only bearer
-/// token was the only other variant, and every question callers asked of it
-/// ("is this OAuth?", "what scope?") existed to work around the fact that
-/// it might not be. There is only one kind of credential now.
+/// #33 まで enum だったものを struct にした: もう一方の variant は app-only
+/// bearer token だけで､呼び出し側がこれに投げていた問い ("これは OAuth か?"
+/// "scope は何か?") はどれも､そうでないかもしれないという事実を回避する
+/// ために存在していた｡今 credential は 1 種類しかない｡
 ///
-/// `scope: None` means unrecorded/unknown — a pre-#14 token, or one whose
-/// token-endpoint response carried no `scope` at all — which
-/// `tokens::has_scope` treats as insufficient for anything scope-gated.
+/// `scope: None` は未記録・不明を意味する — #14 以前の token か､token
+/// エンドポイントのレスポンスに `scope` がまったく無かったもの — で､
+/// `tokens::has_scope` はこれを scope で守られた操作には不十分として扱う｡
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Credential {
     pub(crate) token: String,
     pub(crate) scope: Option<String>,
 }
 
-/// Why a stored OAuth session could not be used as-is, and
-/// [`resolve_credential`] had to fall through to the bearer token (or to
-/// nothing) instead (#54). `ui.rs` renders this on screen and names the fix,
-/// because the app otherwise gives no other sign anything changed: the
-/// timeline still renders (on the bearer token, if one is configured), so
-/// silently losing the ability to post looks identical to "everything is
-/// fine".
+/// 保存された OAuth セッションをそのまま使えず､[`resolve_credential`] が
+/// 代わりに bearer token (あるいは何も無い状態) へ落ちるしかなかった理由
+/// (#54)｡`ui.rs` はこれを画面に出して直し方を示す｡そうしないとアプリは何かが
+/// 変わった印を他に何も出さないからだ: timeline は (bearer token が設定
+/// されていればそれで) 依然として描画されるので､post する能力を黙って失うのは
+/// "everything is fine" と見分けがつかない｡
 ///
-/// A fresh session, or one refreshed successfully, carries no reason at all
-/// — see [`Resolution::demotion`] — since nothing degraded in that case.
+/// 新しいセッションや refresh に成功したセッションは理由をまったく持たない
+/// — [`Resolution::demotion`] を参照 — その場合は何も劣化していないからだ｡
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SessionDemotion {
-    /// The stored session needed a refresh, but carries no refresh token to
-    /// refresh with — a session that predates `offline.access`, or one X
-    /// simply never issued a refresh token for.
+    /// 保存されたセッションは refresh が必要だったが､refresh するための
+    /// refresh token を持っていない — `offline.access` 以前のセッションか､
+    /// X が単に refresh token を発行しなかったセッション｡
     NoRefreshToken,
-    /// A refresh was attempted (a client id and a refresh token were both
-    /// present) but X rejected it. `detail` carries the token endpoint's own
-    /// error text — a revoked token and one expired beyond recovery both
-    /// surface as the same generic 400 here, so there is nothing more
-    /// specific to classify locally.
+    /// refresh を試みた (client id と refresh token が両方あった) が X が
+    /// 拒否した｡`detail` は token エンドポイント自身のエラーテキストを運ぶ
+    /// — 失効した token も回復不能なほど期限切れの token も､ここでは同じ
+    /// 汎用の 400 として現れるので､手元でこれ以上細かく分類する材料は無い｡
     Rejected(String),
 }
 
-/// What [`resolve_credential`] found: the credential to use, if any, and —
-/// since #54 — whether a stored OAuth session had to be demoted along the
-/// way, and why. A stored-but-unrefreshable session is a materially
-/// different state from "no credential was ever configured": both can
-/// resolve to no credential at all, but only one of them means the user was
-/// signed in a moment ago and now silently isn't.
+/// [`resolve_credential`] が見つけたもの: 使う credential があればそれと､
+/// #54 以降は､途中で保存された OAuth セッションを降格させる必要があったか
+/// どうかと､その理由｡保存されているが refresh できないセッションは
+/// "credential が一度も設定されていない" とは実質的に別の状態だ: どちらも
+/// credential 無しに解決しうるが､ユーザーがついさっきまでサインインしていて
+/// 今は黙ってそうでなくなっている､という意味なのは一方だけだ｡
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Resolution {
     pub(crate) credential: Option<Credential>,
     pub(crate) demotion: Option<SessionDemotion>,
 }
 
-/// Find a usable credential without opening a browser: a fresh stored OAuth
-/// session, or a stale one refreshed in place. `credential: None` means
-/// there is no usable session and the caller (`--fetch-only`, or `ui.rs` at
-/// startup) should ask the user to sign in.
+/// ブラウザを開かずに使える credential を見つける: 保存された新しい OAuth
+/// セッションか､古くなったものをその場で refresh したもの｡
+/// `credential: None` は使えるセッションが無いという意味で､呼び出し側
+/// (`--fetch-only` か起動時の `ui.rs`) はユーザーにサインインを促すべきだ｡
 ///
-/// Before #33 this had a third outcome — falling back to the app-only
-/// bearer token — which is what `demotion` existed to explain: the timeline
-/// still rendered, so silently losing the ability to post looked identical
-/// to everything being fine. `demotion` survives the bearer token because
-/// the same explanation is still owed, only now the visible consequence is
-/// "signed out" rather than "quietly less capable".
+/// #33 以前はもう 1 つ結果があった — app-only bearer token へのフォール
+/// バックだ — `demotion` はそれを説明するために存在していた: timeline は
+/// 依然として描画されるので､post する能力を黙って失うのは何も問題ない状態と
+/// 見分けがつかなかった｡bearer token が消えても `demotion` が残るのは､同じ
+/// 説明が依然として要るからだ｡ただし今は目に見える帰結が "静かに能力が
+/// 落ちる" ではなく "サインアウト" になった｡
 pub(crate) fn resolve_credential(config: &Config, paths: &Paths, now: i64) -> Result<Resolution> {
     let Some(stored) = tokens::load(paths)? else {
         return Ok(Resolution {
@@ -216,11 +213,11 @@ pub(crate) fn resolve_credential(config: &Config, paths: &Paths, now: i64) -> Re
     match refresh_access_token(client_id, refresh) {
         Ok(response) => {
             let mut refreshed = TokenSet::from_response(response, now);
-            // RFC 6749 §5.1 lets the token endpoint omit `scope` on a
-            // refresh when it's unchanged from what's already granted —
-            // `carried_scope` is what keeps a working `tweet.write` session
-            // from silently reverting to "unknown" (and spuriously reviving
-            // the re-authorize banner) on every routine refresh.
+            // RFC 6749 §5.1 は､すでに与えられたものから変わらない場合に
+            // token エンドポイントが refresh 時の `scope` を省くことを許す —
+            // `carried_scope` は､動いている `tweet.write` セッションが日常的な
+            // refresh のたびに黙って "unknown" へ戻る (そして再認可バナーが
+            // 誤って復活する) のを防ぐものだ｡
             refreshed.scope = carried_scope(refreshed.scope, stored.scope.as_deref());
             tokens::save(paths, &refreshed)?;
             Ok(Resolution {
@@ -232,13 +229,12 @@ pub(crate) fn resolve_credential(config: &Config, paths: &Paths, now: i64) -> Re
             })
         }
         Err(error) => {
-            // X rejected the refresh outright — revoked, or expired beyond
-            // recovery. #54: demote to the bearer token exactly like the two
-            // cases above, rather than propagate as a hard error, which
-            // would blank whatever the timeline was already showing over a
-            // session problem the *read* path doesn't actually have (see
-            // this module's doc and the issue's "do not break the bearer
-            // fallback" requirement).
+            // X が refresh をきっぱり拒否した — 失効か､回復不能なほどの期限
+            // 切れだ｡#54: 上の 2 つの場合とまったく同じように bearer token へ
+            // 降格させ､ハードエラーとして伝播させない｡伝播させると､*read* の
+            // 経路には実際には無いセッションの問題のせいで､timeline がすでに
+            // 出していたものを空にしてしまう (このモジュールの doc と issue の
+            // "do not break the bearer fallback" という要求を参照)｡
             Ok(Resolution {
                 credential: None,
                 demotion: Some(SessionDemotion::Rejected(format!("{error:#}"))),
@@ -247,13 +243,13 @@ pub(crate) fn resolve_credential(config: &Config, paths: &Paths, now: i64) -> Re
     }
 }
 
-/// Explain why a stored OAuth session couldn't be used as-is (#54), for
-/// `ui.rs`'s on-screen banner and `--fetch-only`'s stderr alike.
+/// 保存された OAuth セッションをそのまま使えなかった理由を説明する (#54)｡
+/// `ui.rs` の画面上のバナーにも `--fetch-only` の stderr にも使う｡
 ///
-/// Both remaining cases are fixed the same way — sign in again — so both
-/// messages say so. `NoClientId` was a third case until #33 made a client
-/// id mandatory at startup: an app that cannot start without one cannot
-/// later discover it is missing.
+/// 残る 2 つの場合はどちらも同じ直し方 — もう一度サインインする — なので､
+/// どちらのメッセージもそう言う｡`NoClientId` は 3 つ目の場合だったが､#33 が
+/// 起動時に client id を必須にした: それ無しに起動できないアプリが､後から
+/// それが無いと気づくことはありえない｡
 pub(crate) fn describe_demotion(demotion: &SessionDemotion) -> String {
     match demotion {
         SessionDemotion::NoRefreshToken => "Your X sign-in session expired and carries no \
@@ -267,11 +263,11 @@ pub(crate) fn describe_demotion(demotion: &SessionDemotion) -> String {
     }
 }
 
-/// What scope to persist across a refresh (#14): the freshly-returned scope
-/// if the token endpoint sent one, otherwise whatever was already recorded.
-/// Pure and tested directly rather than only through `resolve_credential`'s
-/// full path, since exercising the real refresh branch needs a live HTTP
-/// call this crate's tests never make (see the module doc).
+/// refresh をまたいでどの scope を残すか (#14): token エンドポイントが送って
+/// きたなら新しく返ってきた scope を､でなければすでに記録されていたものを｡
+/// `resolve_credential` の全経路を通してだけでなく純粋関数として直接テスト
+/// している｡実際の refresh 分岐を動かすには､このクレートのテストが決して
+/// 行わない実際の HTTP 呼び出しが要るからだ (モジュールの doc を参照)｡
 fn carried_scope(refreshed_scope: Option<String>, previous_scope: Option<&str>) -> Option<String> {
     refreshed_scope.or_else(|| previous_scope.map(str::to_string))
 }
@@ -327,9 +323,9 @@ mod tests {
 
     #[test]
     fn carried_scope_falls_back_to_the_previous_scope_when_the_refresh_omitted_it() {
-        // RFC 6749 §5.1: the token endpoint may omit `scope` on a refresh
-        // when unchanged — this must not silently downgrade a working
-        // `tweet.write` session back to "unknown".
+        // RFC 6749 §5.1: 変わっていなければ token エンドポイントは refresh
+        // 時の `scope` を省いてよい — これが動いている `tweet.write`
+        // セッションを黙って "unknown" へ格下げしてはならない｡
         assert_eq!(
             carried_scope(None, Some("tweet.read tweet.write")),
             Some("tweet.read tweet.write".into())
@@ -376,8 +372,8 @@ mod tests {
 
         let config = test_config("client-id");
         let resolution = resolve_credential(&config, &paths, 1_000_000).unwrap();
-        // #33: there is no fallback credential left, so a session that
-        // cannot be renewed leaves the app signed out — and says why.
+        // #33: フォールバックの credential はもう無いので､更新できない
+        // セッションはアプリをサインアウト状態にする — そして理由を言う｡
         assert_eq!(resolution.credential, None);
         assert_eq!(resolution.demotion, Some(SessionDemotion::NoRefreshToken));
 
@@ -386,10 +382,9 @@ mod tests {
 
     #[test]
     fn resolve_credential_reports_why_even_though_there_is_nothing_to_fall_back_to() {
-        // `credential: None` and `demotion: Some(_)` are independent facts,
-        // and `ui.rs` needs both: the first decides whether the app can read
-        // anything, the second decides whether the "session expired" banner
-        // shows.
+        // `credential: None` と `demotion: Some(_)` は独立した事実で､
+        // `ui.rs` には両方が要る: 前者はアプリが何かを読めるかを決め､後者は
+        // "session expired" のバナーを出すかを決める｡
         let root = temp_root("no-fallback");
         let paths = test_paths(&root);
         paths.ensure_dirs().unwrap();

@@ -1,11 +1,9 @@
-//! Author avatars (#64): pick a size, then hand the URL to the shared
-//! image cache.
+//! 著者のアバター (#64): サイズを選び､URL を共有の画像キャッシュへ渡す｡
 //!
-//! The downloading, caching and file-naming all live in
-//! [`crate::image_cache`], shared with post media (#65). What is
-//! avatar-specific — and so stays here — is [`preferred_url`], the choice
-//! of which size variant to ask X for, and the fallback when that guess is
-//! wrong.
+//! ダウンロード､キャッシュ､ファイル名付けはすべて [`crate::image_cache`]
+//! にあり､post のメディア (#65) と共有している｡アバター固有のもの — つまり
+//! ここに残るもの — は [`preferred_url`]､X にどのサイズの variant を求めるか
+//! の選択､そしてその推測が外れたときの fallback だ｡
 
 use std::path::PathBuf;
 
@@ -14,15 +12,15 @@ use anyhow::Result;
 use crate::image_cache;
 use crate::paths::Paths;
 
-/// Upgrade X's default `_normal` (48x48) avatar URL to the 400x400 variant,
-/// which is what a Retina display needs to render a 44pt circle without
-/// blurring.
+/// X の既定の `_normal` (48x48) アバター URL を 400x400 の variant へ
+/// 上げる｡Retina ディスプレイが 44pt の円をぼやけずに描くのに要るのが
+/// それだ｡
 ///
-/// The suffix convention is X's, not a documented API guarantee, so this
-/// only ever rewrites a URL that actually ends in `_normal.<ext>` and
-/// leaves everything else exactly as it came. A rewritten URL that turns
-/// out not to exist is handled one level up: [`ensure_cached`] falls back
-/// to the original URL rather than leaving the row without an avatar.
+/// この接尾辞の慣習は X のものであって､文書化された API の保証ではない｡
+/// だから書き換えるのは実際に `_normal.<ext>` で終わる URL だけで､それ
+/// 以外は来たままにする｡書き換えた URL が存在しなかった場合は 1 つ上で
+/// 扱う: [`ensure_cached`] が row をアバター無しにする代わりに元の URL へ
+/// fallback する｡
 pub(crate) fn preferred_url(url: &str) -> String {
     let Some((stem, extension)) = url.rsplit_once('.') else {
         return url.to_string();
@@ -33,20 +31,20 @@ pub(crate) fn preferred_url(url: &str) -> String {
     }
 }
 
-/// The local path for `url`'s avatar, downloading it first if it isn't
-/// cached yet (#64).
+/// `url` のアバターのローカルパス｡まだキャッシュされていなければ先に
+/// ダウンロードする (#64)｡
 ///
-/// Tries [`preferred_url`]'s larger variant first and falls back to the URL
-/// exactly as the API gave it, since the size-suffix convention is X's own
-/// and not promised by anything. Both are cached under their own key, so a
-/// fallback costs one extra request once, not once per render.
+/// まず [`preferred_url`] の大きい variant を試し､API がくれたままの URL へ
+/// fallback する｡サイズ接尾辞の慣習は X 自身のもので､何にも約束されて
+/// いないからだ｡どちらも自分の key でキャッシュされるので､fallback の
+/// 代償は追加リクエスト 1 回きりであって､描画ごとに 1 回ではない｡
 pub(crate) fn ensure_cached(paths: &Paths, url: &str) -> Result<PathBuf> {
     let dir = paths.avatar_dir();
     let preferred = preferred_url(url);
     match image_cache::ensure_cached(&dir, &preferred) {
         Ok(path) => Ok(path),
         Err(error) if preferred != url => {
-            // The larger variant is a guess; the API's own URL is not.
+            // 大きい variant は推測だが､API 自身の URL はそうではない｡
             image_cache::ensure_cached(&dir, url).map_err(|fallback_error| {
                 fallback_error.context(format!("the {preferred} variant also failed: {error:#}"))
             })
@@ -69,8 +67,8 @@ mod tests {
 
     #[test]
     fn leaves_a_url_without_the_normal_suffix_alone() {
-        // The suffix convention is X's, not a documented guarantee, so
-        // anything unfamiliar is passed through untouched.
+        // 接尾辞の慣習は X のものであって文書化された保証ではないので､
+        // 見慣れないものは触らずそのまま通す｡
         assert_eq!(
             preferred_url("https://pbs.twimg.com/profile_images/1/abc.jpg"),
             "https://pbs.twimg.com/profile_images/1/abc.jpg"
