@@ -156,9 +156,10 @@ live の window は起動だけで課金される｡
 `unsafe_code = "forbid"` のため — `activity.rs` が `ioreg` を､`browser.rs` が
 `open(1)` を起こすのと同じ線だ｡
 
-読み方､何を issue にするかの閾値､過去の測定記録は `runtime-profiling` スキル
+読み方と､何を issue にするかの閾値は `runtime-profiling` スキル
 (`.claude/skills/runtime-profiling/SKILL.md`) にある｡**閾値は測る前に決めて
-あり､数字を見てから動かさない｡**
+あり､数字を見てから動かさない｡** 測った数字は [perf-record.md](perf-record.md) に
+1 行ずつ足していく — スキルは手順だけを持ち､記録は別に積む｡
 
 ## テスト
 

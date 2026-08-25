@@ -32,7 +32,8 @@
 //! ためだ｡
 //!
 //! `--fixture` としか組まない｡live の window は起動だけで課金される｡
-//! 測り方と読み方､それに過去の数字は `runtime-profiling` スキルにある｡
+//! 測り方と読み方は `runtime-profiling` スキルに､過去の数字は
+//! `docs/perf-record.md` にある｡
 
 use std::fmt;
 use std::process::Command;
