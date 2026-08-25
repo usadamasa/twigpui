@@ -2595,16 +2595,49 @@ mod tests {
     }
 
     #[test]
-    fn keeps_a_timestamp_too_short_to_slice() {
-        // ここでは `&time[..5]` が panic するので､ガードが効く必要がある｡
+    fn keeps_a_timestamp_too_short_to_parse() {
         assert_eq!(format_timestamp(Some("2026-08-16T09")), "2026-08-16T09");
     }
 
     #[test]
-    fn shortens_an_rfc3339_timestamp() {
+    fn shows_an_rfc3339_timestamp_in_jst() {
         assert_eq!(
             format_timestamp(Some("2026-08-16T09:00:00.000Z")),
-            "2026-08-16 09:00"
+            "2026-08-16 18:00"
+        );
+    }
+
+    #[test]
+    fn shows_a_timestamp_without_fractional_seconds_in_jst() {
+        // fractional seconds は RFC 3339 では任意｡
+        assert_eq!(
+            format_timestamp(Some("2026-08-16T09:00:00Z")),
+            "2026-08-16 18:00"
+        );
+    }
+
+    #[test]
+    fn rolls_the_date_forward_when_jst_crosses_midnight() {
+        assert_eq!(
+            format_timestamp(Some("2026-08-16T16:30:00Z")),
+            "2026-08-17 01:30"
+        );
+    }
+
+    #[test]
+    fn rolls_the_year_forward_when_jst_crosses_new_year() {
+        assert_eq!(
+            format_timestamp(Some("2026-12-31T23:00:00Z")),
+            "2027-01-01 08:00"
+        );
+    }
+
+    #[test]
+    fn normalises_an_offset_timestamp_to_jst() {
+        // +05:00 の 09:00 は UTC 04:00 で JST 13:00｡
+        assert_eq!(
+            format_timestamp(Some("2026-08-16T09:00:00+05:00")),
+            "2026-08-16 13:00"
         );
     }
 
