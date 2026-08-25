@@ -267,7 +267,7 @@ pub(crate) struct TimelineView {
     /// 遡るのに要る｡`/me` が一度解決するまでは `None`｡
     home_user_id: Option<String>,
     /// サインインしたユーザー自身の screen name (これも `/me` から)｡header に
-    /// 出る — [`header_title`] を見よ｡
+    /// 出る — [`render::header_title`] を見よ｡
     home_username: Option<String>,
     /// どの timeline がウィンドウを埋めるか (#161): [`Self::new`] の中で
     /// [`list_picker::initial_source`] が決め､再代入するのは
