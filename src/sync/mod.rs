@@ -53,6 +53,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::x_api::model::User;
 
+mod api;
 mod auto;
 mod run;
 mod schedule;

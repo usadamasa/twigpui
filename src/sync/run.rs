@@ -8,6 +8,7 @@
 
 use anyhow::{Context as _, Result};
 
+use super::api::ListSyncApi;
 use super::schedule::Outcome;
 use super::{Action, Plan, load_plan, load_state, plan, report, save_plan, save_state};
 use crate::cache;
@@ -62,19 +63,19 @@ fn read_all(
 /// unit test していない｡理由は [`read_all`] と同じ｡
 pub(super) fn plan_sync(
     paths: &Paths,
-    client: &XClient,
+    client: &dyn ListSyncApi,
     user_id: &str,
     list_id: &str,
     now: i64,
 ) -> Result<Plan> {
     let following = match paths.profile().sync_seed_usernames() {
         None => read_all("follow list", |cursor| {
-            client.following(paths, user_id, cursor, now)
+            client.following_page(paths, user_id, cursor, now)
         })?,
         Some(usernames) => seed_users(paths, client, usernames, now)?,
     };
     let members = read_all("list members", |cursor| {
-        client.list_members(paths, list_id, cursor, now)
+        client.list_members_page(paths, list_id, cursor, now)
     })?;
     Ok(plan(list_id, now, &following, &members))
 }
@@ -89,7 +90,12 @@ pub(super) fn plan_sync(
 /// 2 回目の lookup 相当の表示名ではなく screen name を入れてある｡
 ///
 /// unit test していない｡理由は [`read_all`] と同じ｡
-fn seed_users(paths: &Paths, client: &XClient, usernames: &[&str], now: i64) -> Result<Vec<User>> {
+fn seed_users(
+    paths: &Paths,
+    client: &dyn ListSyncApi,
+    usernames: &[&str],
+    now: i64,
+) -> Result<Vec<User>> {
     usernames
         .iter()
         .map(|username| {
@@ -99,7 +105,7 @@ fn seed_users(paths: &Paths, client: &XClient, usernames: &[&str], now: i64) -> 
                 id
             } else {
                 let id = client
-                    .user_id_by_username(paths, username, now)
+                    .lookup_user_id(paths, username, now)
                     .with_context(|| {
                         format!("could not resolve the development sync seed @{username}")
                     })?;
@@ -134,7 +140,7 @@ fn seed_users(paths: &Paths, client: &XClient, usernames: &[&str], now: i64) -> 
 /// unit test していない｡理由は [`read_all`] と同じ｡
 fn apply(
     paths: &Paths,
-    client: &XClient,
+    client: &dyn ListSyncApi,
     plan: &mut Plan,
     prune: bool,
     now: i64,
@@ -162,7 +168,7 @@ fn apply(
 /// unit test していない｡理由は [`read_all`] と同じ｡
 pub(super) fn apply_some(
     paths: &Paths,
-    client: &XClient,
+    client: &dyn ListSyncApi,
     plan: &mut Plan,
     prune: bool,
     now: i64,
@@ -179,8 +185,8 @@ pub(super) fn apply_some(
             ));
         }
         let result = match action {
-            Action::Add => client.add_list_member(paths, &plan.list_id, &user_id, now),
-            Action::Remove => client.remove_list_member(paths, &plan.list_id, &user_id, now),
+            Action::Add => client.add_member(paths, &plan.list_id, &user_id, now),
+            Action::Remove => client.remove_member(paths, &plan.list_id, &user_id, now),
         };
         if let Err(error) = result {
             return (sent, Err(error));
@@ -282,12 +288,12 @@ pub(crate) fn run_cli(config: &Config, paths: &Paths, request: Request) -> i32 {
 /// サインイン中のアカウント自身の id｡`/me` のキャッシュが新しければ
 /// (30 日 — `cache::cached_me` を見よ) そこから､でなければ API から取る｡
 /// [`run_cli`] が拒否の並びとして読めるように関数を分けてある｡
-fn resolve_own_id(paths: &Paths, client: &XClient) -> Result<String> {
+fn resolve_own_id(paths: &Paths, client: &dyn ListSyncApi) -> Result<String> {
     let now = oauth::unix_now();
     if let Some(entry) = cache::cached_me(paths, now)? {
         return Ok(entry.id);
     }
-    let user = client.me(paths, now)?;
+    let user = client.signed_in_user(paths, now)?;
     cache::save_me(paths, &user.id, &user.username, now)?;
     Ok(user.id)
 }
@@ -304,7 +310,7 @@ fn resolve_own_id(paths: &Paths, client: &XClient) -> Result<String> {
 /// 終わらせるし､refusal はそれを伸ばす｡
 fn run(
     paths: &Paths,
-    client: &XClient,
+    client: &dyn ListSyncApi,
     user_id: &str,
     list_id: &str,
     request: Request,
@@ -400,5 +406,541 @@ fn run(
             settled.state.refusals
         ),
         _ => Ok(report(&plan)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::api::fake::{Call, FakeApi, Scratch, page, rate_limited, user};
+    use super::*;
+    use crate::sync::{Action, PlanEntry};
+
+    /// 未適用の entry だけを持つ plan｡`members_total` は removal を測る
+    /// 分母なので､prune の判定が絡むテストが自分で上書きする｡
+    fn plan_of(list_id: &str, adds: &[&str], removals: &[&str]) -> Plan {
+        let entry = |user_id: &str, action| PlanEntry {
+            user_id: user_id.to_string(),
+            username: format!("user{user_id}"),
+            action,
+            applied: false,
+        };
+        Plan {
+            list_id: list_id.to_string(),
+            created_at: 0,
+            members_total: removals.len(),
+            entries: adds
+                .iter()
+                .map(|id| entry(id, Action::Add))
+                .chain(removals.iter().map(|id| entry(id, Action::Remove)))
+                .collect(),
+        }
+    }
+
+    fn applied_ids(plan: &Plan) -> Vec<&str> {
+        plan.entries
+            .iter()
+            .filter(|entry| entry.applied)
+            .map(|entry| entry.user_id.as_str())
+            .collect()
+    }
+
+    // --- read_all: 部分的な read は決して plan にならない ---
+
+    #[test]
+    fn every_page_is_joined_in_the_order_it_arrived() {
+        let pages = std::cell::RefCell::new(vec![
+            page(&[("1", "a")], Some("next")),
+            page(&[("2", "b")], None),
+        ]);
+        let read = read_all("follow list", |_| pages.borrow_mut().remove(0)).unwrap();
+        assert_eq!(
+            read.iter().map(|u| u.id.as_str()).collect::<Vec<_>>(),
+            ["1", "2"]
+        );
+    }
+
+    #[test]
+    fn the_cursor_of_one_page_is_what_the_next_page_is_asked_for() {
+        // ここを取り違えると同じ 1 ページ目を課金しながら読み続ける｡
+        let asked = std::cell::RefCell::new(Vec::new());
+        let pages = std::cell::RefCell::new(vec![
+            page(&[("1", "a")], Some("cursor-2")),
+            page(&[("2", "b")], None),
+        ]);
+        read_all("follow list", |cursor| {
+            asked.borrow_mut().push(cursor.map(str::to_string));
+            pages.borrow_mut().remove(0)
+        })
+        .unwrap();
+        assert_eq!(
+            asked.into_inner(),
+            [None, Some("cursor-2".to_string())],
+            "the second page must be asked for with the first page's cursor"
+        );
+    }
+
+    #[test]
+    fn a_page_that_fails_halfway_fails_the_whole_read() {
+        // 半分読めた follow list は小さい答えではなく誤った答えだ｡
+        let pages = std::cell::RefCell::new(vec![
+            page(&[("1", "a")], Some("next")),
+            Err(anyhow::anyhow!("the API said 503")),
+        ]);
+        let error = read_all("follow list", |_| pages.borrow_mut().remove(0))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("nothing was changed"), "{error}");
+    }
+
+    #[test]
+    fn a_cursor_that_never_ends_is_an_error_rather_than_a_truncated_read() {
+        let error = read_all("follow list", |_| page(&[("1", "a")], Some("forever")))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("did not finish paging"), "{error}");
+        assert!(error.contains("nothing was changed"), "{error}");
+    }
+
+    // --- plan_sync: 両側を読んで diff へ渡す ---
+
+    #[test]
+    fn the_diff_reads_both_sides_and_plans_from_what_came_back() {
+        let scratch = Scratch::new("plan-sync");
+        let client = FakeApi::new()
+            .following(vec![
+                page(&[("1", "alice")], Some("page-2")),
+                page(&[("2", "bob")], None),
+            ])
+            .members(vec![page(&[("2", "bob"), ("3", "carol")], None)]);
+
+        let plan = plan_sync(scratch.paths(), &client, "me", "7", 100).unwrap();
+
+        assert_eq!(plan.pending_count(Action::Add), 1);
+        assert_eq!(plan.pending_count(Action::Remove), 1);
+        assert_eq!(plan.members_total, 2);
+        assert_eq!(
+            client.calls(),
+            [
+                Call::Following(None),
+                Call::Following(Some("page-2".to_string())),
+                Call::Members(None),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_failed_follow_read_never_reaches_the_member_read() {
+        // 続ければ diff の片側だけに金を払ったうえで捨てることになる｡
+        let scratch = Scratch::new("plan-sync-fail");
+        let client = FakeApi::new().following(vec![Err(anyhow::anyhow!("the API said 401"))]);
+
+        let error = plan_sync(scratch.paths(), &client, "me", "7", 100)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("nothing was changed"), "{error}");
+        assert_eq!(client.calls(), [Call::Following(None)]);
+    }
+
+    #[test]
+    fn the_dev_profile_builds_its_follow_side_from_the_seed_instead_of_the_graph() {
+        // #169 の要点: 開発中の diff が本物の follow グラフを課金しない｡
+        let scratch = Scratch::dev("seed");
+        let client = FakeApi::new()
+            .lookups(vec![
+                Ok("11".to_string()),
+                Ok("12".to_string()),
+                Ok("13".to_string()),
+                Ok("14".to_string()),
+            ])
+            .members(vec![page(&[], None)]);
+
+        let plan = plan_sync(scratch.paths(), &client, "me", "7", 100).unwrap();
+
+        assert_eq!(plan.pending_count(Action::Add), 4);
+        assert!(
+            !client
+                .calls()
+                .iter()
+                .any(|call| matches!(call, Call::Following(_))),
+            "the seed replaces the follow read outright: {:?}",
+            client.calls()
+        );
+    }
+
+    #[test]
+    fn the_second_diff_resolves_the_seed_from_the_cache() {
+        // 名前ごとに月 1 回の lookup しか払わない (`cache::reload` と同じ形)｡
+        // 2 回目に lookup を求めれば fake は答えを持たず落ちる｡
+        let scratch = Scratch::dev("seed-cached");
+        let client = FakeApi::new()
+            .lookups(vec![
+                Ok("11".to_string()),
+                Ok("12".to_string()),
+                Ok("13".to_string()),
+                Ok("14".to_string()),
+            ])
+            .members(vec![page(&[], None), page(&[], None)]);
+
+        plan_sync(scratch.paths(), &client, "me", "7", 100).unwrap();
+        let again = plan_sync(scratch.paths(), &client, "me", "7", 100).unwrap();
+
+        assert_eq!(again.pending_count(Action::Add), 4);
+        assert_eq!(
+            client
+                .calls()
+                .iter()
+                .filter(|call| matches!(call, Call::Lookup(_)))
+                .count(),
+            4,
+            "the second diff must not pay for the same names again"
+        );
+    }
+
+    #[test]
+    fn a_seed_name_that_will_not_resolve_names_itself() {
+        let scratch = Scratch::dev("seed-fail");
+        let client = FakeApi::new().lookups(vec![Err(anyhow::anyhow!("the API said 404"))]);
+
+        let error = plan_sync(scratch.paths(), &client, "me", "7", 100)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("development sync seed @"), "{error}");
+    }
+
+    // --- apply_some: batch 1 回分の write ---
+
+    #[test]
+    fn a_batch_stops_at_its_limit_and_leaves_the_rest_on_file() {
+        let scratch = Scratch::new("apply-limit");
+        let client = FakeApi::new().writes(vec![Ok(()), Ok(())]);
+        let mut plan = plan_of("7", &["1", "2", "3"], &[]);
+
+        let (sent, result) = apply_some(scratch.paths(), &client, &mut plan, false, 0, 2);
+
+        assert_eq!(sent, 2);
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(plan.pending_count(Action::Add), 1);
+        let on_file = load_plan(&scratch.paths().sync_plan_file())
+            .unwrap()
+            .unwrap();
+        assert_eq!(applied_ids(&on_file), ["1", "2"]);
+    }
+
+    #[test]
+    fn additions_and_removals_alternate_so_a_stopped_catch_up_is_not_all_one_sided() {
+        let scratch = Scratch::new("apply-alternate");
+        let client = FakeApi::new().writes(vec![Ok(()), Ok(()), Ok(()), Ok(())]);
+        let mut plan = plan_of("7", &["1", "2"], &["8", "9"]);
+
+        let (_, result) = apply_some(scratch.paths(), &client, &mut plan, true, 0, 4);
+        assert!(result.is_ok(), "{result:?}");
+
+        assert_eq!(
+            client.calls(),
+            [
+                Call::Add("1".to_string()),
+                Call::Remove("8".to_string()),
+                Call::Add("2".to_string()),
+                Call::Remove("9".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn without_prune_the_batch_never_reaches_a_removal() {
+        let scratch = Scratch::new("apply-no-prune");
+        let client = FakeApi::new().writes(vec![Ok(())]);
+        let mut plan = plan_of("7", &["1"], &["8"]);
+
+        let (sent, _) = apply_some(scratch.paths(), &client, &mut plan, false, 0, usize::MAX);
+
+        assert_eq!(sent, 1);
+        assert_eq!(client.calls(), [Call::Add("1".to_string())]);
+        assert_eq!(plan.pending_count(Action::Remove), 1);
+    }
+
+    #[test]
+    fn a_refused_write_stops_the_batch_and_comes_back_beside_what_landed() {
+        // 件数と失敗が並んで返ることが `state::settle` の見分けの拠りどころだ｡
+        let scratch = Scratch::new("apply-refused");
+        let client = FakeApi::new().writes(vec![Ok(()), Err(rate_limited(9_000, true))]);
+        let mut plan = plan_of("7", &["1", "2", "3"], &[]);
+
+        let (sent, result) = apply_some(scratch.paths(), &client, &mut plan, false, 0, usize::MAX);
+
+        assert_eq!(sent, 1);
+        assert!(result.is_err(), "the refusal must come back");
+        assert_eq!(client.calls().len(), 2, "the batch stops at the refusal");
+        // 届いたものは disk に残る｡再開が再送しないのはこれがあるからだ｡
+        let on_file = load_plan(&scratch.paths().sync_plan_file())
+            .unwrap()
+            .unwrap();
+        assert_eq!(applied_ids(&on_file), ["1"]);
+    }
+
+    #[test]
+    fn the_batch_pauses_before_every_write_but_the_first() {
+        // tick は batch と batch の間を待って来ているので､1 件目の前に
+        // 待てば batch ごとに二重の間が入る｡
+        let scratch = Scratch::new("apply-pause");
+        let client = FakeApi::new().writes(vec![Ok(()), Ok(()), Ok(())]);
+        let mut plan = plan_of("7", &["1", "2", "3"], &[]);
+
+        let (_, result) = apply_some(scratch.paths(), &client, &mut plan, false, 0, usize::MAX);
+        assert!(result.is_ok(), "{result:?}");
+
+        let pauses = client.pauses();
+        assert_eq!(pauses.len(), 2, "3 writes take 2 gaps: {pauses:?}");
+        let floor = super::super::state::WRITE_GAP_FLOOR_SECONDS;
+        let ceiling = floor + super::super::state::WRITE_GAP_SPREAD_SECONDS;
+        for gap in pauses {
+            assert!(
+                (floor..=ceiling).contains(&gap.as_secs()),
+                "the gap must stay inside the configured spread: {gap:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_unlimited_apply_sends_the_whole_plan() {
+        let scratch = Scratch::new("apply-all");
+        let client = FakeApi::new().writes(vec![Ok(()), Ok(()), Ok(())]);
+        let mut plan = plan_of("7", &["1", "2"], &["8"]);
+
+        let (sent, result) = apply(scratch.paths(), &client, &mut plan, true, 0);
+
+        assert_eq!(sent, 3);
+        assert!(result.is_ok(), "{result:?}");
+        assert!(plan.is_complete());
+    }
+
+    // --- run: dry-run と apply の入口 ---
+
+    fn request(apply: bool, prune: bool) -> Request {
+        Request { apply, prune }
+    }
+
+    #[test]
+    fn a_dry_run_writes_the_plan_and_says_nothing_was_changed() {
+        let scratch = Scratch::new("run-dry");
+        let client = FakeApi::new()
+            .following(vec![page(&[("1", "alice")], None)])
+            .members(vec![page(&[], None)]);
+
+        let report = run(
+            scratch.paths(),
+            &client,
+            "me",
+            "7",
+            request(false, false),
+            21_600,
+        )
+        .unwrap();
+
+        assert!(report.contains("nothing was changed"), "{report}");
+        let on_file = load_plan(&scratch.paths().sync_plan_file())
+            .unwrap()
+            .unwrap();
+        assert_eq!(on_file.pending_count(Action::Add), 1);
+    }
+
+    #[test]
+    fn applying_without_a_plan_on_file_is_refused() {
+        // dry-run こそが両側を読んで plan を書く｡それを飛ばした --apply に
+        // 送るものは無い｡
+        let scratch = Scratch::new("run-no-plan");
+        let client = FakeApi::new();
+
+        let error = run(
+            scratch.paths(),
+            &client,
+            "me",
+            "7",
+            request(true, false),
+            21_600,
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("no sync plan on file"), "{error}");
+        assert!(client.calls().is_empty(), "nothing may be sent");
+    }
+
+    #[test]
+    fn a_plan_diffed_against_another_list_is_refused() {
+        // 適用すれば誰も頼んでいない list の membership を書き換える｡
+        let scratch = Scratch::new("run-other-list");
+        save_plan(
+            &scratch.paths().sync_plan_file(),
+            &plan_of("other", &["1"], &[]),
+        )
+        .unwrap();
+        let client = FakeApi::new();
+
+        let error = run(
+            scratch.paths(),
+            &client,
+            "me",
+            "7",
+            request(true, false),
+            21_600,
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(
+            error.contains("the plan on file is for list other"),
+            "{error}"
+        );
+        assert!(client.calls().is_empty(), "nothing may be sent");
+    }
+
+    #[test]
+    fn a_plan_that_was_sent_through_leaves_no_file_behind() {
+        // 置いたままにすると次の --apply に残務があるように見える｡
+        let scratch = Scratch::new("run-complete");
+        save_plan(
+            &scratch.paths().sync_plan_file(),
+            &plan_of("7", &["1"], &[]),
+        )
+        .unwrap();
+        let client = FakeApi::new().writes(vec![Ok(())]);
+
+        run(
+            scratch.paths(),
+            &client,
+            "me",
+            "7",
+            request(true, false),
+            21_600,
+        )
+        .unwrap();
+
+        assert_eq!(
+            load_plan(&scratch.paths().sync_plan_file()).unwrap(),
+            None,
+            "the plan file is gone"
+        );
+    }
+
+    #[test]
+    fn a_refused_apply_records_the_backoff_and_fails() {
+        let scratch = Scratch::new("run-refused");
+        save_plan(
+            &scratch.paths().sync_plan_file(),
+            &plan_of("7", &["1", "2"], &[]),
+        )
+        .unwrap();
+        let client = FakeApi::new().writes(vec![Ok(()), Err(rate_limited(9_000, true))]);
+
+        let error = run(
+            scratch.paths(),
+            &client,
+            "me",
+            "7",
+            request(true, false),
+            21_600,
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(
+            error.contains("rate limited after 1 write(s) landed"),
+            "{error}"
+        );
+        // background sync と同じ記憶を共有する: 拒否はそちらの backoff も伸ばす｡
+        let state = load_state(&scratch.paths().sync_state_file());
+        assert_eq!(state.refusals, 1);
+        assert!(state.blocked_until.is_some(), "{state:?}");
+        // 届いた 1 件は plan ファイルに残り､再実行が再送しない｡
+        let on_file = load_plan(&scratch.paths().sync_plan_file())
+            .unwrap()
+            .unwrap();
+        assert_eq!(applied_ids(&on_file), ["1"]);
+    }
+
+    #[test]
+    fn a_run_without_prune_is_finished_once_every_addition_landed() {
+        // CLI は removal を送るよう求められていないので､残った removal は
+        // 残務ではない — plan ファイルは消える｡loop の側の規則は違う
+        // (`auto::apply` を見よ)｡
+        let scratch = Scratch::new("run-adds-only");
+        save_plan(
+            &scratch.paths().sync_plan_file(),
+            &plan_of("7", &["1"], &["8"]),
+        )
+        .unwrap();
+        let client = FakeApi::new().writes(vec![Ok(())]);
+
+        run(
+            scratch.paths(),
+            &client,
+            "me",
+            "7",
+            request(true, false),
+            21_600,
+        )
+        .unwrap();
+
+        assert_eq!(load_plan(&scratch.paths().sync_plan_file()).unwrap(), None);
+    }
+
+    // --- resolve_own_id: /me は 30 日に 1 回しか払わない ---
+
+    #[test]
+    fn the_signed_in_id_is_looked_up_once_and_then_read_from_the_cache() {
+        let scratch = Scratch::new("me");
+        let client = FakeApi::new().me(Ok(user("42", "alice")));
+
+        assert_eq!(resolve_own_id(scratch.paths(), &client).unwrap(), "42");
+        // 2 回目に /me を求めれば fake は答えを持たず落ちる｡
+        assert_eq!(resolve_own_id(scratch.paths(), &client).unwrap(), "42");
+        assert_eq!(client.calls(), [Call::Me]);
+    }
+
+    // --- run_cli: 支出の前に立つ拒否 ---
+
+    /// `--sync-list` が読むフィールドだけを意味のある値にした設定｡
+    fn config(list_id: Option<&str>) -> Config {
+        Config {
+            oauth_client_id: "client".to_string(),
+            target_username: "alice".to_string(),
+            max_results: 10,
+            min_fetch_interval_seconds: 60,
+            theme: crate::theme::ThemeMode::Light,
+            log_level: crate::log::Level::Info,
+            request_price: None,
+            list_id: list_id.map(str::to_string),
+            daily_request_budget: None,
+            auto_sync_list: false,
+            sync_interval_seconds: 21_600,
+            sync_prune_limit_percent: 10,
+            sync_writes_per_batch: 5,
+            auto_refresh: false,
+            auto_refresh_interval_seconds: 300,
+            follow_new_posts: false,
+        }
+    }
+
+    #[test]
+    fn without_a_list_the_cli_refuses_before_it_resolves_anything() {
+        let scratch = Scratch::new("cli-no-list");
+        assert_eq!(
+            run_cli(&config(None), scratch.paths(), request(false, false)),
+            1
+        );
+    }
+
+    #[test]
+    fn without_a_signed_in_session_the_cli_refuses_before_it_reads() {
+        // read はアカウントごとに課金される｡session の無い実行がそこへ
+        // 到達してはならない｡
+        let scratch = Scratch::new("cli-no-session");
+        assert_eq!(
+            run_cli(&config(Some("7")), scratch.paths(), request(false, false)),
+            1
+        );
     }
 }

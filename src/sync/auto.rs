@@ -47,10 +47,10 @@
 
 use anyhow::Result;
 
+use super::api::ListSyncApi;
 use super::schedule::Outcome;
 use super::{Action, SyncState, load_plan, load_state, save_plan, save_state, schedule, state};
 use crate::paths::Paths;
-use crate::x_api::XClient;
 
 /// 呼び出し側がこの tick に望むペース配分 — *何を* ではなく *いつ* に
 /// 関わるもののうち､[`SyncState`] にまだ無いものすべて｡
@@ -110,7 +110,7 @@ pub(crate) struct Tick {
 /// いる loop が少なくとも次の保存までは正しくペース配分できるようにだ｡
 pub(crate) fn tick(
     paths: &Paths,
-    client: &XClient,
+    client: &dyn ListSyncApi,
     user_id: &str,
     list_id: &str,
     pacing: Pacing,
@@ -155,7 +155,7 @@ pub(crate) fn tick(
 #[allow(clippy::too_many_arguments)]
 fn perform(
     paths: &Paths,
-    client: &XClient,
+    client: &dyn ListSyncApi,
     user_id: &str,
     list_id: &str,
     pacing: Pacing,
@@ -234,7 +234,7 @@ fn perform(
 /// apply 時に取る判定の方だ｡
 fn diff(
     paths: &Paths,
-    client: &XClient,
+    client: &dyn ListSyncApi,
     user_id: &str,
     list_id: &str,
     prune_limit_percent: u8,
@@ -275,7 +275,7 @@ fn diff(
 /// 完了通知が出る｡
 fn apply(
     paths: &Paths,
-    client: &XClient,
+    client: &dyn ListSyncApi,
     mut plan: super::Plan,
     prune: bool,
     now: i64,
@@ -337,5 +337,445 @@ fn log_outcome(outcome: &Result<Outcome>, state: SyncState, wake_at: i64) {
         Err(error) => crate::log::error(&format!(
             "list sync failed: {error:#}; next attempt at unix time {wake_at}"
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::api::fake::{Call, FakeApi, Scratch, page, rate_limited};
+    use super::*;
+    use crate::sync::{Plan, PlanEntry, save_plan};
+
+    const INTERVAL: u32 = 21_600;
+    /// 上限は list の 10% (config の既定)｡
+    const PRUNE_LIMIT: u8 = 10;
+    const NOW: i64 = 1_800_000_000;
+
+    fn pacing(writes_per_batch: u8, forced: bool) -> Pacing {
+        Pacing {
+            interval_seconds: INTERVAL,
+            writes_per_batch,
+            forced,
+        }
+    }
+
+    fn plan_of(list_id: &str, adds: &[&str], removals: &[&str], members_total: usize) -> Plan {
+        let entry = |user_id: &str, action| PlanEntry {
+            user_id: user_id.to_string(),
+            username: format!("user{user_id}"),
+            action,
+            applied: false,
+        };
+        Plan {
+            list_id: list_id.to_string(),
+            created_at: 0,
+            members_total,
+            entries: adds
+                .iter()
+                .map(|id| entry(id, Action::Add))
+                .chain(removals.iter().map(|id| entry(id, Action::Remove)))
+                .collect(),
+        }
+    }
+
+    /// 何も送らずに済む fake — 呼ばれた時点で答えを持たず落ちるので､
+    /// 「API を使わない」を assert するのはこれで足りる｡
+    fn silent() -> FakeApi {
+        FakeApi::new()
+    }
+
+    // --- interval: 期限が来るまで何も買わない ---
+
+    #[test]
+    fn a_tick_inside_the_interval_spends_nothing() {
+        let scratch = Scratch::new("auto-idle");
+        save_state(
+            &scratch.paths().sync_state_file(),
+            &SyncState {
+                last_diff_at: Some(NOW),
+                ..SyncState::default()
+            },
+        )
+        .unwrap();
+        let client = silent();
+
+        let tick = tick(
+            scratch.paths(),
+            &client,
+            "me",
+            "7",
+            pacing(5, false),
+            PRUNE_LIMIT,
+            NOW,
+        );
+
+        assert!(
+            matches!(tick.outcome, Ok(Outcome::Idle { .. })),
+            "{:?}",
+            tick.outcome
+        );
+        assert!(client.calls().is_empty(), "an idle tick reads nothing");
+        assert_eq!(tick.wake_at, NOW.saturating_add(i64::from(INTERVAL)));
+    }
+
+    #[test]
+    fn a_forced_tick_does_not_wait_out_the_interval() {
+        // #174 のボタン｡interval を縮めるのではなく last-diff の時刻を捨てる｡
+        let scratch = Scratch::new("auto-forced");
+        save_state(
+            &scratch.paths().sync_state_file(),
+            &SyncState {
+                last_diff_at: Some(NOW),
+                ..SyncState::default()
+            },
+        )
+        .unwrap();
+        let client = FakeApi::new()
+            .following(vec![page(&[("1", "alice")], None)])
+            .members(vec![page(&[], None)]);
+
+        let tick = tick(
+            scratch.paths(),
+            &client,
+            "me",
+            "7",
+            pacing(5, true),
+            PRUNE_LIMIT,
+            NOW,
+        );
+
+        assert!(
+            matches!(tick.outcome, Ok(Outcome::Diffed { adds: 1, .. })),
+            "{:?}",
+            tick.outcome
+        );
+    }
+
+    // --- diff: 読む前に打刻する ---
+
+    #[test]
+    fn a_due_tick_diffs_both_sides_and_writes_the_plan() {
+        let scratch = Scratch::new("auto-diff");
+        let client = FakeApi::new()
+            .following(vec![page(&[("1", "alice")], None)])
+            .members(vec![page(&[("2", "bob")], None)]);
+
+        let tick = tick(
+            scratch.paths(),
+            &client,
+            "me",
+            "7",
+            pacing(5, false),
+            PRUNE_LIMIT,
+            NOW,
+        );
+
+        assert!(
+            matches!(
+                tick.outcome,
+                Ok(Outcome::Diffed {
+                    adds: 1,
+                    removals: 1,
+                    members_total: 1,
+                    held: true
+                })
+            ),
+            "{:?}",
+            tick.outcome
+        );
+        let plan = load_plan(&scratch.paths().sync_plan_file())
+            .unwrap()
+            .unwrap();
+        assert_eq!(plan.list_id, "7");
+    }
+
+    #[test]
+    fn the_time_of_a_diff_is_stamped_even_when_the_read_fails() {
+        // 届いたページは課金されている｡毎回落ちる diff を起床ごとに
+        // 再試行させないための打刻でもある｡
+        let scratch = Scratch::new("auto-diff-fails");
+        let client = FakeApi::new().following(vec![Err(anyhow::anyhow!("the API said 401"))]);
+
+        let tick = tick(
+            scratch.paths(),
+            &client,
+            "me",
+            "7",
+            pacing(5, false),
+            PRUNE_LIMIT,
+            NOW,
+        );
+
+        assert!(tick.outcome.is_err(), "{:?}", tick.outcome);
+        let state = load_state(&scratch.paths().sync_state_file());
+        assert_eq!(state.last_diff_at, Some(NOW));
+        // 失敗した tick は interval を丸ごと得る｡
+        assert_eq!(state.blocked_until, Some(NOW + i64::from(INTERVAL)));
+    }
+
+    #[test]
+    fn removals_over_the_cap_are_held_rather_than_trimmed_to_fit() {
+        // #176: 疑っているのは read の方なので､悪い read の最初の N 件は
+        // 最後の N 件よりましではない｡
+        let scratch = Scratch::new("auto-held");
+        let members: Vec<(&str, &str)> = vec![
+            ("21", "m1"),
+            ("22", "m2"),
+            ("23", "m3"),
+            ("24", "m4"),
+            ("25", "m5"),
+        ];
+        let client = FakeApi::new()
+            .following(vec![page(&[], None)])
+            .members(vec![page(&members, None)]);
+
+        let tick = tick(
+            scratch.paths(),
+            &client,
+            "me",
+            "7",
+            pacing(5, false),
+            PRUNE_LIMIT,
+            NOW,
+        );
+
+        assert!(
+            matches!(tick.outcome, Ok(Outcome::Diffed { held: true, .. })),
+            "{:?}",
+            tick.outcome
+        );
+        // 保留された plan はファイルに残る — 支払い済みで､
+        // `--sync-list --apply --prune` がそこから送る｡
+        assert!(
+            load_plan(&scratch.paths().sync_plan_file())
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    // --- apply: 流し切りが diff のやり直しに優先する ---
+
+    #[test]
+    fn a_plan_on_file_is_sent_a_batch_at_a_time() {
+        let scratch = Scratch::new("auto-apply");
+        save_plan(
+            &scratch.paths().sync_plan_file(),
+            &plan_of("7", &["1", "2", "3"], &[], 0),
+        )
+        .unwrap();
+        let client = FakeApi::new().writes(vec![Ok(()), Ok(())]);
+
+        let tick = tick(
+            scratch.paths(),
+            &client,
+            "me",
+            "7",
+            pacing(2, false),
+            PRUNE_LIMIT,
+            NOW,
+        );
+
+        assert!(
+            matches!(
+                tick.outcome,
+                Ok(Outcome::Applied {
+                    sent: 2,
+                    remaining: 1
+                })
+            ),
+            "{:?}",
+            tick.outcome
+        );
+        assert_eq!(
+            client.calls(),
+            [Call::Add("1".to_string()), Call::Add("2".to_string())],
+            "the batch never reaches the read"
+        );
+        // 続きがあるので次の batch までの間が state に残る｡
+        assert!(tick.state.paused_until.is_some(), "{:?}", tick.state);
+    }
+
+    #[test]
+    fn a_plan_that_was_sent_through_leaves_no_file_behind() {
+        // 置いたままにすると次の tick が残務として読み､diff を飛ばす｡
+        let scratch = Scratch::new("auto-apply-done");
+        save_plan(
+            &scratch.paths().sync_plan_file(),
+            &plan_of("7", &["1"], &[], 0),
+        )
+        .unwrap();
+        let client = FakeApi::new().writes(vec![Ok(())]);
+
+        tick(
+            scratch.paths(),
+            &client,
+            "me",
+            "7",
+            pacing(5, false),
+            PRUNE_LIMIT,
+            NOW,
+        );
+
+        assert_eq!(load_plan(&scratch.paths().sync_plan_file()).unwrap(), None);
+    }
+
+    #[test]
+    fn a_plan_whose_removals_are_held_keeps_its_file_after_the_additions_land() {
+        // CLI と分かれる一点｡保留された removal は支払い済みなので､
+        // `--sync-list --apply --prune` がここから送る｡
+        let scratch = Scratch::new("auto-apply-held");
+        save_plan(
+            &scratch.paths().sync_plan_file(),
+            &plan_of("7", &["1"], &["8", "9"], 2),
+        )
+        .unwrap();
+        let client = FakeApi::new().writes(vec![Ok(())]);
+
+        let tick = tick(
+            scratch.paths(),
+            &client,
+            "me",
+            "7",
+            pacing(5, false),
+            PRUNE_LIMIT,
+            NOW,
+        );
+
+        assert!(
+            matches!(
+                tick.outcome,
+                Ok(Outcome::Applied {
+                    sent: 1,
+                    remaining: 0
+                })
+            ),
+            "{:?}",
+            tick.outcome
+        );
+        assert_eq!(client.calls(), [Call::Add("1".to_string())]);
+        let left = load_plan(&scratch.paths().sync_plan_file())
+            .unwrap()
+            .unwrap();
+        assert_eq!(left.pending_count(Action::Remove), 2);
+    }
+
+    #[test]
+    fn a_plan_diffed_against_another_list_is_dropped_and_the_diff_runs_instead() {
+        // loop には拒否を伝える相手がいないので､`run.rs` のように
+        // エラーにはせず捨てる｡
+        let scratch = Scratch::new("auto-other-list");
+        save_plan(
+            &scratch.paths().sync_plan_file(),
+            &plan_of("other", &["1"], &[], 0),
+        )
+        .unwrap();
+        let client = FakeApi::new()
+            .following(vec![page(&[], None)])
+            .members(vec![page(&[], None)]);
+
+        let tick = tick(
+            scratch.paths(),
+            &client,
+            "me",
+            "7",
+            pacing(5, false),
+            PRUNE_LIMIT,
+            NOW,
+        );
+
+        assert!(
+            matches!(tick.outcome, Ok(Outcome::Diffed { .. })),
+            "{:?}",
+            tick.outcome
+        );
+        assert!(
+            !client
+                .calls()
+                .iter()
+                .any(|call| matches!(call, Call::Add(_) | Call::Remove(_))),
+            "nothing from another list's plan may be sent"
+        );
+    }
+
+    #[test]
+    fn a_refused_write_backs_the_loop_off_instead_of_failing_the_tick() {
+        // rate limit はエラーではなく outcome だ｡loop がそれについて
+        // できることは待つことだけだからだ｡
+        let scratch = Scratch::new("auto-refused");
+        save_plan(
+            &scratch.paths().sync_plan_file(),
+            &plan_of("7", &["1", "2"], &[], 0),
+        )
+        .unwrap();
+        let client = FakeApi::new().writes(vec![Err(rate_limited(NOW + 900, true))]);
+
+        let tick = tick(
+            scratch.paths(),
+            &client,
+            "me",
+            "7",
+            pacing(5, false),
+            PRUNE_LIMIT,
+            NOW,
+        );
+
+        assert!(
+            matches!(
+                tick.outcome,
+                Ok(Outcome::RateLimited {
+                    sent: 0,
+                    remaining: 2,
+                    ..
+                })
+            ),
+            "{:?}",
+            tick.outcome
+        );
+        assert_eq!(tick.state.refusals, 1);
+        assert!(tick.wake_at > NOW, "the loop must not come straight back");
+    }
+
+    // --- state を保存できない tick ---
+
+    #[test]
+    fn a_state_that_cannot_be_saved_still_gives_the_loop_a_deadline() {
+        // 走っている loop は少なくとも次の保存までペース配分できなければ
+        // ならない — 保存の失敗は log であって tick の中断ではない｡
+        let scratch = Scratch::new("auto-readonly");
+        let state_dir = scratch
+            .paths()
+            .sync_state_file()
+            .parent()
+            .unwrap()
+            .to_owned();
+        let mut permissions = std::fs::metadata(&state_dir).unwrap().permissions();
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            permissions.set_mode(0o500);
+        }
+        std::fs::set_permissions(&state_dir, permissions).unwrap();
+        let client = silent();
+
+        let tick = tick(
+            scratch.paths(),
+            &client,
+            "me",
+            "7",
+            pacing(5, false),
+            PRUNE_LIMIT,
+            NOW,
+        );
+
+        assert!(tick.outcome.is_err(), "{:?}", tick.outcome);
+        assert_eq!(tick.wake_at, NOW.saturating_add(i64::from(INTERVAL)));
+        assert_eq!(tick.state.blocked_until, Some(tick.wake_at));
+
+        // Scratch が片付けられるよう書き込みを戻す｡
+        let mut permissions = std::fs::metadata(&state_dir).unwrap().permissions();
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            permissions.set_mode(0o700);
+        }
+        std::fs::set_permissions(&state_dir, permissions).unwrap();
     }
 }
