@@ -3603,6 +3603,158 @@ mod tests {
         });
     }
 
+    // --- #175: 手動 scroll ---
+
+    /// 40 件で開き､1 フレーム描いて timeline の bounds を返す｡ホイールの
+    /// event は hit test を通るので､描いていないウィンドウには届かない｡
+    fn scrollable_window(
+        cx: &mut gpui::TestAppContext,
+    ) -> (
+        gpui::VisualTestContext,
+        gpui::Entity<super::TimelineView>,
+        gpui::Bounds<gpui::Pixels>,
+    ) {
+        let ids: Vec<String> = (1..=40).map(|n| n.to_string()).collect();
+        let shown: Vec<&str> = ids.iter().map(String::as_str).collect();
+        let (window, timeline) = fixture_window(cx, fixture_with(&shown, &[]));
+        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let body = visual
+            .debug_bounds("timeline")
+            .expect("the timeline has to be laid out before a wheel can reach it");
+        (visual, timeline, body)
+    }
+
+    fn wheel_event(at: gpui::Point<gpui::Pixels>, lines: f32) -> gpui::ScrollWheelEvent {
+        gpui::ScrollWheelEvent {
+            position: at,
+            delta: gpui::ScrollDelta::Lines(gpui::point(0., lines)),
+            modifiers: gpui::Modifiers::none(),
+            touch_phase: gpui::TouchPhase::Moved,
+        }
+    }
+
+    fn pan_event(
+        at: gpui::Point<gpui::Pixels>,
+        pixels: f32,
+        phase: gpui::TouchPhase,
+    ) -> gpui::ScrollWheelEvent {
+        gpui::ScrollWheelEvent {
+            position: at,
+            delta: gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.), gpui::px(pixels))),
+            modifiers: gpui::Modifiers::none(),
+            touch_phase: phase,
+        }
+    }
+
+    fn offset_y(cx: &mut gpui::TestAppContext, timeline: &gpui::Entity<super::TimelineView>) -> f32 {
+        cx.update(|cx| timeline.read(cx).list_scroll.offset().y.into())
+    }
+
+    /// #175: ホイールのティックは飛ばずに滑る｡event の直後には動いておらず
+    /// (gpui 自身の handler が同じ event に delta を足していればここで
+    /// 飛ぶ)､落ち着いたところで delta ぶんちょうど進んでいて､2 回目は
+    /// その 2 倍のところに着く｡
+    #[gpui::test]
+    fn a_wheel_tick_is_smoothed_and_lands_exactly_its_delta_away(cx: &mut gpui::TestAppContext) {
+        let (mut visual, timeline, body) = scrollable_window(cx);
+
+        visual.simulate_event(wheel_event(body.center(), -3.));
+        let right_after = offset_y(cx, &timeline);
+        assert!(
+            right_after.abs() < 1.,
+            "a tick must not jump in the same frame, offset {right_after}"
+        );
+
+        cx.executor().advance_clock(std::time::Duration::from_secs(2));
+        cx.run_until_parked();
+        let one_tick = offset_y(cx, &timeline);
+        assert!(one_tick < -10., "after settling the list has scrolled down, {one_tick}");
+        cx.update(|cx| {
+            let view = timeline.read(cx);
+            assert!(view.scroller.is_settled(), "and there is nothing left to animate");
+            assert!(view.scroll_motion.is_none(), "so the frame loop has let go");
+        });
+
+        visual.simulate_event(wheel_event(body.center(), -3.));
+        cx.executor().advance_clock(std::time::Duration::from_secs(2));
+        cx.run_until_parked();
+        let two_ticks = offset_y(cx, &timeline);
+        assert!(
+            (two_ticks - one_tick * 2.).abs() < 1.,
+            "two equal ticks land twice as far: {two_ticks} vs 2 x {one_tick}"
+        );
+    }
+
+    /// #175: 読み手が触れたら glide は即座に止まり､2 つの animation が
+    /// scroll 位置を取り合わない｡
+    #[gpui::test]
+    fn a_wheel_tick_stops_a_glide_in_flight(cx: &mut gpui::TestAppContext) {
+        let (mut visual, timeline, body) = scrollable_window(cx);
+
+        cx.update(|cx| {
+            timeline.update(cx, |view, cx| {
+                view.follow = super::FollowMode::Follow;
+                let shown: Vec<String> = shown_ids(view);
+                let displayed: Vec<&str> = shown.iter().map(String::as_str).collect();
+                let incoming: Vec<TimelineItem> = ["42", "41"]
+                    .iter()
+                    .chain(displayed.iter())
+                    .map(|id| item_with(id, "someone", None))
+                    .collect();
+                let pending = pending_after_poll(&displayed, incoming).expect("two arrived");
+                view.present_poll(pending, cx);
+                assert!(view.glide.is_some(), "the reveal starts as a glide");
+            });
+        });
+
+        visual.simulate_event(wheel_event(body.center(), -1.));
+        cx.update(|cx| {
+            assert!(
+                timeline.read(cx).glide.is_none(),
+                "the reader's hand wins over the glide"
+            );
+        });
+    }
+
+    /// #175: 最上部で trackpad をさらに引くと一覧は動かず band が伸び､
+    /// 指が離れれば戻る｡見た目のずれは描いた bounds に出る｡
+    #[gpui::test]
+    fn a_trackpad_pull_past_the_top_bounces_and_relaxes(cx: &mut gpui::TestAppContext) {
+        let (mut visual, timeline, body) = scrollable_window(cx);
+
+        visual.simulate_event(pan_event(body.center(), 40., gpui::TouchPhase::Started));
+        let (offset, shift) = cx.update(|cx| {
+            let view = timeline.read(cx);
+            (f32::from(view.list_scroll.offset().y), view.scroller.shift())
+        });
+        assert!(offset.abs() < 1., "the list itself stays at the top, {offset}");
+        assert!(shift > 0. && shift < 40., "40px of pull shows as a smaller shift, {shift}");
+
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let pulled = visual
+            .debug_bounds("timeline")
+            .expect("still laid out while pulled");
+        assert!(
+            (f32::from(pulled.top() - body.top()) - shift).abs() < 0.5,
+            "the drawn list sits {shift}px lower, was {}",
+            f32::from(pulled.top() - body.top())
+        );
+
+        visual.simulate_event(pan_event(body.center(), 0., gpui::TouchPhase::Ended));
+        cx.executor().advance_clock(std::time::Duration::from_secs(2));
+        cx.run_until_parked();
+        cx.update(|cx| {
+            let view = timeline.read(cx);
+            assert!(view.scroller.shift().abs() < 0.5, "the band relaxes once the finger lifts");
+            assert!(view.scroller.is_settled(), "{:?}", view.scroller);
+        });
+    }
+
     /// #22: 読み手が最上部にいるところへ来た poll はそのまま流れる — pill も
     /// 押下も無い｡描画されていないウィンドウは「最上部」と読まれる
     /// (`logical_scroll_top` はレイアウト前には `(0, 0px)` を答える)｡開いた
