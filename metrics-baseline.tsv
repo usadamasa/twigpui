@@ -60,7 +60,12 @@ src/compose.rs	350
 # doc に載せた 2 つの定数 (上限は約 7/min で作動し 24h で回復した)､
 # resolver､そしてその 8 本のテスト｡
 src/config.rs	850
-src/fixture.rs	100
+# fixture.rs 100 -> 150: #205 の `FixtureSync`｡フィクスチャが post 以外を
+# 書く 2 つ目のフィールド (1 つ目は #164 の `lists`) で､増えた分の大半は
+# doc｡3 つのフィールドが「行を出せ」ではなく sync の状態である理由と､
+# 拒否の期限が絶対時刻ではなく起動からの相対秒である理由を書いている｡
+# どちらもこのモジュールがすでに掲げている規則の帰結にあたる｡
+src/fixture.rs	150
 src/image_cache.rs	150
 src/like.rs	150
 src/log.rs	350
@@ -182,7 +187,12 @@ src/toggle.rs	200
 # `fixture_arrival` のフィールド､トグルのハンドラ､`show_fixture` の到着
 # 分岐 — follow/glide の機構そのものは下の `ui/auto_refresh.rs` へ行った｡
 # だからこれは 200 ではなく 50 だ｡
-src/ui/mod.rs	1900
+# 1900 -> 1950: #205 の 3 つのフィールド (計画の残件数､フェードの段､それを
+# 進めるタイマー)､`render` の中の sync 行とダイアログの 2 行､ステータスバーの
+# 帯の `addressable`､fixture の sync 状態の受け口｡行とダイアログとフェード
+# そのものは**ここには無い** — 下の `ui/sync_row.rs` へ行った｡だからこれは
+# 400 ではなく 50 になる｡
+src/ui/mod.rs	1950
 src/ui/reload_policy.rs	300
 # #21 で新設｡auto-refresh のすべてを持つ: 純粋な tick/pending の判断と
 # そのテスト､そしてそれらに基づいて動く poll ループの `impl TimelineView`
@@ -204,7 +214,10 @@ src/ui/auto_refresh.rs	650
 # 加えてステータスバーが報告する status の enum､2 つのラベル､手動トリガの
 # 2 段構えが同居する｡形は上の `auto_refresh.rs` と同じ — 純粋な関数と
 # そのテスト､続いて `impl TimelineView` ブロック｡
-src/ui/list_sync.rs	650
+# 650 -> 550: #205 が見せ方を `ui/sync_row.rs` へ出した — 行､フェード､
+# ダイアログ､footer の入口｡残ったのは sync が何をしているかと､それを動かす
+# ループ｡余裕を残さず下げてある｡次にこのファイルが育つときに気づけるように｡
+src/ui/list_sync.rs	550
 # #164 で新設｡理由は `list_sync.rs` と同じだ: `ui/mod.rs` が天井の 1 行下に
 # 座っていたので､picker — 保存された選択､区画の一覧､切り替え､そして区画に
 # 名前を与える 1 回の課金付き fetch — を同じ形で専用ファイルへ出した｡
@@ -220,6 +233,15 @@ src/ui/list_picker.rs	450
 # テストに座標ではなく名前で要素をクリックさせるものであり､置き換えた
 # どの呼び出し箇所でも行数は変わらない｡
 src/ui/render.rs	1150
+# #205 で新設｡`list_sync.rs` に足すと 1,000 行近くになったので､同じ機構を
+# 2 つの問いで割った｡あちらは「sync は何をしているか｡今 何を支払ってよいか」､
+# こちらは「それを読み手にどう出すか」｡`reload_policy.rs` と `render.rs` の
+# 間にすでにある線と同じもの｡
+# 中身は #205 の 3 つ — footer の 1 段上に出る行､その出入りを段で数える
+# `RowFade` (gpui の `with_animation` を使わない理由は型の doc)､そして
+# このアプリ初のダイアログ｡形は `auto_refresh.rs` と同じで､純粋な関数と
+# そのテストが先､`impl TimelineView` が後｡
+src/ui/sync_row.rs	550
 # #137 で新設｡#137 は `impl TimelineView` を分割するか､どこで分けるかを
 # 問うたものだ｡これはその選択肢 (b): `cx.spawn` を持つメソッドすべて｡
 # 大きいが､それは意図的だ — 継ぎ目は「金が出ていくのはここだ」であり､

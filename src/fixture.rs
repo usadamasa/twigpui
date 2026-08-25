@@ -18,6 +18,13 @@
 //!
 //! `--fetch-only` の代わりにもならない｡あちらは *ネットワーク* の経路が
 //! 動くことを示すために存在し､こちらはネットワークを止めておくために存在する｡
+//!
+//! ## timeline 以外を書くフィールド
+//!
+//! [`Fixture::lists`] (#164) と [`Fixture::sync`] (#205) は post ではない｡
+//! それでも規則は同じで､どちらもアカウントとその同期の *状態* を書き､
+//! widget を書かない｡本物の fetch や tick が通るのと同じ判断が､その状態から
+//! 画面を決める｡
 
 use std::path::Path;
 
@@ -66,6 +73,29 @@ pub(crate) struct Fixture {
     /// フィールドができる前に書かれたフィクスチャはすべてそうだ｡
     #[serde(default)]
     pub lists: Vec<ListSummary>,
+    /// list sync が置かれている状態 (#205)｡無ければ sync の行は出ない｡
+    #[serde(default)]
+    pub sync: Option<FixtureSync>,
+}
+
+/// フィクスチャが言う list sync の状態 (#205)｡
+///
+/// 書けるのは sync が何を負っていて何に拒まれているかまで｡行を出すかも
+/// 文言も､本物の tick が通るのと同じ判断が決める｡「行を出せ」と書けると､
+/// 本物の sync にはありえない画面をフィクスチャが描ける｡
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub(crate) struct FixtureSync {
+    /// ディスク上の計画がまだ負っているメンバーシップ変更の件数｡
+    pub pending: usize,
+    /// 拒否が明けるまでの秒数｡0 なら拒否されていない｡
+    ///
+    /// 絶対時刻ではなく起動からの相対秒｡ファイルに書いた unix 時刻は翌日には
+    /// 過去になり､毎回違う画面が出てしまう｡
+    #[serde(default)]
+    pub blocked_for_seconds: i64,
+    /// 上限が続けて何回 no と言ったか (#197)｡2 回以上で文言と色が変わる｡
+    #[serde(default)]
+    pub refusals: u32,
 }
 
 /// フィクスチャファイルを読んでパースする｡
@@ -198,6 +228,32 @@ mod tests {
             fixture.lists.len() > 1,
             "lists for the picker, more than one so the trough has \
              unselected segments beside Home (#164)"
+        );
+        // #205: 行に出せるいちばん込み入った状態｡件数も連続回数も JST の
+        // 解除予定も 1 行に載るので､22px に収まるかを目で確かめられる｡
+        let sync = fixture
+            .sync
+            .as_ref()
+            .expect("a sync state, or there is no row to look at (#205)");
+        assert!(sync.pending > 0, "a row with nothing owed does not appear");
+        assert!(
+            sync.blocked_for_seconds > 0 && sync.refusals >= 2,
+            "the busiest label: a stuck catch-up counting down to a JST hour"
+        );
+        // #205: ダイアログの list 名は所有 list のキャッシュ (#164) からしか
+        // 来ない｡フィクスチャはそのキャッシュを丸ごと置き換えるので､ミラー先が
+        // 無いとダイアログが id へ落ちる｡`cargo run --fixture` は debug ビルド
+        // なので､突き合わせる相手は dev プロファイルの既定の list｡
+        let mirrored = crate::profile::Profile::Dev
+            .default_list_id()
+            .expect("the dev profile mirrors into a list");
+        assert!(
+            fixture
+                .lists
+                .iter()
+                .any(|list| list.id == mirrored && !list.name.is_empty()),
+            "the list the dev profile syncs into has to be among the cached \
+             lists with a name, or the sync dialog shows a bare id (#205)"
         );
         // バーは表示中のものに対して新着を数えるので､すでに `items` に
         // ある pending な post は数えられたうえで何も現さない — 見せる

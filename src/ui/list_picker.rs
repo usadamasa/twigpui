@@ -642,6 +642,7 @@ mod tests {
             items: Vec::new(),
             pending: Vec::new(),
             lists: Vec::new(),
+            sync: None,
         };
         assert_eq!(
             saved_selection_for(&Startup::Fixture(Box::new(fixture)), &paths),
