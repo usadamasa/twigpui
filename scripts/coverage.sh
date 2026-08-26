@@ -36,6 +36,20 @@ set -euo pipefail
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$repo_root"
 
+# 計測付きのビルドを共有の build-dir から外し､cargo-llvm-cov が使う target の
+# 下へ戻す｡`.cargo/config.toml` は中間成果物を $CARGO_HOME/build/twigpui へ
+# 逃がしているが､それをここにも効かせると計測付きの binary と素の binary が
+# 同じ deps/ に並ぶ｡下の remove_stale_objects が説明しているとおり
+# cargo-llvm-cov は deps/ の `twigpui-<hash>` を **すべて** llvm-cov に渡すので､
+# 計測されていない binary が混ざればレポートが壊れる｡
+#
+# 渡すのは `llvm-cov-target` ではなくその親だ｡cargo-llvm-cov は受け取った
+# build-dir の下に自分で `llvm-cov-target` を作る (target-dir と同じ扱い)｡
+# `target/llvm-cov-target` を渡すと
+# `target/llvm-cov-target/llvm-cov-target/debug/deps` へ二重にネストし､report が
+# 歩く `target/llvm-cov-target/debug` には object が 1 つも無くなる｡
+export CARGO_BUILD_BUILD_DIR="$repo_root/target"
+
 work_dir="./tmp/coverage"
 cov_json="$work_dir/llvm-cov.json"
 cutoffs_json="$work_dir/cutoffs.json"

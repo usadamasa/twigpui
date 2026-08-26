@@ -20,6 +20,11 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # `.cargo/config.toml` は build-dir を $CARGO_HOME の下へ逃がしている —
+  # worktree ごとに 1.6 GB を建て直さないための手元の設定だ｡CI に worktree は
+  # 無く､Swatinem/rust-cache が cache するのは ./target なので､ここへ移した
+  # ままだと中間成果物が cache から漏れて毎回冷える｡従来どおり target に置く｡
+  CARGO_BUILD_BUILD_DIR: target
 
 jobs:
   # 唯一の required check: `needs` のどれかが失敗したときだけ動き､そのとき

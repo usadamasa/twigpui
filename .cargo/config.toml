@@ -1,0 +1,24 @@
+# 中間成果物 (deps/ build/ incremental/) の置き場を worktree の外へ出す｡
+#
+# worktree ごとに target/ を建て直すと 1 本あたり 1.6 GB を使い､783 個の依存を
+# 一から compile することになる｡build-dir を固定の共有パスにすると､依存の
+# 成果物は worktree をまたいで再利用され､建て直すのはこの crate だけになる｡
+#
+# CARGO_TARGET_DIR ではなく build-dir を使う理由は､最終実行ファイルが各
+# worktree の target/{profile}/ に残ることだ｡build-app-bundle.sh が読む
+# target/release/twigpui のようなパスはそのまま動く｡
+#
+# {cargo-cache-home} は $CARGO_HOME に展開される｡後ろは固定文字列なので､どの
+# worktree からも同じ場所を指す｡絶対パスを書かないので CI でも解決できる｡
+#
+# 上書きしている場所が 2 つある:
+# - .github/workflows/ci.yaml — Swatinem/rust-cache が cache するのは ./target
+#   なので､CI では target へ戻す｡
+# - scripts/coverage.sh — 計測付きの binary を素の binary と同じ deps/ に
+#   混ぜない｡
+#
+# 共有 build-dir は自動では掃除されない｡cargo の GC が見るのは $CARGO_HOME の
+# registry と git だけで､build-dir は対象外だ｡branch や gpui fork の bump を
+# またぐと古い成果物が溜まるので､ときどき中身を消す｡
+[build]
+build-dir = "{cargo-cache-home}/build/twigpui"

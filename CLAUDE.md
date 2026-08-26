@@ -62,6 +62,14 @@ cargo test
   `sandbox.excludedCommands` に `cargo *` を置いている。この指定を外すと `cargo fetch` が
   crate の展開途中で止まり、`cargo run` はウィンドウを開けない。sandbox 由来の失敗を
   切り分けるときは `sandbox-troubleshooting` スキルに従う。
+- **中間成果物は `target/` に無い**: `.cargo/config.toml` の `build.build-dir` が
+  `deps/` `build/` `incremental/` を `$CARGO_HOME/build/twigpui` へ逃がしている。
+  worktree をまたいで依存を再利用するためで、`target/{profile}/` に残るのは
+  最終実行ファイルだけになる。中間成果物のパスを踏むスクリプトを書くときは
+  `target/` を前提にしない。CI と `scripts/coverage.sh` は
+  `CARGO_BUILD_BUILD_DIR` でこれを上書きしていて、理由は
+  `.cargo/config.toml` のコメントにある。共有 build-dir は自動で掃除されないので、
+  溜まったらまとめて消す。
 - **lint はすべて `deny`**: `unsafe_code` は forbid。`warn` に下げると手元で通って CI だけが
   落ちるので、**レベルを下げて回避しない**。バイナリクレートなので公開項目は `pub(crate)`。
   clippy に弾かれたときの書き直し方は `rust-lint-gauntlet` スキルに従う。
