@@ -68,8 +68,8 @@ use crate::thread::{self, ThreadChain};
 use crate::toggle::{ToggleState, ToggleStatus};
 use crate::usage;
 use crate::x_api::{
-    Draft, PostLink, PostMedia, PostMetrics, QuotedPost, RepliedTo, TimelineItem, XClient,
-    action_post_id,
+    Denial, Denied, Draft, PostLink, PostMedia, PostMetrics, QuotedPost, RepliedTo, TimelineItem,
+    XClient, action_post_id,
 };
 
 /// ある reply の "Show thread" の辿り (#12) について分かっていること｡
@@ -377,6 +377,18 @@ pub(crate) struct TimelineView {
     /// 成功した瞬間に [`Self::sign_in`] で
     /// 消される｡
     session_notice: Option<SharedString>,
+    /// auto-refresh のポーリングが止まった理由 (#239) — 走っているか､
+    /// そもそも off なら `None`｡`session_notice` と同じく `state` に
+    /// 関わらず消えないバナーとして描く｡別のフィールドなのは出所が別だから
+    /// だ: あちらは起動時の credential 解決が言うことで､こちらは何時間も
+    /// 経ってから X が取得を断ったと言うことだ｡片方がもう片方を上書きしては
+    /// ならない｡
+    ///
+    /// 設定するのは [`auto_refresh::TimelineView::apply_poll`] で一度だけ｡
+    /// ループはその直後に終わるので二度は通らない｡消えるのは
+    /// [`Self::start_auto_refresh`] が新しいループを始めるとき — つまり
+    /// サインインし直したときだ｡
+    auto_refresh_notice: Option<SharedString>,
     /// cooldown か失敗した reload｡`state` から独立に保つ (#57) — 理由は
     /// [`ReloadNotice`] の doc を見よ｡直近の reload の試み (あれば) が
     /// 阻まれても失敗してもいないときは `None`; [`Self::reload`] の早期
@@ -653,6 +665,7 @@ impl TimelineView {
             submit_task: None,
             oauth_scope: None,
             session_notice: None,
+            auto_refresh_notice: None,
             reload_notice: None,
             cooldown_ticker: None,
             usage_totals: usage::Totals::default(),
@@ -1936,7 +1949,14 @@ impl Render for TimelineView {
             // 起きなかったかのように描かれる timeline なので､このバナーは下の
             // `body` が今何を出していようと独立して生き残らねばならない｡
             .when_some(self.session_notice.clone(), |column, message| {
-                column.child(session_notice_banner(message, theme))
+                column.child(session_notice_banner("banner-session", message, theme))
+            })
+            // #239: 止まった auto-refresh｡上の `session_notice` とまったく
+            // 同じ理屈で出す — timeline は起動時に読んだ post を出したまま
+            // でいられるので､取得がもう走っていないことを言えるのはここ
+            // しかない｡
+            .when_some(self.auto_refresh_notice.clone(), |column, message| {
+                column.child(session_notice_banner("banner-auto-refresh", message, theme))
             })
             // #57: 上の `session_notice` と同じ理屈 — クールダウンや失敗した
             // リロードは `body` とは独立に生き残らねばならない｡この時点の
@@ -1956,7 +1976,11 @@ impl Render for TimelineView {
             // 同じだ｡何も起きていないように見えるクリックこそ潰す価値のある
             // 結末で､下の timeline はそれについて何も言えない｡
             .when_some(self.open_failure.clone(), |column, message| {
-                column.child(session_notice_banner(SharedString::from(message), theme))
+                column.child(session_notice_banner(
+                    "banner-open-failure",
+                    SharedString::from(message),
+                    theme,
+                ))
             })
             // #14: 投稿は scope に関わらず OAuth を要求する — `tweet.write`
             // scope が欠けている場合は `submit_post` 自身の中で捕まえる
@@ -1980,6 +2004,7 @@ impl Render for TimelineView {
 
 #[cfg(test)]
 mod tests {
+    use super::auto_refresh::Poll;
     use super::reload_policy::{
         newly_arrived, preserved_scroll_target, reload_cooldown, reload_outcome_label,
     };
@@ -1988,11 +2013,11 @@ mod tests {
         repost_action_label,
     };
     use super::{
-        ComposeStatus, Cooldown, CooldownTick, Fixture, PostLink, PostMedia, PostMetrics,
-        ReloadNotice, ReloadTrigger, RepliedTo, RowCounts, RowFade, Startup, SyncOff, SyncStatus,
-        Theme, ThreadFetchState, TimelineItem, TimelineState, ToggleState, action_post_id,
-        at_the_post_cap, byline, compose_error_message, cooldown_label, cooldown_tick,
-        format_timestamp, media_badge, media_columns, offers_delete, offers_like,
+        ComposeStatus, Cooldown, CooldownTick, Denial, Denied, Fixture, PostLink, PostMedia,
+        PostMetrics, ReloadNotice, ReloadTrigger, RepliedTo, RowCounts, RowFade, Startup, SyncOff,
+        SyncStatus, Theme, ThreadFetchState, TimelineItem, TimelineState, ToggleState,
+        action_post_id, at_the_post_cap, byline, compose_error_message, cooldown_label,
+        cooldown_tick, format_timestamp, media_badge, media_columns, offers_delete, offers_like,
         offers_load_older, offers_quote, offers_reauthorize, offers_reply, offers_repost,
         pending_after_poll, rate_limit, reload_failure_outcome, reload_gate, reload_start_state,
         reply_banner_label, reply_target_label, repost_banner_label, row_counts,
@@ -3871,6 +3896,76 @@ mod tests {
                     "followed posts are on screen — a pill would offer them twice"
                 );
                 assert!(view.glide.is_some(), "the reveal is the glide's to make");
+            });
+        });
+    }
+
+    /// #239: 待っても直らない拒否を受けた poll は､ループを止めて理由を
+    /// バナーへ置く｡issue のログはこれが無かった姿で､同じ 403 と 401 を
+    /// 3 分ごとに 130 行以上積み上げながら､画面には何も出していなかった｡
+    #[gpui::test]
+    fn a_denied_poll_halts_the_loop_and_leaves_a_banner(cx: &mut gpui::TestAppContext) {
+        let (_window, timeline) = fixture_window(cx, fixture_with(&["2", "1"], &[]));
+
+        cx.update(|cx| {
+            timeline.update(cx, |view, cx| {
+                let denied = anyhow::Error::from(Denied {
+                    endpoint: rate_limit::Endpoint::ListTimeline,
+                    denial: Denial::Forbidden,
+                    detail: "Forbidden: Your monthly spend cap has been reached.".to_string(),
+                });
+
+                assert_eq!(view.apply_poll(Err(denied), cx), Poll::Halt);
+                let notice = view
+                    .auto_refresh_notice
+                    .clone()
+                    .expect("the reader must be told the poll stopped")
+                    .to_string();
+                assert!(notice.contains("list_timeline"), "{notice}");
+                assert!(notice.contains("monthly spend cap"), "{notice}");
+                assert_eq!(
+                    shown_ids(view),
+                    ["2", "1"],
+                    "a failed poll never touches what is on screen"
+                );
+            });
+        });
+    }
+
+    /// #239: そのバナーは実際に描かれる｡上のテストはフィールドが埋まる
+    /// ところまでしか見ないので､`body` の `when_some` を消しても落ちない｡
+    #[gpui::test]
+    fn the_halted_poll_banner_reaches_the_screen(cx: &mut gpui::TestAppContext) {
+        let (mut visual, timeline) = drawn(cx, fixture_with(&["2", "1"], &[]));
+
+        visual.update(|_window, cx| {
+            timeline.update(cx, |view, _cx| {
+                view.auto_refresh_notice =
+                    Some(gpui::SharedString::from("auto-refresh has stopped."));
+            });
+        });
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        assert!(
+            visual.debug_bounds("banner-auto-refresh").is_some(),
+            "the reason the poll stopped must be on the screen, not only in the field"
+        );
+    }
+
+    /// #239 の裏側: 一時的な失敗ではループを止めない｡止めてしまうと､夜中の
+    /// 瞬断ひとつで朝まで取得が死ぬ｡
+    #[gpui::test]
+    fn a_dropped_poll_keeps_the_loop_and_says_nothing(cx: &mut gpui::TestAppContext) {
+        let (_window, timeline) = fixture_window(cx, fixture_with(&["2", "1"], &[]));
+
+        cx.update(|cx| {
+            timeline.update(cx, |view, cx| {
+                let dropped = anyhow::anyhow!("request to https://api.x.com/2/... failed");
+
+                assert_eq!(view.apply_poll(Err(dropped), cx), Poll::Continue);
+                assert!(view.auto_refresh_notice.is_none());
             });
         });
     }

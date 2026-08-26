@@ -88,8 +88,15 @@ pub(super) fn notice(message: impl Into<SharedString>, color: u32) -> impl IntoE
 /// 間にある独立した行だ — 眼目は､`body` がまったく正常に読み込まれた
 /// timeline を描いている間 (bearer token への fallback 時) でも出しつづけ
 /// ねばならない点で､それこそ #54 が起票された状態そのものだ｡
-pub(super) fn session_notice_banner(message: SharedString, theme: Theme) -> impl IntoElement {
+/// `name` は #184 の呼び名だ｡3 人の呼び出し側が同じ姿のバナーを描くので､
+/// テストは「どれが出ているか」を名前でしか見分けられない｡
+pub(super) fn session_notice_banner(
+    name: &'static str,
+    message: SharedString,
+    theme: Theme,
+) -> impl IntoElement {
     div()
+        .addressable(name)
         .px_4()
         .py_2()
         .bg(rgb(theme.bg_header))

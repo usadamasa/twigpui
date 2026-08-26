@@ -92,7 +92,22 @@ impl Session {
             .into());
         };
 
-        let response = refresh(&self.client_id, &refresh_token)?;
+        // X が答えたうえで断ったのなら、このセッションは死んでいる — 繰り返し
+        // 取得している側 (auto-refresh のポーリング) がそれと分かる型で言う。
+        // 届かなかっただけの失敗は素のまま通す。そちらは次の tick には直って
+        // いておかしくないので、ポーリングを止める理由にならない。
+        let response = refresh(&self.client_id, &refresh_token).map_err(|error| {
+            if error
+                .downcast_ref::<super::TokenRequestRejected>()
+                .is_some()
+            {
+                anyhow::Error::from(super::SessionExpired {
+                    detail: format!("{error:#}"),
+                })
+            } else {
+                error
+            }
+        })?;
         let mut refreshed = TokenSet::from_response(response, now);
         // `resolve_credential` の refresh 分岐と同じ扱い: token エンドポイント
         // は変わらない scope を省いてよい (RFC 6749 §5.1)。
@@ -223,6 +238,57 @@ mod tests {
         session.bearer_with(10_000, |_, _| Ok(renewed())).unwrap();
 
         assert_eq!(session.scope().as_deref(), Some("tweet.read users.read"));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn reports_an_expired_session_when_x_turns_the_refresh_down() {
+        // #239 の再来を防ぐ側。X が refresh token を失効させたら、ここは
+        // ポーリングが「待っても直らない」と読める型で言わなければならない。
+        // 素の `TokenRequestRejected` のまま通すと、`halting_reason` が
+        // 拾えず、3 分ごとの取得が止まらないまま朝を迎える。
+        let root = temp_root("rejected");
+        let paths = test_paths(&root);
+        paths.ensure_dirs().unwrap();
+
+        let session = Session::new("client".to_string(), paths, stored(10_000));
+        let error = session
+            .bearer_with(10_000, |_, _| {
+                Err(super::super::TokenRequestRejected {
+                    status: 400,
+                    detail: "invalid_request: Value passed for the token was invalid.".to_string(),
+                }
+                .into())
+            })
+            .unwrap_err();
+
+        let expired = error
+            .downcast_ref::<super::super::SessionExpired>()
+            .expect("a refusal from X is an expired session, not a blip");
+        assert!(expired.detail.contains("invalid_request"), "{expired:?}");
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn leaves_an_unreachable_token_endpoint_as_an_ordinary_failure() {
+        // 裏側。届かなかっただけの失敗まで `SessionExpired` にすると、
+        // 瞬断ひとつでポーリングが永久に止まり、再サインインを促す嘘の
+        // バナーが出る。
+        let root = temp_root("unreachable");
+        let paths = test_paths(&root);
+        paths.ensure_dirs().unwrap();
+
+        let session = Session::new("client".to_string(), paths, stored(10_000));
+        let error = session
+            .bearer_with(10_000, |_, _| Err(anyhow::anyhow!("token request failed")))
+            .unwrap_err();
+
+        assert!(
+            error
+                .downcast_ref::<super::super::SessionExpired>()
+                .is_none()
+        );
         std::fs::remove_dir_all(&root).unwrap();
     }
 
