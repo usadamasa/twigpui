@@ -216,7 +216,18 @@ src/ui/reload_policy.rs	300
 # どこまで運んでくるか (`momentumPhase` を読まない､`Lines` は行の高さ倍)
 # と､なぜ係数を重ねないかは､コードのどこにも書かれていなければ誰も復元
 # できない｡
-src/ui/scroll.rs	350
+# 350 -> 600: #175 の再訪｡端の跳ね方を､生の引っ張り量の指数減衰から
+# 見た目の px を戻す spring (`harmonica`) へ差し替えた｡足したのは
+# `advance` と `shift_of` / `pull_of` / `fling` の 4 つの小さな関数と
+# spring の定数､それに手触りの回帰テスト 6 本｡doc も伸びた — なぜ
+# spring なのか､なぜ生の量ではなく見た目を動かすのか､なぜ慣性の当たりは
+# 位置ではなく勢いで渡して 1 回しか受け取らないのかは､どれも数字を見ても
+# 復元できない｡
+# あわせて､並んでいた `f32` に単位の別名 (`Px` `PxPerSecond`
+# `RadPerSecond` `Seconds` `Damping` `Stiffness` `Share` `PeakRatio`) を
+# 与え､`advance` の 6 引数を `Spin` と `Drift` の 2 つにまとめた｡
+# 型の宣言と doc がそのぶん増える｡
+src/ui/scroll.rs	600
 # #21 で新設｡auto-refresh のすべてを持つ: 純粋な tick/pending の判断と
 # そのテスト､そしてそれらに基づいて動く poll ループの `impl TimelineView`
 # ブロック — `reload_policy` と `render` が純粋な関数だけを持つのに対し､

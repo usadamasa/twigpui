@@ -63,6 +63,19 @@ base64 = "0.23.1"
 # #195: `created_at` を `Asia/Tokyo` へ直して表示する｡
 chrono = { version = "0.4.45", default-features = false, features = ["alloc"] }
 chrono-tz = { version = "0.10.4", default-features = false }
+# #175 の手動 scroll｡Ryan Juckett の減衰調和振動子を､1 フレームぶんの
+# 係数に畳んだ閉じた形で解く (`ui::scroll`)｡指数関数で目標へ寄せるのと
+# 違って速度が状態として残るので､静止から加速し､途中で目標が変わっても
+# 速度が跳ねない — そこが「なめらか」の中身｡
+#
+# 版を `=` で固定する｡ここが返す係数がそのまま画面の動きなので､patch
+# 更新でも手触りが変わりうる｡上げるときは目で見て決める｡
+#
+# 同じ解法の crate では `damped-springs` を先に読み､採らなかった:
+# 臨界減衰 (ζ = 1) の係数が Juckett の `timeExpFreq + expTerm` を
+# `* expTerm` と書き違えていて､dt = 0 で位置が 0 に飛ぶ｡ここが使うのは
+# ちょうどその ζ = 1｡
+charmed-harmonica = "=0.2.3"
 dotenvy = "0.15.7"
 # 必要なのは生のランダムバイトの供給源だけで (PKCE の verifier と OAuth の
 # `state`)､`rand` の API 全面 (分布､シード､シャッフル補助) ではない｡
