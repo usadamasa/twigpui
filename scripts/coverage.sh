@@ -118,6 +118,30 @@ profile_is_stale() {
   [ -n "$newer" ]
 }
 
+# 前のビルドが残したこの crate の実行ファイルを消す｡
+#
+# cargo-llvm-cov の `report` は `target/llvm-cov-target/debug` を丸ごと歩き､
+# `twigpui-<hash>` に一致する実行ファイルを **すべて** llvm-cov に渡す
+# (`src/report.rs` の `object_files`｡mtime も hash も見ない)｡hash は依存や
+# フラグから決まるので､Cargo.lock を更新したり RUSTFLAGS を変えたりすると
+# 新しい hash の binary が隣に並び､古い方は消えずに残る｡古い binary が
+# 別のソースから作られていれば llvm-cov は同じ関数として畳めず､実装の
+# region を二重に数える — 2026-08-26 に手元で 13,146 region のところが
+# 24,487 と出た原因がこれで､残っていたのは 8/24 の計測が作った binary
+# だった｡CI も #227 から Coverage の target をキャッシュしているので､
+# main の Cargo.lock が動いた次の run から同じ形で膨らむ｡
+#
+# `cargo llvm-cov clean --workspace` は依存の成果物まで落として毎回一から
+# 建て直す｡消すべきなのはこの crate の実行ファイルだけで､それは次の
+# ビルドが必ず link し直す｡消えるのは link 1 回分の時間だけだ｡
+remove_stale_objects() {
+  local deps="target/llvm-cov-target/debug/deps"
+  [ -d "$deps" ] || return 0
+  # `-perm -u+x` で `.d` `.rlib` `.rmeta` を除く｡cargo-llvm-cov 自身の
+  # `is_object` と同じ見分け方だ｡
+  find "$deps" -maxdepth 1 -type f -perm -u+x -name 'twigpui-*' -delete
+}
+
 # 計測付きのテストを走らせ､そのデータから報告する｡`report` は再ビルドせずに
 # profile を読み直すので､下の 3 つのモードは 1 回のビルドを共有する｡
 #
@@ -137,6 +161,7 @@ measure() {
     printf 'Reusing the existing profile (COVERAGE_REUSE is set).\n' >&2
   elif profile_is_stale; then
     printf 'Building instrumented and running the tests (1-2 minutes).\n' >&2
+    remove_stale_objects
     cargo llvm-cov --locked --all-targets --no-report
   else
     printf 'Reusing the profile in %s; nothing under src has changed since.\n' \
