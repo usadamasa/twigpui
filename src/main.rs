@@ -338,7 +338,7 @@ fn fetch_only(config: &config::Config, paths: &paths::Paths) -> i32 {
         return 1;
     };
 
-    let client = x_api::XClient::new(credential.token);
+    let client = x_api::XClient::renewing(credential.session);
     match cache::reload(
         paths,
         &client,
@@ -557,7 +557,7 @@ fn fetch_post(config: &config::Config, paths: &paths::Paths, arg: &str) -> i32 {
         return 1;
     };
 
-    let client = x_api::XClient::new(credential.token);
+    let client = x_api::XClient::renewing(credential.session);
     let joined_ids = ids.join(",");
     match client.tweets_by_id(paths, &joined_ids, oauth::unix_now()) {
         Ok(items) => {

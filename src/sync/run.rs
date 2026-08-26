@@ -265,7 +265,7 @@ pub(crate) fn run_cli(config: &Config, paths: &Paths, request: Request) -> i32 {
         return 1;
     }
 
-    let client = XClient::new(credential.token);
+    let client = XClient::renewing(credential.session);
     let user_id = match resolve_own_id(paths, &client) {
         Ok(user_id) => user_id,
         Err(error) => {

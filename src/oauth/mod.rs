@@ -9,11 +9,15 @@
 
 mod callback;
 mod pkce;
+mod session;
 pub(crate) mod tokens;
 
+pub(crate) use session::Session;
+
+use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context as _, Result, bail};
+use anyhow::{Context as _, Result};
 use gpui::BackgroundExecutor;
 use ureq::Agent;
 
@@ -99,6 +103,44 @@ fn refresh_access_token(client_id: &str, refresh_token: &str) -> Result<TokenRes
     ])
 }
 
+/// token エンドポイントが答えたうえで断った (RFC 6749 §5.2)｡リクエストが
+/// 届かなかった場合と型で区別する (#239): 届かなかったのなら retry で直り
+/// うるが､断られたのなら何度送っても同じ答えが返る｡
+#[derive(Debug)]
+pub(crate) struct TokenRequestRejected {
+    pub(crate) status: u16,
+    pub(crate) detail: String,
+}
+
+impl std::fmt::Display for TokenRequestRejected {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "token request failed with HTTP {}: {}",
+            self.status, self.detail
+        )
+    }
+}
+
+impl std::error::Error for TokenRequestRejected {}
+
+/// 保存された OAuth セッションがもう使えない (#239): refresh するための
+/// refresh token が無いか､X が refresh を断った｡待っても直らないので､
+/// 繰り返し取得している側 — auto-refresh のポーリング — はこれを見たら
+/// やめて､人にサインインし直すよう言う｡
+#[derive(Debug)]
+pub(crate) struct SessionExpired {
+    pub(crate) detail: String,
+}
+
+impl std::fmt::Display for SessionExpired {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "the stored X session expired: {}", self.detail)
+    }
+}
+
+impl std::error::Error for SessionExpired {}
+
 /// token エンドポイントへのリクエストを 1 つ POST する｡これは
 /// **public client** だ (#7 で確定した設計): `client_id` は grant と並んで
 /// body に載り､HTTP Basic auth としては決して送らない｡対になる client
@@ -116,7 +158,7 @@ fn request_token(form: &[(&str, &str)]) -> Result<TokenResponse> {
 
     if !(200..300).contains(&status) {
         let detail = tokens::describe_token_error(&body).unwrap_or_else(|| body.clone());
-        bail!("token request failed with HTTP {status}: {detail}");
+        return Err(TokenRequestRejected { status, detail }.into());
     }
 
     serde_json::from_str(&body).context("could not parse the token response")
@@ -133,9 +175,14 @@ fn request_token(form: &[(&str, &str)]) -> Result<TokenResponse> {
 /// `scope: None` は未記録・不明を意味する — #14 以前の token か､token
 /// エンドポイントのレスポンスに `scope` がまったく無かったもの — で､
 /// `tokens::has_scope` はこれを scope で守られた操作には不十分として扱う｡
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// #239 で access token の文字列が [`Session`] に替わった｡文字列は解決した
+/// 瞬間の姿でしかなく､ウィンドウはそれを `XClient` へ焼き付けたまま何時間
+/// も走る — X の access token は 2 時間で切れるので､起動から 2 時間後に
+/// すべての取得が 401 になっていた｡`Session` は同じ問いに今の答えを返す｡
+#[derive(Debug, Clone)]
 pub(crate) struct Credential {
-    pub(crate) token: String,
+    pub(crate) session: Arc<Session>,
     pub(crate) scope: Option<String>,
 }
 
@@ -167,7 +214,7 @@ pub(crate) enum SessionDemotion {
 /// "credential が一度も設定されていない" とは実質的に別の状態だ: どちらも
 /// credential 無しに解決しうるが､ユーザーがついさっきまでサインインしていて
 /// 今は黙ってそうでなくなっている､という意味なのは一方だけだ｡
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub(crate) struct Resolution {
     pub(crate) credential: Option<Credential>,
     pub(crate) demotion: Option<SessionDemotion>,
@@ -192,45 +239,29 @@ pub(crate) fn resolve_credential(config: &Config, paths: &Paths, now: i64) -> Re
         });
     };
 
-    if !stored.needs_refresh(now) {
-        return Ok(Resolution {
-            credential: Some(Credential {
-                token: stored.access_token,
-                scope: stored.scope,
-            }),
-            demotion: None,
-        });
-    }
-
-    let client_id = &config.oauth_client_id;
-    let Some(refresh) = &stored.refresh_token else {
+    if stored.needs_refresh(now) && stored.refresh_token.is_none() {
         return Ok(Resolution {
             credential: None,
             demotion: Some(SessionDemotion::NoRefreshToken),
         });
-    };
+    }
 
-    match refresh_access_token(client_id, refresh) {
-        Ok(response) => {
-            let mut refreshed = TokenSet::from_response(response, now);
-            // RFC 6749 §5.1 は､すでに与えられたものから変わらない場合に
-            // token エンドポイントが refresh 時の `scope` を省くことを許す —
-            // `carried_scope` は､動いている `tweet.write` セッションが日常的な
-            // refresh のたびに黙って "unknown" へ戻る (そして再認可バナーが
-            // 誤って復活する) のを防ぐものだ｡
-            refreshed.scope = carried_scope(refreshed.scope, stored.scope.as_deref());
-            tokens::save(paths, &refreshed)?;
-            Ok(Resolution {
-                credential: Some(Credential {
-                    token: refreshed.access_token,
-                    scope: refreshed.scope,
-                }),
-                demotion: None,
-            })
-        }
+    // #239: refresh を自分で回すのではなく [`Session`] に任せる｡起動時に
+    // 一度 `bearer` を呼ぶのは､使えないセッションを *最初の取得より前* に
+    // バナーで説明するためだ (#54)｡token がまだ新しければネットワークには
+    // 出ず､保存されたものをそのまま返す｡
+    let session = Session::new(config.oauth_client_id.clone(), paths.clone(), stored);
+    match session.bearer(now) {
+        Ok(_) => Ok(Resolution {
+            credential: Some(Credential {
+                scope: session.scope(),
+                session,
+            }),
+            demotion: None,
+        }),
         Err(error) => {
             // X が refresh をきっぱり拒否した — 失効か､回復不能なほどの期限
-            // 切れだ｡#54: 上の 2 つの場合とまったく同じように bearer token へ
+            // 切れだ｡#54: 上の場合とまったく同じように credential 無しへ
             // 降格させ､ハードエラーとして伝播させない｡伝播させると､*read* の
             // 経路には実際には無いセッションの問題のせいで､timeline がすでに
             // 出していたものを空にしてしまう (このモジュールの doc と issue の
@@ -374,7 +405,7 @@ mod tests {
         let resolution = resolve_credential(&config, &paths, 1_000_000).unwrap();
         // #33: フォールバックの credential はもう無いので､更新できない
         // セッションはアプリをサインアウト状態にする — そして理由を言う｡
-        assert_eq!(resolution.credential, None);
+        assert!(resolution.credential.is_none());
         assert_eq!(resolution.demotion, Some(SessionDemotion::NoRefreshToken));
 
         std::fs::remove_dir_all(&root).unwrap();
@@ -401,7 +432,7 @@ mod tests {
 
         let config = test_config("client-id");
         let resolution = resolve_credential(&config, &paths, 1_000_000).unwrap();
-        assert_eq!(resolution.credential, None);
+        assert!(resolution.credential.is_none());
         assert_eq!(resolution.demotion, Some(SessionDemotion::NoRefreshToken));
 
         std::fs::remove_dir_all(&root).unwrap();

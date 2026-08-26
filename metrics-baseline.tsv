@@ -74,8 +74,16 @@ src/log.rs	350
 src/main.rs	650
 src/menu.rs	350
 src/oauth/callback.rs	350
-src/oauth/mod.rs	300
+# oauth/mod.rs 300 -> 350: #239 の 2 つのエラー型 (`TokenRequestRejected`､
+# `SessionExpired`)｡token エンドポイントが「答えたうえで断った」ことと
+# 「届かなかった」ことを型で分ける — ポーリングが繰り返してよいかどうかが
+# そこで決まる｡
+src/oauth/mod.rs	350
 src/oauth/pkce.rs	150
+# #239 で新設｡実行中に自分を更新する OAuth セッション｡`oauth/mod.rs` から
+# 切り出したのは天井のためではなく､refresh を握る `Mutex` と､それを
+# ネットワーク無しでテストするための継ぎ目が 1 か所に要るからだ｡
+src/oauth/session.rs	150
 src/oauth/tokens.rs	200
 # paths.rs 300 -> 350: #169 は 3 つのベースディレクトリに `Profile` を
 # 通し､テストがプロファイルを名指すのに要る `for_profile` の継ぎ目を足し､
@@ -311,7 +319,11 @@ src/usage.rs	350
 # 1100 -> 1150: `log_429` (#199)｡429 のヘッダと body を記録する唯一の
 # WARN 行だ — このファイルで最初の `log::` 呼び出しであり､#197 が何も
 # 持っていなかった記録だ｡
-src/x_api/client.rs	1150
+# 1150 -> 1250: #239 の 2 つ｡`Denied`/`Denial` は 401/403 を型で運び
+# (どちらも待っても直らない拒否だ)､`Bearer` は client が持つのが token の
+# 文字列か自分を更新するセッションかを分ける｡後者に伴って 5 つの
+# `send_*_once` が `now` を取る｡
+src/x_api/client.rs	1250
 src/x_api/mod.rs	50
 # x_api/model.rs 750 -> 800: #163 の読み書きのための `UserIdRequest` と
 # `UserPageResponse`｡
