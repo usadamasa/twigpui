@@ -20,7 +20,7 @@
   "sandbox": {
     "excludedCommands": [
       "cargo *",
-      "scripts/coverage.sh"
+      "scripts/coverage.sh *"
     ]
   },
   "enabledPlugins": {
