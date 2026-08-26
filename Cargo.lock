@@ -872,6 +872,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "charmed-harmonica"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c325c83a04824969dc5595447048675aef1e1d4da4af99de23bab3b83f9b6e33"
+
+[[package]]
 name = "chrono"
 version = "0.4.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6338,6 +6344,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
+ "charmed-harmonica",
  "chrono",
  "chrono-tz",
  "dotenvy",

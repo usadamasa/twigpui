@@ -27,52 +27,155 @@
 //!   のに､次の入力まで何も起きない — それが「機敏すぎる」の正体だ｡
 //!
 //! だからここでは係数を重ねない｡`Pixels` は 1:1 で通す (慣性を二重に
-//! 足さない)｡`Lines` は目標へ積み上げ､位置は指数関数で目標へ寄る —
+//! 足さない)｡`Lines` は目標へ積み上げ､位置は spring で目標へ寄る —
 //! 小さな入力は小さく､立て続けの入力は位置が追いつかないぶんだけ速く
 //! 動き､入力が止まれば減速して止まる｡どちらも端を越えたぶんは rubber
 //! band に回し､指が離れるか入力が止まれば戻る｡
+//!
+//! # なぜ spring で､なぜ見た目の px を動かすのか
+//!
+//! 動かすものは 2 つ (ホイールの位置と band) あって､どちらも
+//! [`harmonica::Spring`] の臨界減衰 — 速度を状態に持ち､静止から加速し､
+//! 行きすぎない｡指数関数で寄せると 1 フレーム目がいちばん速く､目には
+//! 弾かれたように映る｡
+//!
+//! band は生の引っ張り量ではなく**見た目の px** を spring で戻す｡最初の
+//! 実装は逆で､生の量を減らして見た目は飽和する関数に通していた｡慣性の
+//! event が数千 px 積み上げると､見た目はしばらく上限に貼りついたまま
+//! 動かず — 端で「大きく出て､止まって､それから戻る」に見えた｡見た目を
+//! 直接動かせば､戻る時間は伸びた距離 ([`PULL_LIMIT_PX`] 以下) だけで
+//! 決まり､どれだけ積み上がっても変わらない｡
+//!
+//! band への入力も 2 通りに分かれる｡指が触れているあいだは**位置** —
+//! 引いたぶんだけ伸び､離すまでそこにいる｡指が離れていれば **勢い** —
+//! 端に当たった速さを spring の初速に渡して､あとは任せる｡慣性は 1 回の
+//! 弾みが数十の event に分かれて届くので､その全部を band に足すと
+//! 慣性が尽きるまで端に貼りつく｡受け取るのは最初の 1 回だけにする｡
 
 use gpui::TouchPhase;
+use harmonica::Spring;
 
 // [`super::list_sync`] と同じく書き下す: ここが `ui` から借りるものは
 // clippy の `wildcard_imports` が列挙できる程度に少ない｡
 use super::{Context, Duration, IntoElement, Styled, TimelineView, px};
 
+/// 画面上の長さ､px｡offset も band も delta もこれで､向きは gpui と同じ
+/// (正が最上部側)｡
+///
+/// このモジュールの数はどれも `f32` で､px と px/s と rad/s と秒が同じ顔で
+/// 並ぶ｡引数を 1 つ入れ替えても型は通り､ずれはコンパイラではなく画面に
+/// 出る｡別名を付けて読み手に単位を渡し､並びが 3 つを越えるところ
+/// ([`advance`]) は [`Spin`] と [`Drift`] にまとめて順番そのものを消す｡
+type Px = f32;
+
+/// 速さ､px/s｡spring が状態として持つ｡
+type PxPerSecond = f32;
+
+/// spring の固有角周波数､rad/s｡
+type RadPerSecond = f32;
+
+/// 減衰比｡1 で臨界減衰､下回ると行き過ぎてから戻る｡単位は無い｡
+type Damping = f32;
+
+/// 時間､秒｡
+type Seconds = f32;
+
+/// rubber band の硬さ｡引くほど渋くなる曲線の傾きを決める｡
+type Stiffness = f32;
+
+/// 入ってきた量のうち､どれだけを取るかの割合 (0..=1)｡
+type Share = f32;
+
+/// 静止した spring に初速を与えたときの､`速度 / 固有角周波数` に対する
+/// 頂点の比｡減衰比だけで決まる｡
+type PeakRatio = f32;
+
+/// spring の性格 — 固有角周波数と減衰比の対｡どちらも `f32` なので､
+/// [`advance`] の引数として並べず 1 つにまとめる｡
+#[derive(Debug, Clone, Copy)]
+struct Spin {
+    frequency: RadPerSecond,
+    damping: Damping,
+}
+
+/// spring の状態 — 位置と速度の対｡[`Spin`] と同じ理由で 1 つにする｡
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct Drift {
+    position: Px,
+    speed: PxPerSecond,
+}
+
 /// アニメーションの 1 フレームの長さ､秒 — 60Hz のディスプレイに追随
 /// する｡timer の間隔であり､[`Scroller::step`] へ渡す経過時間でもある｡
 /// glide (#22) も同じ刻みで歩く｡
-pub(super) const FRAME_S: f32 = 0.016;
+pub(super) const FRAME_S: Seconds = 0.016;
 
 /// このモデルが置いた offset から一覧がどれだけ離れていたら､誰か他の人
 /// (`ScrollToTop`､reload の補正､pill) が飛ばしたと読むか､px｡glide が
 /// 読み手の手を検知するのと同じ閾値｡
-const GRAB_PX: f32 = 1.0;
+const GRAB_PX: Px = 1.0;
 
-/// ホイールの目標へ寄る時定数､秒｡位置と目標の差は 1 時定数ごとに
-/// 1/e になるので､100px のティックは 0.1 秒で 63px､0.3 秒で 95px 進む｡
-/// Chrome の smooth scrolling と同じ桁で､短すぎれば元の「飛ぶ」に戻り､
-/// 長すぎれば入力に遅れて付いてくる｡
-const WHEEL_TAU_S: f32 = 0.09;
+/// ホイールが目標へ寄る spring｡60px のティックは 0.1 秒で 6 割､0.35 秒で
+/// 目標に着く｡Chrome の smooth scrolling と同じ桁で､周波数を上げれば元の
+/// 「飛ぶ」に戻り､下げれば入力に遅れて付いてくる｡
+///
+/// 減衰比は 1 を下回らせない: 目標は読み手が選んだ行き先なので､通り過ぎて
+/// から戻ってはいけない｡
+const WHEEL_SPIN: Spin = Spin {
+    frequency: 20.,
+    damping: 1.,
+};
+
+/// band が戻る spring｡上限まで伸びたところから 0.19 秒で home に着く —
+/// ホイールの追従より速い｡端を突いたのは行き先を選んだ結果ではないので､
+/// 見せたら早く畳む｡
+///
+/// 減衰比は臨界減衰を少しだけ下回らせる｡ちょうど 1 だと止まり方が固く
+/// 見える｡頂点の 5% ぶん (上限まで伸びても 2px) だけ home を行き過ぎて
+/// 戻る — 一覧を包む clip が無いので行が潜っては困るが､この幅なら行の
+/// 高さのはるか下で､目には固さが取れたぶんだけが残る｡
+const PULL_SPIN: Spin = Spin {
+    frequency: 34.,
+    damping: 0.68,
+};
 
 /// 端を越えたぶんの見た目の上限､px｡rubber band はこの先へは伸びない｡
-pub(super) const PULL_LIMIT_PX: f32 = 96.;
+/// 一覧は clip されず､伸びたぶんはウィンドウの地が出るだけなので
+/// macOS の scroll view よりだいぶ控えめにする — 行 1 つぶんも空けば
+/// 「これ以上は無い」は十分に伝わる｡
+pub(super) const PULL_LIMIT_PX: Px = 40.;
 
 /// rubber band の硬さ｡引いた量 `x` に対して見た目は
 /// `LIMIT * (1 - 1 / (x * STIFFNESS / LIMIT + 1))` で､最初の数十 px は
 /// ほぼこの比率で付いてきて､先へ行くほど渋くなる｡
-const PULL_STIFFNESS: f32 = 0.55;
+const PULL_STIFFNESS: Stiffness = 0.55;
 
 /// ホイールが端を突いたとき､余った距離のうち band に回す割合｡trackpad の
 /// 引っ張りより控えめにする — ノッチ 1 つが 100px を越えることがあり､
 /// そのまま回すと端に着くたびに大きく跳ねる｡
-const WHEEL_PULL: f32 = 0.4;
+const WHEEL_PULL: Share = 0.25;
 
-/// band が戻る時定数､秒｡指を離した瞬間からこの速さで縮む｡
-const PULL_TAU_S: f32 = 0.08;
+/// 指が触れていない入力の余りを速度に読み替える時間､秒｡「この 1 event が
+/// 1 フレームぶんの距離を運んできた」と読む｡
+const FLING_S: Seconds = FRAME_S;
+
+/// 静止した spring に初速 `v` を与えたとき､見た目が伸びる頂点の
+/// `v / frequency` に対する比 — `exp(-ζ · arccos ζ / √(1 - ζ²))`｡臨界減衰
+/// なら `1/e` (0.368) で､減衰比を下げるほど大きくなる｡[`PULL_SPIN`] の
+/// 0.68 でこの値になる｡
+const PULL_PEAK_RATIO: PeakRatio = 0.466;
+
+/// 端に当たった勢いの上限､px/s｡ここを越えなければ頂点も
+/// [`PULL_LIMIT_PX`] を越えない｡
+const PULL_SPEED_MAX: PxPerSecond = PULL_LIMIT_PX * PULL_SPIN.frequency / PULL_PEAK_RATIO;
 
 /// 目標や band の残りがこれを切ったら吸着して終わりにする距離､px｡
-/// 指数関数はそれ自体ではゼロに届かない｡
-const SNAP_PX: f32 = 0.5;
+/// spring はそれ自体ではゼロに届かない｡
+const SNAP_PX: Px = 0.5;
+
+/// 吸着してよい速さの上限､px/s｡距離だけで見ると､目標を高速で通り抜ける
+/// フレームをたまたま掴んで急停止させてしまう｡
+const SNAP_SPEED: PxPerSecond = 20.;
 
 /// 手動 scroll の状態｡offset は gpui のもので､最上部が 0､下へ行くほど
 /// 負に大きく､`floor` (`-max_offset`) が末尾｡delta も gpui と同じ向きで､
@@ -80,27 +183,36 @@ const SNAP_PX: f32 = 0.5;
 #[derive(Debug, Default)]
 pub(super) struct Scroller {
     /// ホイールが向かっている offset｡`None` なら追従中ではない｡
-    target: Option<f32>,
-    /// 端を越えて引いた生の量､px｡正は最上部を越えて下へ引いた､負は
-    /// 末尾を越えて上へ引いた｡見た目は [`Self::shift`] が丸める｡
-    pull: f32,
+    target: Option<Px>,
+    /// 目標へ寄る spring の速度､px/s｡位置は一覧が持っているのでここには
+    /// 無い｡ティックをまたいで残るので､立て続けの入力は速度が積み上がった
+    /// ところから続く｡
+    speed: PxPerSecond,
+    /// 端を越えたぶんの band｡`position` が見た目のずれ ([`Motion::shift`] と
+    /// 同じもの) で､正は最上部を越えて下へ引いた､負は末尾を越えて上へ
+    /// 引いた｡生の引っ張り量は [`pull_of`] が要るときに逆算する｡
+    band: Drift,
     /// trackpad に指が触れているか (`Started` から `Ended` まで)｡触れて
     /// いるあいだ band は戻らない｡
     touching: bool,
+    /// 今の慣性がもう端に当たったか｡1 回の慣性は数十の event に分かれて
+    /// 届くので (`momentumPhase` が読めない)､弾ませるのは最初の 1 回だけ｡
+    /// 指が触れ直せば､次の慣性のためにまた降ろす｡
+    bounced: bool,
     /// 直前にこのモデルが一覧に置いた offset｡次に渡される offset がここ
     /// から [`GRAB_PX`] より離れていれば､誰か他の人が一覧を飛ばしたと
     /// いうことで､古い目標へ引き戻さないよう目標も band も捨てる｡
-    placed: Option<f32>,
+    placed: Option<Px>,
 }
 
 /// [`Scroller::step`] が 1 フレームぶん決めたもの｡
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct Motion {
     /// 一覧に置く offset｡`floor..=0` に収まっている｡
-    pub offset: f32,
+    pub offset: Px,
     /// 一覧の見た目をずらす量､px｡正で下へ (最上部の band)､負で上へ
     /// (末尾の band)｡端に触れていなければ 0｡
-    pub shift: f32,
+    pub shift: Px,
     /// もう動くものが無い — ループはここで止まってよい｡
     pub done: bool,
 }
@@ -109,11 +221,11 @@ impl Scroller {
     /// ホイールのティック (#175)｡`delta` は px に直した後の値｡目標に
     /// 積み上げるだけで､位置は次の [`Self::step`] から寄っていく｡端を
     /// 越えたぶんは band へ｡
-    pub(super) fn wheel(&mut self, offset: f32, floor: f32, delta: f32) {
+    pub(super) fn wheel(&mut self, offset: Px, floor: Px, delta: Px) {
         self.resync(offset);
         let want = self.target.unwrap_or(offset) + delta;
         let (clamped, excess) = clamp_with_excess(want, floor);
-        self.pull += excess * WHEEL_PULL;
+        self.fling(excess * WHEEL_PULL);
         self.target = Some(clamped);
     }
 
@@ -121,27 +233,39 @@ impl Scroller {
     /// 置くべき offset を返す｡ホイールの目標があれば捨てる — 指が触れた
     /// 一覧は指のものだ｡band が伸びているときの反対向きの入力は､まず
     /// band を縮めてから残りで一覧を動かす｡
-    pub(super) fn pan(&mut self, offset: f32, floor: f32, delta: f32, phase: TouchPhase) -> f32 {
+    pub(super) fn pan(&mut self, offset: Px, floor: Px, delta: Px, phase: TouchPhase) -> Px {
         self.resync(offset);
         self.target = None;
+        // 速度も一緒に｡残すと､指を離したあとの最初のティックが前の
+        // 勢いに引かれて逆へ跳ねる｡
+        self.speed = 0.;
         match phase {
-            TouchPhase::Started => self.touching = true,
+            TouchPhase::Started => {
+                self.touching = true;
+                self.bounced = false;
+            }
             TouchPhase::Ended => self.touching = false,
             TouchPhase::Moved => {}
         }
         let mut delta = delta;
-        if self.is_pulled() && (self.pull > 0.) != (delta > 0.) {
-            let remaining = self.pull + delta;
-            if (remaining > 0.) == (self.pull > 0.) {
-                self.pull = remaining;
+        if self.is_pulled() && (self.band.position > 0.) != (delta > 0.) {
+            let pulled = pull_of(self.band.position);
+            let remaining = pulled + delta;
+            if (remaining > 0.) == (pulled > 0.) {
+                self.band.position = shift_of(remaining);
                 self.placed = Some(offset);
                 return offset;
             }
-            self.pull = 0.;
+            self.band = Drift::default();
             delta = remaining;
         }
         let (clamped, excess) = clamp_with_excess(offset + delta, floor);
-        self.pull += excess;
+        if self.touching {
+            self.stretch(excess);
+        } else if !self.bounced && excess.abs() > 0. {
+            self.fling(excess);
+            self.bounced = true;
+        }
         self.placed = Some(clamped);
         clamped
     }
@@ -150,24 +274,37 @@ impl Scroller {
     /// 前のフレームで置いた値とは限らず､reload の補正が動かしていること
     /// もあるからだ｡そのときは [`Self::release`] と同じことをして
     /// `done` を返す｡
-    pub(super) fn step(&mut self, offset: f32, floor: f32, dt_s: f32) -> Motion {
+    pub(super) fn step(&mut self, offset: Px, floor: Px, dt_s: Seconds) -> Motion {
         self.resync(offset);
         let mut next = offset;
         if let Some(target) = self.target {
             let target = target.clamp(floor, 0.);
-            let gap = target - offset;
-            if gap.abs() <= SNAP_PX {
+            let from = Drift {
+                position: offset,
+                speed: self.speed,
+            };
+            let moved = advance(dt_s, WHEEL_SPIN, from, target);
+            if (target - moved.position).abs() <= SNAP_PX && moved.speed.abs() <= SNAP_SPEED {
                 next = target;
                 self.target = None;
+                self.speed = 0.;
             } else {
-                next = offset + gap * (1. - (-dt_s / WHEEL_TAU_S).exp());
+                next = moved.position;
+                self.speed = moved.speed;
                 self.target = Some(target);
             }
         }
         if self.is_pulled() && !self.touching {
-            self.pull *= (-dt_s / PULL_TAU_S).exp();
-            if self.shift().abs() < SNAP_PX {
-                self.pull = 0.;
+            let moved = advance(dt_s, PULL_SPIN, self.band, 0.);
+            if moved.position.abs() <= SNAP_PX && moved.speed.abs() <= SNAP_SPEED {
+                self.band = Drift::default();
+            } else {
+                self.band = Drift {
+                    // 勢いを重ねて渡されたときの保険｡[`PULL_SPEED_MAX`] は
+                    // 1 回ぶんしか見ていない｡
+                    position: moved.position.clamp(-PULL_LIMIT_PX, PULL_LIMIT_PX),
+                    speed: moved.speed,
+                };
             }
         }
         let offset = next.clamp(floor, 0.);
@@ -180,10 +317,8 @@ impl Scroller {
     }
 
     /// 一覧の見た目をずらす量､px — [`Motion::shift`] と同じもの｡
-    pub(super) fn shift(&self) -> f32 {
-        let magnitude = self.pull.abs();
-        let shift = PULL_LIMIT_PX * (1. - 1. / (magnitude * PULL_STIFFNESS / PULL_LIMIT_PX + 1.));
-        shift.copysign(self.pull)
+    pub(super) fn shift(&self) -> Px {
+        self.band.position
     }
 
     /// 動かすものが何も残っていないか｡指が band を押さえていればまだだ｡
@@ -195,17 +330,48 @@ impl Scroller {
     /// 一覧を飛ばしたあとに呼ぶ — 古い目標へ引き戻してはいけない｡
     pub(super) fn release(&mut self) {
         self.target = None;
-        self.pull = 0.;
+        self.speed = 0.;
+        self.band = Drift::default();
         self.touching = false;
+        self.bounced = false;
         self.placed = None;
     }
 
+    /// 指が引っ張っているあいだの band｡生の引っ張り量を `raw` px ぶん
+    /// 足して見た目を引き直す — 足すのは生の側なので､すでに伸びている
+    /// ところへの入力は先へ行くほど渋くなる｡指が押さえている band は
+    /// spring が動かさないので､速度は 0 のまま｡
+    fn stretch(&mut self, raw: Px) {
+        self.band.position = shift_of(pull_of(self.band.position) + raw);
+    }
+
+    /// 指が離れているときに端へ当たったぶん (慣性とホイール)｡位置ではなく
+    /// **勢い**を渡し､そこから先は spring に任せる｡
+    ///
+    /// 位置に足していたときは､慣性の event が届き続けるかぎり band が
+    /// 押されつづけ､端に貼りついたまま慣性が尽きるのを待っていた — 手には
+    /// それが引っかかりになる｡勢いなら 1 度渡せば済み､
+    /// `v / frequency * PULL_PEAK_RATIO` の高さまで伸びて自分で戻る｡速く
+    /// 当たれば大きく､そっと当たれば小さく弾むのも､距離で決めていたときには
+    /// 出せなかった｡
+    ///
+    /// すでに弾んでいるあいだの当たりは捨てる｡1 回の慣性は数十の event に
+    /// 分かれて届くので､足し込めば位置に足していたのと同じ貼りつきに戻る｡
+    fn fling(&mut self, excess: Px) {
+        if self.is_pulled() {
+            return;
+        }
+        self.band.speed = (excess / FLING_S).clamp(-PULL_SPEED_MAX, PULL_SPEED_MAX);
+    }
+
+    /// band に動くものがあるか｡伸びていなくても勢いを渡された直後は
+    /// まだこれから伸びる｡
     fn is_pulled(&self) -> bool {
-        self.pull.abs() > 0.
+        self.band.position.abs() > 0. || self.band.speed.abs() > 0.
     }
 
     /// 渡された offset が自分の置いたところに無ければ [`Self::release`]｡
-    fn resync(&mut self, offset: f32) {
+    fn resync(&mut self, offset: Px) {
         if let Some(placed) = self.placed
             && (offset - placed).abs() > GRAB_PX
         {
@@ -214,8 +380,57 @@ impl Scroller {
     }
 }
 
+/// spring を `dt_s` 秒進め､新しい位置と速度を返す｡
+///
+/// 係数は 1 フレームぶんの閉じた形なので､刻みを半分にして 2 回呼んでも
+/// 同じところへ着く — [`Scroller::step`] を 30Hz で回しても 60Hz と同じ
+/// 位置になる根拠がここにある｡
+///
+/// [`harmonica`] は f64 で解く｡px は f32 で持っているので､戻すときに
+/// 落ちる桁がある — 24bit の仮数は 1px の 1/100 万まで表せるので､
+/// 画面の 1px には届かない｡
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "a spring solved in f64 comes back to f32 pixels; the discarded \
+              bits are far below what a display can show"
+)]
+fn advance(dt_s: Seconds, spin: Spin, from: Drift, home: Px) -> Drift {
+    let spring = Spring::new(
+        f64::from(dt_s),
+        f64::from(spin.frequency),
+        f64::from(spin.damping),
+    );
+    let (position, speed) = spring.update(
+        f64::from(from.position),
+        f64::from(from.speed),
+        f64::from(home),
+    );
+    Drift {
+        position: position as f32,
+        speed: speed as f32,
+    }
+}
+
+/// 生の引っ張り量から見た目のずれへ｡最初の数十 px はほぼ
+/// [`PULL_STIFFNESS`] の比率で付いてきて､先へ行くほど渋くなり､
+/// [`PULL_LIMIT_PX`] には届かない｡
+fn shift_of(pull: Px) -> Px {
+    let magnitude = pull.abs();
+    let shift = PULL_LIMIT_PX * (1. - 1. / (magnitude * PULL_STIFFNESS / PULL_LIMIT_PX + 1.));
+    shift.copysign(pull)
+}
+
+/// [`shift_of`] の逆｡band を伸ばし縮めする入力は生の側で足し引きするので､
+/// 見た目からいったん戻す必要がある｡上限に貼りついた見た目を渡されても
+/// 無限大にならないよう､ほんの手前で頭打ちにする｡
+fn pull_of(shift: Px) -> Px {
+    let magnitude = shift.abs().min(PULL_LIMIT_PX * 0.999);
+    let pull = PULL_LIMIT_PX * magnitude / (PULL_STIFFNESS * (PULL_LIMIT_PX - magnitude));
+    pull.copysign(shift)
+}
+
 /// `want` を `floor..=0` に収めた値と､はみ出した量 (符号付き)｡
-fn clamp_with_excess(want: f32, floor: f32) -> (f32, f32) {
+fn clamp_with_excess(want: Px, floor: Px) -> (Px, Px) {
     if want > 0. {
         (0., want)
     } else if want < floor {
@@ -343,11 +558,11 @@ mod tests {
     use super::*;
     use gpui::TouchPhase;
 
-    const FLOOR: f32 = -2_000.;
+    const FLOOR: Px = -2_000.;
 
     /// 落ち着くまで 1 フレームずつ進め､最後の offset と要したフレーム数を
     /// 返す｡10 秒で落ち着かなければそれ自体が失敗だ｡
-    fn settle(scroller: &mut Scroller, mut offset: f32, floor: f32) -> (f32, usize) {
+    fn settle(scroller: &mut Scroller, mut offset: Px, floor: Px) -> (Px, usize) {
         for frame in 1..=600 {
             let motion = scroller.step(offset, floor, FRAME_S);
             offset = motion.offset;
@@ -358,7 +573,7 @@ mod tests {
         unreachable!("ten seconds passed and the scroller never settled, offset {offset}");
     }
 
-    fn close(a: f32, b: f32) -> bool {
+    fn close(a: Px, b: Px) -> bool {
         (a - b).abs() < 0.01
     }
 
@@ -594,7 +809,10 @@ mod tests {
             assert!(!motion.done, "a finger on the glass is not settled");
         }
         scroller.pan(0., FLOOR, 0., TouchPhase::Ended);
-        let mut previous = held;
+        // 戻りは減衰比を 1 から少し下げてあるので､home をわずかに行き
+        // 過ぎてから収まる｡行き過ぎが行の高さに届けば先頭の行が composer
+        // の下へ潜るので､そこは押さえる｡
+        let overshoot_limit = -PULL_LIMIT_PX * 0.1;
         let (offset, frames) = {
             let mut offset = 0.;
             let mut frames = 0;
@@ -603,16 +821,15 @@ mod tests {
                 let motion = scroller.step(offset, FLOOR, FRAME_S);
                 offset = motion.offset;
                 assert!(
-                    motion.shift <= previous,
-                    "spring-back is monotone: {}",
+                    motion.shift <= held,
+                    "the band never stretches further than the finger left it: {}",
                     motion.shift
                 );
                 assert!(
-                    motion.shift >= 0.,
-                    "and never crosses zero: {}",
+                    motion.shift >= overshoot_limit,
+                    "and swings back past home by a hair at most: {}",
                     motion.shift
                 );
-                previous = motion.shift;
                 if motion.done {
                     break (offset, frames);
                 }
@@ -668,6 +885,33 @@ mod tests {
         );
     }
 
+    // 目標だけを捨てて速度を残すと､指のあとの最初のティックが下向きの
+    // 勢いに引かれて逆へ跳ねる — spring は速度を状態に持つので､目標を
+    // 捨てるときは速度も一緒に捨てる｡
+    #[test]
+    fn a_wheel_after_a_pan_starts_from_rest_and_never_lurches_backwards() {
+        let mut scroller = Scroller::default();
+        scroller.wheel(-500., FLOOR, -600.);
+        let mut offset = -500.;
+        for _ in 0..8 {
+            offset = scroller.step(offset, FLOOR, FRAME_S).offset;
+        }
+        let grabbed = scroller.pan(offset, FLOOR, 0., TouchPhase::Started);
+        scroller.pan(grabbed, FLOOR, 0., TouchPhase::Ended);
+        scroller.wheel(grabbed, FLOOR, 60.);
+        let motion = scroller.step(grabbed, FLOOR, FRAME_S);
+        assert!(
+            motion.offset > grabbed,
+            "the tick asked to go up, not down: {} from {grabbed}",
+            motion.offset
+        );
+        let (end, _) = settle(&mut scroller, motion.offset, FLOOR);
+        assert!(
+            close(end, grabbed + 60.),
+            "and it lands exactly its delta away, {end} from {grabbed}"
+        );
+    }
+
     // `ScrollToTop`､pill､reload の補正はどれもモデルを通さずに一覧を
     // 飛ばす｡次に見た offset が置いた場所に無ければ､古い目標へ引き戻さず
     // そこで止まる｡
@@ -697,5 +941,145 @@ mod tests {
             "nothing may outlive a jump made by someone else"
         );
         assert!(close(scroller.shift(), 0.), "{}", scroller.shift());
+    }
+
+    // --- 動きの手触り (#175 の再訪) ---
+    //
+    // 最初の実装は生の引っ張り量を指数関数で減らし､見た目はそれを飽和する
+    // 関数に通していた｡飽和のせいで､慣性の event が積み上げた数千 px の
+    // うち最初の何百 px を削るあいだ見た目は上限に貼りついたまま動かず､
+    // 端で「大きく出て､しばらく止まって､それから戻る」に見えた｡
+    // 見た目の px そのものを spring で戻せば､戻る時間は伸びた距離だけで
+    // 決まり､どれだけ積み上がっても変わらない｡
+
+    /// 落ち着くまでの 1 フレームごとの `shift` の減り方を集める｡
+    fn relax(scroller: &mut Scroller) -> Vec<Px> {
+        let mut previous = scroller.shift();
+        let mut steps = Vec::new();
+        for _ in 0..600 {
+            let motion = scroller.step(0., FLOOR, FRAME_S);
+            steps.push(previous - motion.shift);
+            previous = motion.shift;
+            if motion.done {
+                break;
+            }
+        }
+        steps
+    }
+
+    // 慣性の event はいくらでも積み上がる｡そこから指を離しても､戻りに
+    // かかる時間は見た目の伸びぶんだけで決まる｡
+    #[test]
+    fn a_band_pulled_far_past_the_limit_still_relaxes_in_a_fifth_of_a_second() {
+        let mut scroller = Scroller::default();
+        scroller.pan(0., FLOOR, 100_000., TouchPhase::Started);
+        scroller.pan(0., FLOOR, 0., TouchPhase::Ended);
+        let frames = relax(&mut scroller).len();
+        assert!(
+            frames <= 14,
+            "the band must be home within a fifth of a second, took {frames} frames"
+        );
+        assert!(close(scroller.shift(), 0.), "{}", scroller.shift());
+    }
+
+    // gpui は `momentumPhase` を読まないので､指を離したあとも OS の慣性は
+    // `Moved` として届き続ける (モジュール doc)｡1 回の弾みが数十の event に
+    // 分かれて届くということで､その全部を band に足すと慣性が尽きるまで
+    // 端に貼りついたままになる — 手にはそれが引っかかりになる｡
+    #[test]
+    fn a_run_of_momentum_events_bounces_the_band_once_and_lets_it_come_home() {
+        let mut scroller = Scroller::default();
+        scroller.pan(0., FLOOR, 0., TouchPhase::Ended);
+        let mut trace = Vec::new();
+        let mut delta = 60.;
+        for _ in 0..40 {
+            scroller.pan(0., FLOOR, delta, TouchPhase::Moved);
+            trace.push(scroller.step(0., FLOOR, FRAME_S).shift);
+            delta *= 0.9;
+        }
+        let peak = trace.iter().copied().fold(0.0_f32, f32::max);
+        let peaked_at = trace
+            .iter()
+            .position(|shift| close(*shift, peak))
+            .unwrap_or(usize::MAX);
+        assert!(
+            peak > 0. && peak <= PULL_LIMIT_PX,
+            "the run must show as a bounce inside the limit, {peak}"
+        );
+        assert!(
+            peaked_at <= 6,
+            "and top out at once, not ride the whole run: frame {peaked_at}"
+        );
+        let last = trace.last().copied().unwrap_or_default();
+        assert!(
+            last.abs() < 0.5,
+            "the band must be home while the momentum still arrives, {last}"
+        );
+    }
+
+    // 勢いの上限 [`PULL_SPEED_MAX`] は [`PULL_PEAK_RATIO`] から逆算して
+    // いる｡比が過大なら弾みが上限を越え､過小なら上限まで届かない — どちら
+    // も見て初めて分かる類のずれなので､両側から挟む｡
+    #[test]
+    fn the_hardest_bounce_fills_the_limit_without_passing_it() {
+        let mut scroller = Scroller::default();
+        scroller.pan(0., FLOOR, 0., TouchPhase::Ended);
+        scroller.pan(0., FLOOR, 100_000., TouchPhase::Moved);
+        let mut peak = 0.0_f32;
+        for _ in 0..600 {
+            let motion = scroller.step(0., FLOOR, FRAME_S);
+            peak = peak.max(motion.shift);
+            if motion.done {
+                break;
+            }
+        }
+        assert!(
+            peak <= PULL_LIMIT_PX,
+            "the hardest bounce must stay inside the limit, {peak}"
+        );
+        assert!(
+            peak > PULL_LIMIT_PX * 0.9,
+            "and must be worth the limit it was given, {peak}"
+        );
+    }
+
+    // 離した瞬間に最高速で走り出すのは指数関数の癖で､目には弾かれたように
+    // 映る｡spring は静止から加速するので､最初のフレームは山より小さい｡
+    #[test]
+    fn the_band_eases_out_of_the_pull_instead_of_bolting_on_the_first_frame() {
+        let mut scroller = Scroller::default();
+        scroller.pan(0., FLOOR, 120., TouchPhase::Started);
+        scroller.pan(0., FLOOR, 0., TouchPhase::Ended);
+        let steps = relax(&mut scroller);
+        let first = steps.first().copied().unwrap_or_default();
+        let peak = steps.iter().copied().fold(0.0_f32, f32::max);
+        assert!(
+            first < peak * 0.75,
+            "the first frame ({first}) must be gentler than the fastest ({peak})"
+        );
+    }
+
+    // ホイールも同じ｡目標へ寄る速さが 1 フレーム目にいきなり最大になると
+    // ｢飛ぶ｣に戻る｡
+    #[test]
+    fn a_wheel_tick_eases_in_instead_of_lurching_on_its_first_frame() {
+        let mut scroller = Scroller::default();
+        scroller.wheel(-500., FLOOR, -200.);
+        let mut offset = -500.;
+        let mut steps = Vec::new();
+        for _ in 0..600 {
+            let motion = scroller.step(offset, FLOOR, FRAME_S);
+            steps.push(offset - motion.offset);
+            offset = motion.offset;
+            if motion.done {
+                break;
+            }
+        }
+        let first = steps.first().copied().unwrap_or_default();
+        let peak = steps.iter().copied().fold(0.0_f32, f32::max);
+        assert!(
+            first < peak * 0.75,
+            "the first frame ({first}) must be gentler than the fastest ({peak})"
+        );
     }
 }
