@@ -151,7 +151,10 @@ fn main() {
     // も出す — Finder から起動した `.app` では stderr がどこにも行かないので
     // (#40, #45)､それが唯一の記録になる｡
     log::init(&paths, config.log_level);
-    log::info("starting twigpui");
+    log::info(&startup_banner(
+        env!("CARGO_PKG_VERSION"),
+        env!("TWIGPUI_GIT_HASH"),
+    ));
 
     // #95: ツールバーが描くアイコン｡gpui は `svg()` のパスをこれを通して
     // 解決するので､これが無いとどのアイコンも何も描かれない｡
@@ -230,6 +233,18 @@ fn main() {
             cx.activate(true);
             perf::start(cx, perf);
         });
+}
+
+/// ログの 1 行目 (#231)｡`starting twigpui 0.1.0 (abc1234)`｡
+///
+/// version だけでは足りない｡`0.1.0` は当分動かないし､`.app` は
+/// `scripts/build-app-bundle.sh` で組み直され､手元には worktree が何本も
+/// 並ぶ｡どのビルドのログを読んでいるかを決めるのは commit のほうだ｡
+///
+/// `hash` は `build.rs` が埋める｡git が使えなければ `unknown`､追跡中の
+/// ファイルに未コミットの差分があれば `abc1234-dirty` になる｡
+fn startup_banner(version: &str, hash: &str) -> String {
+    format!("starting twigpui {version} ({hash})")
 }
 
 /// 致命的な起動エラーを stderr へ､そして — stderr を読む端末が付いて
@@ -612,6 +627,42 @@ fn usage_only(config: &config::Config, paths: &paths::Paths) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- #231: 起動ログの 1 行目 ---
+
+    #[test]
+    fn the_startup_banner_names_the_version_and_the_commit() {
+        assert_eq!(
+            startup_banner("0.1.0", "abc1234"),
+            "starting twigpui 0.1.0 (abc1234)"
+        );
+    }
+
+    #[test]
+    fn a_dirty_tree_and_a_missing_git_both_still_read_as_one_line() {
+        // `build.rs` が出しうる残り 2 つ｡どちらも括弧の中に収まる｡
+        assert_eq!(
+            startup_banner("0.1.0", "abc1234-dirty"),
+            "starting twigpui 0.1.0 (abc1234-dirty)"
+        );
+        assert_eq!(
+            startup_banner("0.1.0", "unknown"),
+            "starting twigpui 0.1.0 (unknown)"
+        );
+    }
+
+    #[test]
+    fn the_banner_carries_the_hash_this_build_was_stamped_with() {
+        // `env!` なので埋め忘れはコンパイルエラーになる｡ここが見るのは
+        // 中身が実際に届いているか — `build.rs` が空文字列を出しても
+        // `env!` は通ってしまう｡
+        let hash = env!("TWIGPUI_GIT_HASH");
+        assert!(!hash.is_empty(), "build.rs stamped an empty hash");
+        assert!(
+            startup_banner(env!("CARGO_PKG_VERSION"), hash).ends_with(&format!("({hash})")),
+            "the banner should end with the stamped hash"
+        );
+    }
 
     #[test]
     fn applescript_quote_escapes_backslashes_and_quotes() {

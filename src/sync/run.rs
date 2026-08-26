@@ -173,14 +173,24 @@ pub(super) fn apply_some(
     limit: usize,
 ) -> (usize, Result<()>) {
     let mut sent = 0usize;
-    for (action, user_id) in super::schedule::next_batch(plan, prune, limit) {
+    let batch = super::schedule::next_batch(plan, prune, limit);
+    let batch_size = batch.len();
+    for (action, user_id) in batch {
         // batch の中を散らす｡これが無いと batch は同じ秒のうちに全件を
         // 投げる — #197 のロックの直前にしていた形｡1 件目の前には置かない｡
         // tick は既に batch と batch の間を待って来ている｡
         if sent > 0 {
-            client.pause_between_writes(super::state::write_gap(
-                crate::rate_limit::random_jitter_fraction(),
+            let gap = super::state::write_gap(crate::rate_limit::random_jitter_fraction());
+            // 眠る前に書く (#231)｡行のタイムスタンプと待つ秒数が sleep を
+            // 挟むので､次の 1 回はログだけで間が本当に空いたかを読める｡
+            // batch サマリだけでは 1 件ずつ送ったのか同じ秒に投げたのかが
+            // 見分けられなかった｡
+            crate::log::info(&format!(
+                "list sync: waiting {}s before write {} of {batch_size}",
+                gap.as_secs(),
+                sent.saturating_add(1)
             ));
+            client.pause_between_writes(gap);
         }
         let result = match action {
             Action::Add => client.add_member(paths, &plan.list_id, &user_id, now),
