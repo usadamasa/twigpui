@@ -138,7 +138,11 @@ impl TimelineView {
             // submit が進行中の間は編集を拒む｡下の submit ボタン自身の
             // 無効状態に倣う — なぜそれが大事なのかは
             // `ComposeState::can_submit` の doc を見よ｡
-            .child(Input::new(&self.compose_input).disabled(is_submitting))
+            .child(
+                div()
+                    .addressable("compose-input")
+                    .child(Input::new(&self.compose_input).disabled(is_submitting)),
+            )
             // #16: "Quote" が設定していれば quote の対象 —
             // `composer_quote_card` の doc を見よ｡
             .when_some(self.compose.quote(), |column, target| {
