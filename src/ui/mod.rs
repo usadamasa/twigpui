@@ -464,10 +464,10 @@ mod tests {
     use super::reload_policy::{
         newly_arrived, preserved_scroll_target, reload_cooldown, reload_outcome_label,
     };
-    use super::render::{
-        avatar_initial, header_title, is_own_post, like_action_label, post_permalink, profile_url,
-        repost_action_label,
-    };
+    use super::render::actions::{like_action_label, repost_action_label};
+    use super::render::frame::header_title;
+    use super::render::offers::is_own_post;
+    use super::render::post::{avatar_initial, post_permalink, profile_url};
     use super::{
         ComposeStatus, Cooldown, CooldownTick, Denial, Denied, Fade, Fixture, PostLink, PostMedia,
         PostMetrics, ReloadNotice, ReloadTrigger, RepliedTo, RowCounts, Startup, SyncOff,
