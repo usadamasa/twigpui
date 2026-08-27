@@ -23,5 +23,4 @@ src/config.rs	850
 src/main.rs	650
 src/ui/auto_refresh.rs	800
 src/ui/render.rs	1100
-src/x_api/client.rs	1250
 src/x_api/model.rs	850
