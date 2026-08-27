@@ -28,6 +28,7 @@ mod render;
 mod scroll;
 mod sync_row;
 mod tasks;
+mod toast;
 
 // `ui` の兄弟ではなく子モジュールにする (#126): 子モジュールは親の
 // プライベート項目を参照できるので､`TimelineState`､`ReloadNotice`､
@@ -54,6 +55,7 @@ use render::{
     thread_toggle_row, usage_color, usage_label, with_count,
 };
 use render::{RowCounts, row_counts};
+use toast::Toast;
 
 use crate::menu::{
     BlurComposer, CloseWindow, FocusComposer, KEY_CONTEXT, Minimize, Reload, ScrollToTop,
@@ -498,6 +500,22 @@ pub(crate) struct TimelineView {
     /// 自身も､offset が置いていった場所に無いと分かった瞬間に止まる｡それは
     /// 読み手がホイールを握った合図である｡
     glide: Option<Task<()>>,
+    /// follow が流し込んだ新着のうち､まだ viewport の上に残っている数
+    /// (#206)｡toast の countdown はこれを数える｡
+    ///
+    /// [`Self::follow`] が件数を置き､scroll 位置が動くたびに
+    /// [`Self::note_scroll_position`] が減らす｡増える経路は follow だけで､
+    /// timeline を置き換える経路は [`Self::clear_pending`] と同じ理由で 0 に
+    /// 戻す — 置き換えられた行を基準に数えた数だからだ｡
+    unseen: usize,
+    /// 新着の toast が今どう見えているか (#206)｡[`Toast`] を参照｡
+    ///
+    /// `pending` と `unseen` が今何件かで､これは画面がそこへどこまで追い
+    /// ついたか — `sync_fade` が `sync_status` に対してそうであるのと同じ｡
+    toast: Toast,
+    /// toast のフェードを 1 段ずつ進めるタイマー (#206)｡`sync_fade_task` と
+    /// 同じ契約で､目的地に着いたら [`Self::fade_toast`] が外す｡
+    toast_fade_task: Option<Task<()>>,
     /// 読み手自身の scroll の状態 (#175): ホイールが向かっている目標と､
     /// 端を越えて引いた rubber band｡入力は [`Self::on_wheel`] が渡し､
     /// `body` が band のずれを読む｡純粋なモデルで､なぜ gpui の既定の
@@ -684,6 +702,9 @@ impl TimelineView {
             pending: None,
             follow,
             glide: None,
+            unseen: 0,
+            toast: Toast::HIDDEN,
+            toast_fade_task: None,
             scroller: scroll::Scroller::default(),
             scroll_motion: None,
             fixture_arrival: None,
@@ -3676,6 +3697,309 @@ mod tests {
                     "a click outside the bar must leave the offer standing"
                 );
             });
+        });
+    }
+
+    /// #206: toast は timeline の下端に重なる capsule で､上のバーではない｡
+    ///
+    /// 下端「付近」と中央寄せは bounds で言える｡幅を timeline の半分未満に
+    /// 押さえるのは､最後の行のアクション列を覆う帯にならないため｡
+    #[gpui::test]
+    fn the_new_posts_toast_sits_at_the_bottom_of_the_timeline(cx: &mut gpui::TestAppContext) {
+        let (mut visual, _timeline) = drawn(cx, fixture_with(&["2", "1"], &["4", "3"]));
+
+        let toast = visual
+            .debug_bounds("new-posts")
+            .expect("posts are waiting, so the toast has to be laid out");
+        let body = visual
+            .debug_bounds("timeline")
+            .expect("the timeline is laid out");
+
+        assert!(
+            toast.bottom() <= body.bottom(),
+            "the toast must not hang below the timeline: {toast:?} vs {body:?}"
+        );
+        assert!(
+            body.bottom() - toast.bottom() < gpui::px(48.),
+            "the toast sits near the bottom edge, not floating mid-screen: {toast:?} vs {body:?}"
+        );
+        assert!(
+            toast.top() > body.center().y,
+            "the toast overlaps the bottom of the timeline, not its middle: {toast:?}"
+        );
+        assert!(
+            toast.size.width < body.size.width / 2.,
+            "a capsule, not a bar: {toast:?} vs {body:?}"
+        );
+        assert!(
+            (toast.center().x - body.center().x).abs() < gpui::px(1.),
+            "centered: {toast:?} vs {body:?}"
+        );
+    }
+
+    /// #206: toast は viewport に貼りつく｡一覧が scroll しても動かない｡
+    #[gpui::test]
+    fn the_toast_stays_put_while_the_timeline_scrolls(cx: &mut gpui::TestAppContext) {
+        let ids: Vec<String> = (1..=40).map(|n| n.to_string()).collect();
+        let shown: Vec<&str> = ids.iter().map(String::as_str).collect();
+        let (mut visual, timeline) = drawn(cx, fixture_with(&shown, &["99"]));
+        let body = visual
+            .debug_bounds("timeline")
+            .expect("the timeline is laid out");
+        let before = visual
+            .debug_bounds("new-posts")
+            .expect("a post is waiting, so the toast is laid out");
+
+        visual.simulate_event(wheel_event(body.center(), -3.));
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(2));
+        cx.run_until_parked();
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        assert!(
+            offset_y(cx, &timeline) < -10.,
+            "the list itself has scrolled"
+        );
+        let after = visual
+            .debug_bounds("new-posts")
+            .expect("the toast is still there");
+        assert_eq!(before, after, "the toast must not scroll with the rows");
+    }
+
+    /// #206: 下端の帯のうち capsule の外は timeline のまま — 覆いの wrapper が
+    /// クリックを食ってはいけない｡
+    #[gpui::test]
+    fn clicking_beside_the_toast_reaches_the_timeline_not_the_toast(cx: &mut gpui::TestAppContext) {
+        let (mut visual, timeline) = drawn(cx, fixture_with(&["2", "1"], &["4", "3"]));
+        let toast = visual
+            .debug_bounds("new-posts")
+            .expect("posts are waiting, so the toast is laid out");
+        let body = visual
+            .debug_bounds("timeline")
+            .expect("the timeline is laid out");
+
+        visual.simulate_click(
+            gpui::point(body.left() + gpui::px(10.), toast.center().y),
+            gpui::Modifiers::none(),
+        );
+
+        cx.update(|cx| {
+            assert_eq!(
+                timeline
+                    .read(cx)
+                    .pending
+                    .as_ref()
+                    .map(|pending| pending.count),
+                Some(2),
+                "a click beside the capsule must leave the offer standing"
+            );
+        });
+    }
+
+    /// #206: 出るときは段階的に濃くなり､着いたらタイマーを手放す｡
+    #[gpui::test]
+    fn the_toast_fades_in_and_then_settles(cx: &mut gpui::TestAppContext) {
+        let (_visual, timeline) = drawn(cx, fixture_with(&["2", "1"], &["3"]));
+
+        cx.update(|cx| {
+            let view = timeline.read(cx);
+            assert!(
+                matches!(view.toast.fade, Fade::Rising(_)),
+                "the first frame is the first step, not the whole capsule: {:?}",
+                view.toast.fade
+            );
+            assert!(view.toast_fade_task.is_some(), "the fade is ticking");
+        });
+
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(1));
+        cx.run_until_parked();
+
+        cx.update(|cx| {
+            let view = timeline.read(cx);
+            assert_eq!(view.toast.fade, Fade::Shown);
+            assert_eq!(view.toast.count, 1);
+            assert!(
+                view.toast_fade_task.is_none(),
+                "a settled fade must not keep burning frames"
+            );
+        });
+    }
+
+    /// #206: 見せたら薄くなって外れる｡薄くなる間も件数は言い続ける｡
+    #[gpui::test]
+    fn the_toast_fades_out_and_leaves_once_the_posts_are_shown(cx: &mut gpui::TestAppContext) {
+        let (mut visual, timeline) = drawn(cx, fixture_with(&["2", "1"], &["4", "3"]));
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(1));
+        cx.run_until_parked();
+
+        let toast = visual
+            .debug_bounds("new-posts")
+            .expect("posts are waiting, so the toast is laid out");
+        visual.simulate_click(toast.center(), gpui::Modifiers::none());
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        assert!(
+            visual.debug_bounds("new-posts").is_some(),
+            "the toast fades rather than vanishing in the same frame"
+        );
+        cx.update(|cx| {
+            let view = timeline.read(cx);
+            assert!(view.pending.is_none(), "the click showed the posts");
+            assert!(
+                matches!(view.toast.fade, Fade::Falling(_)),
+                "the toast is on its way out: {:?}",
+                view.toast.fade
+            );
+            assert_eq!(
+                view.toast.count, 2,
+                "while falling the label keeps saying what it said"
+            );
+        });
+
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(1));
+        cx.run_until_parked();
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        assert!(
+            visual.debug_bounds("new-posts").is_none(),
+            "a hidden toast is out of the tree, not a transparent capsule"
+        );
+        cx.update(|cx| {
+            let view = timeline.read(cx);
+            assert_eq!(view.toast.fade, Fade::Hidden);
+            assert!(view.toast_fade_task.is_none());
+        });
+    }
+
+    /// #206: follow が流し込む間､toast は「まだ視界の上にある数」を数え
+    /// 下げ､0 で消える｡
+    ///
+    /// 途中の値そのものは assert しない — 行の高さはテストの layout が決める｡
+    /// 言えるのは 3 から始まり､減る一方で､0 で終わり､途中の値が少なくとも
+    /// 1 つ見えたことだ｡
+    #[gpui::test]
+    fn following_counts_down_as_the_new_posts_glide_in(cx: &mut gpui::TestAppContext) {
+        let (mut visual, timeline, _body) = scrollable_window(cx);
+
+        cx.update(|cx| {
+            timeline.update(cx, |view, cx| {
+                view.follow = super::FollowMode::Follow;
+                let shown: Vec<String> = shown_ids(view);
+                let displayed: Vec<&str> = shown.iter().map(String::as_str).collect();
+                let incoming: Vec<TimelineItem> = ["43", "42", "41"]
+                    .iter()
+                    .chain(displayed.iter())
+                    .map(|id| item_with(id, "someone", None))
+                    .collect();
+                let pending = pending_after_poll(&displayed, incoming).expect("three arrived");
+                view.present_poll(pending, cx);
+                assert_eq!(view.unseen, 3, "every new row starts above the viewport");
+            });
+        });
+
+        let mut seen = vec![3_usize];
+        for _ in 0..600 {
+            cx.executor()
+                .advance_clock(std::time::Duration::from_secs_f32(super::scroll::FRAME_S));
+            cx.run_until_parked();
+            visual.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            let now = cx.update(|cx| timeline.read(cx).unseen);
+            if seen.last() != Some(&now) {
+                seen.push(now);
+            }
+            if now == 0 {
+                break;
+            }
+        }
+
+        assert_eq!(
+            seen.last(),
+            Some(&0),
+            "the glide ends with nothing left above: {seen:?}"
+        );
+        assert!(
+            seen.windows(2).all(|pair| pair[1] < pair[0]),
+            "the count only ever goes down: {seen:?}"
+        );
+        assert!(
+            seen.len() > 2,
+            "at least one intermediate count is visible on the way: {seen:?}"
+        );
+
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(1));
+        cx.run_until_parked();
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            visual.debug_bounds("new-posts").is_none(),
+            "with nothing left above, the toast is gone"
+        );
+    }
+
+    /// #206: follow の途中で toast を押すと最上部へ飛ぶ｡pill と同じく無料 —
+    /// リクエストも取得も無い｡
+    #[gpui::test]
+    fn clicking_the_toast_while_following_jumps_to_the_top_for_free(cx: &mut gpui::TestAppContext) {
+        let (mut visual, timeline, _body) = scrollable_window(cx);
+
+        cx.update(|cx| {
+            timeline.update(cx, |view, cx| {
+                view.follow = super::FollowMode::Follow;
+                let shown: Vec<String> = shown_ids(view);
+                let displayed: Vec<&str> = shown.iter().map(String::as_str).collect();
+                let incoming: Vec<TimelineItem> = ["43", "42", "41"]
+                    .iter()
+                    .chain(displayed.iter())
+                    .map(|id| item_with(id, "someone", None))
+                    .collect();
+                let pending = pending_after_poll(&displayed, incoming).expect("three arrived");
+                view.present_poll(pending, cx);
+            });
+        });
+        // 1 フレームで補正が着地し､次のフレームで glide が歩き出す｡
+        for _ in 0..2 {
+            cx.executor()
+                .advance_clock(std::time::Duration::from_secs_f32(super::scroll::FRAME_S));
+            cx.run_until_parked();
+            visual.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+        }
+        cx.update(|cx| {
+            let view = timeline.read(cx);
+            assert!(view.unseen > 0, "the rows are still above the viewport");
+            assert!(view.glide.is_some(), "and the glide is still walking");
+        });
+
+        let toast = visual
+            .debug_bounds("new-posts")
+            .expect("rows are above the viewport, so the toast is laid out");
+        visual.simulate_click(toast.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+
+        cx.update(|cx| {
+            let view = timeline.read(cx);
+            assert_eq!(view.unseen, 0, "the jump reveals every row at once");
+            assert!(view.glide.is_none(), "the jump replaces the glide");
+            assert!(view.pending.is_none());
+            assert!(view.client.is_none());
+            assert!(
+                view.last_reload_at.is_none(),
+                "jumping to the top must not count as a fetch"
+            );
         });
     }
 
