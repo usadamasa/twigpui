@@ -58,8 +58,8 @@ window が描き続けている数字で (`Cargo.toml` の `[patch.crates-io]`)�
 
 ### 最初の 10 秒は捨てる
 
-fixture でもアバターと添付は `pbs.twimg.com` から落とす。起動直後の数秒は
-ダウンロード・デコード・再レイアウトが乗る。さらに **fixture は 5 秒後に保留分の
+fixture のアバターと添付は `fixtures/media/` から読む (#234) が、デコードと
+再レイアウトは起動直後の数秒に乗る。さらに **fixture は 5 秒後に保留分の
 投稿を届ける** (README の "Show New Posts" の節) ので、6 秒目に山が 1 つ出るのは
 仕様。idle の判断は **11 秒目以降** の行でする。
 
