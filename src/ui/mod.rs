@@ -22,6 +22,7 @@ use crate::log;
 mod auto_refresh;
 mod chrome;
 mod composer;
+mod countdown;
 mod fade;
 mod layout;
 mod list_picker;

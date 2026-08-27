@@ -902,6 +902,32 @@ mod tests {
         assert_eq!(next_tick(&situation, 31_300), Tick::Wait { until: 31_400 });
     }
 
+    // #214: footer が数える期限は､`next_tick` が `Poll` と答え始める時刻と
+    // 同じ 1 つの規則から出る｡2 つが食い違えば､カウントダウンが 0 に
+    // なってもポーリングが来ないか､来たのに数字が残る｡
+    #[test]
+    fn the_due_time_is_the_moment_the_tick_turns_into_a_poll() {
+        let situation = situation(Some(1_500), 1_000);
+        let due = poll_due_at(&situation);
+
+        assert_eq!(due, 1_800);
+        assert_eq!(next_tick(&situation, due - 1), Tick::Wait { until: due });
+        assert_eq!(next_tick(&situation, due), Tick::Poll);
+    }
+
+    #[test]
+    fn the_due_time_starts_from_the_loop_when_nothing_has_been_fetched() {
+        assert_eq!(poll_due_at(&situation(None, 1_000)), 1_300);
+    }
+
+    #[test]
+    fn the_due_time_starts_from_the_return_when_that_is_later() {
+        let mut situation = situation(Some(31_100), 500);
+        situation.resumed_at = Some(31_200);
+
+        assert_eq!(poll_due_at(&situation), 31_500);
+    }
+
     #[test]
     fn a_poll_that_brought_nothing_new_leaves_nothing_waiting() {
         let displayed = ["3", "2", "1"];
