@@ -192,11 +192,7 @@ impl TimelineView {
     /// 保持している post の数は timeline が読み込まれてからしか出さない｡
     /// サインイン中や取得中には出せる数が無いし､"0 / 200" は答えの無い
     /// 問いではなく空の cache のように読めてしまう｡
-    pub(super) fn status_bar(
-        &self,
-        density: countdown::Density,
-        cx: &mut Context<'_, Self>,
-    ) -> impl IntoElement {
+    pub(super) fn status_bar(&self, density: countdown::Density) -> impl IntoElement {
         let theme = self.theme;
 
         // #18: リクエスト数は常に出す; 見積り金額は `request_price` が
@@ -237,37 +233,27 @@ impl TimelineView {
                     .text_color(rgb(usage_color(usage_status, theme)))
                     .child(usage_text),
             )
-            // #174: list sync を 1 回始める手段｡toolbar ではなくリクエスト数の
-            // 隣に置くのは､同じ種類の事実 (timeline ではなくアプリについての
-            // 累計) だから｡
-            //
-            // #205: sync が何をしているかは上の行へ移った｡ここに残るのは
-            // 入口だけで､文言は状態によらず動かない｡
+            // #214: リクエスト数の隣に次の sync の時刻｡#174 から #248 までは
+            // ここに "Sync list…" の入口が居て､時刻はその隣だった｡入口は
+            // メニューへ移り (`menu::SyncList`)､時刻だけが残る — 同じ種類の
+            // 事実 (timeline ではなくアプリについての累計) の隣なのは
+            // 変わらない｡
             //
             // この margin は､どう読めようとも行の `gap_3` と重複しては
             // いない｡ここはウィンドウで唯一､裸のテキスト span が二つ兄弟に
             // なる場所で — 他はどこも子が自分の padding を持つ — 画面上で
             // gap はそれらをまったく引き離さない: "Total: 11 req" と
-            // "List sync: …" は "11 reqList sync" のようにくっついて
-            // 描かれる｡gap を `gap_8` へ上げても何も変わらないので､間隔は
-            // ここで実際に効くと示せる場所から来なければ
-            // ならない｡
+            // "Next sync in …" は "11 reqNext sync" のようにくっついて
+            // 描かれる (#182 の "11 reqList sync" と同じ)｡gap を `gap_8` へ
+            // 上げても何も変わらないので､間隔はここで実際に効くと示せる
+            // 場所から来なければならない｡
             //
             // #184: この margin は今テストの下にある｡どちらの segment にも
             // 名前が付いているので､ウィンドウのテストが配置後の bounds を
             // 読み返して､それらが接していないことを要求できる — それこそが
             // 欠陥そのもので､このコメントを書いた時点ではスクリーンショット
-            // 以外に捕まえる手が無かった
-            // ものである｡
-            .child(
-                div()
-                    .addressable("status-sync")
-                    .ml(theme::ROW_PAD_X)
-                    .child(self.sync_segment(cx)),
-            )
-            // #214: 入口の隣に次の時刻｡入口とは別の要素にしてある — 入口は
-            // クリックできる (`ask_to_sync`) ので､同じ要素に足すと当たりが
-            // 文言の分だけ広がる｡margin は上と同じ理由で `gap` に頼らない｡
+            // 以外に捕まえる手が無かったものである｡
+            //
             // 文言は `density` が幅で選ぶ｡それでも帯に入りきらないとき最初に
             // 譲るのはこれだ: `min_w(0)` が無いと flex item は中身より狭く
             // なれず､代わりに右端の post の数がウィンドウの外へ押し出される｡

@@ -71,7 +71,7 @@ use toast::Toast;
 
 use crate::menu::{
     BlurComposer, CloseWindow, FocusComposer, KEY_CONTEXT, Minimize, Reload, ScrollToTop,
-    ShowAbout, ShowNewPosts, ToggleFollowNewPosts,
+    ShowAbout, ShowNewPosts, SyncList, ToggleFollowNewPosts,
 };
 use crate::oauth;
 use crate::paths::Paths;

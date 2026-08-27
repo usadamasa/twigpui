@@ -44,6 +44,10 @@ gpui::actions!(
         /// 純粋に見せ方の話で — poll そのものは `auto_refresh` のスイッチな
         /// ので､どちらに倒しても何も費やさない｡
         ToggleFollowNewPosts,
+        /// list sync の確認ダイアログを開く (#248)｡footer の入口から移した:
+        /// 手で同期を始めるのはまれで､そのために footer の幅を使い続ける
+        /// 理由が無い｡鍵は持たない — 確認の先で API リクエストを費やす｡
+        SyncList,
     ]
 );
 
@@ -279,6 +283,11 @@ pub(crate) fn menus() -> Vec<gpui::Menu> {
             name: "View".into(),
             items: [
                 RELOAD.menu_item(),
+                // #248: Reload の隣｡どちらも押せば API リクエストを費やす
+                // 操作で､こちらは確認ダイアログを挟む｡鍵が無いので
+                // `Shortcut` ではなく素の項目 — `every_menu_item_has_a_binding`
+                // が名指しで除いている｡
+                Some(gpui::MenuItem::action("Sync List…", SyncList)),
                 SHOW_NEW_POSTS.menu_item(),
                 TOGGLE_FOLLOW_NEW_POSTS.menu_item(),
                 SCROLL_TO_TOP.menu_item(),

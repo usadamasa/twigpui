@@ -8,7 +8,7 @@
 //! いつかを言わない｡
 //!
 //! ここは 2 つの期限を同じ形で出す — toolbar の reload アイコンの隣に
-//! "Auto-refresh in 4m"､footer の "Sync list…" の隣に "next in 5h 12m"｡
+//! "Auto-refresh in 4m"､footer のリクエスト数の隣に "Next sync in 5h 12m"｡
 //! 期限そのものはここで決めない｡auto-refresh の期限は [`poll_due_at`] が
 //! ([`super::auto_refresh::next_tick`] と同じ規則で) 出し､sync の期限は
 //! [`SyncStatus::Idle`] が tick から運んできた `until` をそのまま読む｡
@@ -20,12 +20,12 @@
 //! 最初は両方を footer に置いた｡550px の fixture ですら "posts kept" が
 //! 右端から落ちた｡footer にはリクエスト数と sync の入口と post の数が
 //! すでに並んでいて､本番で実際に使われている 429px では､それだけで
-//! 幅の 9 割が埋まる｡
+//! 幅の 9 割が埋まっていた (入口は #248 でメニューへ移った)｡
 //!
 //! だから auto-refresh の期限は toolbar へ — それが次に押すことになる
 //! reload のアイコンの隣は､どのみち読みやすい場所だ — sync の期限は
-//! footer に残し､文言を幅で選ぶ ([`density`])｡広ければ "next in 5h 12m"､
-//! 狭ければ "5h 12m"｡post の数も同じ段で "posts kept" から "posts" へ
+//! footer に残し､文言を幅で選ぶ ([`density`])｡広ければ "Next sync in 5h 12m"､
+//! 狭ければ "Sync in 5h 12m"｡post の数も同じ段で "posts kept" から "posts" へ
 //! 縮む｡それでも入らないときは､右端の post の数を落とすのではなく
 //! sync の期限を "…" で切る (`chrome::status_bar` の `truncate`)｡
 //! 数字が読めないより､どこが読めていないか分かるほうがよい｡
@@ -55,18 +55,20 @@ use crate::activity::Activity;
 /// 縮める先が無いからだ — "5h 12m" より短い残り時間の書き方は無い｡
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Density {
-    /// 全部書く: "Auto-refresh in 4m"､"next in 5h 12m"､"posts kept"｡
+    /// 全部書く: "Auto-refresh in 4m"､"Next sync in 5h 12m"､"posts kept"｡
     Wide,
-    /// 主語を落とす: "in 4m"､"5h 12m"､"posts"｡
+    /// 主語を落とす: "in 4m"､"Sync in 5h 12m"､"posts"｡
     Compact,
 }
 
 /// この幅を下回ると [`Density::Compact`] になる｡
 ///
-/// 実測から置いた｡`Wide` の footer は本番のフォントで 478px 要る
+/// 実測から置いた (#214)｡`Wide` の footer は本番のフォントで 478px 要った
 /// (usage 140､入口 54､"next in 5h 59m" 82､"N / 500 posts kept" 118､
-/// 余白 84)｡520 は `Wide` に 40px の余裕を残す — フォントや桁数の
-/// 揺れで "…" が出たり消えたりする境目を､使う幅から離しておく｡
+/// 余白 84)｡#248 で入口 (54 と margin 12) が抜け､代わりに文言が
+/// "Next sync in 5h 59m" へ伸びた — こちらの幅は本番のフォントでは
+/// 測っていない｡520 は `Wide` に余裕を残す — フォントや桁数の揺れで
+/// "…" が出たり消えたりする境目を､使う幅から離しておく｡
 /// 既定のウィンドウ (560px) は `Wide`､本番の 429px は `Compact`｡
 pub(super) const COMPACT_BELOW: Pixels = px(520.);
 
@@ -157,15 +159,16 @@ pub(super) fn sync_deadline(status: &SyncStatus) -> Option<i64> {
     }
 }
 
-/// footer の sync の segment が言うこと｡"Sync list…" の入口のすぐ隣に
-/// 座るので主語を繰り返さない — "Sync list… next in 5h 12m" と読める｡
-/// `Compact` では "next in" も落とす｡入口の隣の薄い数字は､それだけで
-/// 次の時刻だと読める｡
+/// footer の sync の segment が言うこと｡#248 までは "Sync list…" の入口の
+/// すぐ隣に座っていたので主語を省けた ("Sync list… next in 5h 12m")｡入口が
+/// メニューへ移って単独になったので､何のカウントダウンかは自分で言う｡
+/// `Compact` では "Next" を落とす — toolbar の "Auto-refresh in 4m" が
+/// "in 4m" になるのと同じ段｡
 pub(super) fn sync_next_label(until: i64, now: i64, density: Density) -> String {
     let remaining = countdown(until.saturating_sub(now));
     match density {
-        Density::Wide => format!("next in {remaining}"),
-        Density::Compact => remaining,
+        Density::Wide => format!("Next sync in {remaining}"),
+        Density::Compact => format!("Sync in {remaining}"),
     }
 }
 
