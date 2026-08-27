@@ -15,7 +15,7 @@ committed scope: `tweet.read users.read tweet.write like.write offline.access`
 
 ## アプリが使っている 11 本 (`src/rate_limit.rs` の `Endpoint`)
 
-URL の組み立ては `src/x_api/client.rs` の各 builder が正本。
+URL の組み立ては `src/x_api/client/urls.rs` の各 builder が正本。
 
 | `Endpoint` | メソッドとパス | 必要な scope | 実測上限 |
 | --- | --- | --- | --- |
@@ -55,7 +55,7 @@ Lists read の resource 課金は Developer Console で未確認。
 
 このリポジトリの資格情報は OAuth 2.0 ユーザーコンテキストだけなので実害はないが、
 **「Bearer で試して切り分ける」という手はこれらでは使えない。**
-`src/x_api/client.rs` の `fn me()` の doc コメントが同じことを書いている。
+`src/x_api/client/endpoints.rs` の `fn me()` の doc コメントが同じことを書いている。
 
 ## committed scope で届くその他の読み取り
 
@@ -164,7 +164,7 @@ entities.mentions.username geo.place_id article.cover_media article.media_entiti
 
 アプリが使っている `referenced_tweets.id.author_id` と
 `referenced_tweets.id.attachments.media_keys` も列挙に無いが、これらは probe ではなく
-**`src/x_api/client.rs` の `TIMELINE_FIELDS` が実行時に動いていることが根拠**。
+**`src/x_api/client/urls.rs` の `TIMELINE_FIELDS` が実行時に動いていることが根拠**。
 
 `user.fields`:
 

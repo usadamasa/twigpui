@@ -74,8 +74,9 @@ cargo test
   落ちるので、**レベルを下げて回避しない**。バイナリクレートなので公開項目は `pub(crate)`。
   clippy に弾かれたときの書き直し方は `rust-lint-gauntlet` スキルに従う。
 - **ファイルサイズは CI が落とす**: `scripts/code-metrics.sh --check` が
-  `metrics-baseline.tsv` の天井と突き合わせる。新規ファイルは先に登録しないと落ちる。
-  天井の上げ下げは `code-metrics-ratchet` スキルに従う。
+  実装行数を一律の上限 (600 行) と突き合わせる。超えたら分割する。
+  上限より大きいまま残っているファイルの天井は `metrics-baseline.tsv` にあり、
+  上げられない (#241)。落ちたときの手順は `code-metrics-ratchet` スキルに従う。
 - **カバレッジは報告のみ、閾値は無い**: `scripts/coverage.sh` が実装だけの
   カバレッジを出す (テストは同じファイルの `#[cfg(test)]` にあるので、素の
   `cargo llvm-cov` の数字は 25 ポイント以上ふくらむ)。CI の Coverage ジョブは

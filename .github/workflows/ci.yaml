@@ -223,9 +223,14 @@ jobs:
       # #48 のゲートであり､ゲートである唯一のメトリクスだ｡関数の長さは
       # すでに `clippy::too_many_lines` (`pedantic` 経由で deny､#47) が
       # 強制しているし､認知的複雑度はゲートにするヒットが無い｡ファイル
-      # サイズには実際の問題があり､既存のチェックが無い｡絶対値の上限では
-      # なく `metrics-baseline.tsv` に対してラチェットするので､成長は
-      # 可能だが決して黙ってはいない — 天井を超えるとここで落ち､通す道は
-      # 同じ pull request で天井を上げることだけだ｡
-      - name: Check file sizes against the baseline
+      # サイズには実際の問題があり､既存のチェックが無い｡上限は一律で
+      # (#241)､超えたファイルは分割する｡上限より大きいまま残っている
+      # ファイルの天井は `metrics-baseline.tsv` にあり､main と比べて下がる
+      # 方向にしか動かせない — その比較のために main を fetch する
+      # (`actions/checkout` は既定で pull request の merge commit だけを
+      # 持ってくる)｡
+      - name: Fetch main for the ceiling comparison
+        run: git fetch --no-tags --depth=1 origin main
+
+      - name: Check file sizes against the cap
         run: bash scripts/code-metrics.sh --check
