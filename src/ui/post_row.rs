@@ -84,6 +84,7 @@ impl TimelineView {
             Some(path) => frame
                 .child(
                     img(path.clone())
+                        .addressable(format!("media-image-{}", media.url))
                         .size_full()
                         .rounded(theme::RADIUS_THUMB)
                         .object_fit(ObjectFit::Contain),

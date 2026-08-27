@@ -2061,9 +2061,16 @@ mod tests {
         });
 
         let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
-        visual.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
+        // 2 回描く: 最初の draw が画像のデコードを background に頼み､
+        // `run_until_parked` がそれを終わらせ､2 回目の draw で gpui が画像の
+        // 縦横比を layout に持ち込む｡1 回目の bounds では縦横比の影響が
+        // まだ無く､画面で起きる突き抜けを見られない｡
+        for _ in 0..2 {
+            visual.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            cx.run_until_parked();
+        }
 
         // `Pixels` の四則は `arithmetic_side_effects` に弾かれるので､素の
         // f32 で比べる (`rust-lint-gauntlet`)｡
@@ -2078,6 +2085,23 @@ mod tests {
         assert!(
             single > timeline_width / 2.0,
             "a lone thumbnail spans the column: {single} of {timeline_width}"
+        );
+        // 着いた画像そのものも枠に収まる｡`size_full` の高さは親の固定の
+        // 高さに効かず､画像の縦横比で決まってしまう — その画像は枠を
+        // 突き抜けて次の行に重なる｡
+        let image = laid_out(&mut visual, "media-image-media/e.png");
+        assert!(
+            close(
+                f32::from(image.size.height),
+                f32::from(super::MEDIA_CELL_HEIGHT)
+            ),
+            "an image that arrived is as tall as its frame, not as tall as its aspect ratio says: {}",
+            image.size.height
+        );
+        assert!(
+            f32::from(image.size.width) <= arrived + 1.0,
+            "an image that arrived stays inside its frame: {} in {arrived}",
+            image.size.width
         );
         assert!(
             close(arrived, single),
