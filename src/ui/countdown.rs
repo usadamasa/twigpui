@@ -392,17 +392,25 @@ mod tests {
     }
 
     #[test]
-    fn the_sync_count_follows_its_entry_without_repeating_the_subject() {
+    fn the_sync_countdown_names_its_subject_now_that_it_stands_alone() {
+        // #248: 入口がメニューへ移り､footer にはこの文言だけが残るので､
+        // 何のカウントダウンかは自分で言う｡
         assert_eq!(
             sync_next_label(19_720, 1_000, Density::Wide),
-            "next in 5h 12m"
+            "Next sync in 5h 12m"
         );
-        assert_eq!(sync_next_label(1_000, 1_000, Density::Wide), "next in 0s");
+        assert_eq!(
+            sync_next_label(1_000, 1_000, Density::Wide),
+            "Next sync in 0s"
+        );
     }
 
     #[test]
-    fn a_narrow_window_keeps_only_the_number_by_the_sync_entry() {
-        assert_eq!(sync_next_label(19_720, 1_000, Density::Compact), "5h 12m");
+    fn a_narrow_window_shortens_the_sync_countdown() {
+        assert_eq!(
+            sync_next_label(19_720, 1_000, Density::Compact),
+            "Sync in 5h 12m"
+        );
     }
 
     // --- kept_label ---
