@@ -30,8 +30,9 @@ tail -f ~/.local/state/twigpui/logs/twigpui.log
 **debug ビルドは別ファイル (#169)。** `cargo run` の挙動を追っているのに
 `twigpui/` の下を読んでいると、何も出ていないように見える。
 
-ターミナルから起動したときは同じ行が stderr にも流れる。`.app` から起動したときは
-ファイルだけ。
+ターミナルから起動したときは stderr にも流れる。**stderr はレベルで絞られない**
+(`log::write` はレベルの判定より前に echo する) ので、ターミナルに出た `DEBUG` の行が
+ファイルに無いのは正常。`.app` から起動したときはファイルだけ。
 
 ## 起動の行から読む
 
@@ -56,9 +57,11 @@ dev の `config.toml` は `~/.config/twigpui-dev/config.toml`。
 ## ログに無いもの
 
 - **トークン。** 書く前に `log::redact` を通る: `Bearer <token>`、および
-  `access_token` / `refresh_token` / `client_secret` / `token` / `code` / `state` の
-  値は `[redacted]` になる。伏せすぎに倒してあるので、値が要る調査はログでは
+  `access_token=` / `refresh_token=` / `client_secret=` / `token=` / `code=` / `state=`
+  の値は `[redacted]` になる。伏せすぎに倒してあるので、値が要る調査はログでは
   できない。ファイル自体も `0600`。
+  **JSON 形 (`"access_token":"…"`) は伏せない** (#246)。token エンドポイントの
+  本文をそのままログに出す行は書かない。
 - **ヘッドレスの出力。** `--fetch-only` / `--fetch-post` / `--usage` は stderr へ
   直接書き、ファイルには残さない。ターミナルの出力を保存する。
 - **1 MiB より前。** 超えた時点で `twigpui.log.1` へ移して新しく始める。
