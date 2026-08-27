@@ -58,10 +58,15 @@ impl TimelineView {
     /// を示す badge を出す; どちらもここでは再生されない｡
     ///
     /// 枠の幅は行が決める (#154): セルは `flex_1` で行の幅を分け合い､画像は
-    /// `Cover` で枠を埋めて､はみ出す分を枠が切り取る｡画像の縦横比に幅を
-    /// 任せると､縦長の 1 枚が細く立って右半分が空く｡高さが固定なのは
-    /// [`Self::media_grid`] の doc のとおり — 幅も同じ理屈で､画像が着いても
-    /// 枠は動かない｡
+    /// 枠の中に `Contain` で収める｡画像の縦横比に幅を任せると､縦長の 1 枚が
+    /// 細く立って右半分が空く｡高さが固定なのは [`Self::media_grid`] の doc の
+    /// とおり — 幅も同じ理屈で､画像が着いても枠は動かない｡
+    ///
+    /// `Cover` で枠を埋めない理由は角丸だ｡gpui の content mask は矩形しか
+    /// 持たず､`Cover` は枠より大きい quad を描くので､切り取られた辺の角が
+    /// 直角になる — 既定幅では 2 列のセルが 2.35:1 で､16:9 の写真もほぼ
+    /// 全部がそうなった｡枠を placeholder と同じ色で塗っておけば､縦長の
+    /// 画像は左右に余白を残して枠の中に座り､着く前と後で枠の形が変わらない｡
     fn media_cell(
         &self,
         media: &PostMedia,
@@ -74,12 +79,17 @@ impl TimelineView {
             .h(MEDIA_CELL_HEIGHT)
             .w_full()
             .rounded(theme::RADIUS_THUMB)
-            .overflow_hidden();
+            .bg(rgb(theme.border));
         let inner = match self.media_paths.get(&media.url) {
             Some(path) => frame
-                .child(img(path.clone()).size_full().object_fit(ObjectFit::Cover))
+                .child(
+                    img(path.clone())
+                        .size_full()
+                        .rounded(theme::RADIUS_THUMB)
+                        .object_fit(ObjectFit::Contain),
+                )
                 .into_any_element(),
-            None => frame.bg(rgb(theme.border)).into_any_element(),
+            None => frame.into_any_element(),
         };
 
         let mut cell = div()
