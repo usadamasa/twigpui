@@ -37,6 +37,7 @@
 use chrono::DateTime;
 use chrono_tz::Asia::Tokyo;
 
+use super::countdown::sync_deadline;
 use super::{Context, Duration, ReloadNotice, Theme, TimelineView, log, oauth, sync};
 
 /// ウィンドウが list sync について今知っていること (#174)｡
@@ -501,6 +502,12 @@ impl TimelineView {
     pub(super) fn show_sync(&mut self, status: SyncStatus, cx: &mut Context<'_, Self>) {
         self.sync_status = status;
         self.fade_sync_row(cx);
+        // #214: 次の時刻を持つ status になった瞬間から footer が数える｡
+        // ticker は数えるものが無くなると自分で終わるので､ここで起こし
+        // 直さないと "up to date" に戻った sync の期限が止まったまま残る｡
+        if sync_deadline(&self.sync_status).is_some() {
+            self.start_countdown_ticker(cx);
+        }
         cx.notify();
     }
 

@@ -134,6 +134,9 @@ impl Render for TimelineView {
         // #206: toast の件数には書き手が多いので､見直すのは描画の頭で —
         // `fade_toast` の doc を見る｡`body` がこの結果を読む｡
         self.fade_toast(cx);
+        // #214: 枠の文言はウィンドウの幅で選ぶ｡toolbar と footer が別々の
+        // 段にならないよう､ここで 1 回決めて両方へ渡す｡
+        let density = countdown::density(window.viewport_size().width);
 
         div()
             // #58: どのバインディングもグローバルに登録するのではなく､この
@@ -225,7 +228,7 @@ impl Render for TimelineView {
             .bg(rgb(theme.bg))
             .text_color(rgb(theme.text))
             .text_size(theme::TEXT_BODY)
-            .child(self.header(cx))
+            .child(self.header(density, cx))
             // #54: `state` に関わらず出す — これが直す不具合はまさに､何も
             // 起きなかったかのように描かれる timeline なので､このバナーは下の
             // `body` が今何を出していようと独立して生き残らねばならない｡
@@ -271,7 +274,7 @@ impl Render for TimelineView {
             .when_some(self.sync_row(), ParentElement::child)
             // #95: ステータスバー｡ヘッダーがツールバーになった今､累計の
             // リクエスト数が住んでいるのはここだ｡
-            .child(self.status_bar(cx))
+            .child(self.status_bar(density, cx))
             // #205: 手動 sync の確認｡`absolute` なので列の中で場所を取らず
             // ウィンドウ全体を覆う｡最後の子なのは重なり順のため｡
             .when_some(self.sync_dialog(cx), ParentElement::child)

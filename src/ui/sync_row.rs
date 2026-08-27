@@ -347,8 +347,11 @@ impl TimelineView {
                 refusals: fixture.refusals,
             }
         } else {
+            // #214: `until` は footer が "Next sync in …" と数える先｡
+            // 追いつきの最中なら次のバッチ — ここではフェードが落ちる
+            // その瞬間だ｡
             SyncStatus::Idle {
-                until: now,
+                until: now.saturating_add(Self::FIXTURE_SYNC_SECONDS.cast_signed()),
                 pending: fixture.pending,
             }
         };
@@ -358,9 +361,13 @@ impl TimelineView {
                 .timer(Duration::from_secs(Self::FIXTURE_SYNC_SECONDS))
                 .await;
             let _ = this.update(cx, |this, cx| {
+                // #214: 定常状態の `until` は本物の tick が返すのと同じ
+                // 1 interval 先｡`now` のままだと "Next sync in 0s" が
+                // 撮った画面に残り続ける｡
+                let interval = i64::from(this.config.sync_interval_seconds);
                 this.show_sync(
                     SyncStatus::Idle {
-                        until: oauth::unix_now(),
+                        until: oauth::unix_now().saturating_add(interval),
                         pending: 0,
                     },
                     cx,
