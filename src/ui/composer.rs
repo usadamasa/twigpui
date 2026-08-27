@@ -138,10 +138,19 @@ impl TimelineView {
             // submit が進行中の間は編集を拒む｡下の submit ボタン自身の
             // 無効状態に倣う — なぜそれが大事なのかは
             // `ComposeState::can_submit` の doc を見よ｡
+            //
+            // #153: カウンタとボタンを隠す条件がそのまま､入力欄を 1 行に
+            // 畳む条件でもある｡畳むのは高さの上書きだけで､ウィジェットも
+            // その中の下書きも作り直さない — 畳んだ状態は定義から空なので､
+            // 固定の高さが `auto_grow` と喧嘩することは無い｡
             .child(
-                div()
-                    .addressable("compose-input")
-                    .child(Input::new(&self.compose_input).disabled(is_submitting)),
+                div().addressable("compose-input").child(
+                    Input::new(&self.compose_input)
+                        .disabled(is_submitting)
+                        .when(!showing_controls, |input| {
+                            input.h(theme::COMPOSER_FOLDED_HEIGHT)
+                        }),
+                ),
             )
             // #16: "Quote" が設定していれば quote の対象 —
             // `composer_quote_card` の doc を見よ｡

@@ -82,6 +82,16 @@ pub(crate) const TOOLBAR_HEIGHT: Pixels = px(44.0);
 /// ウィンドウ下端のステータスバー (#95)｡
 pub(crate) const STATUS_BAR_HEIGHT: Pixels = px(24.0);
 
+/// 空でフォーカスも無い composer の入力欄の高さ (#153) — 1 行ぶん｡
+///
+/// 入力ウィジェット (`gpui_component::Input`) の 1 行 (`1.25rem` = 20px) と
+/// 上下の余白 (8px ずつ) と枠線 (1px ずつ) の和｡ウィジェット側の定数は
+/// 公開されていないので､ここに写してある｡ずれれば
+/// `the_composer_folds_to_one_line_until_it_is_used` が 40px の上限で落ちる｡
+/// 広がった状態 (2 行以上) はウィジェットの `auto_grow` に任せ､ここでは
+/// 決めない｡
+pub(crate) const COMPOSER_FOLDED_HEIGHT: Pixels = px(38.0);
+
 /// ステータスバーの 1 段上に座る list sync の行 (#205)｡
 ///
 /// フェードの最中も含め､行が出ている間はずっとこの高さ｡0 から補間すると
