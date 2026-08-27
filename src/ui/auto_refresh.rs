@@ -56,6 +56,14 @@ use super::*;
 /// 二重にポーリングすることは無い｡
 const BUSY_RECHECK_SECONDS: i64 = 5;
 
+/// 終わった 1 回のポーリングのあと､ループが続くか終わるか (#239)｡
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Poll {
+    Continue,
+    /// 繰り返しても同じ答えしか返らない拒否だった｡[`halting_reason`] を見よ｡
+    Halt,
+}
+
 /// auto-refresh ループの 1 回の起床が何をすべきか｡
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Tick {
@@ -175,6 +183,52 @@ pub(super) fn pending_after_poll(
         items: incoming,
         count,
     })
+}
+
+/// 失敗したポーリングを繰り返す意味があるか (#239)｡`Some` を返したら
+/// ループはそこで終わり､返した文言が常設バナーになる｡
+///
+/// #239 のログはこれが無かった姿だ: 3 分ごとの 403 が 30 行､続いて 401 が
+/// 100 行以上｡どれも同じ理由で拒まれ続けていて､次の 1 回が違う答えを持ち
+/// 帰る見込みはどこにも無かった｡
+///
+/// 止めるのは **X が答えたうえで断った** 場合だけだ｡ネットワークの瞬断も
+/// 5xx も普通の rate limit も `None` を返す — そのどれも次の tick には
+/// 直っていておかしくないし､ポーリングの失敗は黙って捨てるという
+/// [`TimelineView::apply_poll`] の約束は､そちらにはそのまま当てはまる｡
+pub(super) fn halting_reason(error: &anyhow::Error) -> Option<String> {
+    if let Some(denied) = error.downcast_ref::<Denied>() {
+        return Some(match denied.denial {
+            // 401 が生き残るのは､更新した token まで拒まれたときだけだ
+            // (#239 の Session が期限前に更新する)｡つまりセッションそのもの
+            // が死んでいる｡
+            Denial::Rejected => "X no longer accepts this sign-in session, so auto-refresh \
+                 has stopped. Click \"Sign in with X\" to start a new session."
+                .to_string(),
+            Denial::Forbidden => format!(
+                "X refused the auto-refresh poll ({}), so it has stopped: {}. Check the \
+                 monthly spend cap and this app's permissions in the X developer portal, \
+                 then restart twigpui.",
+                denied.endpoint.key(),
+                denied.detail
+            ),
+        });
+    }
+    if let Some(expired) = error.downcast_ref::<oauth::SessionExpired>() {
+        return Some(format!(
+            "auto-refresh has stopped because the X sign-in session could not be renewed \
+             ({}). Click \"Sign in with X\" to start a new session.",
+            expired.detail
+        ));
+    }
+    if let Some(cap) = error.downcast_ref::<rate_limit::UsageCapExceeded>() {
+        return Some(format!(
+            "auto-refresh has stopped because the X API credit is used up: {}. Top up the \
+             balance, then restart twigpui.",
+            cap.detail
+        ));
+    }
+    None
 }
 
 /// pill が言うこと｡
@@ -343,6 +397,11 @@ impl TimelineView {
             return;
         };
 
+        // #239: 前のループが止まった理由は､新しいループより長生きできない｡
+        // ここへ来る 2 つ目の経路は再サインインで､それはまさに 401 で
+        // 止まったループへの答えだ｡
+        self.auto_refresh_notice = None;
+
         let paths = self.paths.clone();
         let source = self.source.clone();
         let max_results = self.config.max_results;
@@ -403,7 +462,15 @@ impl TimelineView {
                                 .await
                         };
 
-                        let _ = this.update(cx, |this, cx| this.apply_poll(result, cx));
+                        // #239: `Err` はウィンドウが消えたということで､
+                        // 下の `Halt` と同じくループを終える｡
+                        let Ok(poll) = this.update(cx, |this, cx| this.apply_poll(result, cx))
+                        else {
+                            return;
+                        };
+                        if poll == Poll::Halt {
+                            return;
+                        }
                         now.saturating_add(i64::from(interval_seconds))
                     }
                 };
@@ -442,11 +509,16 @@ impl TimelineView {
     /// `next_page_token` は意図的に更新しない｡これは "Load older" の
     /// カーソルで､読み手がどこまで遡ったかを表す｡背後で取った先頭ページ
     /// は､scroll の途中でそれを巻き戻してしまう｡
+    ///
+    /// 例外は 1 つだけで､#239 が足した: [`halting_reason`] が「次の 1 回も
+    /// 同じ答えだ」と言う拒否なら､ループを止めてバナーを出す ([`Poll::Halt`])｡
+    /// 上の「黙って捨てる」が守っているのは一時的な失敗で読み手を煩わせない
+    /// ことであり､**取得が止まったこと自体を隠すこと** ではない｡
     pub(super) fn apply_poll(
         &mut self,
         result: anyhow::Result<cache::ReloadedPrimary>,
         cx: &mut Context<'_, Self>,
-    ) {
+    ) -> Poll {
         self.refresh_usage(cx);
         let reloaded = match result {
             Ok(reloaded) => reloaded,
@@ -454,7 +526,13 @@ impl TimelineView {
                 // `log::redact` は出ていく途中で走る — API のエラーは
                 // それを生んだリクエストを引用しうる｡
                 log::error(&format!("auto-refresh poll failed: {error:#}"));
-                return;
+                let Some(reason) = halting_reason(&error) else {
+                    return Poll::Continue;
+                };
+                log::warn(&format!("auto-refresh stopped: {reason}"));
+                self.auto_refresh_notice = Some(SharedString::from(reason));
+                cx.notify();
+                return Poll::Halt;
             }
         };
 
@@ -470,9 +548,10 @@ impl TimelineView {
         };
         let Some(pending) = pending_after_poll(&displayed, reloaded.items) else {
             // 新着無し｡notice すら出さない — このメソッドの doc を見よ｡
-            return;
+            return Poll::Continue;
         };
         self.present_poll(pending, cx);
+        Poll::Continue
     }
 
     /// ポーリングの新着 post が画面上で何になるか (#21, #22): 流し込みか､
@@ -1008,5 +1087,74 @@ mod tests {
             }
             other => unreachable!("half a second in, both should still be gliding: {other:?}"),
         }
+    }
+
+    // --- #239: 繰り返す意味のない拒否 ---
+    //
+    // issue のログは同じ拒否を 130 行以上積み上げた｡下の 3 本が止める側で､
+    // 続く 3 本が「止めすぎない」側だ｡後者が無いと､夜中のネットワークの
+    // 瞬断ひとつで朝まで取得が死ぬ｡
+
+    #[test]
+    fn a_spend_cap_403_stops_the_poll_and_says_where_to_look() {
+        let error = anyhow::Error::from(Denied {
+            endpoint: rate_limit::Endpoint::ListTimeline,
+            denial: Denial::Forbidden,
+            detail: "Forbidden: Your monthly spend cap has been reached.".to_string(),
+        });
+        let reason = halting_reason(&error).unwrap();
+        assert!(reason.contains("list_timeline"), "{reason}");
+        assert!(reason.contains("monthly spend cap"), "{reason}");
+    }
+
+    #[test]
+    fn a_401_stops_the_poll_and_points_at_signing_in_again() {
+        let error = anyhow::Error::from(Denied {
+            endpoint: rate_limit::Endpoint::ListTimeline,
+            denial: Denial::Rejected,
+            detail: "Unauthorized".to_string(),
+        });
+        let reason = halting_reason(&error).unwrap();
+        assert!(reason.contains("Sign in with X"), "{reason}");
+    }
+
+    #[test]
+    fn an_exhausted_credit_cap_stops_the_poll() {
+        let error = anyhow::Error::from(rate_limit::UsageCapExceeded {
+            detail: "Usage cap exceeded: Monthly product cap".to_string(),
+        });
+        assert!(halting_reason(&error).is_some());
+    }
+
+    #[test]
+    fn a_session_that_cannot_be_renewed_stops_the_poll() {
+        let error = anyhow::Error::from(oauth::SessionExpired {
+            detail: "invalid_request".to_string(),
+        });
+        let reason = halting_reason(&error).unwrap();
+        assert!(reason.contains("Sign in with X"), "{reason}");
+    }
+
+    #[test]
+    fn an_ordinary_rate_limit_keeps_polling() {
+        // これは待てば直る｡`decision` が次の tick を送らせないので､
+        // ループを殺す理由が無い｡
+        let error = anyhow::Error::from(rate_limit::RateLimited {
+            reset_at: Some(1_700_000_000),
+            opaque: false,
+        });
+        assert_eq!(halting_reason(&error), None);
+    }
+
+    #[test]
+    fn a_dropped_connection_keeps_polling() {
+        let error = anyhow::anyhow!("request to https://api.x.com/2/lists/1/tweets failed");
+        assert_eq!(halting_reason(&error), None);
+    }
+
+    #[test]
+    fn a_5xx_keeps_polling() {
+        let error = anyhow::anyhow!("list_timeline: HTTP 503 — upstream unavailable");
+        assert_eq!(halting_reason(&error), None);
     }
 }

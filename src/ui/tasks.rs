@@ -113,7 +113,7 @@ impl TimelineView {
                         this.session_notice = session_notice.map(SharedString::from);
                         this.signed_in_with_oauth = true;
                         this.oauth_scope.clone_from(&credential.scope);
-                        this.client = Some(XClient::new(credential.token));
+                        this.client = Some(XClient::renewing(credential.session));
                         // `client` と `oauth_scope` の後に置く｡これらを
                         // 条件にし､借りるからだ; 下の fetch より前に置く｡
                         // どちらにせよ依存していないからだ｡
@@ -992,25 +992,32 @@ impl TimelineView {
                 .spawn(async move {
                     let tokens = oauth::sign_in(&executor, &client_id).await?;
                     oauth::tokens::save(&paths, &tokens)?;
-                    anyhow::Ok(tokens)
+                    let scope = tokens.scope.clone();
+                    // #239: 起動時の経路と同じく `Session` を渡す｡ここで
+                    // 文字列を渡すと､サインインし直した窓だけが 2 時間で
+                    // 401 に落ちる窓に戻る｡
+                    anyhow::Ok(oauth::Credential {
+                        session: oauth::Session::new(client_id, paths, tokens),
+                        scope,
+                    })
                 })
                 .await;
 
             let _ = this.update(cx, |this, cx| match result {
-                Ok(tokens) => {
+                Ok(credential) => {
                     log::info("signed in with OAuth");
                     this.signed_in_with_oauth = true;
                     // #14: 新しく許可された scope — 再認可が成功した直後
                     // に `offers_reauthorize` がボタンを出すのをやめるのは
                     // これのおかげだ｡
-                    this.oauth_scope.clone_from(&tokens.scope);
+                    this.oauth_scope.clone_from(&credential.scope);
                     // #54: 新しい sign-in はバナーが報じていた何であれ
                     // 解消する — 期限切れのセッションが真新しいものを
                     // 越えて期限切れのままではいられない｡
                     this.session_notice = None;
                     // #11: 保存された OAuth セッションは常に home timeline
                     // へ対応する — `TimelineSource::for_credential` を見よ｡
-                    this.client = Some(XClient::new(tokens.access_token));
+                    this.client = Some(XClient::renewing(credential.session));
                     // sync が始まりうるもう一方の場所だ｡"Re-authorize" が
                     // 通る経路であり､scope 不足で断られたセッションに
                     // とって効くのはこちらだ: 足りなかった scope がいま

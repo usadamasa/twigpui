@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
@@ -7,6 +8,7 @@ use super::model::{
     ApiProblem, Draft, ListPageResponse, ListSummary, TimelineItem, TimelineResponse,
     TweetIdRequest, User, UserIdRequest, UserLookupResponse, UserPageResponse,
 };
+use crate::oauth;
 use crate::paths::Paths;
 use crate::rate_limit::{self, Endpoint, RateLimitState};
 use crate::url::Url;
@@ -15,18 +17,47 @@ use crate::usage;
 const API_BASE: &str = "https://api.x.com/2";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 
-/// app-only の Bearer token で届く read エンドポイント向けの blocking client｡
+/// user-context の OAuth セッションで届く X API 向けの blocking client｡
 ///
 /// 呼び出しはどれもアカウントの API クレジットから課金されるので､UI は明示的な
 /// ユーザー操作のときだけ取得する (初回ロードとリロードボタン)｡
 #[derive(Clone)]
 pub(crate) struct XClient {
     agent: Agent,
-    bearer_token: String,
+    bearer: Bearer,
+}
+
+/// リクエストごとに `Authorization` ヘッダへ載せる token の出どころ (#239)｡
+#[derive(Clone)]
+enum Bearer {
+    /// 期限が来たら自分を更新するセッション｡本番の経路はすべてこれだ:
+    /// [`XClient`] は auto-refresh のポーリングと list sync へ clone されて
+    /// 渡り､どちらもウィンドウの一生ぶん生きる｡token の文字列を持たせると
+    /// 起動時の姿のまま凍りつき､X の access token が切れる 2 時間後に
+    /// すべての取得が 401 になる (#239)｡`Arc` を共有するので､clone が
+    /// いくつあっても更新するのは 1 度だけだ｡
+    Renewing(Arc<oauth::Session>),
+    /// 固定の token｡テストだけが使う — ここを通る `XClient` は
+    /// どのみち何も送らないので､`oauth::Session` とそれが要る `Paths` を
+    /// 組み立てさせる意味が無い｡
+    #[cfg(test)]
+    Static(String),
 }
 
 impl XClient {
+    /// 期限が来たら自分を更新するセッションを持つ client (#239)｡
+    /// [`Bearer::Renewing`] を見よ｡
+    pub(crate) fn renewing(session: Arc<oauth::Session>) -> Self {
+        Self::with_bearer(Bearer::Renewing(session))
+    }
+
+    /// 固定の token を持つ client｡[`Bearer::Static`] を見よ｡
+    #[cfg(test)]
     pub(crate) fn new(bearer_token: String) -> Self {
+        Self::with_bearer(Bearer::Static(bearer_token))
+    }
+
+    fn with_bearer(bearer: Bearer) -> Self {
         let config = Agent::config_builder()
             .timeout_global(Some(REQUEST_TIMEOUT))
             // 失敗が素のステータスコードではなく API 自身の説明を伴うよう､
@@ -35,8 +66,22 @@ impl XClient {
             .build();
         Self {
             agent: config.into(),
-            bearer_token,
+            bearer,
         }
+    }
+
+    /// このリクエストに載せる `Authorization` ヘッダの中身｡
+    /// [`Bearer::Renewing`] ではここが token を更新しうる継ぎ目で､
+    /// 送信 1 回ごとに (retry のたびにも) 通る — 更新の判断は
+    /// [`oauth::Session::bearer`] にあり､まだ新しければネットワークへは
+    /// 出ない｡
+    fn authorization(&self, now: i64) -> Result<String> {
+        let token = match &self.bearer {
+            Bearer::Renewing(session) => session.bearer(now)?,
+            #[cfg(test)]
+            Bearer::Static(token) => token.clone(),
+        };
+        Ok(format!("Bearer {token}"))
     }
 
     /// GET を 1 回行う｡まず #10 の中心的な規則を守る — `endpoint` の追跡中の
@@ -63,7 +108,7 @@ impl XClient {
     /// `rate_limit::parse_headers`､`rate_limit::classify_429` (下の
     /// [`check_status`] 経由)､そして `usage::record` だ｡
     fn get(&self, paths: &Paths, endpoint: Endpoint, url: &str, now: i64) -> Result<String> {
-        Self::send_with_retry(paths, endpoint, now, || self.send_once(url))
+        Self::send_with_retry(paths, endpoint, now, || self.send_once(url, now))
     }
 
     /// `POST /2/tweets` を 1 回行う (#14､`quote_tweet_id` は #16 で追加)｡
@@ -78,7 +123,9 @@ impl XClient {
         draft: Draft<'_>,
         now: i64,
     ) -> Result<String> {
-        Self::send_with_retry(paths, endpoint, now, || self.send_post_once(url, draft))
+        Self::send_with_retry(paths, endpoint, now, || {
+            self.send_post_once(url, draft, now)
+        })
     }
 
     /// DELETE を 1 回行う (#15 の repost 取り消し)｡[`Self::get`] と
@@ -87,7 +134,7 @@ impl XClient {
     /// メソッドに関わらず同じように適用され､repost の取り消しのためだけに
     /// 並行する retry ループを書くのではなく､DELETE もここでそれを得る｡
     fn delete(&self, paths: &Paths, endpoint: Endpoint, url: &str, now: i64) -> Result<String> {
-        Self::send_with_retry(paths, endpoint, now, || self.send_delete_once(url))
+        Self::send_with_retry(paths, endpoint, now, || self.send_delete_once(url, now))
     }
 
     /// [`Self::get`] と [`Self::post`] が共有する retry と永続化のループ:
@@ -148,7 +195,7 @@ impl XClient {
                     if status == 429 {
                         log_429(endpoint, state, refusal, &body);
                     }
-                    check_status(status, &body, refusal, now)?;
+                    check_status(endpoint, status, &body, refusal, now)?;
                     return Ok(body);
                 }
                 Err(error) => {
@@ -169,11 +216,11 @@ impl XClient {
     /// 生の HTTP GET 1 回: リクエストを送り､ボディを読み､返ってきた
     /// `x-rate-limit-*` ヘッダを [`rate_limit::parse_headers`] でパースする｡
     /// [`Self::get`] の retry ループが二度以上呼べるよう､そこから切り出した｡
-    fn send_once(&self, url: &str) -> Result<(u16, String, RateLimitState)> {
+    fn send_once(&self, url: &str, now: i64) -> Result<(u16, String, RateLimitState)> {
         let mut response = self
             .agent
             .get(url)
-            .header("Authorization", format!("Bearer {}", self.bearer_token))
+            .header("Authorization", self.authorization(now)?)
             .call()
             .with_context(|| format!("request to {url} failed"))?;
 
@@ -206,11 +253,16 @@ impl XClient {
     /// [`Self::send_once`] の形をなぞる｡`send_json` (`ureq` の `json` feature｡
     /// すでに依存にある) が [`super::model::PostTweetRequest`] を serialize し､
     /// `Content-Type: application/json` も設定する｡
-    fn send_post_once(&self, url: &str, draft: Draft<'_>) -> Result<(u16, String, RateLimitState)> {
+    fn send_post_once(
+        &self,
+        url: &str,
+        draft: Draft<'_>,
+        now: i64,
+    ) -> Result<(u16, String, RateLimitState)> {
         let mut response = self
             .agent
             .post(url)
-            .header("Authorization", format!("Bearer {}", self.bearer_token))
+            .header("Authorization", self.authorization(now)?)
             .send_json(draft.to_request())
             .with_context(|| format!("request to {url} failed"))?;
 
@@ -238,11 +290,11 @@ impl XClient {
     /// 生の HTTP DELETE 1 回 (#15)｡[`Self::send_with_retry`] が同じに扱えるよう
     /// [`Self::send_once`] の形をそのままなぞる — リクエストボディは無く､
     /// [`Self::send_post_once`]/[`Self::send_tweet_id_once`] とはそこが違う｡
-    fn send_delete_once(&self, url: &str) -> Result<(u16, String, RateLimitState)> {
+    fn send_delete_once(&self, url: &str, now: i64) -> Result<(u16, String, RateLimitState)> {
         let mut response = self
             .agent
             .delete(url)
-            .header("Authorization", format!("Bearer {}", self.bearer_token))
+            .header("Authorization", self.authorization(now)?)
             .call()
             .with_context(|| format!("request to {url} failed"))?;
 
@@ -279,11 +331,12 @@ impl XClient {
         &self,
         url: &str,
         tweet_id: &str,
+        now: i64,
     ) -> Result<(u16, String, RateLimitState)> {
         let mut response = self
             .agent
             .post(url)
-            .header("Authorization", format!("Bearer {}", self.bearer_token))
+            .header("Authorization", self.authorization(now)?)
             .send_json(TweetIdRequest { tweet_id })
             .with_context(|| format!("request to {url} failed"))?;
 
@@ -314,11 +367,16 @@ impl XClient {
     /// [`Self::send_post_once`] の兄弟であるのと同じだ: 共有したいのは retry と
     /// rate limit のロジックで､それはすでに [`Self::send_with_retry`] にあり､
     /// 4 つともそこを通る｡
-    fn send_user_id_once(&self, url: &str, user_id: &str) -> Result<(u16, String, RateLimitState)> {
+    fn send_user_id_once(
+        &self,
+        url: &str,
+        user_id: &str,
+        now: i64,
+    ) -> Result<(u16, String, RateLimitState)> {
         let mut response = self
             .agent
             .post(url)
-            .header("Authorization", format!("Bearer {}", self.bearer_token))
+            .header("Authorization", self.authorization(now)?)
             .send_json(UserIdRequest { user_id })
             .with_context(|| format!("request to {url} failed"))?;
 
@@ -534,7 +592,7 @@ impl XClient {
     ) -> Result<()> {
         let url = list_members_write_url(list_id);
         Self::send_with_retry(paths, Endpoint::AddListMember, now, || {
-            self.send_user_id_once(&url, member_user_id)
+            self.send_user_id_once(&url, member_user_id, now)
         })?;
         Ok(())
     }
@@ -617,7 +675,7 @@ impl XClient {
     ) -> Result<()> {
         let url = create_repost_url(user_id);
         Self::send_with_retry(paths, Endpoint::CreateRepost, now, || {
-            self.send_tweet_id_once(&url, source_tweet_id)
+            self.send_tweet_id_once(&url, source_tweet_id, now)
         })?;
         Ok(())
     }
@@ -654,7 +712,7 @@ impl XClient {
     ) -> Result<()> {
         let url = create_like_url(user_id);
         Self::send_with_retry(paths, Endpoint::CreateLike, now, || {
-            self.send_tweet_id_once(&url, tweet_id)
+            self.send_tweet_id_once(&url, tweet_id, now)
         })?;
         Ok(())
     }
@@ -1042,6 +1100,51 @@ fn log_429(endpoint: Endpoint, state: RateLimitState, refusal: rate_limit::Refus
     ));
 }
 
+/// X がリクエストそのものを拒んだ (#239)｡retry では直らない 2 つの場合を
+/// 運ぶ｡
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Denial {
+    /// 401 — token が失効しているか無効｡`x-api-endpoints` の実測どおり､
+    /// このレスポンスには `x-rate-limit-*` すら付かない｡
+    Rejected,
+    /// 403 — この app にそのエンドポイントの権限が無いか､アカウントの
+    /// monthly spend cap に当たっている｡後者は残高切れ (429 +
+    /// [`rate_limit::UsageCapExceeded`]) とは別物で､平文の detail でしか
+    /// 名乗らない｡
+    Forbidden,
+}
+
+/// 401/403 を型で運ぶ (#239)｡呼び出し側がメッセージを grep せずに
+/// 「これは待っても直らない」と判断できるようにするためで､429 の 2 種類を
+/// 型に分けた #10 と同じ理屈だ｡
+///
+/// `endpoint` を持つのは #239 のログがまさにそれを欠いていたからだ:
+/// 拒否が 180 秒ごとに 100 行積み上がっても､どの呼び出しが拒まれたのかは
+/// どこにも書かれていなかった｡
+#[derive(Debug)]
+pub(crate) struct Denied {
+    pub endpoint: Endpoint,
+    pub denial: Denial,
+    pub detail: String,
+}
+
+impl std::fmt::Display for Denied {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let reason = match self.denial {
+            Denial::Rejected => "401 Unauthorized — the bearer token was rejected",
+            Denial::Forbidden => "403 Forbidden — this app cannot access the endpoint",
+        };
+        write!(
+            formatter,
+            "{}: {reason}: {}",
+            self.endpoint.key(),
+            self.detail
+        )
+    }
+}
+
+impl std::error::Error for Denied {}
+
 /// レスポンスのステータスを検証し､2xx でないものをエラーへ変換する｡
 ///
 /// `refusal` は普通の 429 がどの limit から来たかで､生の
@@ -1050,12 +1153,23 @@ fn log_429(endpoint: Endpoint, state: RateLimitState, refusal: rate_limit::Refus
 /// いる｡だからこれらのヘッダが説明しない limit からの 429 は､誤ったウィンドウ
 /// の時計ではなく保守的な backoff を持ち — しかもそう明言するので､`sync` は
 /// 毎回さらに退がれる｡普通の 429 以外のステータスでは無視する｡
-/// 401/403/404/その他のステータスは､#10 より前からこのクレートが使っていた
-/// 平文の `anyhow` エラーのままだ｡#10 の設計により変わったのは 429 だけで:
-/// 2 種類の 429 はここでの文字列比較ではなく [`rate_limit::classify_429`] を
-/// 通じて別々の型 ([`rate_limit::UsageCapExceeded`]､
-/// [`rate_limit::RateLimited`]) になる｡
-fn check_status(status: u16, body: &str, refusal: rate_limit::Refusal, now: i64) -> Result<()> {
+///
+/// どのステータスも `endpoint` を名乗る (#239)｡#10 の時点でそう名乗って
+/// いたのは 429 のログ ([`log_429`]) だけで､401 と 403 は名前の無いまま
+/// ログへ流れていた｡[`log_429`] と同じ `{key}: ` の前置に揃えてある｡
+///
+/// 401/403 は [`Denied`] へ (#239)､2 種類の 429 は
+/// [`rate_limit::classify_429`] を通じて [`rate_limit::UsageCapExceeded`] と
+/// [`rate_limit::RateLimited`] へ分かれる｡404 とその他のステータスだけが
+/// 平文の `anyhow` エラーのままだ — 呼び出し側がこれらを型で見分ける必要は
+/// まだ無い｡
+fn check_status(
+    endpoint: Endpoint,
+    status: u16,
+    body: &str,
+    refusal: rate_limit::Refusal,
+    now: i64,
+) -> Result<()> {
     if (200..300).contains(&status) {
         return Ok(());
     }
@@ -1069,17 +1183,28 @@ fn check_status(status: u16, body: &str, refusal: rate_limit::Refusal, now: i64)
         }
     });
 
+    let key = endpoint.key();
     match status {
-        401 => bail!("401 Unauthorized — the bearer token was rejected: {detail}"),
-        403 => bail!("403 Forbidden — this app cannot access the endpoint: {detail}"),
-        404 => bail!("404 Not Found — {detail}"),
+        401 => Err(Denied {
+            endpoint,
+            denial: Denial::Rejected,
+            detail,
+        }
+        .into()),
+        403 => Err(Denied {
+            endpoint,
+            denial: Denial::Forbidden,
+            detail,
+        }
+        .into()),
+        404 => bail!("{key}: 404 Not Found — {detail}"),
         429 => match rate_limit::classify_429(body) {
             rate_limit::RateLimitKind::UsageCapExceeded => {
                 Err(rate_limit::UsageCapExceeded { detail }.into())
             }
             rate_limit::RateLimitKind::RateLimited => Err(refusal.into_error(now).into()),
         },
-        _ => bail!("HTTP {status} — {detail}"),
+        _ => bail!("{key}: HTTP {status} — {detail}"),
     }
 }
 
@@ -1089,8 +1214,8 @@ mod tests {
 
     #[test]
     fn accepts_success_statuses() {
-        assert!(check_status(200, "{}", rate_limit::Refusal::Opaque, 0).is_ok());
-        assert!(check_status(299, "", rate_limit::Refusal::Opaque, 0).is_ok());
+        assert!(check_status(Endpoint::Me, 200, "{}", rate_limit::Refusal::Opaque, 0).is_ok());
+        assert!(check_status(Endpoint::Me, 299, "", rate_limit::Refusal::Opaque, 0).is_ok());
     }
 
     #[test]
@@ -1477,9 +1602,15 @@ mod tests {
     fn explains_an_exhausted_credit_cap() {
         let body =
             r#"{"title":"UsageCapExceeded","detail":"Usage cap exceeded: Monthly product cap"}"#;
-        let error = check_status(429, body, rate_limit::Refusal::Opaque, 0)
-            .unwrap_err()
-            .to_string();
+        let error = check_status(
+            Endpoint::ListTimeline,
+            429,
+            body,
+            rate_limit::Refusal::Opaque,
+            0,
+        )
+        .unwrap_err()
+        .to_string();
         assert!(error.contains("429"), "{error}");
         assert!(error.contains("Usage cap exceeded"), "{error}");
     }
@@ -1491,8 +1622,14 @@ mod tests {
         // match できる｡
         let body =
             r#"{"title":"UsageCapExceeded","detail":"Usage cap exceeded: Monthly product cap"}"#;
-        let error =
-            check_status(429, body, rate_limit::Refusal::Opaque, 1_700_000_000).unwrap_err();
+        let error = check_status(
+            Endpoint::ListTimeline,
+            429,
+            body,
+            rate_limit::Refusal::Opaque,
+            1_700_000_000,
+        )
+        .unwrap_err();
         let typed = error
             .downcast_ref::<rate_limit::UsageCapExceeded>()
             .unwrap();
@@ -1508,7 +1645,8 @@ mod tests {
         let refusal = rate_limit::Refusal::Window {
             reset_at: 1_700_000_000,
         };
-        let error = check_status(429, body, refusal, 1_699_999_000).unwrap_err();
+        let error =
+            check_status(Endpoint::ListTimeline, 429, body, refusal, 1_699_999_000).unwrap_err();
         let typed = error.downcast_ref::<rate_limit::RateLimited>().unwrap();
         assert_eq!(typed.reset_at, Some(1_700_000_000));
         assert!(!typed.opaque);
@@ -1519,7 +1657,14 @@ mod tests {
         // #197: sync はこのフラグを見て backoff を強めるので､client は 2 種類
         // を retry 時刻へ潰さず､そのまま通さなければならない｡
         let body = r#"{"title":"Too Many Requests","detail":"Too Many Requests"}"#;
-        let error = check_status(429, body, rate_limit::Refusal::Opaque, 1_000).unwrap_err();
+        let error = check_status(
+            Endpoint::ListTimeline,
+            429,
+            body,
+            rate_limit::Refusal::Opaque,
+            1_000,
+        )
+        .unwrap_err();
         let typed = error.downcast_ref::<rate_limit::RateLimited>().unwrap();
         assert!(typed.opaque);
         assert_eq!(
@@ -1531,6 +1676,7 @@ mod tests {
     #[test]
     fn explains_a_rejected_token() {
         let error = check_status(
+            Endpoint::ListTimeline,
             401,
             r#"{"title":"Unauthorized"}"#,
             rate_limit::Refusal::Opaque,
@@ -1541,17 +1687,74 @@ mod tests {
         assert!(error.contains("bearer token was rejected"), "{error}");
     }
 
+    // --- #239: 拒否はどの呼び出しが拒まれたのかを言う ---
+    //
+    // issue のログは 180 秒ごとの 403 を 30 行と 401 を 100 行以上積み上げた
+    // が､どのエンドポイントのものかはどこにも書かれておらず､読み手には
+    // 特定できなかった｡下の 3 本はその穴を塞ぐ｡
+
     #[test]
-    fn falls_back_to_the_raw_body_when_it_is_not_json() {
-        let error = check_status(503, "upstream unavailable", rate_limit::Refusal::Opaque, 0)
+    fn a_rejected_token_names_the_endpoint_it_was_rejected_for() {
+        let error = check_status(
+            Endpoint::ListTimeline,
+            401,
+            r#"{"title":"Unauthorized","detail":"Unauthorized"}"#,
+            rate_limit::Refusal::Opaque,
+            0,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.starts_with("list_timeline: "), "{error}");
+    }
+
+    #[test]
+    fn a_spend_cap_403_downcasts_to_the_typed_error_carrying_the_endpoint() {
+        // #239 のログの前半｡残高切れ (429 + `UsageCapExceeded`) ではなく
+        // アカウントの monthly spend cap で､平文の detail でしか名乗らない｡
+        let body = r#"{"title":"Forbidden","detail":"Forbidden: Your monthly spend cap has been reached."}"#;
+        let error = check_status(
+            Endpoint::ListTimeline,
+            403,
+            body,
+            rate_limit::Refusal::Opaque,
+            0,
+        )
+        .unwrap_err();
+        let typed = error.downcast_ref::<Denied>().unwrap();
+        assert_eq!(typed.endpoint, Endpoint::ListTimeline);
+        assert_eq!(typed.denial, Denial::Forbidden);
+        assert!(typed.detail.contains("monthly spend cap"), "{typed:?}");
+        assert!(
+            typed.to_string().contains("list_timeline: 403 Forbidden"),
+            "{typed}"
+        );
+    }
+
+    #[test]
+    fn other_statuses_name_the_endpoint_too() {
+        let error = check_status(Endpoint::Me, 404, "", rate_limit::Refusal::Opaque, 0)
             .unwrap_err()
             .to_string();
+        assert!(error.starts_with("me: 404 Not Found"), "{error}");
+    }
+
+    #[test]
+    fn falls_back_to_the_raw_body_when_it_is_not_json() {
+        let error = check_status(
+            Endpoint::Me,
+            503,
+            "upstream unavailable",
+            rate_limit::Refusal::Opaque,
+            0,
+        )
+        .unwrap_err()
+        .to_string();
         assert!(error.contains("upstream unavailable"), "{error}");
     }
 
     #[test]
     fn reports_an_empty_body_rather_than_nothing() {
-        let error = check_status(500, "", rate_limit::Refusal::Opaque, 0)
+        let error = check_status(Endpoint::Me, 500, "", rate_limit::Refusal::Opaque, 0)
             .unwrap_err()
             .to_string();
         assert!(error.contains("empty response body"), "{error}");
