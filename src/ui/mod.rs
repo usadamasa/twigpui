@@ -3,8 +3,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use gpui::{
-    AnyElement, Context, Div, Entity, FocusHandle, Focusable as _, FontWeight, ScrollHandle,
-    SharedString, Subscription, Task, Window, div, img, prelude::*, px, rgb, rgba, svg,
+    AnyElement, Context, Div, Entity, FocusHandle, Focusable as _, FontWeight, ObjectFit,
+    ScrollHandle, SharedString, Subscription, Task, Window, div, img, prelude::*, px, rgb, rgba,
+    svg,
 };
 use gpui_component::input::{Input, InputEvent, InputState};
 
@@ -2064,26 +2065,26 @@ mod tests {
             let _ = window.draw(cx);
         });
 
-        let timeline_width = laid_out(&mut visual, "timeline").size.width;
+        // `Pixels` の四則は `arithmetic_side_effects` に弾かれるので､素の
+        // f32 で比べる (`rust-lint-gauntlet`)｡
+        let timeline_width = f32::from(laid_out(&mut visual, "timeline").size.width);
         let a = laid_out(&mut visual, "media-media/a.png");
         let b = laid_out(&mut visual, "media-media/b.png");
         let c = laid_out(&mut visual, "media-media/c.png");
-        let single = laid_out(&mut visual, "media-media/d.png");
-        let arrived = laid_out(&mut visual, "media-media/e.png");
+        let single = f32::from(laid_out(&mut visual, "media-media/d.png").size.width);
+        let arrived = f32::from(laid_out(&mut visual, "media-media/e.png").size.width);
+        let close = |left: f32, right: f32| (left - right).abs() < 1.0;
 
         assert!(
-            single.size.width > timeline_width / 2.0,
-            "a lone thumbnail spans the column: {} of {timeline_width}",
-            single.size.width
+            single > timeline_width / 2.0,
+            "a lone thumbnail spans the column: {single} of {timeline_width}"
         );
         assert!(
-            (arrived.size.width - single.size.width).abs() < gpui::px(1.0),
-            "an image that arrived takes the same width as the placeholder: {} vs {}",
-            arrived.size.width,
-            single.size.width
+            close(arrived, single),
+            "an image that arrived takes the same width as the placeholder: {arrived} vs {single}"
         );
         assert!(
-            (a.size.width - b.size.width).abs() < gpui::px(1.0),
+            close(f32::from(a.size.width), f32::from(b.size.width)),
             "two thumbnails on one row split it evenly: {} vs {}",
             a.size.width,
             b.size.width
@@ -2093,16 +2094,15 @@ mod tests {
             "the second thumbnail sits to the right of the first"
         );
         assert!(
-            (b.right() - a.left() - single.size.width).abs() < gpui::px(1.0),
-            "together the pair spans what a lone thumbnail spans: {} vs {}",
-            b.right() - a.left(),
-            single.size.width
+            close(f32::from(b.right()) - f32::from(a.left()), single),
+            "together the pair spans what a lone thumbnail spans: {} to {} vs {single}",
+            a.left(),
+            b.right()
         );
         assert!(
-            (c.size.width - single.size.width).abs() < gpui::px(1.0),
-            "the third, alone on the second row, spans the column again: {} vs {}",
-            c.size.width,
-            single.size.width
+            close(f32::from(c.size.width), single),
+            "the third, alone on the second row, spans the column again: {} vs {single}",
+            c.size.width
         );
         assert!(
             c.top() >= a.bottom(),

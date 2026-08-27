@@ -56,6 +56,12 @@ impl TimelineView {
     /// このアプリに lightbox は無く､ちゃんと見る手段の無いサムネイルは機能
     /// の半分でしかない｡動画やアニメーション GIF は静止画と､それがどちらか
     /// を示す badge を出す; どちらもここでは再生されない｡
+    ///
+    /// 枠の幅は行が決める (#154): セルは `flex_1` で行の幅を分け合い､画像は
+    /// `Cover` で枠を埋めて､はみ出す分を枠が切り取る｡画像の縦横比に幅を
+    /// 任せると､縦長の 1 枚が細く立って右半分が空く｡高さが固定なのは
+    /// [`Self::media_grid`] の doc のとおり — 幅も同じ理屈で､画像が着いても
+    /// 枠は動かない｡
     fn media_cell(
         &self,
         media: &PostMedia,
@@ -64,23 +70,26 @@ impl TimelineView {
     ) -> AnyElement {
         let url = media.url.clone();
 
+        let frame = div()
+            .h(MEDIA_CELL_HEIGHT)
+            .w_full()
+            .rounded(theme::RADIUS_THUMB)
+            .overflow_hidden();
         let inner = match self.media_paths.get(&media.url) {
-            Some(path) => img(path.clone())
-                .h(MEDIA_CELL_HEIGHT)
-                .rounded(theme::RADIUS_THUMB)
+            Some(path) => frame
+                .child(img(path.clone()).size_full().object_fit(ObjectFit::Cover))
                 .into_any_element(),
-            None => div()
-                .h(MEDIA_CELL_HEIGHT)
-                .w(MEDIA_CELL_HEIGHT)
-                .rounded(theme::RADIUS_THUMB)
-                .bg(rgb(theme.border))
-                .into_any_element(),
+            None => frame.bg(rgb(theme.border)).into_any_element(),
         };
 
         let mut cell = div()
             .addressable(format!("media-{}", media.url))
             .flex()
             .flex_col()
+            .flex_1()
+            // `flex_1` だけでは足りない: flex item の `min-width` は既定で
+            // `auto` (= 中身の幅) なので､着いた画像が自分の幅を主張する｡
+            .min_w_0()
             .gap_1()
             .child(inner)
             .on_click(cx.listener(move |this, _event, _window, cx| {
