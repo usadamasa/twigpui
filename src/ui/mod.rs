@@ -2001,6 +2001,115 @@ mod tests {
         }
     }
 
+    /// `name` の要素が置かれた bounds｡置かれていなければ panic — 「無い」を
+    /// 確かめるテストはこれを使わない｡
+    fn laid_out(
+        visual: &mut gpui::VisualTestContext,
+        name: &'static str,
+    ) -> gpui::Bounds<gpui::Pixels> {
+        visual
+            .debug_bounds(name)
+            .unwrap_or_else(|| panic!("{name} has to be laid out"))
+    }
+
+    /// `urls` を添付に持つ [`item_with`]｡
+    fn item_with_media(id: &str, urls: &[&str]) -> TimelineItem {
+        TimelineItem {
+            media: urls
+                .iter()
+                .map(|url| PostMedia {
+                    url: (*url).to_string(),
+                    kind: Some("photo".to_string()),
+                    width: Some(320),
+                    height: Some(180),
+                    alt_text: None,
+                })
+                .collect(),
+            ..item_with(id, "someone", None)
+        }
+    }
+
+    /// #154: サムネイルは行の幅を分け合う｡
+    ///
+    /// 1 枚なら本文の列いっぱいに､2 枚なら半分ずつ｡3 枚目は 2 段目に 1 枚で
+    /// 座るので､また列いっぱいになる｡画像が着いていてもいなくても同じ —
+    /// 枠の幅を決めるのは画像の縦横比ではなく行のほうだ｡
+    ///
+    /// 「列いっぱい」の基準に本文の bounds は使わない (名前が無い)｡代わりに
+    /// timeline 自身の幅の半分より広いことを要求する: 修正前の枠は 96px の
+    /// 正方形で､560px のウィンドウではその 1/5 にも届かなかった｡
+    #[gpui::test]
+    fn media_cells_share_the_rows_width(cx: &mut gpui::TestAppContext) {
+        let fixture = Fixture {
+            items: vec![
+                item_with_media("3", &["media/a.png", "media/b.png", "media/c.png"]),
+                item_with_media("2", &["media/d.png"]),
+                item_with_media("1", &["media/e.png"]),
+            ],
+            ..fixture_with(&[], &[])
+        };
+        let (window, timeline) = fixture_window(cx, fixture);
+        // 1 枚は届いている扱いにして､`img` の枝も同じ幅になることを見る｡
+        // 中身は何でもよい — layout は画像のデコードを待たない｡
+        let arrived = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/AppIcon.png");
+        cx.update(|cx| {
+            timeline.update(cx, |view, cx| {
+                view.media_paths.insert("media/e.png".to_string(), arrived);
+                cx.notify();
+            });
+        });
+
+        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let timeline_width = laid_out(&mut visual, "timeline").size.width;
+        let a = laid_out(&mut visual, "media-media/a.png");
+        let b = laid_out(&mut visual, "media-media/b.png");
+        let c = laid_out(&mut visual, "media-media/c.png");
+        let single = laid_out(&mut visual, "media-media/d.png");
+        let arrived = laid_out(&mut visual, "media-media/e.png");
+
+        assert!(
+            single.size.width > timeline_width / 2.0,
+            "a lone thumbnail spans the column: {} of {timeline_width}",
+            single.size.width
+        );
+        assert!(
+            (arrived.size.width - single.size.width).abs() < gpui::px(1.0),
+            "an image that arrived takes the same width as the placeholder: {} vs {}",
+            arrived.size.width,
+            single.size.width
+        );
+        assert!(
+            (a.size.width - b.size.width).abs() < gpui::px(1.0),
+            "two thumbnails on one row split it evenly: {} vs {}",
+            a.size.width,
+            b.size.width
+        );
+        assert!(
+            a.right() < b.left(),
+            "the second thumbnail sits to the right of the first"
+        );
+        assert!(
+            (b.right() - a.left() - single.size.width).abs() < gpui::px(1.0),
+            "together the pair spans what a lone thumbnail spans: {} vs {}",
+            b.right() - a.left(),
+            single.size.width
+        );
+        assert!(
+            (c.size.width - single.size.width).abs() < gpui::px(1.0),
+            "the third, alone on the second row, spans the column again: {} vs {}",
+            c.size.width,
+            single.size.width
+        );
+        assert!(
+            c.top() >= a.bottom(),
+            "the third thumbnail wraps below the first row"
+        );
+    }
+
     /// #146: fixture のウィンドウは `XClient` をまったく構築しない｡
     ///
     /// `show_fixture` のドキュメントはこれを｢慣習ではなく､fixture がコストを
