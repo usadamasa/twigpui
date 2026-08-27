@@ -513,6 +513,8 @@ impl TimelineView {
                     .wheel(y, floor, lines.y * f32::from(line_height));
             }
         }
+        // #206: 読み手が上へ戻れば､follow の countdown もそこまで進む｡
+        self.note_scroll_position();
         self.drive_scroll(cx);
         cx.notify();
     }
@@ -539,6 +541,7 @@ impl TimelineView {
                     let motion = this.scroller.step(f32::from(offset.y), floor, FRAME_S);
                     this.list_scroll
                         .set_offset(gpui::point(offset.x, px(motion.offset)));
+                    this.note_scroll_position();
                     cx.notify();
                     motion.done
                 }) else {

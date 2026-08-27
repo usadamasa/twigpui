@@ -261,7 +261,11 @@ src/ui/scroll.rs	600
 # 700 -> 750: #239 の `halting_reason` — 失敗したポーリングを繰り返す意味が
 # あるかの判断｡ここに置いたのは､このファイルの上半分が「auto-refresh の
 # 判断は純粋に書いてテストする」場所だからだ｡
-src/ui/auto_refresh.rs	750
+# 750 -> 800: #206 の toast の countdown｡follow が「上に駐まった件数」を
+# 置き､glide が 1 フレームごとに減らし､apply/clear が 0 に戻す — 数える
+# のは toast だが､数が動く場所はすべてここにある｡足したのは 3 文と
+# その理由で､天井を 2 行だけ越えた｡
+src/ui/auto_refresh.rs	800
 # #174 で新設｡`ui/mod.rs` がこのために再び上がらずに済んだ理由でもある:
 # `start_auto_sync` が `ui` からここへ移り､`start_sync` として戻ってきた｡
 # 加えてステータスバーが報告する status の enum､2 つのラベル､手動トリガの
@@ -285,7 +289,9 @@ src/ui/list_picker.rs	450
 # なぜ同じ文字列でなければならないかを言う doc コメントを載せている｡これが
 # テストに座標ではなく名前で要素をクリックさせるものであり､置き換えた
 # どの呼び出し箇所でも行数は変わらない｡
-src/ui/render.rs	1150
+#
+# 1150 -> 1100: #206 が `new_posts_bar` を `ui/toast.rs` へ出した｡
+src/ui/render.rs	1100
 # #205 で新設｡`list_sync.rs` に足すと 1,000 行近くになったので､同じ機構を
 # 2 つの問いで割った｡あちらは「sync は何をしているか｡今 何を支払ってよいか」､
 # こちらは「それを読み手にどう出すか」｡`reload_policy.rs` と `render.rs` の
@@ -294,7 +300,20 @@ src/ui/render.rs	1150
 # `RowFade` (gpui の `with_animation` を使わない理由は型の doc)､そして
 # このアプリ初のダイアログ｡形は `auto_refresh.rs` と同じで､純粋な関数と
 # そのテストが先､`impl TimelineView` が後｡
-src/ui/sync_row.rs	550
+# 550 -> 450: #206 がフェードを `ui/fade.rs` へ出した｡新着の toast が
+# 2 つ目の使い手になり､sync の行のファイルから借りる形が嘘になったため｡
+src/ui/sync_row.rs	450
+# #206 で新設｡`sync_row.rs` の `RowFade` を `Fade` として移したもので､
+# 中身は enum と 4 つの純粋関数､それに 2 つの定数｡sync の行と新着の
+# toast が同じ段の数で出入りする｡
+src/ui/fade.rs	150
+# #206 で新設｡#21 の "N new posts" のバーが timeline の下端に重なる toast に
+# なったもの｡形は `sync_row.rs` と同じ — 先に純粋な関数 (件数の足し
+# 合わせ､scroll による減り方､濃さとラベル) とそのテスト､続いて
+# `impl TimelineView` (要素､フェードのタイマー､クリック､最上部への跳び)｡
+# `render.rs` から出た `new_posts_bar` と `ui/mod.rs` から出た
+# `ScrollToTop` の中身がここに来ている｡
+src/ui/toast.rs	300
 # #137 で新設｡#137 は `impl TimelineView` を分割するか､どこで分けるかを
 # 問うたものだ｡これはその選択肢 (b): `cx.spawn` を持つメソッドすべて｡
 # 大きいが､それは意図的だ — 継ぎ目は「金が出ていくのはここだ」であり､

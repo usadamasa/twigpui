@@ -607,6 +607,9 @@ impl TimelineView {
             self.list_scroll.scroll_to_top_of_item(0);
         } else {
             self.list_scroll.scroll_to_top_of_item(count);
+            // #206: 新しい行は全部 viewport の上に駐まっている｡glide が
+            // 1 行降ろすたびに `note_scroll_position` が減らす｡
+            self.unseen = count;
             self.start_glide(cx);
         }
         self.refresh_images(cx);
@@ -672,11 +675,14 @@ impl TimelineView {
                     }
                     if let Some(next) = glide_y(start, elapsed_s) {
                         this.list_scroll.set_offset(gpui::point(offset.x, px(next)));
+                        this.note_scroll_position();
                         last_set = Some(next);
                         cx.notify();
                         false
                     } else {
                         this.list_scroll.set_offset(gpui::point(offset.x, px(0.)));
+                        // 最上部に着いた｡上に残っている行は無い (#206)｡
+                        this.unseen = 0;
                         cx.notify();
                         true
                     }
@@ -712,8 +718,10 @@ impl TimelineView {
             return;
         };
         // まだ歩いている glide は､これが置き換えるリストを基準に測った
-        // offset を狙っている (#22)｡
+        // offset を狙っている (#22)｡上に残っていた行もこれで視界に入る
+        // (#206)｡
         self.glide = None;
+        self.unseen = 0;
         self.state = TimelineState::Loaded(pending.items);
         self.list_scroll.scroll_to_top_of_item(0);
         self.refresh_images(cx);
@@ -733,10 +741,12 @@ impl TimelineView {
     ///
     /// glide も同じ古さのために捨てる (#22): その offset は置き換えられる
     /// 行を基準に測ったものなので､歩かせ続ければ古い距離のぶんだけ新しい
-    /// リストを scroll してしまう｡
+    /// リストを scroll してしまう｡toast の countdown も同じ行を数えたもの
+    /// なので一緒に捨てる (#206)｡
     pub(super) fn clear_pending(&mut self) {
         self.pending = None;
         self.glide = None;
+        self.unseen = 0;
     }
 }
 
