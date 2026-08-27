@@ -294,7 +294,13 @@ src/ui/render.rs	1150
 # `RowFade` (gpui の `with_animation` を使わない理由は型の doc)､そして
 # このアプリ初のダイアログ｡形は `auto_refresh.rs` と同じで､純粋な関数と
 # そのテストが先､`impl TimelineView` が後｡
-src/ui/sync_row.rs	550
+# 550 -> 450: #206 がフェードを `ui/fade.rs` へ出した｡新着の toast が
+# 2 つ目の使い手になり､sync の行のファイルから借りる形が嘘になったため｡
+src/ui/sync_row.rs	450
+# #206 で新設｡`sync_row.rs` の `RowFade` を `Fade` として移したもので､
+# 中身は enum と 4 つの純粋関数､それに 2 つの定数｡sync の行と新着の
+# toast が同じ段の数で出入りする｡
+src/ui/fade.rs	150
 # #137 で新設｡#137 は `impl TimelineView` を分割するか､どこで分けるかを
 # 問うたものだ｡これはその選択肢 (b): `cx.spawn` を持つメソッドすべて｡
 # 大きいが､それは意図的だ — 継ぎ目は「金が出ていくのはここだ」であり､

@@ -20,6 +20,7 @@ use crate::image_cache;
 use crate::like;
 use crate::log;
 mod auto_refresh;
+mod fade;
 mod list_picker;
 mod list_sync;
 mod reload_policy;
@@ -35,6 +36,7 @@ mod tasks;
 // 触ってよい」という意味になり､それはファイルを分割した目的と
 // 正反対になる｡
 use auto_refresh::{FollowMode, Pending, pending_after_poll, pending_label};
+use fade::Fade;
 use list_sync::{SyncOff, SyncStatus, SyncTrigger};
 use reload_policy::{
     CooldownTick, at_the_post_cap, cooldown_label, cooldown_tick, newly_arrived, offers_load_older,
@@ -52,7 +54,6 @@ use render::{
     thread_toggle_row, usage_color, usage_label, with_count,
 };
 use render::{RowCounts, row_counts};
-use sync_row::RowFade;
 
 use crate::menu::{
     BlurComposer, CloseWindow, FocusComposer, KEY_CONTEXT, Minimize, Reload, ScrollToTop,
@@ -446,12 +447,12 @@ pub(crate) struct TimelineView {
     /// その tick こそダイアログが尋ねている当のもの｡毎フレームではなく
     /// [`Self::ask_to_sync`] で 1 回読む｡
     sync_plan_pending: usize,
-    /// sync の行が今どれだけ濃いか (#205)｡[`RowFade`] を参照｡
+    /// sync の行が今どれだけ濃いか (#205)｡[`Fade`] を参照｡
     ///
     /// `sync_status` とは別に持つ｡status は今どうなっているかで､これは画面が
     /// そこへどこまで追いついたか｡消えていく行は､もう報告するものが無い
     /// status を出したまま薄くなる｡
-    sync_fade: RowFade,
+    sync_fade: Fade,
     /// フェードを 1 段ずつ進めるタイマー (#205)｡
     ///
     /// `auto_sync` と同じ drop で取り消す契約｡目的地に着いたら
@@ -677,7 +678,7 @@ impl TimelineView {
             sync_status: SyncStatus::Off(SyncOff::NotSignedIn),
             pending_sync: false,
             sync_plan_pending: 0,
-            sync_fade: RowFade::Hidden,
+            sync_fade: Fade::Hidden,
             sync_fade_task: None,
             auto_refresh: None,
             pending: None,
@@ -2013,8 +2014,8 @@ mod tests {
         repost_action_label,
     };
     use super::{
-        ComposeStatus, Cooldown, CooldownTick, Denial, Denied, Fixture, PostLink, PostMedia,
-        PostMetrics, ReloadNotice, ReloadTrigger, RepliedTo, RowCounts, RowFade, Startup, SyncOff,
+        ComposeStatus, Cooldown, CooldownTick, Denial, Denied, Fade, Fixture, PostLink, PostMedia,
+        PostMetrics, ReloadNotice, ReloadTrigger, RepliedTo, RowCounts, Startup, SyncOff,
         SyncStatus, Theme, ThreadFetchState, TimelineItem, TimelineState, ToggleState,
         action_post_id, at_the_post_cap, byline, compose_error_message, cooldown_label,
         cooldown_tick, format_timestamp, media_badge, media_columns, offers_delete, offers_like,
@@ -4740,7 +4741,7 @@ mod tests {
         for step in 1..4_u8 {
             cx.update(|cx| {
                 timeline.update(cx, |view, cx| {
-                    view.sync_fade = RowFade::Falling(step);
+                    view.sync_fade = Fade::Falling(step);
                     cx.notify();
                 });
             });
