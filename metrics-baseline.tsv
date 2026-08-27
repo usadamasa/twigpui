@@ -22,7 +22,6 @@ src/cache/mod.rs	650
 src/config.rs	850
 src/main.rs	650
 src/ui/auto_refresh.rs	800
-src/ui/mod.rs	2050
 src/ui/render.rs	1100
 src/ui/tasks.rs	1200
 src/x_api/client.rs	1250
