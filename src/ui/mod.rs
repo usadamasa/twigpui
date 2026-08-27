@@ -43,7 +43,7 @@ mod toast;
 // 隣のファイルから届かせるためだけに広げると､「クレート内のどこからでも
 // 触ってよい」という意味になり､それはファイルを分割した目的と
 // 正反対になる｡
-use auto_refresh::{FollowMode, Pending, pending_after_poll};
+use auto_refresh::{FollowMode, Pending, Situation, pending_after_poll};
 use fade::Fade;
 use list_sync::{SyncOff, SyncStatus, SyncTrigger};
 use reload_policy::{
@@ -309,6 +309,16 @@ pub(crate) struct TimelineView {
     /// アプリは何も送らない」を傾向ではなく保証にしている
     /// ものである｡
     auto_refresh: Option<Task<()>>,
+    /// auto-refresh のループが直近の起床で見たもの (#214)｡footer はここから
+    /// 次のポーリングの期限を数え直す — [`countdown::refresh_label`] を見よ｡
+    ///
+    /// ループが起床ごとに写し､ループが無いとき (off､サインイン前､#239 で
+    /// 止まった後) は `None`｡`last_reload_at` だけは写しではなく view の
+    /// 値を読む: 手動 reload はループが次に起きるより先に期限を動かす｡
+    refresh_situation: Option<Situation>,
+    /// footer のカウントダウンを刻む (#214) — [`countdown`] を見よ｡
+    /// `cooldown_ticker` と同じ契約で､数えるものが無くなれば自分で終わる｡
+    countdown_ticker: Option<Task<()>>,
     /// 直近の poll が取ってきたもの｡読み手が求めるまで画面へ出さずに
     /// 抑えておく (#21) — [`Pending`] と
     /// [`pending_after_poll`] を見よ｡
@@ -461,7 +471,7 @@ pub(crate) struct TimelineView {
 
 #[cfg(test)]
 mod tests {
-    use super::auto_refresh::Poll;
+    use super::auto_refresh::{Poll, Situation};
     use super::reload_policy::{
         newly_arrived, preserved_scroll_target, reload_cooldown, reload_outcome_label,
     };
@@ -2691,7 +2701,13 @@ mod tests {
                     detail: "Forbidden: Your monthly spend cap has been reached.".to_string(),
                 });
 
+                view.refresh_situation = Some(counting_situation());
+
                 assert_eq!(view.apply_poll(Err(denied), cx), Poll::Halt);
+                assert!(
+                    view.refresh_situation.is_none(),
+                    "#214: a halted loop has no next poll for the footer to count down to"
+                );
                 let notice = view
                     .auto_refresh_notice
                     .clone()
@@ -3066,6 +3082,83 @@ mod tests {
             let _ = window.draw(cx);
         });
         (visual, timeline)
+    }
+
+    /// auto-refresh のループが最初の起床で写すもの (#214)｡`smoke_config` は
+    /// auto-refresh を切っていて fixture のウィンドウは client を持たない
+    /// ので､ループは決して始まらず､テストはこれを直接置く｡
+    fn counting_situation() -> Situation {
+        Situation {
+            last_reload_at: None,
+            started_at: crate::oauth::unix_now(),
+            interval_seconds: 300,
+            busy: false,
+            activity: crate::activity::Activity::Present,
+            resumed_at: None,
+        }
+    }
+
+    /// #214: footer のカウントダウンはループが写した期限から出る｡写しが
+    /// 無ければ出ない — off のウィンドウに "Next refresh" が出れば嘘になる｡
+    /// 出たときは post の数と接しない (#184 の `the_status_bars_segments_keep_apart`
+    /// と同じ主張)｡
+    #[gpui::test]
+    fn the_refresh_countdown_is_on_the_footer_only_while_a_loop_is_counting(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (mut visual, timeline) = drawn(cx, fixture_with(&["2", "1"], &[]));
+
+        visual.update(|_window, cx| {
+            timeline.update(cx, |view, _cx| view.refresh_situation = None);
+        });
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            visual.debug_bounds("status-refresh").is_none(),
+            "a window with no polling loop must not promise a next poll"
+        );
+
+        visual.update(|_window, cx| {
+            timeline.update(cx, |view, _cx| {
+                view.refresh_situation = Some(counting_situation());
+            });
+        });
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let refresh = visual
+            .debug_bounds("status-refresh")
+            .expect("a counting loop has to reach the footer");
+        let kept = visual
+            .debug_bounds("status-kept")
+            .expect("a loaded timeline always says how many posts it keeps");
+        assert!(
+            kept.left() > refresh.right(),
+            "the countdown runs into the post count: countdown ends at {:?}, count starts at {:?}",
+            refresh.right(),
+            kept.left()
+        );
+    }
+
+    /// #214: 次の sync の時刻は入口の隣に座り､入口と接しない｡
+    #[gpui::test]
+    fn the_next_sync_time_sits_apart_from_the_sync_entry(cx: &mut gpui::TestAppContext) {
+        let (mut visual, _timeline) = drawn(cx, fixture_with_sync(&["2", "1"], 0));
+
+        let entry = visual
+            .debug_bounds("status-sync")
+            .expect("the sync entry is always shown");
+        let next = visual
+            .debug_bounds("status-sync-next")
+            .expect("an idle sync has a next time to show");
+        assert!(
+            next.left() > entry.right(),
+            "the next sync time runs into its entry: entry ends at {:?}, time starts at {:?}",
+            entry.right(),
+            next.left()
+        );
     }
 
     /// #164: どの区画も配置され､Home が先頭で､どれも重ならない —

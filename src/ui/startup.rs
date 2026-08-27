@@ -128,6 +128,8 @@ impl TimelineView {
             sync_fade: Fade::Hidden,
             sync_fade_task: None,
             auto_refresh: None,
+            refresh_situation: None,
+            countdown_ticker: None,
             pending: None,
             follow,
             glide: None,
@@ -246,6 +248,21 @@ impl TimelineView {
         // 出入りのフェードも本物の tick とまったく同じ経路を通る｡
         if let Some(sync) = fixture.sync {
             self.show_fixture_sync(&sync, cx);
+        }
+        // #214: footer のカウントダウン｡本物のウィンドウならループが
+        // 最初の起床で写すものを､ループの無い (client の無い) fixture では
+        // 開いた時刻を起点にして置く｡footer はこれを本物と同じ関数で読む
+        // ので､fixture が本物には出ない文言を描くことはない｡
+        if self.config.auto_refresh {
+            self.refresh_situation = Some(Situation {
+                last_reload_at: None,
+                started_at: oauth::unix_now(),
+                interval_seconds: self.config.auto_refresh_interval_seconds,
+                busy: false,
+                activity: Activity::Present,
+                resumed_at: None,
+            });
+            self.start_countdown_ticker(cx);
         }
         // アバターと添付画像は今もダウンロードされる｡API ではなく
         // `pbs.twimg.com` からで､quota も credit も要らない (`avatar` を

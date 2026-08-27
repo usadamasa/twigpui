@@ -133,16 +133,28 @@ pub(super) fn next_tick(situation: &Situation, now: i64) -> Tick {
             until: now.saturating_add(BUSY_RECHECK_SECONDS),
         };
     }
-    let anchor = situation
-        .last_reload_at
-        .unwrap_or(situation.started_at)
-        .max(situation.resumed_at.unwrap_or(i64::MIN));
-    let due = anchor.saturating_add(i64::from(situation.interval_seconds));
+    let due = poll_due_at(situation);
     if due > now {
         Tick::Wait { until: due }
     } else {
         Tick::Poll
     }
+}
+
+/// 次のポーリングが期限を迎える時刻 — [`next_tick`] が `Poll` と答え
+/// 始める瞬間で､footer のカウントダウン (#214) が数えるのもこれだ｡
+///
+/// 起点は `last_reload_at`､無ければ `started_at`｡どちらより後でも読み手が
+/// 戻ってきた時刻 (#204) が勝つ｡規則の理由は [`next_tick`] の doc にある｡
+/// ここに切り出したのは､ループと footer が別々の計算を持つと､数字が 0 に
+/// なってもポーリングが来ないか､来たのに数字が残るかのどちらかになる
+/// からだ｡
+pub(super) fn poll_due_at(situation: &Situation) -> i64 {
+    situation
+        .last_reload_at
+        .unwrap_or(situation.started_at)
+        .max(situation.resumed_at.unwrap_or(i64::MIN))
+        .saturating_add(i64::from(situation.interval_seconds))
 }
 
 /// ポーリングが取ってきた､まだ読み手に見せていない post (#21)｡
@@ -390,6 +402,9 @@ impl TimelineView {
         /// 起床の最短間隔｡ループがキャンセル可能なままでいられるように｡
         const MIN_SLEEP_SECONDS: i64 = 1;
 
+        // #214: 前のループの期限も同じく｡早期 return より前に消すのは､
+        // 止まったループの下でカウントダウンだけが残らないようにするため｡
+        self.refresh_situation = None;
         if !self.config.auto_refresh {
             return;
         }
@@ -426,13 +441,20 @@ impl TimelineView {
 
                 // `Err` はウィンドウが消えたということで､このループが
                 // 終わる唯一の理由だ — `start_auto_sync` の約束｡
-                let Ok(situation) = this.update(cx, |this, _| Situation {
-                    last_reload_at: this.last_reload_at,
-                    started_at,
-                    interval_seconds,
-                    busy: this.reloading,
-                    activity,
-                    resumed_at: presence.resumed_at(),
+                let Ok(situation) = this.update(cx, |this, _| {
+                    let situation = Situation {
+                        last_reload_at: this.last_reload_at,
+                        started_at,
+                        interval_seconds,
+                        busy: this.reloading,
+                        activity,
+                        resumed_at: presence.resumed_at(),
+                    };
+                    // #214: footer がこの判断を数え直せるように写す｡
+                    // `notify` はしない — 数字を進めるのは countdown の
+                    // ticker で､こちらは 1 分に 1 回しか起きない｡
+                    this.refresh_situation = Some(situation);
+                    situation
                 }) else {
                     return;
                 };
@@ -488,6 +510,8 @@ impl TimelineView {
                 presence.woke(expected_wake_at, oauth::unix_now(), interval_seconds);
             }
         }));
+        // #214: ループが最初に起きた瞬間から footer が数えられるように｡
+        self.start_countdown_ticker(cx);
     }
 
     /// 終わったポーリングがウィンドウに対してすること (#21)｡
@@ -531,6 +555,8 @@ impl TimelineView {
                 };
                 log::warn(&format!("auto-refresh stopped: {reason}"));
                 self.auto_refresh_notice = Some(SharedString::from(reason));
+                // #214: 来ないポーリングを数え続けない｡
+                self.refresh_situation = None;
                 cx.notify();
                 return Poll::Halt;
             }

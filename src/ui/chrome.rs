@@ -191,6 +191,8 @@ impl TimelineView {
             TimelineState::Loaded(ref items) => Some(items.len()),
             _ => None,
         };
+        // #214: 次の更新まで｡どちらも `countdown` が決め､無ければ出さない｡
+        let (next_refresh, next_sync) = self.countdown_labels(oauth::unix_now());
 
         div()
             // #205: sync の行が「footer の 1 段上」に居ることをテストが
@@ -240,13 +242,39 @@ impl TimelineView {
                     .ml(theme::ROW_PAD_X)
                     .child(self.sync_segment(cx)),
             )
-            .when_some(kept, |bar, kept| {
+            // #214: 入口の隣に次の時刻｡入口とは別の要素にしてある — 入口は
+            // クリックできる (`ask_to_sync`) ので､同じ要素に足すと当たりが
+            // 文言の分だけ広がる｡margin は上と同じ理由で `gap` に頼らない｡
+            .when_some(next_sync, |bar, label| {
                 bar.child(
                     div()
-                        .ml_auto()
+                        .addressable("status-sync-next")
+                        .ml(theme::ROW_PAD_X)
                         .text_color(rgb(theme.text_tertiary))
-                        .child(format!("{kept} / {} posts kept", cache::MAX_CACHED_POSTS)),
+                        .child(label),
                 )
             })
+            // 右端は timeline についての 2 つ: 次のポーリングと､保持して
+            // いる post の数｡どちらも出ないことがあるので､`ml_auto` は
+            // 個々ではなく包みに付ける — 両方に付けると余白が 2 つに割れ､
+            // 片方が帯の真ん中に浮く｡
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .ml_auto()
+                    .text_color(rgb(theme.text_tertiary))
+                    .when_some(next_refresh, |right, label| {
+                        right.child(div().addressable("status-refresh").child(label))
+                    })
+                    .when_some(kept, |right, kept| {
+                        right.child(
+                            div()
+                                .addressable("status-kept")
+                                .ml(theme::ROW_PAD_X)
+                                .child(format!("{kept} / {} posts kept", cache::MAX_CACHED_POSTS)),
+                        )
+                    }),
+            )
     }
 }
