@@ -15,10 +15,12 @@ description: >-
 
 ## 場所
 
-| 起動 | ログ |
-| --- | --- |
-| release (`.app`, `cargo run --release`) | `~/.local/state/twigpui/logs/twigpui.log` |
-| debug (`cargo run`, `twigpui-dev.app`) | `~/.local/state/twigpui-dev/logs/twigpui.log` |
+分かれるのはビルドプロファイルで、bundle かどうかではない (#169)。
+
+| ビルド | 起動のしかた | ログ |
+| --- | --- | --- |
+| release | `dist/twigpui.app`、`cargo run --release` | `~/.local/state/twigpui/logs/twigpui.log` |
+| debug | `cargo run`、`dist/twigpui-dev.app` | `~/.local/state/twigpui-dev/logs/twigpui.log` |
 
 `XDG_STATE_HOME` を変えていればその下。`cache` ではなく `state` なのは、
 次の起動で消えるログでは昨日の問いに答えられないから。
@@ -27,8 +29,11 @@ description: >-
 tail -f ~/.local/state/twigpui/logs/twigpui.log
 ```
 
-**debug ビルドは別ファイル (#169)。** `cargo run` の挙動を追っているのに
-`twigpui/` の下を読んでいると、何も出ていないように見える。
+**`cargo run` の挙動を追っているのに `twigpui/` の下を読んでいると、何も出ていない
+ように見える。** まず `-dev` のほうを疑う。
+
+行の形は `2026-08-25T20:24:44Z WARN media fetch failed: …` — UTC の時刻、レベル、
+本文。grep はレベルの語で絞れる。
 
 ターミナルから起動したときは stderr にも流れる。**stderr はレベルで絞られない**
 (`log::write` はレベルの判定より前に echo する) ので、ターミナルに出た `DEBUG` の行が
@@ -45,23 +50,25 @@ tail -f ~/.local/state/twigpui/logs/twigpui.log
 
 | 手段 | 効く起動 |
 | --- | --- |
-| 環境変数 `TWIGPUI_LOG=debug` | ターミナルからの `cargo run` だけ |
 | `config.toml` の `log_level = "debug"` | すべて |
+| 環境変数 `TWIGPUI_LOG=debug` | ターミナルからの `cargo run` だけ。両方あればこちらが勝つ |
+
+`config.toml` はプロファイルごと: release は `~/.config/twigpui/config.toml`、
+debug は `~/.config/twigpui-dev/config.toml`。
 
 **Finder・Spotlight・Dock から起動した `.app` はシェルの環境変数を見ない**
-(`app-bundle`)。`.app` のレベルを変えるなら `config.toml`。両方あれば環境変数が勝つ。
-認識できない値は起動を止めず、警告して既定に落ちる。
-
-dev の `config.toml` は `~/.config/twigpui-dev/config.toml`。
+(`app-bundle`)。`.app` のレベルを変える手段は `config.toml` だけ。
+認識できない値は起動を止めず、警告して既定に落ちる。レベルは起動時に 1 度だけ
+読むので、変えたら起動し直す。
 
 ## ログに無いもの
 
 - **トークン。** 書く前に `log::redact` を通る: `Bearer <token>`、および
   `access_token=` / `refresh_token=` / `client_secret=` / `token=` / `code=` / `state=`
-  の値は `[redacted]` になる。伏せすぎに倒してあるので、値が要る調査はログでは
-  できない。ファイル自体も `0600`。
-  **JSON 形 (`"access_token":"…"`) は伏せない** (#246)。token エンドポイントの
-  本文をそのままログに出す行は書かない。
+  の値は `[redacted]` になる。値が要る調査はログではできない。ファイル自体も `0600`。
+  **ただし JSON 形 (`"access_token":"…"`) は伏せない** (#246)。守っているのは
+  redact ではなく「token エンドポイントの本文をそのままログに出す行を書かない」
+  という慣習のほう。
 - **ヘッドレスの出力。** `--fetch-only` / `--fetch-post` / `--usage` は stderr へ
   直接書き、ファイルには残さない。ターミナルの出力を保存する。
 - **1 MiB より前。** 超えた時点で `twigpui.log.1` へ移して新しく始める。
