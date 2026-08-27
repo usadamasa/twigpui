@@ -7,12 +7,28 @@
 //! 出るのは何かを負っているときだけで､定常状態の "up to date" は次が
 //! いつかを言わない｡
 //!
-//! ここは 2 つの期限を同じ形で footer に出す — "Next refresh in 4m"､
-//! "Next sync in 5h 12m"｡期限そのものはここで決めない｡auto-refresh の
-//! 期限は [`poll_due_at`] が ([`super::auto_refresh::next_tick`] と同じ
-//! 規則で) 出し､sync の期限は [`SyncStatus::Idle`] が tick から運んで
-//! きた `until` をそのまま読む｡ここが持つのは残り秒数を言葉にする
-//! [`countdown`] と､数字を進める ticker だけだ｡
+//! ここは 2 つの期限を同じ形で出す — toolbar の reload アイコンの隣に
+//! "Auto-refresh in 4m"､footer の "Sync list…" の隣に "next in 5h 12m"｡
+//! 期限そのものはここで決めない｡auto-refresh の期限は [`poll_due_at`] が
+//! ([`super::auto_refresh::next_tick`] と同じ規則で) 出し､sync の期限は
+//! [`SyncStatus::Idle`] が tick から運んできた `until` をそのまま読む｡
+//! ここが持つのは残り秒数を言葉にする [`countdown`] と､幅に合わせて
+//! 文言を選ぶ [`Density`] と､数字を進める ticker だけだ｡
+//!
+//! # 置き場所と幅
+//!
+//! 最初は両方を footer に置いた｡550px の fixture ですら "posts kept" が
+//! 右端から落ちた｡footer にはリクエスト数と sync の入口と post の数が
+//! すでに並んでいて､本番で実際に使われている 429px では､それだけで
+//! 幅の 9 割が埋まる｡
+//!
+//! だから auto-refresh の期限は toolbar へ — それが次に押すことになる
+//! reload のアイコンの隣は､どのみち読みやすい場所だ — sync の期限は
+//! footer に残し､文言を幅で選ぶ ([`density`])｡広ければ "next in 5h 12m"､
+//! 狭ければ "5h 12m"｡post の数も同じ段で "posts kept" から "posts" へ
+//! 縮む｡それでも入らないときは､右端の post の数を落とすのではなく
+//! sync の期限を "…" で切る (`chrome::status_bar` の `truncate`)｡
+//! 数字が読めないより､どこが読めていないか分かるほうがよい｡
 //!
 //! # なぜ分単位なのか
 //!
@@ -25,10 +41,43 @@
 //! ticker は 1 秒ごとに起きるが､`notify` するのは文言が変わったときだけ
 //! だ｡起きること自体は何も描かず､文字列を 2 つ組むだけで済む｡
 
+use gpui::{Pixels, px};
+
 use super::auto_refresh::{Situation, poll_due_at};
 use super::list_sync::SyncStatus;
 use super::{Context, Duration, TimelineView, oauth};
 use crate::activity::Activity;
+
+/// 枠 (toolbar と footer) の文言をどれだけ詰めるか (#214)｡
+///
+/// ウィンドウの幅から [`density`] が決め､描画のたびに読み直すので､
+/// ウィンドウを引き伸ばせば文言も戻る｡2 段しか無いのは､3 段目に
+/// 縮める先が無いからだ — "5h 12m" より短い残り時間の書き方は無い｡
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Density {
+    /// 全部書く: "Auto-refresh in 4m"､"next in 5h 12m"､"posts kept"｡
+    Wide,
+    /// 主語を落とす: "in 4m"､"5h 12m"､"posts"｡
+    Compact,
+}
+
+/// この幅を下回ると [`Density::Compact`] になる｡
+///
+/// 実測から置いた｡`Wide` の footer は本番のフォントで 478px 要る
+/// (usage 140､入口 54､"next in 5h 59m" 82､"N / 500 posts kept" 118､
+/// 余白 84)｡520 は `Wide` に 40px の余裕を残す — フォントや桁数の
+/// 揺れで "…" が出たり消えたりする境目を､使う幅から離しておく｡
+/// 既定のウィンドウ (560px) は `Wide`､本番の 429px は `Compact`｡
+pub(super) const COMPACT_BELOW: Pixels = px(520.);
+
+/// ウィンドウの幅から [`Density`] を選ぶ｡
+pub(super) fn density(width: Pixels) -> Density {
+    if width < COMPACT_BELOW {
+        Density::Compact
+    } else {
+        Density::Wide
+    }
+}
 
 /// 残り秒数を言葉にする｡
 ///
@@ -49,7 +98,7 @@ pub(super) fn countdown(remaining: i64) -> String {
     }
 }
 
-/// auto-refresh の segment が言うこと｡ループが無ければ `None`｡
+/// toolbar の auto-refresh の segment が言うこと｡ループが無ければ `None`｡
 ///
 /// `situation` はループが直近の起床で写したもので､`last_reload_at` だけ
 /// は view の今の値で上書きしてから期限を出す｡手動の reload は次の
@@ -61,23 +110,31 @@ pub(super) fn countdown(remaining: i64) -> String {
 /// 見直すだけで､戻ってきた時刻から改めて 1 interval を数える｡ロック中に
 /// 過ぎた期限を "0s" と出すと､戻ってきた読み手には今にも来るように
 /// 読めるが､来るのは 1 interval 後だ｡
+///
+/// `Compact` は主語を落とす｡reload のアイコンのすぐ左に座るので､
+/// "in 4m" だけでもそのアイコンの話だと読める｡
 pub(super) fn refresh_label(
     situation: Option<&Situation>,
     last_reload_at: Option<i64>,
     now: i64,
+    density: Density,
 ) -> Option<String> {
     let situation = situation?;
     if matches!(situation.activity, Activity::Away) {
-        return Some("Next refresh: paused".to_string());
+        return Some(match density {
+            Density::Wide => "Auto-refresh paused".to_string(),
+            Density::Compact => "paused".to_string(),
+        });
     }
     let due = poll_due_at(&Situation {
         last_reload_at,
         ..*situation
     });
-    Some(format!(
-        "Next refresh in {}",
-        countdown(due.saturating_sub(now))
-    ))
+    let remaining = countdown(due.saturating_sub(now));
+    Some(match density {
+        Density::Wide => format!("Auto-refresh in {remaining}"),
+        Density::Compact => format!("in {remaining}"),
+    })
 }
 
 /// sync が次に起きる時刻｡約束できる状態でなければ `None`｡
@@ -100,23 +157,47 @@ pub(super) fn sync_deadline(status: &SyncStatus) -> Option<i64> {
     }
 }
 
-/// sync の segment が言うこと｡[`refresh_label`] と同じ形にしてある｡
-/// 並んだ 2 つの数字が別の文法で書かれていると､読み手は毎回読み直す｡
-pub(super) fn sync_next_label(until: i64, now: i64) -> String {
-    format!("Next sync in {}", countdown(until.saturating_sub(now)))
+/// footer の sync の segment が言うこと｡"Sync list…" の入口のすぐ隣に
+/// 座るので主語を繰り返さない — "Sync list… next in 5h 12m" と読める｡
+/// `Compact` では "next in" も落とす｡入口の隣の薄い数字は､それだけで
+/// 次の時刻だと読める｡
+pub(super) fn sync_next_label(until: i64, now: i64, density: Density) -> String {
+    let remaining = countdown(until.saturating_sub(now));
+    match density {
+        Density::Wide => format!("next in {remaining}"),
+        Density::Compact => remaining,
+    }
+}
+
+/// footer の右端､保持している post の数 (#95)｡`Compact` では "kept" を
+/// 落とす｡"N / 500 posts" だけで上限に対する数だと読める｡
+pub(super) fn kept_label(kept: usize, cap: usize, density: Density) -> String {
+    match density {
+        Density::Wide => format!("{kept} / {cap} posts kept"),
+        Density::Compact => format!("{kept} / {cap} posts"),
+    }
 }
 
 impl TimelineView {
-    /// footer が今出す 2 つの文言 (#214): auto-refresh と list sync｡
-    /// 出すものが無ければそれぞれ `None`｡
-    pub(super) fn countdown_labels(&self, now: i64) -> (Option<String>, Option<String>) {
+    /// ウィンドウが今出す 2 つの文言 (#214): toolbar の auto-refresh と
+    /// footer の list sync｡出すものが無ければそれぞれ `None`｡
+    pub(super) fn countdown_labels(
+        &self,
+        now: i64,
+        density: Density,
+    ) -> (Option<String>, Option<String>) {
         (
-            refresh_label(self.refresh_situation.as_ref(), self.last_reload_at, now),
-            sync_deadline(&self.sync_status).map(|until| sync_next_label(until, now)),
+            refresh_label(
+                self.refresh_situation.as_ref(),
+                self.last_reload_at,
+                now,
+                density,
+            ),
+            sync_deadline(&self.sync_status).map(|until| sync_next_label(until, now, density)),
         )
     }
 
-    /// footer のカウントダウンを進める (#214)｡
+    /// カウントダウンを進める (#214)｡
     ///
     /// `start_cooldown_ticker` (#57) と同じ形だが､`notify` は文言が変わった
     /// ときだけだ｡理由はモジュールの doc を見よ｡数えるものが無くなれば
@@ -126,6 +207,10 @@ impl TimelineView {
     /// 呼ぶのは期限が生まれる 2 か所: auto-refresh のループを始めたとき
     /// と､sync が次の時刻を持つ status になったとき｡代入し直すと前の
     /// ticker は drop され取り消されるので､2 つが並んで刻むことは無い｡
+    ///
+    /// 文言は [`Density::Wide`] で比べる｡ticker はウィンドウの幅を知らない
+    /// が､知る必要も無い — 2 つの密度は同じ [`countdown`] を包んでいる
+    /// だけなので､片方が変わる瞬間はもう片方が変わる瞬間と同じだ｡
     pub(super) fn start_countdown_ticker(&mut self, cx: &mut Context<'_, Self>) {
         self.countdown_ticker = Some(cx.spawn(async move |this, cx| {
             let mut shown: Option<(Option<String>, Option<String>)> = None;
@@ -133,7 +218,7 @@ impl TimelineView {
                 cx.background_executor().timer(Duration::from_secs(1)).await;
 
                 let Ok(keep_going) = this.update(cx, |this, cx| {
-                    let labels = this.countdown_labels(oauth::unix_now());
+                    let labels = this.countdown_labels(oauth::unix_now(), Density::Wide);
                     if labels == (None, None) {
                         return false;
                     }
@@ -201,23 +286,37 @@ mod tests {
         assert_eq!(countdown(-5), "0s");
     }
 
+    // --- density ---
+
+    #[test]
+    fn the_default_window_is_wide_and_the_production_window_is_compact() {
+        assert_eq!(density(px(560.)), Density::Wide);
+        assert_eq!(density(px(429.)), Density::Compact);
+    }
+
+    #[test]
+    fn the_threshold_itself_is_still_wide() {
+        assert_eq!(density(COMPACT_BELOW), Density::Wide);
+        assert_eq!(density(COMPACT_BELOW - px(1.)), Density::Compact);
+    }
+
     // --- refresh_label ---
 
     #[test]
     fn no_loop_means_no_label() {
-        assert_eq!(refresh_label(None, None, 1_000), None);
+        assert_eq!(refresh_label(None, None, 1_000, Density::Wide), None);
     }
 
     #[test]
     fn a_fresh_window_counts_down_from_when_the_loop_started() {
-        let label = refresh_label(Some(&situation(None, 1_000)), None, 1_000);
-        assert_eq!(label.as_deref(), Some("Next refresh in 5m"));
+        let label = refresh_label(Some(&situation(None, 1_000)), None, 1_000, Density::Wide);
+        assert_eq!(label.as_deref(), Some("Auto-refresh in 5m"));
     }
 
     #[test]
     fn the_count_moves_with_the_clock() {
-        let label = refresh_label(Some(&situation(None, 1_000)), None, 1_258);
-        assert_eq!(label.as_deref(), Some("Next refresh in 42s"));
+        let label = refresh_label(Some(&situation(None, 1_000)), None, 1_258, Density::Wide);
+        assert_eq!(label.as_deref(), Some("Auto-refresh in 42s"));
     }
 
     // 手動の reload は次のポーリングを丸ごと 1 interval 先へ押しやる｡
@@ -226,22 +325,30 @@ mod tests {
     #[test]
     fn a_manual_reload_moves_the_count_before_the_loop_notices() {
         let stale = situation(None, 1_000);
-        let label = refresh_label(Some(&stale), Some(1_200), 1_200);
-        assert_eq!(label.as_deref(), Some("Next refresh in 5m"));
+        let label = refresh_label(Some(&stale), Some(1_200), 1_200, Density::Wide);
+        assert_eq!(label.as_deref(), Some("Auto-refresh in 5m"));
     }
 
     #[test]
     fn a_locked_screen_says_paused_rather_than_counting_a_dead_deadline() {
         let mut away = situation(None, 1_000);
         away.activity = Activity::Away;
-        let label = refresh_label(Some(&away), None, 90_000);
-        assert_eq!(label.as_deref(), Some("Next refresh: paused"));
+        let label = refresh_label(Some(&away), None, 90_000, Density::Wide);
+        assert_eq!(label.as_deref(), Some("Auto-refresh paused"));
+        let label = refresh_label(Some(&away), None, 90_000, Density::Compact);
+        assert_eq!(label.as_deref(), Some("paused"));
     }
 
     #[test]
     fn a_deadline_the_loop_has_not_acted_on_yet_reads_as_zero() {
-        let label = refresh_label(Some(&situation(None, 1_000)), None, 1_305);
-        assert_eq!(label.as_deref(), Some("Next refresh in 0s"));
+        let label = refresh_label(Some(&situation(None, 1_000)), None, 1_305, Density::Wide);
+        assert_eq!(label.as_deref(), Some("Auto-refresh in 0s"));
+    }
+
+    #[test]
+    fn a_narrow_window_drops_the_subject_next_to_the_reload_icon() {
+        let label = refresh_label(Some(&situation(None, 1_000)), None, 1_000, Density::Compact);
+        assert_eq!(label.as_deref(), Some("in 5m"));
     }
 
     // --- sync_deadline / sync_next_label ---
@@ -285,8 +392,24 @@ mod tests {
     }
 
     #[test]
-    fn the_sync_count_uses_the_same_wording_as_the_refresh_count() {
-        assert_eq!(sync_next_label(19_720, 1_000), "Next sync in 5h 12m");
-        assert_eq!(sync_next_label(1_000, 1_000), "Next sync in 0s");
+    fn the_sync_count_follows_its_entry_without_repeating_the_subject() {
+        assert_eq!(
+            sync_next_label(19_720, 1_000, Density::Wide),
+            "next in 5h 12m"
+        );
+        assert_eq!(sync_next_label(1_000, 1_000, Density::Wide), "next in 0s");
+    }
+
+    #[test]
+    fn a_narrow_window_keeps_only_the_number_by_the_sync_entry() {
+        assert_eq!(sync_next_label(19_720, 1_000, Density::Compact), "5h 12m");
+    }
+
+    // --- kept_label ---
+
+    #[test]
+    fn the_post_count_drops_kept_when_the_window_is_narrow() {
+        assert_eq!(kept_label(10, 500, Density::Wide), "10 / 500 posts kept");
+        assert_eq!(kept_label(10, 500, Density::Compact), "10 / 500 posts");
     }
 }

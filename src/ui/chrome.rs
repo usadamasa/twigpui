@@ -7,7 +7,11 @@
 use super::*;
 
 impl TimelineView {
-    pub(super) fn header(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
+    pub(super) fn header(
+        &self,
+        density: countdown::Density,
+        cx: &mut Context<'_, Self>,
+    ) -> impl IntoElement {
         // #57: `state` の match に畳み込まず､その手前で判定する — post が
         // すでに出ている間の進行中の reload は `state` を `Loaded` のままに
         // する (`reload_start_state` を見よ) ので､その場合に fetch が走って
@@ -38,6 +42,7 @@ impl TimelineView {
         };
 
         let theme = self.theme;
+        let (next_refresh, _) = self.countdown_labels(oauth::unix_now(), density);
 
         div()
             .flex()
@@ -90,6 +95,19 @@ impl TimelineView {
                         ),
                         |row| row.child(sign_in_pill("reauthorize", "Re-authorize", theme, cx)),
                     )
+                    // #214: 次のポーリングまで｡reload のアイコンの隣に
+                    // 置くのは､それがこの期限に押されるボタンだからで､
+                    // footer に置くと 429px で post の数が右端から落ちる
+                    // からでもある (`countdown` のモジュール doc を見よ)｡
+                    .when_some(next_refresh, |row, label| {
+                        row.child(
+                            div()
+                                .addressable("auto-refresh-countdown")
+                                .text_size(theme::TEXT_META)
+                                .text_color(rgb(theme.text_tertiary))
+                                .child(label),
+                        )
+                    })
                     .child(self.primary_action_control(&label, busy, action, cx)),
             )
     }
@@ -174,7 +192,11 @@ impl TimelineView {
     /// 保持している post の数は timeline が読み込まれてからしか出さない｡
     /// サインイン中や取得中には出せる数が無いし､"0 / 200" は答えの無い
     /// 問いではなく空の cache のように読めてしまう｡
-    pub(super) fn status_bar(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
+    pub(super) fn status_bar(
+        &self,
+        density: countdown::Density,
+        cx: &mut Context<'_, Self>,
+    ) -> impl IntoElement {
         let theme = self.theme;
 
         // #18: リクエスト数は常に出す; 見積り金額は `request_price` が
@@ -191,8 +213,9 @@ impl TimelineView {
             TimelineState::Loaded(ref items) => Some(items.len()),
             _ => None,
         };
-        // #214: 次の更新まで｡どちらも `countdown` が決め､無ければ出さない｡
-        let (next_refresh, next_sync) = self.countdown_labels(oauth::unix_now());
+        // #214: 次の sync まで｡`countdown` が決め､無ければ出さない｡
+        // auto-refresh のほうは toolbar (`header`) に居る｡
+        let (_, next_sync) = self.countdown_labels(oauth::unix_now(), density);
 
         div()
             // #205: sync の行が「footer の 1 段上」に居ることをテストが
@@ -245,36 +268,34 @@ impl TimelineView {
             // #214: 入口の隣に次の時刻｡入口とは別の要素にしてある — 入口は
             // クリックできる (`ask_to_sync`) ので､同じ要素に足すと当たりが
             // 文言の分だけ広がる｡margin は上と同じ理由で `gap` に頼らない｡
+            // 文言は `density` が幅で選ぶ｡それでも帯に入りきらないとき最初に
+            // 譲るのはこれだ: `min_w(0)` が無いと flex item は中身より狭く
+            // なれず､代わりに右端の post の数がウィンドウの外へ押し出される｡
+            // `truncate` は切れた側に "…" を出す — 読めない数字より､読めて
+            // いないと分かるほうがよい (`countdown` のモジュール doc)｡
             .when_some(next_sync, |bar, label| {
                 bar.child(
                     div()
                         .addressable("status-sync-next")
                         .ml(theme::ROW_PAD_X)
+                        .min_w(px(0.))
+                        .truncate()
                         .text_color(rgb(theme.text_tertiary))
                         .child(label),
                 )
             })
-            // 右端は timeline についての 2 つ: 次のポーリングと､保持して
-            // いる post の数｡どちらも出ないことがあるので､`ml_auto` は
-            // 個々ではなく包みに付ける — 両方に付けると余白が 2 つに割れ､
-            // 片方が帯の真ん中に浮く｡
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .ml_auto()
-                    .text_color(rgb(theme.text_tertiary))
-                    .when_some(next_refresh, |right, label| {
-                        right.child(div().addressable("status-refresh").child(label))
-                    })
-                    .when_some(kept, |right, kept| {
-                        right.child(
-                            div()
-                                .addressable("status-kept")
-                                .ml(theme::ROW_PAD_X)
-                                .child(format!("{kept} / {} posts kept", cache::MAX_CACHED_POSTS)),
-                        )
-                    }),
-            )
+            .when_some(kept, |bar, kept| {
+                bar.child(
+                    div()
+                        .addressable("status-kept")
+                        .ml_auto()
+                        .text_color(rgb(theme.text_tertiary))
+                        .child(countdown::kept_label(
+                            kept,
+                            cache::MAX_CACHED_POSTS,
+                            density,
+                        )),
+                )
+            })
     }
 }

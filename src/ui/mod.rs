@@ -472,6 +472,7 @@ pub(crate) struct TimelineView {
 #[cfg(test)]
 mod tests {
     use super::auto_refresh::{Poll, Situation};
+    use super::countdown;
     use super::reload_policy::{
         newly_arrived, preserved_scroll_target, reload_cooldown, reload_outcome_label,
     };
@@ -3098,12 +3099,12 @@ mod tests {
         }
     }
 
-    /// #214: footer のカウントダウンはループが写した期限から出る｡写しが
-    /// 無ければ出ない — off のウィンドウに "Next refresh" が出れば嘘になる｡
-    /// 出たときは post の数と接しない (#184 の `the_status_bars_segments_keep_apart`
-    /// と同じ主張)｡
+    /// #214: auto-refresh のカウントダウンはループが写した期限から出る｡
+    /// 写しが無ければ出ない — off のウィンドウに "Auto-refresh in" が出れば
+    /// 嘘になる｡出たときは reload のアイコンの左に座り､接しない (#184 の
+    /// `the_status_bars_segments_keep_apart` と同じ主張)｡
     #[gpui::test]
-    fn the_refresh_countdown_is_on_the_footer_only_while_a_loop_is_counting(
+    fn the_refresh_countdown_sits_by_the_reload_icon_only_while_a_loop_is_counting(
         cx: &mut gpui::TestAppContext,
     ) {
         let (mut visual, timeline) = drawn(cx, fixture_with(&["2", "1"], &[]));
@@ -3115,7 +3116,7 @@ mod tests {
             let _ = window.draw(cx);
         });
         assert!(
-            visual.debug_bounds("status-refresh").is_none(),
+            visual.debug_bounds("auto-refresh-countdown").is_none(),
             "a window with no polling loop must not promise a next poll"
         );
 
@@ -3128,17 +3129,144 @@ mod tests {
             let _ = window.draw(cx);
         });
 
-        let refresh = visual
-            .debug_bounds("status-refresh")
-            .expect("a counting loop has to reach the footer");
-        let kept = visual
-            .debug_bounds("status-kept")
-            .expect("a loaded timeline always says how many posts it keeps");
+        let countdown = visual
+            .debug_bounds("auto-refresh-countdown")
+            .expect("a counting loop has to reach the toolbar");
+        let reload = visual
+            .debug_bounds("primary-action")
+            .expect("the reload icon is always shown");
         assert!(
-            kept.left() > refresh.right(),
-            "the countdown runs into the post count: countdown ends at {:?}, count starts at {:?}",
-            refresh.right(),
+            reload.left() > countdown.right(),
+            "the countdown runs into the reload icon: countdown ends at {:?}, icon starts at {:?}",
+            countdown.right(),
+            reload.left()
+        );
+    }
+
+    /// footer の主要な区画の bounds を､ウィンドウを `width` にしてから読む
+    /// (#214)｡順に: 帯､次の sync､post の数｡
+    fn footer_bounds_at(
+        visual: &mut gpui::VisualTestContext,
+        width: f32,
+    ) -> (
+        gpui::Bounds<gpui::Pixels>,
+        gpui::Bounds<gpui::Pixels>,
+        gpui::Bounds<gpui::Pixels>,
+    ) {
+        visual.simulate_resize(gpui::size(gpui::px(width), gpui::px(700.)));
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        (
+            visual
+                .debug_bounds("status-bar")
+                .expect("the footer is always shown"),
+            visual
+                .debug_bounds("status-sync-next")
+                .expect("an idle sync has a next time to show"),
+            visual
+                .debug_bounds("status-kept")
+                .expect("a loaded timeline always says how many posts it keeps"),
+        )
+    }
+
+    /// #214: 幅が足りなくなると footer はまず文言を詰め､それでも足りなければ
+    /// 次の sync を "…" で切る｡post の数は決して右端から落ちない｡
+    ///
+    /// 最初の実装は両方のカウントダウンを footer に置き､550px ですら
+    /// "posts kept" が右端から落ちた｡2 つの幅で見る: `COMPACT_BELOW` を
+    /// わずかに下回る幅では詰めた文言がそのまま入り (同じ密度でもっと広い
+    /// 幅と同じ寸法)､本番の 429px では詰めた文言も切られるが､post の数は
+    /// 帯の中に残る｡テスト環境のフォントは本番より広いので､本番なら 429px
+    /// で入る文言がここでは切られる — このテストが見ているのは寸法ではなく
+    /// 譲る順番だ｡
+    #[gpui::test]
+    fn the_footer_shortens_first_and_truncates_last(cx: &mut gpui::TestAppContext) {
+        let (mut visual, timeline) = drawn(cx, fixture_with_sync(&["2", "1"], 0));
+        visual.update(|_window, cx| {
+            timeline.update(cx, |view, _cx| {
+                view.refresh_situation = Some(counting_situation());
+            });
+        });
+
+        // 詰めた文言の本来の幅は､詰める側でいちばん広い幅で読む｡それより
+        // 狭い幅で同じ寸法なら､そこでも丸ごと入っている｡
+        let roomy = f32::from(countdown::COMPACT_BELOW) - 1.;
+        let (_, unsqueezed, _) = footer_bounds_at(&mut visual, roomy);
+        let (bar, next, kept) = footer_bounds_at(&mut visual, roomy - 20.);
+        assert_eq!(
+            next.size.width, unsqueezed.size.width,
+            "a little under the threshold the shortened wording has to fit whole"
+        );
+        assert!(
+            kept.right() <= bar.right(),
+            "the post count falls off the window: count ends at {:?}, window ends at {:?}",
+            kept.right(),
+            bar.right()
+        );
+
+        let (bar, _, kept) = footer_bounds_at(&mut visual, 429.);
+        assert!(
+            kept.right() <= bar.right(),
+            "at 429px the post count falls off the window: count ends at {:?}, window ends at {:?}",
+            kept.right(),
+            bar.right()
+        );
+
+        // 詰めた文言すら入らない幅は寸法から逆算する: 余っている幅を使い
+        // 切り､さらに文言の半分ぶん狭める｡
+        let slack = f32::from(bar.right()) - f32::from(kept.right());
+        let cramped = 429. - slack - f32::from(unsqueezed.size.width) / 2.;
+        let (bar, next, kept) = footer_bounds_at(&mut visual, cramped);
+        assert!(
+            kept.right() <= bar.right(),
+            "cramped, the post count falls off the window: count ends at {:?}, window ends at {:?}",
+            kept.right(),
+            bar.right()
+        );
+        assert!(
+            next.size.width < unsqueezed.size.width,
+            "cramped, the next sync time has to be the segment that gives way"
+        );
+        assert!(
+            next.right() <= kept.left(),
+            "the next sync time runs into the post count: time ends at {:?}, count starts at {:?}",
+            next.right(),
             kept.left()
+        );
+    }
+
+    /// #214: toolbar のカウントダウンは 429px でも reload のアイコンを
+    /// ウィンドウの外へ押し出さない｡
+    #[gpui::test]
+    fn the_toolbar_countdown_keeps_the_reload_icon_in_the_window(cx: &mut gpui::TestAppContext) {
+        let (mut visual, timeline) = drawn(cx, fixture_with(&["2", "1"], &[]));
+        visual.update(|_window, cx| {
+            timeline.update(cx, |view, _cx| {
+                view.refresh_situation = Some(counting_situation());
+            });
+        });
+        visual.simulate_resize(gpui::size(gpui::px(429.), gpui::px(700.)));
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let viewport = visual.update(|window, _| window.viewport_size());
+        let reload = visual
+            .debug_bounds("primary-action")
+            .expect("the reload icon is always shown");
+        let countdown = visual
+            .debug_bounds("auto-refresh-countdown")
+            .expect("a counting loop has to reach the toolbar");
+        assert!(
+            reload.right() <= viewport.width,
+            "the reload icon falls off the window: icon ends at {:?}, window ends at {:?}",
+            reload.right(),
+            viewport.width
+        );
+        assert!(
+            countdown.right() < reload.left(),
+            "the countdown runs into the reload icon"
         );
     }
 
