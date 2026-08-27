@@ -36,7 +36,7 @@ mod toast;
 // 隣のファイルから届かせるためだけに広げると､「クレート内のどこからでも
 // 触ってよい」という意味になり､それはファイルを分割した目的と
 // 正反対になる｡
-use auto_refresh::{FollowMode, Pending, pending_after_poll, pending_label};
+use auto_refresh::{FollowMode, Pending, pending_after_poll};
 use fade::Fade;
 use list_sync::{SyncOff, SyncStatus, SyncTrigger};
 use reload_policy::{
@@ -48,11 +48,11 @@ use render::Addressable as _;
 use render::{
     AVATAR_SIZE, MAX_RENDERED_MEDIA, MEDIA_CELL_HEIGHT, author_link, avatar_placeholder, byline,
     compose_error_message, format_timestamp, header_title_element, like_row, link_row, media_badge,
-    media_columns, new_posts_bar, notice, offers_delete, offers_like, offers_quote,
-    offers_reauthorize, offers_reply, offers_repost, open_post_link, quote_card, quote_row,
-    reload_notice_banner, render_thread_chain, reply_banner_label, reply_row, reply_target_label,
-    repost_banner_label, repost_row, session_notice_banner, sign_in_pill, thread_action_label,
-    thread_toggle_row, usage_color, usage_label, with_count,
+    media_columns, notice, offers_delete, offers_like, offers_quote, offers_reauthorize,
+    offers_reply, offers_repost, open_post_link, quote_card, quote_row, reload_notice_banner,
+    render_thread_chain, reply_banner_label, reply_row, reply_target_label, repost_banner_label,
+    repost_row, session_notice_banner, sign_in_pill, thread_action_label, thread_toggle_row,
+    usage_color, usage_label, with_count,
 };
 use render::{RowCounts, row_counts};
 use toast::Toast;
@@ -1847,6 +1847,10 @@ impl TimelineView {
             .overflow_hidden()
             .child(list)
             .child(Self::wheel_capture(cx))
+            // #206: 新着の toast｡一覧の外､ずれない wrapper に重ねるので
+            // scroll しても下端に留まる｡`when_some` なので無いときは
+            // 要素そのものが無い｡
+            .when_some(self.toast(cx), ParentElement::child)
     }
 }
 
@@ -1866,6 +1870,9 @@ fn load_older_row(theme: Theme, cx: &mut Context<'_, TimelineView>) -> impl Into
 impl Render for TimelineView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let theme = self.theme;
+        // #206: toast の件数には書き手が多いので､見直すのは描画の頭で —
+        // `fade_toast` の doc を見る｡`body` がこの結果を読む｡
+        self.fade_toast(cx);
 
         div()
             // #58: どのバインディングもグローバルに登録するのではなく､この
@@ -1935,17 +1942,8 @@ impl Render for TimelineView {
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &ScrollToTop, _window, cx| {
-                // #22: 完全にローカル — リクエストもゲートも無いし､報告する
-                // ことも無い｡ピクセルのオフセットではなく
-                // `scroll_to_top_of_item(0)` にしてあるのは､最新の行そのものへ
-                // 着地させるためだ｡進行中の glide も同じ場所へ歩いている —
-                // ジャンプがそれに取って代わる｡ホイールの目標も同じ (#175):
-                // 飛んだ先から古い目標へ引き戻してはいけない｡
-                this.glide = None;
-                this.scroll_motion = None;
-                this.scroller.release();
-                this.list_scroll.scroll_to_top_of_item(0);
-                cx.notify();
+                // #22: 完全にローカル — 理由は `jump_to_top` の doc に｡
+                this.jump_to_top(cx);
             }))
             .on_action(cx.listener(|_this, _: &Minimize, window, _cx| {
                 window.minimize_window();
@@ -1986,14 +1984,9 @@ impl Render for TimelineView {
             .when_some(self.reload_notice.clone(), |column, notice| {
                 column.child(reload_notice_banner(&notice, theme, oauth::unix_now()))
             })
-            // #21: 自動更新が取得して抑えているもの｡`body` の中ではなく
-            // バナーの隣に置くのは､バナーがそうである理由と同じだ —
-            // `new_posts_bar` を見る — ただしこちらは報告ではなく､申し出
-            // そのものである点が違う｡
-            .when_some(
-                self.pending.as_ref().map(|pending| pending.count),
-                |column, count| column.child(new_posts_bar(count, theme, cx)),
-            )
+            // #21 の "N new posts" はここに座っていた｡#206 で `body` の
+            // 下端に重なる toast へ移った — 報告ではなく申し出なので､
+            // バナーの列ではなく timeline の上に住む｡
             // #70: 開けなかったリンク｡上の 2 つと同じバナーの扱いで､理由も
             // 同じだ｡何も起きていないように見えるクリックこそ潰す価値のある
             // 結末で､下の timeline はそれについて何も言えない｡
@@ -3720,7 +3713,7 @@ mod tests {
             "the toast must not hang below the timeline: {toast:?} vs {body:?}"
         );
         assert!(
-            body.bottom() - toast.bottom() < gpui::px(48.),
+            f32::from(body.bottom()) - f32::from(toast.bottom()) < 48.,
             "the toast sits near the bottom edge, not floating mid-screen: {toast:?} vs {body:?}"
         );
         assert!(
@@ -3728,11 +3721,11 @@ mod tests {
             "the toast overlaps the bottom of the timeline, not its middle: {toast:?}"
         );
         assert!(
-            toast.size.width < body.size.width / 2.,
+            f32::from(toast.size.width) < f32::from(body.size.width) / 2.,
             "a capsule, not a bar: {toast:?} vs {body:?}"
         );
         assert!(
-            (toast.center().x - body.center().x).abs() < gpui::px(1.),
+            (f32::from(toast.center().x) - f32::from(body.center().x)).abs() < 1.,
             "centered: {toast:?} vs {body:?}"
         );
     }
@@ -3743,6 +3736,13 @@ mod tests {
         let ids: Vec<String> = (1..=40).map(|n| n.to_string()).collect();
         let shown: Vec<&str> = ids.iter().map(String::as_str).collect();
         let (mut visual, timeline) = drawn(cx, fixture_with(&shown, &["99"]));
+        // 出てくる途中は持ち上がりで動くので､先に着かせる｡
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(1));
+        cx.run_until_parked();
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
         let body = visual
             .debug_bounds("timeline")
             .expect("the timeline is laid out");
@@ -3781,7 +3781,7 @@ mod tests {
             .expect("the timeline is laid out");
 
         visual.simulate_click(
-            gpui::point(body.left() + gpui::px(10.), toast.center().y),
+            gpui::point(gpui::px(f32::from(body.left()) + 10.), toast.center().y),
             gpui::Modifiers::none(),
         );
 
@@ -3869,14 +3869,18 @@ mod tests {
             let _ = window.draw(cx);
         });
 
-        assert!(
-            visual.debug_bounds("new-posts").is_none(),
-            "a hidden toast is out of the tree, not a transparent capsule"
-        );
+        // `debug_bounds` では「無い」を言えない — gpui の `Frame::clear` は
+        // その map を空けないので､一度描いた名前は消えた後も残る｡代わりに
+        // 要素を組む側に尋ねる｡
         cx.update(|cx| {
-            let view = timeline.read(cx);
-            assert_eq!(view.toast.fade, Fade::Hidden);
-            assert!(view.toast_fade_task.is_none());
+            timeline.update(cx, |view, cx| {
+                assert_eq!(view.toast.fade, Fade::Hidden);
+                assert!(view.toast_fade_task.is_none());
+                assert!(
+                    view.toast(cx).is_none(),
+                    "a hidden toast is out of the tree, not a transparent capsule"
+                );
+            });
         });
     }
 
@@ -3943,10 +3947,15 @@ mod tests {
         visual.update(|window, cx| {
             let _ = window.draw(cx);
         });
-        assert!(
-            visual.debug_bounds("new-posts").is_none(),
-            "with nothing left above, the toast is gone"
-        );
+        cx.update(|cx| {
+            timeline.update(cx, |view, cx| {
+                assert_eq!(view.toast.fade, Fade::Hidden);
+                assert!(
+                    view.toast(cx).is_none(),
+                    "with nothing left above, the toast is gone"
+                );
+            });
+        });
     }
 
     /// #206: follow の途中で toast を押すと最上部へ飛ぶ｡pill と同じく無料 —

@@ -52,7 +52,7 @@ pub(crate) struct Fixture {
     /// このクレートの他の場所と同じく､新しい順｡
     pub items: Vec<TimelineItem>,
     /// poll が取得済みでまだ表示していない post (#21)､新しい順 —
-    /// "N new posts" のバーが差し出しているものだ｡
+    /// "N new posts" の toast (#206) が差し出しているものだ｡
     ///
     /// 素の件数ではなく本物の [`TimelineItem`] なのは､このモジュール自身の
     /// 規則による: フィクスチャが記述するのは timeline であって､widget では

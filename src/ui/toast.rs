@@ -12,7 +12,14 @@
 //! [`super::auto_refresh`] のもので､押したときに起きることも
 //! ([`TimelineView::apply_pending`]) あちらのまま｡ここは見せ方だけ｡
 
-use super::fade::{Fade, fade_opacity, fade_settled, next_fade};
+use super::auto_refresh::pending_label;
+use super::fade::{FADE_STEP_MILLIS, Fade, fade_occupies, fade_opacity, fade_settled, next_fade};
+use super::render::Addressable as _;
+use super::{
+    AnyElement, Context, Duration, FontWeight, InteractiveElement as _, IntoElement as _,
+    ParentElement as _, StatefulInteractiveElement as _, Styled as _, TimelineView, div, px, rgb,
+    rgba, theme,
+};
 
 /// 読み手にまだ届いていない新着の数 (#206)｡toast が言う件数｡
 ///
@@ -101,6 +108,176 @@ impl Toast {
     /// この件数に対して､これ以上 tick しても変わらないかどうか (#206)｡
     pub(super) fn settled_for(self, count: usize) -> bool {
         fade_settled(self.fade) && (count > 0) == (self.fade == Fade::Shown)
+    }
+}
+
+/// capsule の縁 (#206)｡`rgba` なので下 8 bit が不透明度｡
+///
+/// accent の塗りの上に白を薄く引く｡明暗どちらのテーマでも accent は
+/// 濃い青で､縁が無いと timeline の白や暗色の上で平らな四角に読める｡
+const TOAST_EDGE: u32 = 0xffff_ff33;
+
+/// toast のうち､ウィンドウの状態に触る半分 (#206)｡
+impl TimelineView {
+    /// toast が今言うべき件数 (#206)｡0 なら出さない｡
+    fn unread(&self) -> usize {
+        unread_count(
+            self.pending.as_ref().map(|pending| pending.count),
+            self.unseen,
+        )
+    }
+
+    /// timeline の下端に重ねる toast (#206)｡出さないなら `None`｡
+    ///
+    /// 呼ぶのは `body` の wrapper｡scroll する一覧の外､band でずれない
+    /// wrapper に `absolute` で寄せるので､一覧がどこへ scroll しても toast は
+    /// 動かない｡外側の帯は幅いっぱいだが listener を持たない — gpui の
+    /// hit test は listener の無い要素に hitbox を置かないので､capsule の
+    /// 横のクリックは下の行へ届く｡
+    ///
+    /// 上向きの矢印は､押したらどの方向へ行くかを告げる (#21)｡濃さと
+    /// 持ち上がりは同じ [`Fade`] から引く ([`toast_drop_px`])｡
+    pub(super) fn toast(&self, cx: &mut Context<'_, Self>) -> Option<AnyElement> {
+        if !fade_occupies(self.toast.fade) {
+            return None;
+        }
+        let theme = self.theme;
+        let fade = self.toast.fade;
+        Some(
+            div()
+                .absolute()
+                .left_0()
+                .right_0()
+                .bottom(px(TOAST_INSET_PX - toast_drop_px(fade)))
+                .flex()
+                .justify_center()
+                .child(
+                    div()
+                        .addressable("new-posts")
+                        .flex()
+                        .items_center()
+                        .gap_1p5()
+                        .px_3()
+                        .py_1p5()
+                        .rounded_full()
+                        .bg(rgb(theme.accent))
+                        .border_1()
+                        .border_color(rgba(TOAST_EDGE))
+                        .shadow_md()
+                        .text_color(rgb(theme.button_label))
+                        .text_size(theme::TEXT_META)
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .opacity(fade_opacity(fade))
+                        .cursor_pointer()
+                        .hover(gpui::Styled::shadow_lg)
+                        .child("↑")
+                        .child(pending_label(self.toast.count))
+                        .on_click(
+                            cx.listener(|this, _event, _window, cx| this.reveal_new_posts(cx)),
+                        ),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// フェードを今の件数が求める向きへ歩かせる (#206)｡
+    ///
+    /// `render` の頭で毎フレーム呼ぶ｡sync の行は `show_sync` という 1 つの
+    /// 戸口を持つが､toast の件数は 2 つの出所と 6 つの書き手 (poll､fixture､
+    /// follow､glide の各フレーム､ホイール､最上部への跳び) を持ち､その
+    /// すべてに「フェードを見直せ」を置くと 1 つ忘れた瞬間に toast が
+    /// 取り残される｡描画はそのどれの後にも必ず来る｡
+    ///
+    /// 目的地に着いていればタイマーを持たず､走っていれば触らない — タイマー
+    /// が毎段件数を読み直すので､向きが変わっても新しいタイマーは要らない｡
+    /// 描画のたびに段を踏まないのもそのためだ: glide の 60fps に引きずられて
+    /// 30ms の刻みが 16ms になる｡踏むのは 1 段目だけで､それは
+    /// `fade_sync_row` と同じ理由 — タイマーを待つと最初の 30ms が何も
+    /// 起きないフレームになる｡
+    pub(super) fn fade_toast(&mut self, cx: &mut Context<'_, Self>) {
+        let unread = self.unread();
+        self.toast = self.toast.observe(unread);
+        if self.toast.settled_for(unread) {
+            self.toast_fade_task = None;
+            return;
+        }
+        if self.toast_fade_task.is_some() {
+            return;
+        }
+        self.toast = self.toast.ticked(unread);
+        if self.toast.settled_for(unread) {
+            return;
+        }
+        self.toast_fade_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(FADE_STEP_MILLIS))
+                    .await;
+                // `Err` はウィンドウが消えたということ｡
+                let Ok(settled) = this.update(cx, |this, cx| {
+                    let unread = this.unread();
+                    this.toast = this.toast.ticked(unread);
+                    cx.notify();
+                    if this.toast.settled_for(unread) {
+                        // 落ち着いた toast がフレームを焚き続けない｡
+                        // `drive_scroll` が自分のスロットを空けるのと同じ｡
+                        this.toast_fade_task = None;
+                        true
+                    } else {
+                        false
+                    }
+                }) else {
+                    return;
+                };
+                if settled {
+                    return;
+                }
+            }
+        }));
+    }
+
+    /// toast のクリック (#206)｡差し出しているものを見せる｡
+    ///
+    /// バッファがあれば [`Self::apply_pending`] — バーのクリックと `⌘⇧R` が
+    /// 通ってきた経路そのもので､リクエストは飛ばない｡無ければ follow が
+    /// 流し込んだ行がまだ上にあるということなので､最上部へ跳ぶ
+    /// (`ScrollToTop` と同じ)｡どちらも glide の続きを待たずに全部を見せる｡
+    pub(super) fn reveal_new_posts(&mut self, cx: &mut Context<'_, Self>) {
+        if self.pending.is_some() {
+            self.apply_pending(cx);
+        } else {
+            self.jump_to_top(cx);
+        }
+    }
+
+    /// 最上部へ跳ぶ (#22)｡`ScrollToTop` と toast の両方から｡
+    ///
+    /// 完全にローカル — リクエストもゲートも無いし､報告することも無い｡
+    /// ピクセルのオフセットではなく `scroll_to_top_of_item(0)` にしてある
+    /// のは､最新の行そのものへ着地させるためだ｡進行中の glide も同じ場所へ
+    /// 歩いている — ジャンプがそれに取って代わる｡ホイールの目標も同じ
+    /// (#175): 飛んだ先から古い目標へ引き戻してはいけない｡上に残っていた
+    /// 新着も全部視界に入るので､countdown は 0 (#206)｡
+    pub(super) fn jump_to_top(&mut self, cx: &mut Context<'_, Self>) {
+        self.glide = None;
+        self.scroll_motion = None;
+        self.scroller.release();
+        self.list_scroll.scroll_to_top_of_item(0);
+        self.unseen = 0;
+        cx.notify();
+    }
+
+    /// scroll 位置が動いた (#206)｡follow の countdown をそこまで進める｡
+    ///
+    /// glide と読み手のホイールの両方から呼ぶ｡`logical_scroll_top` は直近の
+    /// prepaint の行の bounds と今の offset から数えるので､一覧を置き換えた
+    /// 直後の 1 フレームだけは古い行を基準に答える｡glide は補正の着地を
+    /// 待ってから呼ぶ (`start_glide` の `SETTLE_FRAMES`)｡ホイールはその窓で
+    /// 読み手が握ったときだけ 1 回ずれうるが､握った時点で数は読み手の
+    /// ものなので､そのための仕掛けは置かない｡
+    pub(super) fn note_scroll_position(&mut self) {
+        let (top_item, _) = self.list_scroll.logical_scroll_top();
+        self.unseen = unseen_after_scroll(self.unseen, top_item);
     }
 }
 

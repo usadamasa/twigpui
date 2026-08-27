@@ -136,35 +136,6 @@ pub(super) fn reload_notice_banner(
         .child(message)
 }
 
-/// auto-refresh が差し出す「N new posts」のバー (#21)｡
-///
-/// timeline の中の行ではなくヘッダと timeline の間のバーにしてある｡それ
-/// が差し出しと割り込みの違いだ｡scroll する一覧の中なら一番上に座ること
-/// になり — 下へ scroll した人からは見えない｡auto-refresh はまさにその
-/// 読み手のために在る｡ここなら動かず､上の二つのバナーの隣にいて､下の
-/// timeline は押されるまでまったく動かない｡
-///
-/// 隣の二つと違い､ヘッダ自身の背景の上に `accent` で塗る:
-/// `session_notice_banner` と `reload_notice_banner` は起きたことを報じる
-/// が､この列の中でボタンなのはこの帯だけだ｡上向きの矢印は､押したらどの
-/// 方向へ行くかを告げる｡読み手を先頭へ戻しもするからだ｡
-pub(super) fn new_posts_bar(
-    count: usize,
-    theme: Theme,
-    cx: &mut Context<'_, TimelineView>,
-) -> impl IntoElement {
-    div()
-        .addressable("new-posts")
-        .px_4()
-        .py_2()
-        .bg(rgb(theme.bg_header))
-        .border_b_1()
-        .border_color(rgb(theme.border))
-        .text_color(rgb(theme.accent))
-        .child(format!("↑ {}", pending_label(count)))
-        .on_click(cx.listener(|this, _event, _window, cx| this.apply_pending(cx)))
-}
-
 /// `@name`｡expansion に著者が居なければ何も返さない — 裸の `@` は壊れた
 /// 行に見えてしまう｡
 pub(super) fn byline(author_username: &str) -> String {
