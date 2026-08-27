@@ -268,6 +268,99 @@ mod tests {
     }
 
     #[test]
+    fn relative_image_paths_resolve_against_the_fixture_directory() {
+        // #234: fixture が持ち込む画像はファイルの隣に置く｡書くのは
+        // fixture からの相対パスで､読んだ側がそれを絶対パスにする —
+        // `cargo run` の cwd がどこであっても同じファイルを指すように｡
+        let path = write(
+            "relative-images",
+            r#"{
+              "signed_in_as": { "id": "1", "username": "me" },
+              "items": [
+                {
+                  "id": "1", "text": "with images",
+                  "author_name": "A", "author_username": "a",
+                  "author_avatar_url": "media/avatar.png",
+                  "media": [{ "url": "media/one.png" }],
+                  "quoted": {
+                    "author_name": "B", "author_username": "b", "text": "q",
+                    "media": [{ "url": "media/quoted.png" }]
+                  }
+                }
+              ],
+              "pending": [
+                {
+                  "id": "2", "text": "pending",
+                  "author_name": "C", "author_username": "c",
+                  "author_avatar_url": "https://pbs.twimg.com/profile_images/1/c_normal.jpg",
+                  "media": [{ "url": "/absolute/stays.png" }]
+                }
+              ]
+            }"#,
+        );
+        let fixture = load(&path).unwrap();
+        let base = path.parent().unwrap();
+
+        let item = &fixture.items[0];
+        assert_eq!(
+            item.author_avatar_url.as_deref(),
+            base.join("media/avatar.png").to_str()
+        );
+        assert_eq!(item.media[0].url, base.join("media/one.png").to_str().unwrap());
+        assert_eq!(
+            item.quoted.as_ref().unwrap().media[0].url,
+            base.join("media/quoted.png").to_str().unwrap()
+        );
+        // URL と絶対パスはそのまま｡
+        let pending = &fixture.pending[0];
+        assert_eq!(
+            pending.author_avatar_url.as_deref(),
+            Some("https://pbs.twimg.com/profile_images/1/c_normal.jpg")
+        );
+        assert_eq!(pending.media[0].url, "/absolute/stays.png");
+
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn the_bundled_fixture_never_reaches_for_the_network() {
+        // #234: fixture 起動は課金なしで毎回同じ画面を出すためにある｡
+        // 画像 1 枚でもネットワークへ出ると､オフラインでは別の画面になり､
+        // 本番のログに fixture 由来の WARN が混ざる｡
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/timeline.json");
+        let fixture = load(&path).expect("fixtures/timeline.json must load");
+
+        let images = fixture
+            .items
+            .iter()
+            .chain(fixture.pending.iter())
+            .flat_map(|item| {
+                item.author_avatar_url
+                    .iter()
+                    .map(String::as_str)
+                    .chain(item.media.iter().map(|media| media.url.as_str()))
+                    .chain(
+                        item.quoted
+                            .iter()
+                            .flat_map(|quoted| quoted.media.iter().map(|media| media.url.as_str())),
+                    )
+            });
+        let mut seen = 0;
+        for image in images {
+            seen += 1;
+            assert!(
+                !crate::image_cache::is_remote(image),
+                "{image} would be fetched over the network"
+            );
+            assert!(
+                Path::new(image).is_file(),
+                "{image} is not a file next to the fixture"
+            );
+        }
+        assert!(seen >= 7, "the fixture is meant to show images, saw {seen}");
+    }
+
+    #[test]
     fn a_malformed_fixture_is_an_error() {
         // 手で編集したフィクスチャが実際に起こす失敗｡空の timeline へ
         // fallback すると､アプリが動いているように見えてしまう｡

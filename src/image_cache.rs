@@ -191,4 +191,47 @@ mod tests {
             Some(dir)
         );
     }
+
+    #[test]
+    fn a_local_file_is_returned_as_is_without_touching_the_cache() {
+        // #234: fixture は画像をディスクから持ち込む｡それをキャッシュへ
+        // 複製もせず､ましてネットワークへも出ない — 触った形跡として
+        // キャッシュディレクトリが作られていないことを見る｡
+        let file = std::env::temp_dir().join("twigpui-image-cache-local.png");
+        std::fs::write(&file, b"not really a png").unwrap();
+        let dir = std::env::temp_dir().join("twigpui-image-cache-untouched");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let resolved = ensure_cached(&dir, file.to_str().unwrap()).unwrap();
+
+        assert_eq!(resolved, file);
+        assert!(!dir.exists(), "a local file must not create the cache dir");
+        std::fs::remove_file(&file).unwrap();
+    }
+
+    #[test]
+    fn a_missing_local_file_is_an_error_naming_the_path() {
+        // 無いローカルファイルを URL として fetch しにいってはならない:
+        // 失敗の契約は今までどおり (WARN 1 行と枠のまま) で､その 1 行が
+        // どのファイルかを言う｡
+        let file = std::env::temp_dir().join("twigpui-image-cache-nope.png");
+        let _ = std::fs::remove_file(&file);
+        let dir = std::env::temp_dir().join("twigpui-image-cache-untouched-2");
+
+        let error = ensure_cached(&dir, file.to_str().unwrap()).expect_err("no file, no path");
+
+        assert!(
+            format!("{error:#}").contains("twigpui-image-cache-nope.png"),
+            "{error:#}"
+        );
+        assert!(!dir.exists());
+    }
+
+    #[test]
+    fn only_http_urls_are_remote() {
+        assert!(is_remote("https://pbs.twimg.com/a/b.jpg"));
+        assert!(is_remote("http://example.com/a.png"));
+        assert!(!is_remote("/Users/someone/fixtures/media/one.png"));
+        assert!(!is_remote("fixtures/media/one.png"));
+    }
 }
