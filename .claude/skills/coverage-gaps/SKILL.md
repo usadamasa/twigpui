@@ -77,7 +77,8 @@ CI では Coverage ジョブが同じものを step summary に貼る。**必須
 | 色・フォント・字の詰まり方 | `TestWindow::draw` が no-op。`Scene` から先は走らない (#115 理由 2) |
 | 実 API を叩くコード | テストはネットワークを叩かない。`x-api-budget` |
 
-`x_api/client.rs` のカバレッジが低いのは**正しい状態**。ここを上げようとして
+`x_api/client/mod.rs` (transport) と `client/endpoints.rs` のカバレッジが低いのは
+**正しい状態**。ここを上げようとして
 ネットワークを叩くテストを書いてはいけない。埋めるならフィクスチャ JSON を
 使ったパースとエラー変換のテストで、それは既に厚い (`x_api/model.rs` は 99%)。
 
