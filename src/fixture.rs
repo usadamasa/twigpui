@@ -108,8 +108,37 @@ pub(crate) struct FixtureSync {
 pub(crate) fn load(path: &Path) -> Result<Fixture> {
     let contents = std::fs::read_to_string(path)
         .with_context(|| format!("could not read the fixture {}", path.display()))?;
-    serde_json::from_str(&contents)
-        .with_context(|| format!("could not parse the fixture {}", path.display()))
+    let mut fixture: Fixture = serde_json::from_str(&contents)
+        .with_context(|| format!("could not parse the fixture {}", path.display()))?;
+
+    // #234: 画像は fixture の隣のファイルから読む｡相対パスの基準は cwd
+    // ではなく fixture 自身の場所 — `cargo run` の cwd がどこであっても
+    // 同じ画像を指すように｡`load` の時点で絶対化しておけば､描く側は本物
+    // の URL とローカルのパスを見分けずに済む (`image_cache::ensure_cached`)｡
+    let base = path.parent().unwrap_or_else(|| Path::new("."));
+    for item in fixture.items.iter_mut().chain(fixture.pending.iter_mut()) {
+        if let Some(avatar) = item.author_avatar_url.as_mut() {
+            resolve_image(base, avatar);
+        }
+        for media in &mut item.media {
+            resolve_image(base, &mut media.url);
+        }
+        if let Some(quoted) = item.quoted.as_mut() {
+            for media in &mut quoted.media {
+                resolve_image(base, &mut media.url);
+            }
+        }
+    }
+    Ok(fixture)
+}
+
+/// fixture からの相対パスを `base` 基準の絶対パスに書き換える｡URL と
+/// 絶対パスはそのまま｡
+fn resolve_image(base: &Path, image: &mut String) {
+    if crate::image_cache::is_remote(image) || Path::new(image.as_str()).is_absolute() {
+        return;
+    }
+    *image = base.join(image.as_str()).to_string_lossy().into_owned();
 }
 
 #[cfg(test)]
@@ -306,7 +335,10 @@ mod tests {
             item.author_avatar_url.as_deref(),
             base.join("media/avatar.png").to_str()
         );
-        assert_eq!(item.media[0].url, base.join("media/one.png").to_str().unwrap());
+        assert_eq!(
+            item.media[0].url,
+            base.join("media/one.png").to_str().unwrap()
+        );
         assert_eq!(
             item.quoted.as_ref().unwrap().media[0].url,
             base.join("media/quoted.png").to_str().unwrap()

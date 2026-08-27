@@ -82,12 +82,36 @@ pub(crate) fn cached_path(dir: &Path, url: &str) -> PathBuf {
     dir.join(cache_key(url))
 }
 
+/// `url` が fetch を要するものか｡そうでなければディスク上のパスとして
+/// 読む (#234)｡
+///
+/// 境界は `http(s)://` の有無｡fixture が画像を相対パスで書き､
+/// [`crate::fixture::load`] がそれを絶対パスにして届ける｡X の URL は
+/// どれも `https://pbs.twimg.com/…` なので､本番の経路がこちらへ落ちる
+/// ことはない｡
+pub(crate) fn is_remote(url: &str) -> bool {
+    url.starts_with("https://") || url.starts_with("http://")
+}
+
 /// `url` のローカルパス｡まだキャッシュされていなければ先に `dir` へ
 /// ダウンロードする｡
 ///
-/// unit test しない — 本物の HTTP リクエストを出すからだ｡カバレッジは
-/// [`cache_key`] が担う｡
+/// [`is_remote`] でない `url` はディスク上のファイルとして扱い､キャッシュ
+/// へ複製せずそのまま返す (#234)｡無ければ error — 見つからないファイルを
+/// URL として fetch しにいくと､どのみち失敗するうえに WARN がファイル名
+/// ではなく `could not fetch` を言う｡
+///
+/// fetch の経路は unit test しない — 本物の HTTP リクエストを出すからだ｡
+/// カバレッジは [`cache_key`] とローカルの分岐が担う｡
 pub(crate) fn ensure_cached(dir: &Path, url: &str) -> Result<PathBuf> {
+    if !is_remote(url) {
+        let local = Path::new(url);
+        if !local.is_file() {
+            bail!("{url} is not a file on disk");
+        }
+        return Ok(local.to_path_buf());
+    }
+
     let path = cached_path(dir, url);
     if path.exists() {
         return Ok(path);
