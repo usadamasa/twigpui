@@ -2002,6 +2002,92 @@ mod tests {
         }
     }
 
+    /// #153: composer は使われるまで 1 行に畳まれている｡
+    ///
+    /// 空でフォーカスも無いときだけ畳む｡クリック (フォーカス) すれば広がり､
+    /// 下書きがあればフォーカスを外しても広がったまま — #14 の「下書きを
+    /// 失わない」は､下書きが目に入りつづけることも含む｡空に戻して
+    /// フォーカスを外せば､また畳まれる｡
+    ///
+    /// 「1 行」の絶対値は入力ウィジェット (`gpui-component`) の行の高さと
+    /// 余白で決まるので直値では書かず､avatar の 32px より低いことだけを
+    /// 要求する｡広がった状態はそれより確実に高い (2 行 + 余白)｡
+    #[gpui::test]
+    fn the_composer_folds_to_one_line_until_it_is_used(cx: &mut gpui::TestAppContext) {
+        let (window, timeline) = fixture_window(cx, fixture_with(&["1"], &[]));
+        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+
+        let height_after_draw = |visual: &mut gpui::VisualTestContext| {
+            visual.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            visual
+                .debug_bounds("compose-input")
+                .expect("the composer has to be laid out")
+                .size
+                .height
+        };
+
+        // `Pixels` の四則は `arithmetic_side_effects` に弾かれるので f32 で
+        // 比べる (`rust-lint-gauntlet`)｡
+        let folded = f32::from(height_after_draw(&mut visual));
+        assert!(
+            folded < 40.0,
+            "empty and unfocused, the composer is one line: {folded}px"
+        );
+
+        // クリックの代わりにフォーカスを当てる: 広がる条件はフォーカスで､
+        // クリックはそれを起こす手段の一つにすぎない｡
+        visual.update(|window, cx| {
+            timeline.update(cx, |view, cx| {
+                view.compose_input
+                    .update(cx, |input, cx| input.focus(window, cx));
+            });
+        });
+        let focused = f32::from(height_after_draw(&mut visual));
+        assert!(
+            focused > folded + 12.0,
+            "focused, the composer opens up: {focused}px vs {folded}px"
+        );
+
+        // 下書きを残してフォーカスを外す｡
+        visual.update(|window, cx| {
+            timeline.update(cx, |view, cx| {
+                view.compose_input
+                    .update(cx, |input, cx| input.set_value("a draft", window, cx));
+            });
+            window.dispatch_action(Box::new(crate::menu::BlurComposer), cx);
+        });
+        let drafted = f32::from(height_after_draw(&mut visual));
+        assert!(
+            drafted > folded + 12.0,
+            "a draft keeps the composer open even unfocused: {drafted}px vs {folded}px"
+        );
+        cx.update(|cx| {
+            timeline.update(cx, |view, _cx| {
+                assert_eq!(
+                    view.compose.text(),
+                    "a draft",
+                    "folding never touches the draft"
+                );
+            });
+        });
+
+        // 空に戻してフォーカスを外せば畳まれる｡
+        visual.update(|window, cx| {
+            timeline.update(cx, |view, cx| {
+                view.compose_input
+                    .update(cx, |input, cx| input.set_value("", window, cx));
+            });
+            window.dispatch_action(Box::new(crate::menu::BlurComposer), cx);
+        });
+        let refolded = f32::from(height_after_draw(&mut visual));
+        assert!(
+            (refolded - folded).abs() < 1.0,
+            "emptied and unfocused, it folds again: {refolded}px vs {folded}px"
+        );
+    }
+
     /// `name` の要素が置かれた bounds｡置かれていなければ panic — 「無い」を
     /// 確かめるテストはこれを使わない｡
     fn laid_out(
