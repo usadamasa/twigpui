@@ -2089,6 +2089,15 @@ mod tests {
         // 着いた画像そのものも枠に収まる｡`size_full` の高さは親の固定の
         // 高さに効かず､画像の縦横比で決まってしまう — その画像は枠を
         // 突き抜けて次の行に重なる｡
+        let frame = laid_out(&mut visual, "media-frame-media/e.png");
+        assert!(
+            close(
+                f32::from(frame.size.height),
+                f32::from(super::MEDIA_CELL_HEIGHT)
+            ),
+            "the frame keeps its height once the image arrives: {}",
+            frame.size.height
+        );
         let image = laid_out(&mut visual, "media-image-media/e.png");
         assert!(
             close(

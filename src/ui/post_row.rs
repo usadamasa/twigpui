@@ -76,16 +76,31 @@ impl TimelineView {
         let url = media.url.clone();
 
         let frame = div()
+            .addressable(format!("media-frame-{}", media.url))
+            .flex()
+            .items_center()
+            .justify_center()
             .h(MEDIA_CELL_HEIGHT)
             .w_full()
             .rounded(theme::RADIUS_THUMB)
-            .bg(rgb(theme.border));
+            .bg(rgb(theme.border))
+            // 念のための網｡画像は枠に収まるので普段は何も切らないが､
+            // layout が崩れても隣の行には重ならない｡
+            .overflow_hidden();
         let inner = match self.media_paths.get(&media.url) {
             Some(path) => frame
+                // 高さだけ与え､幅は縦横比に任せる｡画像がデコードされると
+                // gpui は `aspect_ratio` を layout に持ち込み､`size_full` や
+                // 明示の `h()` より縦横比が勝つ (幅いっぱいの縦長の画像が
+                // 枠を突き抜けて次の行に重なった)｡幅を auto にしておけば
+                // gpui 自身が高さから幅を出すので､縦横比と高さが喧嘩しない｡
+                // 枠より横に長い画像は `max_w_full` が止める — そのときは
+                // 縦横比を保って高さのほうが縮み､枠の中央に座る｡
                 .child(
                     img(path.clone())
                         .addressable(format!("media-image-{}", media.url))
-                        .size_full()
+                        .h(MEDIA_CELL_HEIGHT)
+                        .max_w_full()
                         .rounded(theme::RADIUS_THUMB)
                         .object_fit(ObjectFit::Contain),
                 )
