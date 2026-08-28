@@ -27,9 +27,9 @@
   1 つ以上の投稿を JSON で､`--usage` はここまでの API のコストを出力する｡
 - `--fixture fixtures/timeline.json` でアカウントではなくファイルから
   ウィンドウを開く — 認証情報もリクエストも不要で､毎回同じ画面が出る
-  ([docs/operations.md](docs/operations.md) を参照)｡
+  (`fixture-visual-check` スキルを参照)｡
 - `--fixture ... --perf 60` で自分の RSS と CPU を 1 秒ごとに TSV で流し､
-  要約を出して終了する (同じく docs/operations.md)｡
+  要約を出して終了する (`runtime-profiling` スキル)｡
 
 認証の手段は X でのサインインだけである｡app-only の bearer token は削除した:
 ホームタイムラインを読めず､投稿・repost・引用・いいね・削除もできなかった｡
@@ -42,8 +42,11 @@
 | [docs/timeline.md](docs/timeline.md) | ウィンドウが何を表示するか､1 行がどう組み立てられるか |
 | [docs/writing.md](docs/writing.md) | 投稿､返信､引用､repost､いいね､削除､ブラウザで開く |
 | [docs/media.md](docs/media.md) | 添付画像と投稿者のアバター |
-| [docs/operations.md](docs/operations.md) | ログ､コードメトリクス､テスト |
 | [.claude/skills/app-bundle](.claude/skills/app-bundle/SKILL.md) | `.app` バンドルのビルド (release と development) |
+| [.claude/skills/app-logs](.claude/skills/app-logs/SKILL.md) | ログの場所､レベル､伏せ字とローテート |
+| [.claude/skills/fixture-visual-check](.claude/skills/fixture-visual-check/SKILL.md) | `--fixture` でアカウント無しに画面を出し､撮って見る |
+| [.claude/skills/runtime-profiling](.claude/skills/runtime-profiling/SKILL.md) | `--perf` で RSS と CPU を測る |
+| [.claude/skills/code-metrics-ratchet](.claude/skills/code-metrics-ratchet/SKILL.md) | ファイルサイズの上限と `metrics-baseline.tsv` |
 
 ## 必要なもの
 

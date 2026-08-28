@@ -7,7 +7,7 @@
       "created_at": "2026-08-22T09:40:00.000Z",
       "author_name": "Long Text",
       "author_username": "longtext",
-      "author_avatar_url": "https://pbs.twimg.com/profile_images/1354479643882004483/Btnfm47p_normal.jpg",
+      "author_avatar_url": "media/avatar.png",
       "metrics": { "replies": 12, "reposts": 34, "likes": 5600 }
     },
     {
@@ -25,15 +25,15 @@
     },
     {
       "id": "9000000000000000003",
-      "text": "Four attachments, to see the grid at its widest.",
+      "text": "Four attachments, to see the grid at its widest; the second is a tall 9:16 screenshot beside a wide one (#154).",
       "created_at": "2026-08-22T09:30:00.000Z",
       "author_name": "Four Images",
       "author_username": "fourimages",
       "media": [
-        { "url": "https://pbs.twimg.com/media/one.jpg", "kind": "photo", "width": 1200, "height": 675, "alt_text": "first" },
-        { "url": "https://pbs.twimg.com/media/two.jpg", "kind": "photo", "width": 1200, "height": 675 },
-        { "url": "https://pbs.twimg.com/media/three.jpg", "kind": "video", "width": 1280, "height": 720 },
-        { "url": "https://pbs.twimg.com/media/four.jpg", "kind": "animated_gif", "width": 480, "height": 270 }
+        { "url": "media/one.png", "kind": "photo", "width": 320, "height": 180, "alt_text": "first" },
+        { "url": "media/two.png", "kind": "photo", "width": 180, "height": 320 },
+        { "url": "media/three.png", "kind": "video", "width": 320, "height": 180 },
+        { "url": "media/four.png", "kind": "animated_gif", "width": 128, "height": 72 }
       ]
     },
     {
@@ -47,7 +47,7 @@
         "author_username": "XDevelopers",
         "text": "The quoted post, carrying the image that is the whole point of the quote (#123).",
         "media": [
-          { "url": "https://pbs.twimg.com/media/quoted.jpg", "kind": "photo", "width": 1200, "height": 675, "alt_text": "the quoted post's photo" }
+          { "url": "media/quoted.png", "kind": "photo", "width": 320, "height": 180, "alt_text": "the quoted post's photo" }
         ]
       }
     },
@@ -60,7 +60,7 @@
       "reposted_by": "reposter1",
       "original_post_id": "9000000000000000105",
       "media": [
-        { "url": "https://pbs.twimg.com/media/reposted.jpg", "kind": "photo", "width": 1200, "height": 675 }
+        { "url": "media/reposted.png", "kind": "photo", "width": 320, "height": 180 }
       ]
     },
     {

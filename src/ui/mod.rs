@@ -3,8 +3,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use gpui::{
-    AnyElement, Context, Div, Entity, FocusHandle, Focusable as _, FontWeight, ScrollHandle,
-    SharedString, Subscription, Task, Window, div, img, prelude::*, px, rgb, rgba, svg,
+    AnyElement, Context, Div, Entity, FocusHandle, Focusable as _, FontWeight, ObjectFit,
+    ScrollHandle, SharedString, Subscription, Task, Window, div, img, prelude::*, px, rgb, rgba,
+    svg,
 };
 use gpui_component::input::{Input, InputEvent, InputState};
 
@@ -1999,6 +2000,233 @@ mod tests {
             TimelineState::Loaded(items) => items.iter().map(|item| item.id.clone()).collect(),
             other => panic!("expected a loaded timeline, got {other:?}"),
         }
+    }
+
+    /// #153: composer は使われるまで 1 行に畳まれている｡
+    ///
+    /// 空でフォーカスも無いときだけ畳む｡クリック (フォーカス) すれば広がり､
+    /// 下書きがあればフォーカスを外しても広がったまま — #14 の「下書きを
+    /// 失わない」は､下書きが目に入りつづけることも含む｡空に戻して
+    /// フォーカスを外せば､また畳まれる｡
+    ///
+    /// 「1 行」の絶対値は入力ウィジェット (`gpui-component`) の行の高さと
+    /// 余白で決まるので直値では書かず､avatar の 32px より低いことだけを
+    /// 要求する｡広がった状態はそれより確実に高い (2 行 + 余白)｡
+    #[gpui::test]
+    fn the_composer_folds_to_one_line_until_it_is_used(cx: &mut gpui::TestAppContext) {
+        let (window, timeline) = fixture_window(cx, fixture_with(&["1"], &[]));
+        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+
+        let height_after_draw = |visual: &mut gpui::VisualTestContext| {
+            visual.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            visual
+                .debug_bounds("compose-input")
+                .expect("the composer has to be laid out")
+                .size
+                .height
+        };
+
+        // `Pixels` の四則は `arithmetic_side_effects` に弾かれるので f32 で
+        // 比べる (`rust-lint-gauntlet`)｡
+        let folded = f32::from(height_after_draw(&mut visual));
+        assert!(
+            folded < 40.0,
+            "empty and unfocused, the composer is one line: {folded}px"
+        );
+
+        // クリックの代わりにフォーカスを当てる: 広がる条件はフォーカスで､
+        // クリックはそれを起こす手段の一つにすぎない｡
+        visual.update(|window, cx| {
+            timeline.update(cx, |view, cx| {
+                view.compose_input
+                    .update(cx, |input, cx| input.focus(window, cx));
+            });
+        });
+        let focused = f32::from(height_after_draw(&mut visual));
+        assert!(
+            focused > folded + 12.0,
+            "focused, the composer opens up: {focused}px vs {folded}px"
+        );
+
+        // 下書きを残してフォーカスを外す｡
+        visual.update(|window, cx| {
+            timeline.update(cx, |view, cx| {
+                view.compose_input
+                    .update(cx, |input, cx| input.set_value("a draft", window, cx));
+            });
+            window.dispatch_action(Box::new(crate::menu::BlurComposer), cx);
+        });
+        let drafted = f32::from(height_after_draw(&mut visual));
+        assert!(
+            drafted > folded + 12.0,
+            "a draft keeps the composer open even unfocused: {drafted}px vs {folded}px"
+        );
+        cx.update(|cx| {
+            timeline.update(cx, |view, _cx| {
+                assert_eq!(
+                    view.compose.text(),
+                    "a draft",
+                    "folding never touches the draft"
+                );
+            });
+        });
+
+        // 空に戻してフォーカスを外せば畳まれる｡
+        visual.update(|window, cx| {
+            timeline.update(cx, |view, cx| {
+                view.compose_input
+                    .update(cx, |input, cx| input.set_value("", window, cx));
+            });
+            window.dispatch_action(Box::new(crate::menu::BlurComposer), cx);
+        });
+        let refolded = f32::from(height_after_draw(&mut visual));
+        assert!(
+            (refolded - folded).abs() < 1.0,
+            "emptied and unfocused, it folds again: {refolded}px vs {folded}px"
+        );
+    }
+
+    /// `name` の要素が置かれた bounds｡置かれていなければ panic — 「無い」を
+    /// 確かめるテストはこれを使わない｡
+    fn laid_out(
+        visual: &mut gpui::VisualTestContext,
+        name: &'static str,
+    ) -> gpui::Bounds<gpui::Pixels> {
+        visual
+            .debug_bounds(name)
+            .unwrap_or_else(|| panic!("{name} has to be laid out"))
+    }
+
+    /// `urls` を添付に持つ [`item_with`]｡
+    fn item_with_media(id: &str, urls: &[&str]) -> TimelineItem {
+        TimelineItem {
+            media: urls
+                .iter()
+                .map(|url| PostMedia {
+                    url: (*url).to_string(),
+                    kind: Some("photo".to_string()),
+                    width: Some(320),
+                    height: Some(180),
+                    alt_text: None,
+                })
+                .collect(),
+            ..item_with(id, "someone", None)
+        }
+    }
+
+    /// #154: サムネイルは行の幅を分け合う｡
+    ///
+    /// 1 枚なら本文の列いっぱいに､2 枚なら半分ずつ｡3 枚目は 2 段目に 1 枚で
+    /// 座るので､また列いっぱいになる｡画像が着いていてもいなくても同じ —
+    /// 枠の幅を決めるのは画像の縦横比ではなく行のほうだ｡
+    ///
+    /// 「列いっぱい」の基準に本文の bounds は使わない (名前が無い)｡代わりに
+    /// timeline 自身の幅の半分より広いことを要求する: 修正前の枠は 96px の
+    /// 正方形で､560px のウィンドウではその 1/5 にも届かなかった｡
+    #[gpui::test]
+    fn media_cells_share_the_rows_width(cx: &mut gpui::TestAppContext) {
+        let fixture = Fixture {
+            items: vec![
+                item_with_media("3", &["media/a.png", "media/b.png", "media/c.png"]),
+                item_with_media("2", &["media/d.png"]),
+                item_with_media("1", &["media/e.png"]),
+            ],
+            ..fixture_with(&[], &[])
+        };
+        let (window, timeline) = fixture_window(cx, fixture);
+        // 1 枚は届いている扱いにして､`img` の枝も同じ幅になることを見る｡
+        // 中身は何でもよい — layout は画像のデコードを待たない｡
+        let arrived = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/AppIcon.png");
+        cx.update(|cx| {
+            timeline.update(cx, |view, cx| {
+                view.media_paths.insert("media/e.png".to_string(), arrived);
+                cx.notify();
+            });
+        });
+
+        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+        // 2 回描く: 最初の draw が画像のデコードを background に頼み､
+        // `run_until_parked` がそれを終わらせ､2 回目の draw で gpui が画像の
+        // 縦横比を layout に持ち込む｡1 回目の bounds では縦横比の影響が
+        // まだ無く､画面で起きる突き抜けを見られない｡
+        for _ in 0..2 {
+            visual.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            cx.run_until_parked();
+        }
+
+        // `Pixels` の四則は `arithmetic_side_effects` に弾かれるので､素の
+        // f32 で比べる (`rust-lint-gauntlet`)｡
+        let timeline_width = f32::from(laid_out(&mut visual, "timeline").size.width);
+        let a = laid_out(&mut visual, "media-media/a.png");
+        let b = laid_out(&mut visual, "media-media/b.png");
+        let c = laid_out(&mut visual, "media-media/c.png");
+        let single = f32::from(laid_out(&mut visual, "media-media/d.png").size.width);
+        let arrived = f32::from(laid_out(&mut visual, "media-media/e.png").size.width);
+        let close = |left: f32, right: f32| (left - right).abs() < 1.0;
+
+        assert!(
+            single > timeline_width / 2.0,
+            "a lone thumbnail spans the column: {single} of {timeline_width}"
+        );
+        // 着いた画像そのものも枠に収まる｡`size_full` の高さは親の固定の
+        // 高さに効かず､画像の縦横比で決まってしまう — その画像は枠を
+        // 突き抜けて次の行に重なる｡
+        let frame = laid_out(&mut visual, "media-frame-media/e.png");
+        assert!(
+            close(
+                f32::from(frame.size.height),
+                f32::from(super::MEDIA_CELL_HEIGHT)
+            ),
+            "the frame keeps its height once the image arrives: {}",
+            frame.size.height
+        );
+        let image = laid_out(&mut visual, "media-image-media/e.png");
+        assert!(
+            close(
+                f32::from(image.size.height),
+                f32::from(super::MEDIA_CELL_HEIGHT)
+            ),
+            "an image that arrived is as tall as its frame, not as tall as its aspect ratio says: {}",
+            image.size.height
+        );
+        assert!(
+            f32::from(image.size.width) <= arrived + 1.0,
+            "an image that arrived stays inside its frame: {} in {arrived}",
+            image.size.width
+        );
+        assert!(
+            close(arrived, single),
+            "an image that arrived takes the same width as the placeholder: {arrived} vs {single}"
+        );
+        assert!(
+            close(f32::from(a.size.width), f32::from(b.size.width)),
+            "two thumbnails on one row split it evenly: {} vs {}",
+            a.size.width,
+            b.size.width
+        );
+        assert!(
+            a.right() < b.left(),
+            "the second thumbnail sits to the right of the first"
+        );
+        assert!(
+            close(f32::from(b.right()) - f32::from(a.left()), single),
+            "together the pair spans what a lone thumbnail spans: {} to {} vs {single}",
+            a.left(),
+            b.right()
+        );
+        assert!(
+            close(f32::from(c.size.width), single),
+            "the third, alone on the second row, spans the column again: {} vs {single}",
+            c.size.width
+        );
+        assert!(
+            c.top() >= a.bottom(),
+            "the third thumbnail wraps below the first row"
+        );
     }
 
     /// #146: fixture のウィンドウは `XClient` をまったく構築しない｡
