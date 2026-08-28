@@ -264,11 +264,10 @@ impl TimelineView {
             });
             self.start_countdown_ticker(cx);
         }
-        // アバターと添付画像は今もダウンロードされる｡API ではなく
-        // `pbs.twimg.com` からで､quota も credit も要らない (`avatar` を
-        // 見よ)｡URL に届かない fixture は､まだ取得中のときと同じ枠を
-        // 描く｡レイアウトの確認に要るのはどのみち
-        // それである｡
+        // アバターと添付画像は本物と同じ経路で着く｡ただし fixture が
+        // 書くのは fixture の隣のファイルで (#234)､`image_cache` はそれを
+        // fetch せずそのまま返す｡ネットワークへ出ないので､オフラインでも
+        // 起動のたびに同じ画面になり､WARN も出ない｡
         self.refresh_images(cx);
         cx.notify();
     }

@@ -56,6 +56,17 @@ impl TimelineView {
     /// このアプリに lightbox は無く､ちゃんと見る手段の無いサムネイルは機能
     /// の半分でしかない｡動画やアニメーション GIF は静止画と､それがどちらか
     /// を示す badge を出す; どちらもここでは再生されない｡
+    ///
+    /// 枠の幅は行が決める (#154): セルは `flex_1` で行の幅を分け合い､画像は
+    /// 枠の中に `Contain` で収める｡画像の縦横比に幅を任せると､縦長の 1 枚が
+    /// 細く立って右半分が空く｡高さが固定なのは [`Self::media_grid`] の doc の
+    /// とおり — 幅も同じ理屈で､画像が着いても枠は動かない｡
+    ///
+    /// `Cover` で枠を埋めない理由は角丸だ｡gpui の content mask は矩形しか
+    /// 持たず､`Cover` は枠より大きい quad を描くので､切り取られた辺の角が
+    /// 直角になる — 既定幅では 2 列のセルが 2.35:1 で､16:9 の写真もほぼ
+    /// 全部がそうなった｡枠を placeholder と同じ色で塗っておけば､縦長の
+    /// 画像は左右に余白を残して枠の中に座り､着く前と後で枠の形が変わらない｡
     fn media_cell(
         &self,
         media: &PostMedia,
@@ -64,23 +75,47 @@ impl TimelineView {
     ) -> AnyElement {
         let url = media.url.clone();
 
+        let frame = div()
+            .addressable(format!("media-frame-{}", media.url))
+            .flex()
+            .items_center()
+            .justify_center()
+            .h(MEDIA_CELL_HEIGHT)
+            .w_full()
+            .rounded(theme::RADIUS_THUMB)
+            .bg(rgb(theme.border))
+            // 念のための網｡画像は枠に収まるので普段は何も切らないが､
+            // layout が崩れても隣の行には重ならない｡
+            .overflow_hidden();
         let inner = match self.media_paths.get(&media.url) {
-            Some(path) => img(path.clone())
-                .h(MEDIA_CELL_HEIGHT)
-                .rounded(theme::RADIUS_THUMB)
+            Some(path) => frame
+                // 高さだけ与え､幅は縦横比に任せる｡画像がデコードされると
+                // gpui は `aspect_ratio` を layout に持ち込み､`size_full` や
+                // 明示の `h()` より縦横比が勝つ (幅いっぱいの縦長の画像が
+                // 枠を突き抜けて次の行に重なった)｡幅を auto にしておけば
+                // gpui 自身が高さから幅を出すので､縦横比と高さが喧嘩しない｡
+                // 枠より横に長い画像は `max_w_full` が止める — そのときは
+                // 縦横比を保って高さのほうが縮み､枠の中央に座る｡
+                .child(
+                    img(path.clone())
+                        .addressable(format!("media-image-{}", media.url))
+                        .h(MEDIA_CELL_HEIGHT)
+                        .max_w_full()
+                        .rounded(theme::RADIUS_THUMB)
+                        .object_fit(ObjectFit::Contain),
+                )
                 .into_any_element(),
-            None => div()
-                .h(MEDIA_CELL_HEIGHT)
-                .w(MEDIA_CELL_HEIGHT)
-                .rounded(theme::RADIUS_THUMB)
-                .bg(rgb(theme.border))
-                .into_any_element(),
+            None => frame.into_any_element(),
         };
 
         let mut cell = div()
             .addressable(format!("media-{}", media.url))
             .flex()
             .flex_col()
+            .flex_1()
+            // `flex_1` だけでは足りない: flex item の `min-width` は既定で
+            // `auto` (= 中身の幅) なので､着いた画像が自分の幅を主張する｡
+            .min_w_0()
             .gap_1()
             .child(inner)
             .on_click(cx.listener(move |this, _event, _window, cx| {
