@@ -72,7 +72,7 @@ use toast::Toast;
 
 use crate::menu::{
     BlurComposer, CloseWindow, FocusComposer, KEY_CONTEXT, Minimize, Reload, ScrollToTop,
-    ShowAbout, ShowNewPosts, ToggleFollowNewPosts,
+    ShowAbout, ShowNewPosts, SyncList, ToggleFollowNewPosts,
 };
 use crate::oauth;
 use crate::paths::Paths;
@@ -3179,9 +3179,12 @@ mod tests {
     /// 押さえられる間隔だ (#184)｡特定の gap ではなく意図的に `>` にしてある:
     /// 欠陥は 2 つの箱が接することであって､正確な margin を固定すると､
     /// 意図的な間隔の変更がすべてテストの失敗になってしまう｡
+    ///
+    /// #248 で入口はメニューへ移り､リクエスト数の隣に座る裸の span は
+    /// 次の sync の時刻 (#214) になった｡危うさは同じで､見る組が変わった｡
     #[gpui::test]
     fn the_status_bars_segments_keep_apart(cx: &mut gpui::TestAppContext) {
-        let (window, _timeline) = fixture_window(cx, fixture_with(&["2", "1"], &[]));
+        let (window, _timeline) = fixture_window(cx, fixture_with_sync(&["2", "1"], 0));
 
         let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
         visual.update(|window, cx| {
@@ -3191,16 +3194,16 @@ mod tests {
         let usage = visual
             .debug_bounds("status-usage")
             .expect("the request count is always shown");
-        let sync = visual
-            .debug_bounds("status-sync")
-            .expect("the sync segment is always shown");
+        let next = visual
+            .debug_bounds("status-sync-next")
+            .expect("an idle sync has a next time to show");
 
         assert!(
-            sync.left() > usage.right(),
-            "the two segments run together, which reads as `11 reqList sync` \
-             on screen: usage ends at {:?}, sync starts at {:?}",
+            next.left() > usage.right(),
+            "the two segments run together, which reads as `11 reqNext sync` \
+             on screen: usage ends at {:?}, next sync starts at {:?}",
             usage.right(),
-            sync.left()
+            next.left()
         );
     }
 
@@ -3495,25 +3498,6 @@ mod tests {
         assert!(
             countdown.right() < reload.left(),
             "the countdown runs into the reload icon"
-        );
-    }
-
-    /// #214: 次の sync の時刻は入口の隣に座り､入口と接しない｡
-    #[gpui::test]
-    fn the_next_sync_time_sits_apart_from_the_sync_entry(cx: &mut gpui::TestAppContext) {
-        let (mut visual, _timeline) = drawn(cx, fixture_with_sync(&["2", "1"], 0));
-
-        let entry = visual
-            .debug_bounds("status-sync")
-            .expect("the sync entry is always shown");
-        let next = visual
-            .debug_bounds("status-sync-next")
-            .expect("an idle sync has a next time to show");
-        assert!(
-            next.left() > entry.right(),
-            "the next sync time runs into its entry: entry ends at {:?}, time starts at {:?}",
-            entry.right(),
-            next.left()
         );
     }
 
@@ -3987,21 +3971,23 @@ mod tests {
 
     /// #205: 入口はダイアログを開き､cancel は何も支払わずに閉じる｡
     ///
-    /// `simulate_click` なので hit test を通る (#184 の `Addressable`)｡
-    /// 金のための assert は cancel のあとに status が動いていないことで､
-    /// `start_sync` は必ず status を書き換える (資格情報の無いこのウィンドウ
-    /// では gate へ)｡
+    /// 入口は #248 でメニューの `SyncList` になったので､メニューと同じ
+    /// action を dispatch する (#146 層 3)｡cancel は `simulate_click` で
+    /// hit test を通る (#184 の `Addressable`)｡金のための assert は cancel
+    /// のあとに status が動いていないことで､`start_sync` は必ず status を
+    /// 書き換える (資格情報の無いこのウィンドウでは gate へ)｡
     ///
     /// 閉じたことは `debug_bounds` では見られない｡gpui 0.2.2 の
     /// `Frame::clear` はあの map を消さないので､一度描かれた名前は最後の
     /// bounds を返し続ける｡言えるのは「一度も描かれていない」までなので､
-    /// 閉じたことは `pending_sync` で見る｡
+    /// 閉じたことは `pending_sync` で見る｡footer に入口が無いことは､まさに
+    /// その「一度も描かれていない」で見る｡
     ///
     /// 下の `a_stopped_sync_opens_a_dialog_that_offers_no_way_to_spend` が
     /// `sync-confirm` の `None` を見られるのは､あちらのウィンドウがそのボタンを
     /// 一度も描いていないから｡
     #[gpui::test]
-    fn the_entry_opens_the_dialog_and_cancel_closes_it_without_spending(
+    fn the_menu_opens_the_dialog_and_cancel_closes_it_without_spending(
         cx: &mut gpui::TestAppContext,
     ) {
         let (window, timeline) = fixture_window(cx, fixture_with_sync(&["2", "1"], 7));
@@ -4011,10 +3997,13 @@ mod tests {
             let _ = window.draw(cx);
         });
 
-        let entry = visual
-            .debug_bounds("sync-open")
-            .expect("the footer always carries the way in");
-        visual.simulate_click(entry.center(), gpui::Modifiers::none());
+        assert!(
+            visual.debug_bounds("sync-open").is_none(),
+            "the footer no longer carries the way in (#248)"
+        );
+        visual.update(|window, cx| {
+            window.dispatch_action(Box::new(crate::menu::SyncList), cx);
+        });
         cx.run_until_parked();
         visual.update(|window, cx| {
             let _ = window.draw(cx);
@@ -4062,11 +4051,8 @@ mod tests {
         let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
         visual.update(|window, cx| {
             let _ = window.draw(cx);
+            window.dispatch_action(Box::new(crate::menu::SyncList), cx);
         });
-        let entry = visual
-            .debug_bounds("sync-open")
-            .expect("the footer always carries the way in");
-        visual.simulate_click(entry.center(), gpui::Modifiers::none());
         cx.run_until_parked();
         visual.update(|window, cx| {
             let _ = window.draw(cx);

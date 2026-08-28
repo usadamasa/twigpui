@@ -107,31 +107,13 @@ pub(super) fn plan_pending_for(plan: &sync::Plan, list_id: &str) -> usize {
 }
 
 /// list sync の見せ方のうち､ウィンドウの状態に触る半分 (#205)｡
+///
+/// ダイアログを開く入口は #174 から #248 まで footer に居た｡今は
+/// メニューバーの "Sync List…" (`menu::SyncList`) で､`layout.rs` の
+/// `on_action` が [`TimelineView::ask_to_sync`] へつなぐ｡どの状態からでも
+/// 開ける｡始められないときはダイアログが確認ボタンの代わりに
+/// [`sync_blocked_reason`] を出す｡
 impl TimelineView {
-    /// ステータスバーの sync の入口 (#174, #205)｡状態は [`Self::sync_row`]
-    /// へ移り､ここにはダイアログを開く入口だけが残る｡
-    ///
-    /// 入口が footer に残るのは､いちばん効くのが行の出ていないときだから｡
-    /// タイマーを切ったウィンドウ ([`SyncStatus::Ready`]) では sync が何も
-    /// しておらず行が出ないので､入口を行の中に置くと見えなくなる｡
-    ///
-    /// どの状態からでも押せる｡始められないときはダイアログが確認ボタンの
-    /// 代わりに [`sync_blocked_reason`] を出す｡
-    pub(super) fn sync_segment(&self, cx: &mut Context<'_, Self>) -> AnyElement {
-        let theme = self.theme;
-        // 状態ではなく操作を名乗る｡動く文字は行の担当｡
-        div()
-            .addressable("sync-open")
-            .text_color(rgb(if offers_sync(&self.sync_status) {
-                theme.accent
-            } else {
-                theme.text_tertiary
-            }))
-            .child("Sync list…")
-            .on_click(cx.listener(|this, _event, _window, cx| this.ask_to_sync(cx)))
-            .into_any_element()
-    }
-
     /// footer の 1 段上に座る sync の行 (#205)｡出さないなら `None`｡
     ///
     /// 高さが固定な理由は [`fade_occupies`] を参照｡薄れていく間もラベルは

@@ -154,6 +154,11 @@ impl Render for TimelineView {
                 // なってはいけない｡
                 this.reload(ReloadTrigger::UserAction, cx);
             }))
+            .on_action(cx.listener(|this, _: &SyncList, _window, cx| {
+                // #248: footer の入口と同じ経路｡ダイアログが確認を挟み､
+                // 始められない状態ではその理由を出す (`ask_to_sync`)｡
+                this.ask_to_sync(cx);
+            }))
             .on_action(cx.listener(|this, _: &FocusComposer, window, cx| {
                 this.compose_input
                     .update(cx, |input, cx| input.focus(window, cx));
@@ -274,7 +279,7 @@ impl Render for TimelineView {
             .when_some(self.sync_row(), ParentElement::child)
             // #95: ステータスバー｡ヘッダーがツールバーになった今､累計の
             // リクエスト数が住んでいるのはここだ｡
-            .child(self.status_bar(density, cx))
+            .child(self.status_bar(density))
             // #205: 手動 sync の確認｡`absolute` なので列の中で場所を取らず
             // ウィンドウ全体を覆う｡最後の子なのは重なり順のため｡
             .when_some(self.sync_dialog(cx), ParentElement::child)

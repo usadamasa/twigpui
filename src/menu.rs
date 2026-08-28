@@ -44,6 +44,10 @@ gpui::actions!(
         /// 純粋に見せ方の話で — poll そのものは `auto_refresh` のスイッチな
         /// ので､どちらに倒しても何も費やさない｡
         ToggleFollowNewPosts,
+        /// list sync の確認ダイアログを開く (#248)｡footer の入口から移した:
+        /// 手で同期を始めるのはまれで､そのために footer の幅を使い続ける
+        /// 理由が無い｡鍵は持たない — 確認の先で API リクエストを費やす｡
+        SyncList,
     ]
 );
 
@@ -279,6 +283,11 @@ pub(crate) fn menus() -> Vec<gpui::Menu> {
             name: "View".into(),
             items: [
                 RELOAD.menu_item(),
+                // #248: Reload の隣｡どちらも押せば API リクエストを費やす
+                // 操作で､こちらは確認ダイアログを挟む｡鍵が無いので
+                // `Shortcut` ではなく素の項目 — `every_menu_item_has_a_binding`
+                // が名指しで除いている｡
+                Some(gpui::MenuItem::action("Sync List…", SyncList)),
                 SHOW_NEW_POSTS.menu_item(),
                 TOGGLE_FOLLOW_NEW_POSTS.menu_item(),
                 SCROLL_TO_TOP.menu_item(),
@@ -369,6 +378,23 @@ mod tests {
     }
 
     #[test]
+    fn sync_list_is_in_the_menu_bar_without_a_keystroke() {
+        // #248: footer の入口をここへ移した｡手で同期を始めるのはまれで､
+        // そのために footer の幅を使い続ける理由が無い｡鍵を持たないのは
+        // `load_older_has_no_shortcut` と同じ理由 — 押すたびに課金する｡
+        assert!(
+            menu_action_names().iter().any(|name| name == "Sync List…"),
+            "the way into the sync dialog has to be in the menu bar"
+        );
+        assert!(
+            !ALL_SHORTCUTS
+                .iter()
+                .any(|shortcut| shortcut.menu_label == Some("Sync List…")),
+            "Sync List… must not be bound to a key"
+        );
+    }
+
+    #[test]
     fn every_menu_item_has_a_binding() {
         // 他のテストが見落としていた向き｡どれも `ALL_SHORTCUTS` から出発
         // して中身を確かめるので､その配列から漏れた `Shortcut` はどのテスト
@@ -388,10 +414,11 @@ mod tests {
             .collect();
 
         for name in menu_action_names() {
-            // `About twigpui` は設計上ショートカットの無いメニュー項目だ --
-            // 唯一のもので､規則で飛ばすのではなくここに書き下してあるので､
-            // 二つ目がすり抜けることはない｡
-            if name == "About twigpui" {
+            // 設計上ショートカットの無いメニュー項目｡規則で飛ばすのではなく
+            // ここに書き下してあるので､三つ目がすり抜けることはない｡
+            // `Sync List…` (#248) は API リクエストを費やすので､"Load older"
+            // と同じ理由で鍵を持たない — `load_older_has_no_shortcut` を見よ｡
+            if name == "About twigpui" || name == "Sync List…" {
                 continue;
             }
             assert!(
