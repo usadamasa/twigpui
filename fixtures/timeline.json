@@ -64,6 +64,26 @@
       ]
     },
     {
+      "id": "9000000000000000010",
+      "text": "A small photo (128x72), to see it grow to the max width with no grey frame around it (#256).",
+      "created_at": "2026-08-22T09:18:00.000Z",
+      "author_name": "Developers",
+      "author_username": "XDevelopers",
+      "media": [
+        { "url": "media/four.png", "kind": "photo", "width": 128, "height": 72 }
+      ]
+    },
+    {
+      "id": "9000000000000000009",
+      "text": "A lone portrait photo, to see it stop at the max height and start at the column's left edge (#256).",
+      "created_at": "2026-08-22T09:16:00.000Z",
+      "author_name": "Developers",
+      "author_username": "XDevelopers",
+      "media": [
+        { "url": "media/two.png", "kind": "photo", "width": 180, "height": 320 }
+      ]
+    },
+    {
       "id": "9000000000000000006",
       "text": "A reply, so the \"Show thread\" toggle and its cost warning are on screen.",
       "created_at": "2026-08-22T09:15:00.000Z",
