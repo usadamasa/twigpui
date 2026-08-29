@@ -54,13 +54,13 @@ use reload_policy::{
 };
 use render::Addressable as _;
 use render::{
-    AVATAR_SIZE, MAX_RENDERED_MEDIA, MEDIA_CELL_HEIGHT, author_link, avatar_placeholder, byline,
-    compose_error_message, format_timestamp, header_title_element, like_row, link_row, media_badge,
-    media_columns, notice, offers_delete, offers_like, offers_quote, offers_reauthorize,
-    offers_reply, offers_repost, open_post_link, quote_card, quote_row, reload_notice_banner,
-    render_thread_chain, reply_banner_label, reply_row, reply_target_label, repost_banner_label,
-    repost_row, session_notice_banner, sign_in_pill, thread_action_label, thread_toggle_row,
-    usage_color, usage_label, with_count,
+    AVATAR_SIZE, MAX_RENDERED_MEDIA, MEDIA_GAP, author_link, avatar_placeholder, byline,
+    compose_error_message, format_timestamp, header_title_element, like_row, link_row,
+    media_aspect, media_badge, media_row_sizes, notice, offers_delete, offers_like, offers_quote,
+    offers_reauthorize, offers_reply, offers_repost, open_post_link, quote_card, quote_row,
+    reload_notice_banner, render_thread_chain, reply_banner_label, reply_row, reply_target_label,
+    repost_banner_label, repost_row, session_notice_banner, sign_in_pill, thread_action_label,
+    thread_toggle_row, usage_color, usage_label, with_count,
 };
 use render::{RowCounts, row_counts};
 pub(crate) use startup::Startup;
@@ -486,12 +486,11 @@ mod tests {
         PostMetrics, ReloadNotice, ReloadTrigger, RepliedTo, RowCounts, Startup, SyncOff,
         SyncStatus, Theme, ThreadFetchState, TimelineItem, TimelineState, ToggleState,
         action_post_id, at_the_post_cap, byline, compose_error_message, cooldown_label,
-        cooldown_tick, format_timestamp, media_aspect, media_badge, media_row_sizes,
-        offers_delete, offers_like,
-        offers_load_older, offers_quote, offers_reauthorize, offers_reply, offers_repost,
-        pending_after_poll, rate_limit, reload_failure_outcome, reload_gate, reload_start_state,
-        reply_banner_label, reply_target_label, repost_banner_label, row_counts,
-        thread_action_label, usage, usage_color, usage_label,
+        cooldown_tick, format_timestamp, media_aspect, media_badge, media_row_sizes, offers_delete,
+        offers_like, offers_load_older, offers_quote, offers_reauthorize, offers_reply,
+        offers_repost, pending_after_poll, rate_limit, reload_failure_outcome, reload_gate,
+        reload_start_state, reply_banner_label, reply_target_label, repost_banner_label,
+        row_counts, thread_action_label, usage, usage_color, usage_label,
     };
 
     fn item_with(id: &str, author_username: &str, reposted_by: Option<&str>) -> TimelineItem {
@@ -828,7 +827,7 @@ mod tests {
         let sizes = row_sizes(&[media_aspect(&photo(Some(128), Some(72)))]);
         let (width, height) = sizes.first().copied().unwrap_or_default();
         assert!(
-            about(width, f32::from(super::MEDIA_MAX_WIDTH)),
+            about(width, f32::from(super::render::post::MEDIA_MAX_WIDTH)),
             "grows to the max width: {width}"
         );
         assert!(about(height, width * 72.0 / 128.0), "keeps 16:9: {height}");
@@ -840,7 +839,7 @@ mod tests {
         let sizes = row_sizes(&[media_aspect(&photo(Some(180), Some(320)))]);
         let (width, height) = sizes.first().copied().unwrap_or_default();
         assert!(
-            about(height, f32::from(super::MEDIA_MAX_HEIGHT)),
+            about(height, f32::from(super::render::post::MEDIA_MAX_HEIGHT)),
             "stops at the max height: {height}"
         );
         assert!(about(width, height * 180.0 / 320.0), "keeps 9:16: {width}");
@@ -850,7 +849,10 @@ mod tests {
     fn a_square_image_stops_at_the_max_height() {
         let sizes = row_sizes(&[1.0]);
         let (width, height) = sizes.first().copied().unwrap_or_default();
-        assert!(about(height, f32::from(super::MEDIA_MAX_HEIGHT)), "{height}");
+        assert!(
+            about(height, f32::from(super::render::post::MEDIA_MAX_HEIGHT)),
+            "{height}"
+        );
         assert!(about(width, height), "stays square: {width} x {height}");
     }
 
@@ -864,12 +866,18 @@ mod tests {
         let (_, first_height) = sizes.first().copied().unwrap_or_default();
         for (&aspect, &(width, height)) in aspects.iter().zip(&sizes) {
             assert!(about(height, first_height), "one height: {height}");
-            assert!(about(width, aspect * height), "width follows aspect: {width}");
+            assert!(
+                about(width, aspect * height),
+                "width follows aspect: {width}"
+            );
         }
         let widths: f32 = sizes.iter().map(|&(width, _)| width).sum();
         let gaps = 3.0 * f32::from(super::MEDIA_GAP);
         assert!(
-            about(widths + gaps, f32::from(super::MEDIA_MAX_WIDTH)),
+            about(
+                widths + gaps,
+                f32::from(super::render::post::MEDIA_MAX_WIDTH)
+            ),
             "fills the max width with the gaps: {widths} + {gaps}"
         );
     }
@@ -877,8 +885,14 @@ mod tests {
     #[test]
     fn a_missing_or_zero_dimension_counts_as_square() {
         assert!(about(media_aspect(&photo(None, Some(10))), 1.0), "no width");
-        assert!(about(media_aspect(&photo(Some(10), None)), 1.0), "no height");
-        assert!(about(media_aspect(&photo(Some(10), Some(0))), 1.0), "zero height");
+        assert!(
+            about(media_aspect(&photo(Some(10), None)), 1.0),
+            "no height"
+        );
+        assert!(
+            about(media_aspect(&photo(Some(10), Some(0))), 1.0),
+            "zero height"
+        );
     }
 
     #[test]
@@ -2197,25 +2211,23 @@ mod tests {
         }
     }
 
-    /// #256: サムネイルは自分の寸法で本文列の左端に座り､複数枚は横 1 段に並ぶ｡
+    /// 1 フレーム描き､background に頼んだ仕事 (画像のデコード) を終わらせる｡
+    fn draw_until_parked(visual: &mut gpui::VisualTestContext, cx: &mut gpui::TestAppContext) {
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        cx.run_until_parked();
+    }
+
+    /// #256: 1 枚の写真は自分の寸法で本文列の左端に座る｡
     ///
     /// 枠の寸法を決めるのは行の幅ではなく API が返した `width` / `height`
-    /// で､横長 1 枚は `MEDIA_MAX_WIDTH` まで､縦長 1 枚は `MEDIA_MAX_HEIGHT`
-    /// まで｡画像が届く前も後も同じ寸法なので､行は組み直されない｡4 枚は
-    /// 1 段で高さを揃え､幅は縦横比に比例する (Tumblr の photoset)｡
+    /// で､横長は `MEDIA_MAX_WIDTH` まで､縦長は `MEDIA_MAX_HEIGHT` まで｡
+    /// 画像が届く前も後も同じ寸法なので､行は組み直されない｡
     #[gpui::test]
-    fn media_sits_left_at_its_own_size(cx: &mut gpui::TestAppContext) {
+    fn a_lone_photo_sits_left_at_its_own_size(cx: &mut gpui::TestAppContext) {
         let fixture = Fixture {
             items: vec![
-                item_with_media(
-                    "3",
-                    &[
-                        ("media/a.png", 320, 180),
-                        ("media/b.png", 180, 320),
-                        ("media/c.png", 320, 180),
-                        ("media/d.png", 320, 320),
-                    ],
-                ),
                 item_with_media("2", &[("media/e.png", 128, 72)]),
                 item_with_media("1", &[("media/f.png", 180, 320)]),
             ],
@@ -2223,15 +2235,9 @@ mod tests {
         };
         let (window, timeline) = fixture_window(cx, fixture);
         let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
-        let draw = |visual: &mut gpui::VisualTestContext, cx: &mut gpui::TestAppContext| {
-            visual.update(|window, cx| {
-                let _ = window.draw(cx);
-            });
-            cx.run_until_parked();
-        };
 
         // 届く前の placeholder の寸法を控えておく｡
-        draw(&mut visual, cx);
+        draw_until_parked(&mut visual, cx);
         let placeholder = laid_out(&mut visual, "media-frame-media/f.png");
 
         // 1 枚は届いている扱いにして､`img` の枝も同じ寸法になることを見る｡
@@ -2248,14 +2254,14 @@ mod tests {
         // 縦横比を layout に持ち込む｡1 回目の bounds では縦横比の影響が
         // まだ無く､画面で起きる突き抜けを見られない｡
         for _ in 0..2 {
-            draw(&mut visual, cx);
+            draw_until_parked(&mut visual, cx);
         }
 
         // `Pixels` の四則は `arithmetic_side_effects` に弾かれるので､素の
         // f32 で比べる (`rust-lint-gauntlet`)｡
         let close = |left: f32, right: f32| (left - right).abs() < 1.0;
-        let max_width = f32::from(super::MEDIA_MAX_WIDTH);
-        let max_height = f32::from(super::MEDIA_MAX_HEIGHT);
+        let max_width = f32::from(super::render::post::MEDIA_MAX_WIDTH);
+        let max_height = f32::from(super::render::post::MEDIA_MAX_HEIGHT);
         let timeline = laid_out(&mut visual, "timeline");
 
         // 小さい横長 1 枚: 幅の最大値までふくらみ､中央ではなく左に座る｡
@@ -2290,8 +2296,13 @@ mod tests {
             frame.size.width
         );
         assert!(
-            close(f32::from(frame.size.width), f32::from(placeholder.size.width))
-                && close(f32::from(frame.size.height), f32::from(placeholder.size.height)),
+            close(
+                f32::from(frame.size.width),
+                f32::from(placeholder.size.width)
+            ) && close(
+                f32::from(frame.size.height),
+                f32::from(placeholder.size.height)
+            ),
             "the frame keeps the placeholder's size once the image arrives: {:?} vs {:?}",
             frame.size,
             placeholder.size
@@ -2310,8 +2321,30 @@ mod tests {
             frame.left(),
             small.left()
         );
+    }
 
-        // 4 枚: 1 段､同じ高さ､幅は縦横比に比例､全体で幅の最大値に収まる｡
+    /// #256: 複数枚は横 1 段に並び､高さを揃え､幅は縦横比に比例する (Tumblr
+    /// の photoset)｡段の全体は `MEDIA_MAX_WIDTH` に収まる｡
+    #[gpui::test]
+    fn several_photos_share_one_row(cx: &mut gpui::TestAppContext) {
+        let fixture = Fixture {
+            items: vec![item_with_media(
+                "3",
+                &[
+                    ("media/a.png", 320, 180),
+                    ("media/b.png", 180, 320),
+                    ("media/c.png", 320, 180),
+                    ("media/d.png", 320, 320),
+                ],
+            )],
+            ..fixture_with(&[], &[])
+        };
+        let (window, _timeline) = fixture_window(cx, fixture);
+        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+        draw_until_parked(&mut visual, cx);
+
+        let close = |left: f32, right: f32| (left - right).abs() < 1.0;
+        let max_width = f32::from(super::render::post::MEDIA_MAX_WIDTH);
         let a = laid_out(&mut visual, "media-frame-media/a.png");
         let b = laid_out(&mut visual, "media-frame-media/b.png");
         let c = laid_out(&mut visual, "media-frame-media/c.png");

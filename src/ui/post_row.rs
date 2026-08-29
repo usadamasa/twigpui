@@ -5,6 +5,8 @@
 //!
 //! `ui/mod.rs` にあったものをそのまま移した｡
 
+use gpui::{Pixels, Size};
+
 use super::*;
 
 impl TimelineView {
@@ -17,27 +19,25 @@ impl TimelineView {
             .unwrap_or_else(|| ToggleState::new(self.liked_ids.contains(post_id)))
     }
 
-    /// 一つの post の本文の下に置く添付 media のグリッド (#65)｡
+    /// 一つの post の本文の下に置く添付 media の段 (#65, #256)｡
     ///
-    /// サムネイルは最大 [`MAX_RENDERED_MEDIA`] 枚､[`media_columns`] 列で
-    /// 並べる｡各セルは固定の高さなので､行の高さがどの画像のダウンロードを
-    /// 終えたかに依存することはありえない — 画像が着くたびに読み手の下で
-    /// 組み直される timeline は､埋まるのを待つ枠を見せる timeline より
-    /// 悪い｡
+    /// サムネイルは最大 [`MAX_RENDERED_MEDIA`] 枚を横 1 段に並べ､本文列の
+    /// 左端から始める｡各枚の寸法は [`media_row_sizes`] が API の
+    /// `width` / `height` だけから決めるので､どの画像のダウンロードを終えた
+    /// かに段の形が依存することはありえない｡
+    ///
+    /// 引用カードの本文列は外側より狭い｡段は `max_w_full` で列に収め､
+    /// セルは `min_w_0` で縮めるので､入りきらない分は枠の右で切れる｡
     fn media_grid(&self, media: &[PostMedia], cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = self.theme;
         let shown: Vec<&PostMedia> = media.iter().take(MAX_RENDERED_MEDIA).collect();
-        let columns = media_columns(shown.len());
+        let aspects: Vec<f32> = shown.iter().map(|media| media_aspect(media)).collect();
 
-        let mut grid = div().flex().flex_col().gap_1();
-        for chunk in shown.chunks(columns) {
-            let mut row = div().flex().gap_1();
-            for media in chunk {
-                row = row.child(self.media_cell(media, theme, cx));
-            }
-            grid = grid.child(row);
+        let mut row = div().flex().items_start().gap(MEDIA_GAP).max_w_full();
+        for (media, size) in shown.into_iter().zip(media_row_sizes(&aspects)) {
+            row = row.child(self.media_cell(media, size, theme, cx));
         }
-        grid.into_any_element()
+        row.into_any_element()
     }
 
     /// [`Self::media_grid`]｡描く media が無いときは何も返さない (#123) —
@@ -57,19 +57,20 @@ impl TimelineView {
     /// の半分でしかない｡動画やアニメーション GIF は静止画と､それがどちらか
     /// を示す badge を出す; どちらもここでは再生されない｡
     ///
-    /// 枠の幅は行が決める (#154): セルは `flex_1` で行の幅を分け合い､画像は
-    /// 枠の中に `Contain` で収める｡画像の縦横比に幅を任せると､縦長の 1 枚が
-    /// 細く立って右半分が空く｡高さが固定なのは [`Self::media_grid`] の doc の
-    /// とおり — 幅も同じ理屈で､画像が着いても枠は動かない｡
+    /// 枠は `size` そのもの (#256): [`media_row_sizes`] が API の寸法から出した
+    /// 幅と高さを枠にも画像にも与えるので､画像が着く前と後で枠の形は変わら
+    /// ない｡塗るのは placeholder だけ — 画像は枠をちょうど埋めるので､枠まで
+    /// 塗ると API の寸法と実物がわずかに違うときに灰色の縁が覗く｡
     ///
-    /// `Cover` で枠を埋めない理由は角丸だ｡gpui の content mask は矩形しか
-    /// 持たず､`Cover` は枠より大きい quad を描くので､切り取られた辺の角が
-    /// 直角になる — 既定幅では 2 列のセルが 2.35:1 で､16:9 の写真もほぼ
-    /// 全部がそうなった｡枠を placeholder と同じ色で塗っておけば､縦長の
-    /// 画像は左右に余白を残して枠の中に座り､着く前と後で枠の形が変わらない｡
+    /// 幅と高さを両方与えるのは gpui の `img` のためでもある｡画像がデコード
+    /// されると `img` は `aspect_ratio` を layout に持ち込むが､taffy はそれを
+    /// 片方が auto のときにしか使わない｡片方だけ与えると縦横比が勝って枠と
+    /// 喧嘩する (幅いっぱいの縦長の画像が枠を突き抜けて次の行に重なった)｡
+    /// 両方が定まっていれば画像は枠に収まり､差は `Contain` が吸収する｡
     fn media_cell(
         &self,
         media: &PostMedia,
+        size: Size<Pixels>,
         theme: Theme,
         cx: &mut Context<'_, TimelineView>,
     ) -> AnyElement {
@@ -77,44 +78,32 @@ impl TimelineView {
 
         let frame = div()
             .addressable(format!("media-frame-{}", media.url))
-            .flex()
-            .items_center()
-            .justify_center()
-            .h(MEDIA_CELL_HEIGHT)
-            .w_full()
+            .w(size.width)
+            .h(size.height)
+            .max_w_full()
             .rounded(theme::RADIUS_THUMB)
-            .bg(rgb(theme.border))
-            // 念のための網｡画像は枠に収まるので普段は何も切らないが､
-            // layout が崩れても隣の行には重ならない｡
+            // 狭い列 (引用カード) では枠のほうが縮むので､画像は右で切る｡
             .overflow_hidden();
         let inner = match self.media_paths.get(&media.url) {
             Some(path) => frame
-                // 高さだけ与え､幅は縦横比に任せる｡画像がデコードされると
-                // gpui は `aspect_ratio` を layout に持ち込み､`size_full` や
-                // 明示の `h()` より縦横比が勝つ (幅いっぱいの縦長の画像が
-                // 枠を突き抜けて次の行に重なった)｡幅を auto にしておけば
-                // gpui 自身が高さから幅を出すので､縦横比と高さが喧嘩しない｡
-                // 枠より横に長い画像は `max_w_full` が止める — そのときは
-                // 縦横比を保って高さのほうが縮み､枠の中央に座る｡
                 .child(
                     img(path.clone())
                         .addressable(format!("media-image-{}", media.url))
-                        .h(MEDIA_CELL_HEIGHT)
-                        .max_w_full()
+                        .w(size.width)
+                        .h(size.height)
                         .rounded(theme::RADIUS_THUMB)
                         .object_fit(ObjectFit::Contain),
                 )
                 .into_any_element(),
-            None => frame.into_any_element(),
+            None => frame.bg(rgb(theme.border)).into_any_element(),
         };
 
         let mut cell = div()
             .addressable(format!("media-{}", media.url))
             .flex()
             .flex_col()
-            .flex_1()
-            // `flex_1` だけでは足りない: flex item の `min-width` は既定で
-            // `auto` (= 中身の幅) なので､着いた画像が自分の幅を主張する｡
+            // flex item の `min-width` は既定で `auto` (= 中身の幅) なので､
+            // 段が列に入りきらないとき枠が縮めるようにしておく｡
             .min_w_0()
             .gap_1()
             .child(inner)
