@@ -535,6 +535,7 @@ mod tests {
             username: format!("user{user_id}"),
             action,
             applied: false,
+            rejected: None,
         }
     }
 

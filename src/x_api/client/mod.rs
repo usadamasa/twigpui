@@ -26,7 +26,7 @@ mod endpoints;
 mod status;
 mod urls;
 
-pub(crate) use status::{Denial, Denied};
+pub(crate) use status::{Denial, Denied, InvalidRequest};
 use status::{check_status, is_retryable_status, log_429};
 
 const API_BASE: &str = "https://api.x.com/2";

@@ -314,6 +314,14 @@ pub(super) mod fake {
         })
     }
 
+    /// X が request の中身を 400 で拒んだときに write が返すもの (#254)｡
+    pub(crate) fn rejected(detail: &str) -> anyhow::Error {
+        anyhow::Error::new(crate::x_api::InvalidRequest {
+            endpoint: crate::rate_limit::Endpoint::AddListMember,
+            detail: detail.to_string(),
+        })
+    }
+
     /// `env::temp_dir()` 配下を指す [`Paths`] と､それが使うディレクトリ｡
     ///
     /// `label` ごとに別の root なので､テストが並列に走っても互いの plan や
