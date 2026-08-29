@@ -1503,6 +1503,27 @@ mod tests {
         );
     }
 
+    #[test]
+    fn keeps_the_nested_message_beside_the_generic_detail() {
+        // `POST /2/lists/:id/members` の 400 (#254) はこの形: 上段の
+        // `detail` は毎回同じ定型文で､どのパラメータが何故駄目だったかは
+        // `errors[].message` にしか無い｡上段だけ読むと理由が消える｡
+        let problem: ApiProblem = serde_json::from_str(
+            r#"{"errors":[{"parameters":{"user_id":["11720662"]},"message":"The user_id is not valid."}],
+                "title":"Invalid Request",
+                "detail":"One or more parameters to your request was invalid.",
+                "type":"https://api.x.com/2/problems/invalid-request"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            problem.message().as_deref(),
+            Some(
+                "Invalid Request: One or more parameters to your request was invalid. \
+                 (The user_id is not valid.)"
+            )
+        );
+    }
+
     const METRICS_JSON: &str = r#"{
       "data": [
         {

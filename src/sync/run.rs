@@ -419,7 +419,7 @@ fn run(
 
 #[cfg(test)]
 mod tests {
-    use super::super::api::fake::{Call, FakeApi, Scratch, page, rate_limited, user};
+    use super::super::api::fake::{Call, FakeApi, Scratch, page, rate_limited, rejected, user};
     use super::*;
     use crate::sync::{Action, PlanEntry};
 
@@ -686,6 +686,91 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(applied_ids(&on_file), ["1"]);
+    }
+
+    #[test]
+    fn a_rejected_write_is_skipped_and_the_batch_goes_on() {
+        // #254: 先頭の 1 件が 400 で拒まれると､以前は batch ごと止まって
+        // 6 時間後に同じ entry へ同じ request を送り､1,977 件が永久に
+        // 動かなかった｡拒否は entry の問題なので印を付けて次へ進む｡
+        let scratch = Scratch::new("apply-rejected");
+        let client = FakeApi::new().writes(vec![Err(rejected("The user_id is not valid.")), Ok(())]);
+        let mut plan = plan_of("7", &["1", "2"], &[]);
+
+        let (sent, result) = apply_some(scratch.paths(), &client, &mut plan, false, 0, usize::MAX);
+
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(sent, 1);
+        assert_eq!(client.calls(), [Call::Add("1".into()), Call::Add("2".into())]);
+        assert_eq!(applied_ids(&plan), ["2"]);
+        assert_eq!(
+            plan.entries[0].rejected.as_deref(),
+            Some("The user_id is not valid.")
+        );
+        // 印は disk にも届く｡次の tick が同じ entry を先頭に戻さないためだ｡
+        let on_file = load_plan(&scratch.paths().sync_plan_file())
+            .unwrap()
+            .unwrap();
+        assert!(on_file.entries[0].rejected.is_some());
+        assert!(on_file.is_complete());
+    }
+
+    #[test]
+    fn a_rejection_still_keeps_the_gap_before_the_next_write() {
+        // 拒否を数に入れないと次の request が間を置かずに飛ぶ｡#197 の
+        // 連射をそのまま再現する形なので､間は「送れた数」ではなく
+        // 「試した数」に付ける｡
+        let scratch = Scratch::new("apply-rejected-gap");
+        let client = FakeApi::new().writes(vec![Err(rejected("no")), Ok(())]);
+        let mut plan = plan_of("7", &["1", "2"], &[]);
+
+        let (_, result) = apply_some(scratch.paths(), &client, &mut plan, false, 0, usize::MAX);
+
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(client.pauses().len(), 1, "2 attempts take 1 gap");
+    }
+
+    #[test]
+    fn a_batch_that_only_got_rejections_is_an_error() {
+        // 1 件も届かず拒否だけの batch は entry の問題と list や credential
+        // の問題を見分けられない｡tick の失敗として返し､interval 分退く｡
+        // 印は付いているので次の batch は先へ進む｡
+        let scratch = Scratch::new("apply-all-rejected");
+        let client = FakeApi::new().writes(vec![Err(rejected("no")), Err(rejected("no"))]);
+        let mut plan = plan_of("7", &["1", "2", "3"], &[]);
+
+        let (sent, result) = apply_some(scratch.paths(), &client, &mut plan, false, 0, 2);
+
+        assert_eq!(sent, 0);
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("rejected"), "{error}");
+        assert_eq!(client.calls().len(), 2);
+        assert!(plan.entries[0].rejected.is_some());
+        assert!(plan.entries[1].rejected.is_some());
+        assert!(plan.entries[2].rejected.is_none());
+    }
+
+    #[test]
+    fn three_rejections_in_a_row_stop_an_unlimited_apply() {
+        // CLI の `--apply` は上限無しで回るので､400 が list 全体の問題
+        // だったときに 2,000 件を撃ち切ってしまう｡連続 3 件で止める｡
+        let scratch = Scratch::new("apply-rejected-run");
+        let client = FakeApi::new().writes(vec![
+            Ok(()),
+            Err(rejected("no")),
+            Err(rejected("no")),
+            Err(rejected("no")),
+            Ok(()),
+        ]);
+        let mut plan = plan_of("7", &["1", "2", "3", "4", "5"], &[]);
+
+        let (sent, result) = apply_some(scratch.paths(), &client, &mut plan, false, 0, usize::MAX);
+
+        assert_eq!(sent, 1);
+        assert!(result.is_err(), "the run must stop at the third rejection");
+        assert_eq!(client.calls().len(), 4, "entry 5 is never sent");
+        assert!(plan.entries[4].rejected.is_none());
+        assert!(!plan.entries[4].applied);
     }
 
     #[test]

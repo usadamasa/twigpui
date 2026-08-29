@@ -309,6 +309,30 @@ mod tests {
     }
 
     #[test]
+    fn a_400_downcasts_to_the_typed_error_naming_the_endpoint() {
+        // sync はこれを「この entry は駄目」と読んで次へ進む (#254)｡
+        // 文字列を grep せずに済むよう 401/403 と同じく型で運ぶ｡
+        let error = check_status(
+            Endpoint::AddListMember,
+            400,
+            r#"{"title":"Invalid Request","detail":"One or more parameters to your request was invalid."}"#,
+            rate_limit::Refusal::Opaque,
+            0,
+        )
+        .unwrap_err();
+        let rejected = error
+            .downcast_ref::<InvalidRequest>()
+            .expect("a 400 must carry the typed error");
+        assert_eq!(rejected.endpoint, Endpoint::AddListMember);
+        assert!(
+            rejected.detail.contains("One or more parameters"),
+            "{rejected:?}"
+        );
+        let text = error.to_string();
+        assert!(text.starts_with("add_list_member: 400 Bad Request"), "{text}");
+    }
+
+    #[test]
     fn falls_back_to_the_raw_body_when_it_is_not_json() {
         let error = check_status(
             Endpoint::Me,

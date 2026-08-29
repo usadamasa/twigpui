@@ -399,6 +399,35 @@ mod tests {
     }
 
     #[test]
+    fn a_rejected_entry_leaves_the_pending_set_and_counts_as_settled() {
+        // X が 400 で拒んだ entry (#254) は再送しても同じ答えしか返らない｡
+        // 残務から外し､それだけが残った plan は完了として捨てられる｡
+        let mut plan = plan("7", 0, &[user("1", "a"), user("2", "b")], &[]);
+        plan.mark_rejected("1", Action::Add, "The user_id is not valid.");
+
+        assert_eq!(ids(&plan, Action::Add), ["2"]);
+        assert_eq!(plan.pending_count(Action::Add), 1);
+        assert!(!plan.is_complete());
+
+        plan.mark_applied("2", Action::Add);
+        assert!(plan.is_complete());
+
+        // 理由は plan に残り､report が読める｡
+        let text = report(&plan);
+        assert!(text.contains("1 entry rejected by X"), "{text}");
+        assert!(text.contains("@a (1): The user_id is not valid."), "{text}");
+    }
+
+    #[test]
+    fn a_plan_written_before_rejections_existed_still_loads() {
+        let json = r#"{"list_id":"7","created_at":0,"entries":[
+            {"user_id":"1","username":"a","action":"Add","applied":false}]}"#;
+        let plan: Plan = serde_json::from_str(json).unwrap();
+        assert_eq!(plan.entries[0].rejected, None);
+        assert_eq!(ids(&plan, Action::Add), ["1"]);
+    }
+
+    #[test]
     fn a_plan_is_complete_only_once_every_entry_landed() {
         let mut plan = plan("7", 0, &[user("1", "a"), user("2", "b")], &[]);
         assert!(!plan.is_complete());
