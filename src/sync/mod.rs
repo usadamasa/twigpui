@@ -86,6 +86,20 @@ pub(crate) struct PlanEntry {
     /// ファイルも読み込めるようにするためだ｡
     #[serde(default)]
     pub applied: bool,
+    /// X がこの entry の request を 400 で拒んだ理由 (#254)｡`Some` なら
+    /// 残務から外れる: 同じ entry へ再送しても同じ答えしか返らない｡
+    /// 次の diff が plan を作り直すとき follow と list の差はそのままなので
+    /// entry は戻ってくる — 拒否は diff 1 回につき 1 request で済み､列を
+    /// 止めはしない｡
+    #[serde(default)]
+    pub rejected: Option<String>,
+}
+
+impl PlanEntry {
+    /// この entry にもう送るものが無いか — 届いたか､X が拒んだか｡
+    pub(crate) fn is_settled(&self) -> bool {
+        self.applied || self.rejected.is_some()
+    }
 }
 
 /// sync が何をするか｡[`crate::paths::Paths::sync_plan_file`] に書かれる｡
@@ -108,11 +122,11 @@ pub(crate) struct Plan {
 }
 
 impl Plan {
-    /// まだ適用されていない `action` の entry｡
+    /// まだ送るべき `action` の entry — 届いておらず､拒まれてもいないもの｡
     pub(crate) fn pending(&self, action: Action) -> impl Iterator<Item = &PlanEntry> {
         self.entries
             .iter()
-            .filter(move |entry| entry.action == action && !entry.applied)
+            .filter(move |entry| entry.action == action && !entry.is_settled())
     }
 
     /// `action` の entry が何件残っているか｡
@@ -131,10 +145,20 @@ impl Plan {
         }
     }
 
-    /// すべての entry が適用済みかどうか — plan ファイルにもう言うことが
-    /// 無く､捨ててよくなる地点だ｡
+    /// `user_id` の `action` を X が拒んだことと､その理由を記録する (#254)｡
+    /// [`Self::mark_applied`] と同じく､plan が持たない id には何もしない｡
+    pub(crate) fn mark_rejected(&mut self, user_id: &str, action: Action, reason: &str) {
+        for entry in &mut self.entries {
+            if entry.user_id == user_id && entry.action == action {
+                entry.rejected = Some(reason.to_string());
+            }
+        }
+    }
+
+    /// すべての entry が片付いたかどうか (届いたか拒まれたか) — plan
+    /// ファイルにもう言うことが無く､捨ててよくなる地点だ｡
     pub(crate) fn is_complete(&self) -> bool {
-        self.entries.iter().all(|entry| entry.applied)
+        self.entries.iter().all(PlanEntry::is_settled)
     }
 }
 
@@ -193,6 +217,7 @@ fn entry(user: &User, action: Action) -> PlanEntry {
         username: user.username.clone(),
         action,
         applied: false,
+        rejected: None,
     }
 }
 
@@ -228,11 +253,29 @@ pub(crate) fn report(plan: &Plan) -> String {
             plan.members_total
         ));
     }
+    let rejected: Vec<(&PlanEntry, &str)> = plan
+        .entries
+        .iter()
+        .filter_map(|entry| entry.rejected.as_deref().map(|reason| (entry, reason)))
+        .collect();
+    if !rejected.is_empty() {
+        lines.push(format!(
+            "{} entr{} rejected by X — not resent; the next diff tries each once more",
+            rejected.len(),
+            if rejected.len() == 1 { "y" } else { "ies" }
+        ));
+        for (entry, reason) in &rejected {
+            lines.push(format!(
+                "  ! @{} ({}): {reason}",
+                entry.username, entry.user_id
+            ));
+        }
+    }
     lines.push(format!(
         "applying costs {} write request(s); removals need --prune",
         adds.saturating_add(removals)
     ));
-    for entry in plan.entries.iter().filter(|entry| !entry.applied) {
+    for entry in plan.entries.iter().filter(|entry| !entry.is_settled()) {
         let verb = match entry.action {
             Action::Add => "+",
             Action::Remove => "-",
@@ -393,9 +436,39 @@ mod tests {
             username: "a".to_string(),
             action: Action::Remove,
             applied: false,
+            rejected: None,
         });
         plan.mark_applied("1", Action::Add);
         assert_eq!(ids(&plan, Action::Remove), ["2", "1"]);
+    }
+
+    #[test]
+    fn a_rejected_entry_leaves_the_pending_set_and_counts_as_settled() {
+        // X が 400 で拒んだ entry (#254) は再送しても同じ答えしか返らない｡
+        // 残務から外し､それだけが残った plan は完了として捨てられる｡
+        let mut plan = plan("7", 0, &[user("1", "a"), user("2", "b")], &[]);
+        plan.mark_rejected("1", Action::Add, "The user_id is not valid.");
+
+        assert_eq!(ids(&plan, Action::Add), ["2"]);
+        assert_eq!(plan.pending_count(Action::Add), 1);
+        assert!(!plan.is_complete());
+
+        plan.mark_applied("2", Action::Add);
+        assert!(plan.is_complete());
+
+        // 理由は plan に残り､report が読める｡
+        let text = report(&plan);
+        assert!(text.contains("1 entry rejected by X"), "{text}");
+        assert!(text.contains("@a (1): The user_id is not valid."), "{text}");
+    }
+
+    #[test]
+    fn a_plan_written_before_rejections_existed_still_loads() {
+        let json = r#"{"list_id":"7","created_at":0,"entries":[
+            {"user_id":"1","username":"a","action":"Add","applied":false}]}"#;
+        let plan: Plan = serde_json::from_str(json).unwrap();
+        assert_eq!(plan.entries[0].rejected, None);
+        assert_eq!(ids(&plan, Action::Add), ["1"]);
     }
 
     #[test]

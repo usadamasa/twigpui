@@ -1,5 +1,5 @@
 //! レスポンスのステータスをエラーへ変える側 (#241): [`Denied`] (401/403)､
-//! 2 種類の 429､retry してよいかの判定､429 の記録｡ネットワークには
+//! [`InvalidRequest`] (400)､2 種類の 429､retry してよいかの判定､429 の記録｡ネットワークには
 //! 触れないので､`client` のテストの半分はここにある｡
 
 use anyhow::{Result, bail};
@@ -95,6 +95,33 @@ impl std::fmt::Display for Denied {
 
 impl std::error::Error for Denied {}
 
+/// 400 を型で運ぶ (#254)｡X が request の *中身* を拒んだ — token でも
+/// 権限でも window でもなく､送ったパラメータのどれかだ｡
+///
+/// sync がこれを見分ける理由: `POST /2/lists/:id/members` の 400 は送った
+/// `user_id` に対する答えで､同じ entry へ再送しても同じ答えしか返らない｡
+/// 型が無いと sync は tick の失敗として interval 分退き､6 時間後に同じ
+/// entry を先頭から送り直す — #254 はその形で 1,977 件が止まったままに
+/// なった｡
+#[derive(Debug)]
+pub(crate) struct InvalidRequest {
+    pub endpoint: Endpoint,
+    pub detail: String,
+}
+
+impl std::fmt::Display for InvalidRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "{}: 400 Bad Request — {}",
+            self.endpoint.key(),
+            self.detail
+        )
+    }
+}
+
+impl std::error::Error for InvalidRequest {}
+
 /// レスポンスのステータスを検証し､2xx でないものをエラーへ変換する｡
 ///
 /// `refusal` は普通の 429 がどの limit から来たかで､生の
@@ -110,9 +137,9 @@ impl std::error::Error for Denied {}
 ///
 /// 401/403 は [`Denied`] へ (#239)､2 種類の 429 は
 /// [`rate_limit::classify_429`] を通じて [`rate_limit::UsageCapExceeded`] と
-/// [`rate_limit::RateLimited`] へ分かれる｡404 とその他のステータスだけが
-/// 平文の `anyhow` エラーのままだ — 呼び出し側がこれらを型で見分ける必要は
-/// まだ無い｡
+/// [`rate_limit::RateLimited`] へ分かれる｡400 は [`InvalidRequest`] へ (#254)｡
+/// 404 とその他のステータスだけが平文の `anyhow` エラーのままだ — 呼び出し側が
+/// これらを型で見分ける必要はまだ無い｡
 pub(super) fn check_status(
     endpoint: Endpoint,
     status: u16,
@@ -147,6 +174,7 @@ pub(super) fn check_status(
             detail,
         }
         .into()),
+        400 => Err(InvalidRequest { endpoint, detail }.into()),
         404 => bail!("{key}: 404 Not Found — {detail}"),
         429 => match rate_limit::classify_429(body) {
             rate_limit::RateLimitKind::UsageCapExceeded => {
@@ -306,6 +334,33 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.starts_with("me: 404 Not Found"), "{error}");
+    }
+
+    #[test]
+    fn a_400_downcasts_to_the_typed_error_naming_the_endpoint() {
+        // sync はこれを「この entry は駄目」と読んで次へ進む (#254)｡
+        // 文字列を grep せずに済むよう 401/403 と同じく型で運ぶ｡
+        let error = check_status(
+            Endpoint::AddListMember,
+            400,
+            r#"{"title":"Invalid Request","detail":"One or more parameters to your request was invalid."}"#,
+            rate_limit::Refusal::Opaque,
+            0,
+        )
+        .unwrap_err();
+        let rejected = error
+            .downcast_ref::<InvalidRequest>()
+            .expect("a 400 must carry the typed error");
+        assert_eq!(rejected.endpoint, Endpoint::AddListMember);
+        assert!(
+            rejected.detail.contains("One or more parameters"),
+            "{rejected:?}"
+        );
+        let text = error.to_string();
+        assert!(
+            text.starts_with("add_list_member: 400 Bad Request"),
+            "{text}"
+        );
     }
 
     #[test]
