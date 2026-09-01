@@ -180,6 +180,16 @@ impl Paths {
         self.state_dir.join("selection.json")
     }
 
+    /// ウィンドウを最後に見た位置と大きさへのパス (#211)｡`state_dir` 配下｡
+    ///
+    /// [`Self::selection_file`] と同じ理由で cache ではなく state である:
+    /// ネットワーク上の何もこれを返してくれないし､`cache_dir` はキャッシュ
+    /// の形が古くなったとき消すよう案内されるディレクトリで､ウィンドウを
+    /// 置いた場所がそれに巻き込まれてはならない｡
+    pub(crate) fn window_state_file(&self) -> PathBuf {
+        self.state_dir.join("window.json")
+    }
+
     /// `cache_dir` 配下の､1 つの返信 post についてキャッシュした親チェーン
     /// へのパス (#12)｡*返信自身の* id — "Show thread" をクリックした元の
     /// post — をキーにするので､同じ返信を開き直すと最大
@@ -474,9 +484,10 @@ mod tests {
         let user = "2244994945";
         let reply = "1800000000000000003";
         let list = "2091351590695588200";
-        let pairs: [(PathBuf, PathBuf); 19] = [
+        let pairs: [(PathBuf, PathBuf); 20] = [
             (release.owned_lists_file(), dev.owned_lists_file()),
             (release.selection_file(), dev.selection_file()),
+            (release.window_state_file(), dev.window_state_file()),
             (release.settings_file(), dev.settings_file()),
             (release.oauth_token_file(), dev.oauth_token_file()),
             (release.user_ids_file(), dev.user_ids_file()),
@@ -680,6 +691,17 @@ mod tests {
         assert_eq!(
             paths.selection_file(),
             PathBuf::from("/home/alice/.local/state/twigpui/selection.json")
+        );
+    }
+
+    #[test]
+    fn window_state_file_is_under_the_state_dir() {
+        // #211: ウィンドウを置いた場所もネットワークが返してくれるもので
+        // はないので､選択と並べて state に置く｡
+        let paths = release_paths(vars(&[("HOME", "/home/alice")])).unwrap();
+        assert_eq!(
+            paths.window_state_file(),
+            PathBuf::from("/home/alice/.local/state/twigpui/window.json")
         );
     }
 
