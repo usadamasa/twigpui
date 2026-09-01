@@ -61,14 +61,9 @@ impl From<WindowBounds> for SavedBounds {
     /// そのまま開ける｡
     fn from(bounds: WindowBounds) -> Self {
         let bounds = match bounds {
-            WindowBounds::Windowed(bounds) => bounds,
-            WindowBounds::Maximized(_) | WindowBounds::Fullscreen(_) => Bounds {
-                origin: Point {
-                    x: px(0.0),
-                    y: px(0.0),
-                },
-                size: DEFAULT_SIZE,
-            },
+            WindowBounds::Windowed(bounds)
+            | WindowBounds::Maximized(bounds)
+            | WindowBounds::Fullscreen(bounds) => bounds,
         };
         Self {
             x: f32::from(bounds.origin.x),
@@ -97,13 +92,18 @@ pub(crate) struct WindowState {
 /// 同じだ: これを失う代償はウィンドウを一度動かすことなので､ファイルが
 /// 無い・壊れている場合はウィンドウが開くのを止めるエラーではなく既定値に
 /// なる｡
-pub(crate) fn load(_path: &Path) -> WindowState {
-    WindowState::default()
+pub(crate) fn load(path: &Path) -> WindowState {
+    let Ok(contents) = std::fs::read_to_string(path) else {
+        return WindowState::default();
+    };
+    serde_json::from_str(&contents).unwrap_or_default()
 }
 
 /// ウィンドウの状態を `path` へ書く｡
-pub(crate) fn save(_path: &Path, _state: &WindowState) -> Result<()> {
-    Ok(())
+pub(crate) fn save(path: &Path, state: &WindowState) -> Result<()> {
+    let json =
+        serde_json::to_string_pretty(state).context("could not serialize the window state")?;
+    std::fs::write(path, json).with_context(|| format!("could not write {}", path.display()))
 }
 
 /// 保存値をそのまま使ってよいかを決める純関数｡
@@ -117,8 +117,9 @@ pub(crate) fn restore(
     saved: Option<&SavedBounds>,
     displays: &[Bounds<Pixels>],
 ) -> Option<Bounds<Pixels>> {
-    let _ = (saved, displays);
-    None
+    let bounds = saved?.to_bounds();
+    let has_size = bounds.size.width > px(0.0) && bounds.size.height > px(0.0);
+    (has_size && displays.iter().any(|display| bounds.intersects(display))).then_some(bounds)
 }
 
 /// この起動でウィンドウを開く矩形 (#211)｡
