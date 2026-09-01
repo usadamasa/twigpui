@@ -158,6 +158,7 @@ impl TimelineView {
             like_tasks: HashMap::new(),
             avatar_paths: HashMap::new(),
             media_paths: HashMap::new(),
+            media_failed: HashSet::new(),
             avatar_fetch: None,
             media_fetch: None,
             pending_delete: None,

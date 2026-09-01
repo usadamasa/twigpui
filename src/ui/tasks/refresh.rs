@@ -209,10 +209,17 @@ impl TimelineView {
                     Ok(path) => {
                         let _ = this.update(cx, |this, cx| {
                             this.media_paths.insert(url.clone(), path);
+                            this.media_failed.remove(&url);
                             cx.notify();
                         });
                     }
-                    Err(error) => log::warn(&format!("media fetch failed: {error:#}")),
+                    Err(error) => {
+                        log::warn(&format!("media fetch failed: {error:#}"));
+                        let _ = this.update(cx, |this, cx| {
+                            this.media_failed.insert(url.clone());
+                            cx.notify();
+                        });
+                    }
                 }
             }
         }));

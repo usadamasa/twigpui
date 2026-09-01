@@ -442,6 +442,11 @@ pub(crate) struct TimelineView {
     /// `avatar_paths` と同じ形だが､二つは別の cache ディレクトリに置かれ
     /// 別のフィールドから来るので､それぞれ別の map にしてある｡
     media_paths: HashMap<String, PathBuf>,
+    /// 直近のダウンロードが失敗した media の URL (#188)｡`media_paths` に
+    /// 無いことは「まだ取っていない」と「取れなかった」の両方を意味しうる
+    /// ので､クリックした先の viewer が「開けない」を言うにはこちらが要る｡
+    /// `refresh_media` が取れたら remove する｡
+    media_failed: HashSet<String>,
     /// 進行中のアバターのダウンロードを生かしておく (#64)｡行ごとに一つでは
     /// なく､一つの task が見えている timeline 全体を辿る; 代入し直す
     /// (reload) とまだダウンロード中のものは取り消されるが､次の呼び出しが
