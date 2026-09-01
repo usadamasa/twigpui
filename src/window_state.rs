@@ -77,7 +77,7 @@ impl From<WindowBounds> for SavedBounds {
 /// [`crate::paths::Paths::window_state_file`] の中身すべて｡
 ///
 /// フィールドは 1 つだが､それでも struct にしてある — `sync::SyncState` や
-/// `ui::list_picker::SelectionState` と同じ理由だ｡ウィンドウについて次に
+/// `ui::list_picker::SelectionState` と同じ理由で､ウィンドウについて次に
 /// 覚える価値のあるものが､ファイルの形を変えずに入る｡
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
 pub(crate) struct WindowState {
@@ -88,10 +88,9 @@ pub(crate) struct WindowState {
 
 /// 覚えたウィンドウの状態を `path` から読み戻す｡
 ///
-/// [`crate::ui::list_picker::load_selection`] と同じく失敗しない｡理由も
-/// 同じだ: これを失う代償はウィンドウを一度動かすことなので､ファイルが
-/// 無い・壊れている場合はウィンドウが開くのを止めるエラーではなく既定値に
-/// なる｡
+/// [`crate::ui::list_picker::load_selection`] と同じく失敗しない｡これを
+/// 失う代償はウィンドウを一度動かすことなので､ファイルが無い・壊れている
+/// 場合はウィンドウが開くのを止めるエラーではなく既定値になる｡
 pub(crate) fn load(path: &Path) -> WindowState {
     let Ok(contents) = std::fs::read_to_string(path) else {
         return WindowState::default();

@@ -199,7 +199,7 @@ impl TimelineView {
             return;
         };
         let bounds = window_state::SavedBounds::from(window.window_bounds());
-        // 前の task を落とすのが debounce そのものである｡gpui の `Task` は
+        // 前の task を落とすことが debounce になる｡gpui の `Task` は
         // drop で取り消されるので､連続する通知のうち最後の 1 つだけが
         // 時間を待ち切る｡
         self.window_state_save.take();

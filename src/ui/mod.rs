@@ -161,7 +161,7 @@ pub(crate) struct TimelineView {
     window_state_file: Option<PathBuf>,
     /// ウィンドウの矩形が変わったことを知らせる購読 (#211)｡resize でも
     /// 移動でも発火する｡drop すると通知が止まるので､view と同じだけ生きる
-    /// 必要がある — 名前の `_` はそれが読まれずに保持されるものである印だ｡
+    /// 必要がある｡名前の `_` は読まれずに保持されるものの印｡
     _window_bounds_subscription: Subscription,
     /// 矩形を書くまでの間を空けるタイマー (#211)｡ドラッグの最中は通知が
     /// 連続で来るので､新しい task を入れて前のものを落とし､手が止まって
