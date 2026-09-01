@@ -50,14 +50,13 @@ mod toggle;
 mod ui;
 mod url;
 mod usage;
+mod window_state;
 mod x_api;
 
 use std::collections::HashSet;
 use std::io::IsTerminal as _;
 
-use gpui::{
-    AppContext as _, Application, Bounds, TitlebarOptions, WindowBounds, WindowOptions, px, size,
-};
+use gpui::{AppContext as _, Application, TitlebarOptions, WindowBounds, WindowOptions};
 
 fn main() {
     let config = match config::Config::from_env() {
@@ -192,7 +191,9 @@ fn main() {
             })
             .detach();
 
-            let bounds = Bounds::centered(None, size(px(560.0), px(820.0)), cx);
+            // #211: 前回閉じたときの矩形｡記憶が無ければ (fixture では常に)
+            // 既定の大きさで中央に開く｡
+            let bounds = window_state::initial_bounds(&paths, &startup, cx);
             // #169: タイトルがどのインストールかを名乗るので､開発用の
             // ウィンドウと本物がウィンドウ一覧で見分けられる — そして
             // スクリーンショットをタイトルで狙える｡`Profile::current()` を
