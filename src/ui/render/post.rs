@@ -4,6 +4,7 @@
 
 use chrono::DateTime;
 use chrono_tz::Asia::Tokyo;
+use gpui::{Pixels, Size, size};
 
 use crate::ui::*;
 
@@ -179,19 +180,88 @@ fn thread_row(thread_item: &thread::ThreadItem, theme: Theme) -> impl IntoElemen
 /// timeline の行が timeline の行でなくなる手前に収まる限度でもある｡
 pub(in crate::ui) const MAX_RENDERED_MEDIA: usize = 4;
 
-/// サムネイル一枚の高さ (#65)｡media 自身の `width`/`height` から導かず
-/// 固定にしてある: 行の高さが､どの画像のダウンロードを終えたかに依っては
-/// ならない｡さもなくば画像が届くたびに timeline が読み手の下で組み直る｡
-///
-/// 値は #95 の他の寸法と一緒に `theme` にある｡
-pub(in crate::ui) use crate::theme::MEDIA_CELL_HEIGHT;
+/// 添付画像の寸法の上限と隙間 (#256)｡値は #95 の他の寸法と一緒に `theme`
+/// にある｡
+pub(in crate::ui) use crate::theme::{MEDIA_GAP, MEDIA_MAX_HEIGHT, MEDIA_MAX_WIDTH};
 
-/// `count` 枚のサムネイルを何列に並べるか (#65): 一枚なら一列､それ以上は
-/// 二列｡三列にすると この高さでは一枚ずつが読むには狭すぎ､X 自身の上限で
-/// ある四枚は二列二行にちょうど収まる｡0 は決して返さない — `chunks` が
-/// panic するからだ｡
-pub(in crate::ui) fn media_columns(count: usize) -> usize {
-    if count <= 1 { 1 } else { 2 }
+/// 縦横比 (幅 / 高さ) を収める範囲 (#256)｡高さ 1px のバナーや細い縦帯が
+/// 段の高さを 0 へ落としたり､幅の予算を独り占めしたりしないよう､ここで
+/// 止める｡
+const MEDIA_ASPECT_RANGE: std::ops::RangeInclusive<f32> = 0.1..=10.0;
+
+/// `media` の縦横比 (幅 / 高さ) (#256)｡API は `media.fields=width,height`
+/// で寸法を返すが､古いキャッシュの行には無いことがある — 無いときと 0 は
+/// 正方形として扱う｡結果は [`MEDIA_ASPECT_RANGE`] に収める｡
+pub(in crate::ui) fn media_aspect(media: &PostMedia) -> f32 {
+    /// `u32` から `f32` への cast は精度を落とすので通らない｡X の画像は
+    /// `u16` に収まるのでそちらを経由し､収まらないものは上限に丸める｡
+    fn side(pixels: Option<u32>) -> Option<f32> {
+        let pixels = pixels.filter(|&pixels| pixels > 0)?;
+        Some(f32::from(u16::try_from(pixels).unwrap_or(u16::MAX)))
+    }
+    match (side(media.width), side(media.height)) {
+        (Some(width), Some(height)) => {
+            (width / height).clamp(*MEDIA_ASPECT_RANGE.start(), *MEDIA_ASPECT_RANGE.end())
+        }
+        _ => 1.0,
+    }
+}
+
+/// `aspects` の写真を横 1 段に並べたときの各枚の寸法 (#256)｡
+///
+/// Tumblr の photoset と同じ組み方: 高さを揃え､幅は縦横比に比例させる｡
+/// 高さは隙間を除いた [`MEDIA_MAX_WIDTH`] を縦横比の和で割ったもので､
+/// [`MEDIA_MAX_HEIGHT`] を越えない｡1 枚ならこれは「最大値の箱に収まる
+/// ように拡大・縮小する」と同じ式になる｡
+///
+/// 寸法を API の値だけから決めるので､画像が届いても行は組み直されない —
+/// 画像が着くたびに読み手の下で組み直される timeline は､埋まるのを待つ
+/// 枠を見せる timeline より悪い (#65)｡
+pub(in crate::ui) fn media_row_sizes(aspects: &[f32]) -> Vec<Size<Pixels>> {
+    if aspects.is_empty() {
+        return Vec::new();
+    }
+    // `usize` から `f32` への cast を避けて､隙間は 2 枚目以降の 1 枚に 1 つ｡
+    let gaps: f32 = aspects.iter().skip(1).map(|_| f32::from(MEDIA_GAP)).sum();
+    let total_aspect: f32 = aspects.iter().sum();
+    let height =
+        ((f32::from(MEDIA_MAX_WIDTH) - gaps) / total_aspect).min(f32::from(MEDIA_MAX_HEIGHT));
+    aspects
+        .iter()
+        .map(|&aspect| size(px(aspect * height), px(height)))
+        .collect()
+}
+
+/// 複数枚の写真をどちらの向きに並べるか (#256)｡
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::ui) enum MediaArrangement {
+    /// 横 1 段 — 縦長どうしのとき｡
+    Row,
+    /// 縦積み — それ以外｡
+    Column,
+}
+
+/// `aspects` の写真をどう並べるか (#256): 縦長 (縦横比 < 1) が過半数なら
+/// 横 1 段､それ以外は縦積み｡縦長は幅が余るので隣が置けるが､横長を横に
+/// 並べると 1 枚 1 枚が読めないほど小さくなる｡引き分けが縦積みなのは､段に
+/// 入れていちばん縮むのが横長だからだ｡1 枚はどちらの向きでも同じ寸法に
+/// なる｡
+pub(in crate::ui) fn media_arrangement(aspects: &[f32]) -> MediaArrangement {
+    let portraits = aspects.iter().filter(|&&aspect| aspect < 1.0).count();
+    if portraits.saturating_mul(2) > aspects.len() {
+        MediaArrangement::Row
+    } else {
+        MediaArrangement::Column
+    }
+}
+
+/// 縦積みの各枚の寸法 (#256): どの枚も 1 枚のときと同じ式で
+/// [`MEDIA_MAX_WIDTH`] × [`MEDIA_MAX_HEIGHT`] の箱に収まる｡
+pub(in crate::ui) fn media_column_sizes(aspects: &[f32]) -> Vec<Size<Pixels>> {
+    aspects
+        .iter()
+        .flat_map(|&aspect| media_row_sizes(&[aspect]))
+        .collect()
 }
 
 /// 写真でないサムネイルの下に見せるバッジ (#65)｡素の写真なら `None` で､

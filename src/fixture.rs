@@ -237,6 +237,27 @@ mod tests {
                 .any(|item| item.reposted_by.is_some() && !item.media.is_empty()),
             "a repost carrying the original's image (#104)"
         );
+        let lone = |item: &TimelineItem| item.media.len() == 1;
+        assert!(
+            fixture.items.iter().any(|item| {
+                lone(item)
+                    && item.media.iter().all(|media| {
+                        media.width.is_some_and(|width| width <= 128)
+                            && media.height.is_some_and(|height| height <= 72)
+                    })
+            }),
+            "a lone photo small enough to have to grow (#256)"
+        );
+        assert!(
+            fixture.items.iter().any(|item| {
+                lone(item)
+                    && item
+                        .media
+                        .iter()
+                        .all(|media| media.width.zip(media.height).is_some_and(|(w, h)| h > w))
+            }),
+            "a lone portrait photo, for the max height (#256)"
+        );
         assert!(
             fixture.items.iter().any(|item| item.replied_to.is_some()),
             "a reply, for the thread toggle (#12)"
