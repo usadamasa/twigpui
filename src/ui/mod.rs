@@ -1983,6 +1983,70 @@ mod tests {
         crate::paths::Paths::from_vars(move |key| (key == "HOME").then(|| home.clone())).unwrap()
     }
 
+    /// このテスト 1 本だけの XDG ディレクトリを指す [`crate::paths::Paths`]｡
+    ///
+    /// `smoke_paths` は全テストで同じディレクトリを共有するので､何が
+    /// *書かれたか* を見るテストは隣のテストが残したものを読んでしまう｡
+    /// `name` で分けるのはそのため — プロセス id だけでは同じテストバイナリ
+    /// の中で一致する｡
+    fn scratch_paths(name: &str) -> crate::paths::Paths {
+        let home = std::env::temp_dir().join(format!("twigpui-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let home = home.display().to_string();
+        crate::paths::Paths::from_vars(move |key| (key == "HOME").then(|| home.clone())).unwrap()
+    }
+
+    // --- #211: ウィンドウを置いた場所を覚える ---
+
+    #[gpui::test]
+    fn a_live_window_remembers_the_size_it_was_left_at(cx: &mut gpui::TestAppContext) {
+        let paths = scratch_paths("remembers-window-bounds");
+        paths.ensure_dirs().unwrap();
+        let (window, _timeline) = window_with(cx, smoke_config(), paths.clone(), Startup::Live);
+
+        cx.simulate_window_resize(window.into(), gpui::size(gpui::px(700.0), gpui::px(900.0)));
+        // debounce を跨ぐ｡ドラッグの最中は通知が連続で来るので､手が止まって
+        // から 1 度だけ書く｡
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(1));
+        cx.run_until_parked();
+
+        let saved = crate::window_state::load(&paths.window_state_file())
+            .bounds
+            .expect("a live window has to remember where it was left");
+        assert_eq!(
+            saved.to_bounds().size,
+            gpui::size(gpui::px(700.0), gpui::px(900.0)),
+            "the remembered rectangle is the one the window ended up with"
+        );
+    }
+
+    #[gpui::test]
+    fn a_fixture_window_remembers_nothing(cx: &mut gpui::TestAppContext) {
+        // fixture は定義上毎回同じ画面である (`fixture-visual-check`)｡撮る
+        // ために広げたウィンドウが次の live 起動の大きさを決めてはならない｡
+        // 読み取り側 (`window_state::initial_bounds`) と同じように塞いである｡
+        let paths = scratch_paths("fixture-remembers-nothing");
+        paths.ensure_dirs().unwrap();
+        let (window, _timeline) = window_with(
+            cx,
+            smoke_config(),
+            paths.clone(),
+            Startup::Fixture(Box::new(fixture_with(&["1"], &[]))),
+        );
+
+        cx.simulate_window_resize(window.into(), gpui::size(gpui::px(700.0), gpui::px(900.0)));
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(1));
+        cx.run_until_parked();
+
+        assert_eq!(
+            crate::window_state::load(&paths.window_state_file()).bounds,
+            None,
+            "a fixture window must not write the window state file"
+        );
+    }
+
     // --- #146 層 3: 描画せずにウィンドウへ問えること ---
     //
     // gpui はテストプラットフォームでレイアウトを走らせないので､間隔・
