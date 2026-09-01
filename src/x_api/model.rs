@@ -188,26 +188,44 @@ pub(crate) struct ApiProblem {
     pub detail: Option<String>,
     #[serde(default)]
     pub reason: Option<String>,
+    /// 入れ子の `errors[]` の要素が持つ説明 (#254)｡`POST /2/lists/:id/members`
+    /// の 400 は上段の `detail` に毎回同じ定型文を置き､どのパラメータが何故
+    /// 駄目だったかはここにしか書かない｡
+    #[serde(default)]
+    pub message: Option<String>,
     #[serde(default)]
     pub errors: Vec<ApiProblem>,
 }
 
 impl ApiProblem {
-    /// 入れ子の `errors` を平坦化した､人間が読める最良の説明｡
+    /// 入れ子の `errors` まで含めた､人間が読める最良の説明｡
+    ///
+    /// 上段と入れ子の両方が何か言っていれば両方を出す (#254)｡上段だけ
+    /// だと `Invalid Request: One or more parameters ... was invalid.` で
+    /// 終わり､どのパラメータかは入れ子の `message` にしか無い｡
     pub(crate) fn message(&self) -> Option<String> {
+        let nested: Vec<String> = self.errors.iter().filter_map(ApiProblem::message).collect();
+        match self.own_message() {
+            Some(own) if nested.is_empty() => Some(own),
+            Some(own) => Some(format!("{own} ({})", nested.join("; "))),
+            None if nested.is_empty() => None,
+            None => Some(nested.join("; ")),
+        }
+    }
+
+    /// この段だけの説明｡`detail` (あれば `title` を前置)､`message`､
+    /// `title`､`reason` の順｡
+    fn own_message(&self) -> Option<String> {
         if let Some(detail) = &self.detail {
             return Some(match &self.title {
                 Some(title) => format!("{title}: {detail}"),
                 None => detail.clone(),
             });
         }
-        if let Some(title) = &self.title {
-            return Some(title.clone());
-        }
-        if let Some(reason) = &self.reason {
-            return Some(reason.clone());
-        }
-        self.errors.iter().find_map(ApiProblem::message)
+        self.message
+            .clone()
+            .or_else(|| self.title.clone())
+            .or_else(|| self.reason.clone())
     }
 }
 
@@ -1500,6 +1518,27 @@ mod tests {
         assert_eq!(
             problem.message().as_deref(),
             Some("Not Found Error: Could not find user.")
+        );
+    }
+
+    #[test]
+    fn keeps_the_nested_message_beside_the_generic_detail() {
+        // `POST /2/lists/:id/members` の 400 (#254) はこの形: 上段の
+        // `detail` は毎回同じ定型文で､どのパラメータが何故駄目だったかは
+        // `errors[].message` にしか無い｡上段だけ読むと理由が消える｡
+        let problem: ApiProblem = serde_json::from_str(
+            r#"{"errors":[{"parameters":{"user_id":["11720662"]},"message":"The user_id is not valid."}],
+                "title":"Invalid Request",
+                "detail":"One or more parameters to your request was invalid.",
+                "type":"https://api.x.com/2/problems/invalid-request"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            problem.message().as_deref(),
+            Some(
+                "Invalid Request: One or more parameters to your request was invalid. \
+                 (The user_id is not valid.)"
+            )
         );
     }
 

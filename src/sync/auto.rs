@@ -370,6 +370,7 @@ mod tests {
             username: format!("user{user_id}"),
             action,
             applied: false,
+            rejected: None,
         };
         Plan {
             list_id: list_id.to_string(),
