@@ -41,9 +41,17 @@ impl TimelineView {
             MediaArrangement::Column => (div().flex().flex_col(), media_column_sizes(&aspects)),
         };
 
+        // #188: viewer が動く先は写真だけ｡動画とアニメーション GIF は
+        // ここでは再生できないので､今までどおりブラウザへ渡す｡
+        let photos: Vec<PostMedia> = media
+            .iter()
+            .filter(|media| media.kind.as_deref() == Some("photo"))
+            .cloned()
+            .collect();
+
         let mut grid = grid.items_start().gap(MEDIA_GAP).max_w_full();
         for (media, size) in shown.into_iter().zip(sizes) {
-            grid = grid.child(self.media_cell(media, size, theme, cx));
+            grid = grid.child(self.media_cell(media, size, theme, &photos, cx));
         }
         grid.into_any_element()
     }
@@ -60,10 +68,11 @@ impl TimelineView {
     }
 
     /// サムネイル一つ: ダウンロードした画像が着いていればそれ､無ければ同じ
-    /// 大きさの枠 (#65)｡クリックすると原寸の画像をブラウザで開く (#70) —
-    /// このアプリに lightbox は無く､ちゃんと見る手段の無いサムネイルは機能
-    /// の半分でしかない｡動画やアニメーション GIF は静止画と､それがどちらか
-    /// を示す badge を出す; どちらもここでは再生されない｡
+    /// 大きさの枠 (#65)｡ちゃんと見る手段の無いサムネイルは機能の半分でしか
+    /// ないので､クリックには行き先がある — 写真は viewer のウィンドウ
+    /// ([`super::image_viewer`], #188)､それ以外は原寸の画像をブラウザで
+    /// (#70)｡動画やアニメーション GIF は静止画と､それがどちらかを示す
+    /// badge を出す; どちらもここでは再生されない｡
     ///
     /// 枠は `size` そのもの (#256): [`media_row_sizes`] が API の寸法から出した
     /// 幅と高さを枠にも画像にも与えるので､画像が着く前と後で枠の形は変わら
@@ -80,9 +89,18 @@ impl TimelineView {
         media: &PostMedia,
         size: Size<Pixels>,
         theme: Theme,
+        photos: &[PostMedia],
         cx: &mut Context<'_, TimelineView>,
     ) -> AnyElement {
         let url = media.url.clone();
+        // #188: 写真はブラウザではなく viewer のウィンドウで開く｡`photos`
+        // の何枚目かを覚えておくのは､viewer が `←` / `→` で同じ post の
+        // 残りへ動けるようにするためだ｡
+        let timeline = cx.entity();
+        let viewer = photos
+            .iter()
+            .position(|photo| photo.url == media.url)
+            .map(|index| (photos.to_vec(), index));
 
         let frame = div()
             .addressable(format!("media-frame-{}", media.url))
@@ -115,9 +133,14 @@ impl TimelineView {
             .min_w_0()
             .gap_1()
             .child(inner)
-            .on_click(cx.listener(move |this, _event, _window, cx| {
-                this.open_in_browser(url.clone(), cx);
-            }));
+            .on_click(
+                cx.listener(move |this, _event, _window, cx| match viewer.clone() {
+                    Some((photos, index)) => {
+                        image_viewer::open(timeline.clone(), photos, index, cx);
+                    }
+                    None => this.open_in_browser(url.clone(), cx),
+                }),
+            );
 
         if let Some(badge) = media_badge(media.kind.as_deref()) {
             cell = cell.child(div().text_color(rgb(theme.text_muted)).child(badge));
