@@ -2449,6 +2449,41 @@ mod tests {
         );
     }
 
+    /// #188: ディスク上に無い media の URL は `media_failed` に残る｡
+    /// viewer が「開けない」と言うための種で､取れた URL とは別の set に
+    /// 分けてある — `media_paths` は「持っている」だけを言う｡
+    #[gpui::test]
+    fn a_media_fetch_that_finds_no_file_is_recorded_as_failed(cx: &mut gpui::TestAppContext) {
+        let ok_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/AppIcon.png");
+        let ok_url = ok_path.to_string_lossy().into_owned();
+        let fixture = Fixture {
+            items: vec![item_with_media(
+                "1",
+                &[("media/missing.png", 10, 10), (ok_url.as_str(), 10, 10)],
+            )],
+            ..fixture_with(&[], &[])
+        };
+        let (_window, timeline) = fixture_window(cx, fixture);
+        cx.run_until_parked();
+
+        cx.update(|cx| {
+            timeline.update(cx, |view, _cx| {
+                assert!(
+                    view.media_failed.contains("media/missing.png"),
+                    "a url that is not a file on disk lands in media_failed"
+                );
+                assert!(
+                    !view.media_failed.contains(ok_url.as_str()),
+                    "a url that resolved successfully must not stay in media_failed"
+                );
+                assert!(
+                    view.media_paths.contains_key(ok_url.as_str()),
+                    "a url that resolved successfully lands in media_paths"
+                );
+            });
+        });
+    }
+
     /// #256: 縦長の写真どうしは横 1 段に並び､高さを揃え､幅は縦横比に比例
     /// する (Tumblr の photoset)｡段の全体は `MEDIA_MAX_WIDTH` に収まる｡
     #[gpui::test]
