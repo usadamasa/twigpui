@@ -232,6 +232,38 @@ pub(in crate::ui) fn media_row_sizes(aspects: &[f32]) -> Vec<Size<Pixels>> {
         .collect()
 }
 
+/// 複数枚の写真をどちらの向きに並べるか (#256)｡
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::ui) enum MediaArrangement {
+    /// 横 1 段 — 縦長どうしのとき｡
+    Row,
+    /// 縦積み — それ以外｡
+    Column,
+}
+
+/// `aspects` の写真をどう並べるか (#256): 縦長 (縦横比 < 1) が過半数なら
+/// 横 1 段､それ以外は縦積み｡縦長は幅が余るので隣が置けるが､横長を横に
+/// 並べると 1 枚 1 枚が読めないほど小さくなる｡引き分けが縦積みなのは､段に
+/// 入れていちばん縮むのが横長だからだ｡1 枚はどちらの向きでも同じ寸法に
+/// なる｡
+pub(in crate::ui) fn media_arrangement(aspects: &[f32]) -> MediaArrangement {
+    let portraits = aspects.iter().filter(|&&aspect| aspect < 1.0).count();
+    if portraits.saturating_mul(2) > aspects.len() {
+        MediaArrangement::Row
+    } else {
+        MediaArrangement::Column
+    }
+}
+
+/// 縦積みの各枚の寸法 (#256): どの枚も 1 枚のときと同じ式で
+/// [`MEDIA_MAX_WIDTH`] × [`MEDIA_MAX_HEIGHT`] の箱に収まる｡
+pub(in crate::ui) fn media_column_sizes(aspects: &[f32]) -> Vec<Size<Pixels>> {
+    aspects
+        .iter()
+        .flat_map(|&aspect| media_row_sizes(&[aspect]))
+        .collect()
+}
+
 /// 写真でないサムネイルの下に見せるバッジ (#65)｡素の写真なら `None` で､
 /// このアプリが知らない `type` でも `None` だ｡そちらが前方互換の向きで
 /// ある: X が後から生む media type は､誰にも解せないラベルとしてではなく

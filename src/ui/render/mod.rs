@@ -48,10 +48,10 @@ pub(super) use offers::{
     offers_delete, offers_like, offers_quote, offers_reauthorize, offers_reply, offers_repost,
 };
 pub(super) use post::{
-    AVATAR_SIZE, MAX_RENDERED_MEDIA, MEDIA_GAP, RowCounts, avatar_placeholder, byline,
-    format_timestamp, media_aspect, media_badge, media_row_sizes, quote_card, render_thread_chain,
-    reply_banner_label, repost_banner_label, row_counts, thread_action_label, thread_toggle_row,
-    with_count,
+    AVATAR_SIZE, MAX_RENDERED_MEDIA, MEDIA_GAP, MediaArrangement, RowCounts, avatar_placeholder,
+    byline, format_timestamp, media_arrangement, media_aspect, media_badge, media_column_sizes,
+    media_row_sizes, quote_card, render_thread_chain, reply_banner_label, repost_banner_label,
+    row_counts, thread_action_label, thread_toggle_row, with_count,
 };
 
 /// 一つの要素に､gpui とテストの双方が使える名前を一つ与える｡

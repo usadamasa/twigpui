@@ -19,25 +19,33 @@ impl TimelineView {
             .unwrap_or_else(|| ToggleState::new(self.liked_ids.contains(post_id)))
     }
 
-    /// 一つの post の本文の下に置く添付 media の段 (#65, #256)｡
+    /// 一つの post の本文の下に置く添付 media の並び (#65, #256)｡
     ///
-    /// サムネイルは最大 [`MAX_RENDERED_MEDIA`] 枚を横 1 段に並べ､本文列の
-    /// 左端から始める｡各枚の寸法は [`media_row_sizes`] が API の
-    /// `width` / `height` だけから決めるので､どの画像のダウンロードを終えた
-    /// かに段の形が依存することはありえない｡
+    /// サムネイルは最大 [`MAX_RENDERED_MEDIA`] 枚を本文列の左端から並べる｡
+    /// 向きは [`media_arrangement`] が縦横比で決める: 縦長どうしは横 1 段､
+    /// 横長どうしは縦積み｡各枚の寸法は [`media_row_sizes`] /
+    /// [`media_column_sizes`] が API の `width` / `height` だけから決める
+    /// ので､どの画像のダウンロードを終えたかに並びの形が依存することは
+    /// ありえない｡
     ///
-    /// 引用カードの本文列は外側より狭い｡段は `max_w_full` で列に収め､
+    /// 引用カードの本文列は外側より狭い｡並びは `max_w_full` で列に収め､
     /// セルは `min_w_0` で縮めるので､入りきらない分は枠の右で切れる｡
+    /// `items_start` は両向きに掛かる: 縦積みでセルが列いっぱいへ引き
+    /// 伸ばされるのも､横 1 段で高さが揃えられるのも止める｡
     fn media_grid(&self, media: &[PostMedia], cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = self.theme;
         let shown: Vec<&PostMedia> = media.iter().take(MAX_RENDERED_MEDIA).collect();
         let aspects: Vec<f32> = shown.iter().map(|media| media_aspect(media)).collect();
+        let (grid, sizes) = match media_arrangement(&aspects) {
+            MediaArrangement::Row => (div().flex(), media_row_sizes(&aspects)),
+            MediaArrangement::Column => (div().flex().flex_col(), media_column_sizes(&aspects)),
+        };
 
-        let mut row = div().flex().items_start().gap(MEDIA_GAP).max_w_full();
-        for (media, size) in shown.into_iter().zip(media_row_sizes(&aspects)) {
-            row = row.child(self.media_cell(media, size, theme, cx));
+        let mut grid = grid.items_start().gap(MEDIA_GAP).max_w_full();
+        for (media, size) in shown.into_iter().zip(sizes) {
+            grid = grid.child(self.media_cell(media, size, theme, cx));
         }
-        row.into_any_element()
+        grid.into_any_element()
     }
 
     /// [`Self::media_grid`]｡描く media が無いときは何も返さない (#123) —

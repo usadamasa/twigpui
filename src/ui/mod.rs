@@ -54,13 +54,14 @@ use reload_policy::{
 };
 use render::Addressable as _;
 use render::{
-    AVATAR_SIZE, MAX_RENDERED_MEDIA, MEDIA_GAP, author_link, avatar_placeholder, byline,
-    compose_error_message, format_timestamp, header_title_element, like_row, link_row,
-    media_aspect, media_badge, media_row_sizes, notice, offers_delete, offers_like, offers_quote,
-    offers_reauthorize, offers_reply, offers_repost, open_post_link, quote_card, quote_row,
-    reload_notice_banner, render_thread_chain, reply_banner_label, reply_row, reply_target_label,
-    repost_banner_label, repost_row, session_notice_banner, sign_in_pill, thread_action_label,
-    thread_toggle_row, usage_color, usage_label, with_count,
+    AVATAR_SIZE, MAX_RENDERED_MEDIA, MEDIA_GAP, MediaArrangement, author_link, avatar_placeholder,
+    byline, compose_error_message, format_timestamp, header_title_element, like_row, link_row,
+    media_arrangement, media_aspect, media_badge, media_column_sizes, media_row_sizes, notice,
+    offers_delete, offers_like, offers_quote, offers_reauthorize, offers_reply, offers_repost,
+    open_post_link, quote_card, quote_row, reload_notice_banner, render_thread_chain,
+    reply_banner_label, reply_row, reply_target_label, repost_banner_label, repost_row,
+    session_notice_banner, sign_in_pill, thread_action_label, thread_toggle_row, usage_color,
+    usage_label, with_count,
 };
 use render::{RowCounts, row_counts};
 pub(crate) use startup::Startup;
@@ -483,16 +484,15 @@ mod tests {
     use super::render::post::{avatar_initial, post_permalink, profile_url};
     use super::{
         ComposeStatus, Cooldown, CooldownTick, Denial, Denied, Fade, Fixture, MediaArrangement,
-        PostLink, PostMedia,
-        PostMetrics, ReloadNotice, ReloadTrigger, RepliedTo, RowCounts, Startup, SyncOff,
-        SyncStatus, Theme, ThreadFetchState, TimelineItem, TimelineState, ToggleState,
-        action_post_id, at_the_post_cap, byline, compose_error_message, cooldown_label,
-        cooldown_tick, format_timestamp, media_arrangement, media_aspect, media_badge,
-        media_column_sizes, media_row_sizes, offers_delete,
-        offers_like, offers_load_older, offers_quote, offers_reauthorize, offers_reply,
-        offers_repost, pending_after_poll, rate_limit, reload_failure_outcome, reload_gate,
-        reload_start_state, reply_banner_label, reply_target_label, repost_banner_label,
-        row_counts, thread_action_label, usage, usage_color, usage_label,
+        PostLink, PostMedia, PostMetrics, ReloadNotice, ReloadTrigger, RepliedTo, RowCounts,
+        Startup, SyncOff, SyncStatus, Theme, ThreadFetchState, TimelineItem, TimelineState,
+        ToggleState, action_post_id, at_the_post_cap, byline, compose_error_message,
+        cooldown_label, cooldown_tick, format_timestamp, media_arrangement, media_aspect,
+        media_badge, media_column_sizes, media_row_sizes, offers_delete, offers_like,
+        offers_load_older, offers_quote, offers_reauthorize, offers_reply, offers_repost,
+        pending_after_poll, rate_limit, reload_failure_outcome, reload_gate, reload_start_state,
+        reply_banner_label, reply_target_label, repost_banner_label, row_counts,
+        thread_action_label, usage, usage_color, usage_label,
     };
 
     fn item_with(id: &str, author_username: &str, reposted_by: Option<&str>) -> TimelineItem {
@@ -954,9 +954,7 @@ mod tests {
             assert!(
                 about(f32::from(size.width), f32::from(alone.width))
                     && about(f32::from(size.height), f32::from(alone.height)),
-                "a stacked photo keeps the lone size: {:?} vs {:?}",
-                size,
-                alone
+                "a stacked photo keeps the lone size: {size:?} vs {alone:?}"
             );
         }
     }
