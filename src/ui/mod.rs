@@ -25,6 +25,8 @@ mod chrome;
 mod composer;
 mod countdown;
 mod fade;
+// #188: `main` がキーバインドを登録するので､ここだけ crate へ開く｡
+pub(crate) mod image_viewer;
 mod layout;
 mod list_picker;
 mod list_sync;
@@ -2089,7 +2091,7 @@ mod tests {
     /// 足すと 9 つのコピーになったので切り出した｡ビューだけでなくハンドルも
     /// 返す: アクションの dispatch にはウィンドウが要り､結果の assert には
     /// ビューが要る｡
-    fn fixture_window(
+    pub(super) fn fixture_window(
         cx: &mut gpui::TestAppContext,
         fixture: Fixture,
     ) -> (
@@ -2163,7 +2165,7 @@ mod tests {
 
     /// `shown` がすでに画面にあり､`waiting` を抑えてある fixture — #21 の
     /// "N new posts" のバーが存在する理由になっている形だ｡
-    fn fixture_with(shown: &[&str], waiting: &[&str]) -> Fixture {
+    pub(super) fn fixture_with(shown: &[&str], waiting: &[&str]) -> Fixture {
         Fixture {
             signed_in_as: crate::fixture::FixtureUser {
                 id: "5685672".to_string(),
@@ -2316,7 +2318,7 @@ mod tests {
 
     /// `name` の要素が置かれた bounds｡置かれていなければ panic — 「無い」を
     /// 確かめるテストはこれを使わない｡
-    fn laid_out(
+    pub(super) fn laid_out(
         visual: &mut gpui::VisualTestContext,
         name: &'static str,
     ) -> gpui::Bounds<gpui::Pixels> {
@@ -2343,7 +2345,10 @@ mod tests {
     }
 
     /// 1 フレーム描き､background に頼んだ仕事 (画像のデコード) を終わらせる｡
-    fn draw_until_parked(visual: &mut gpui::VisualTestContext, cx: &mut gpui::TestAppContext) {
+    pub(super) fn draw_until_parked(
+        visual: &mut gpui::VisualTestContext,
+        cx: &mut gpui::TestAppContext,
+    ) {
         visual.update(|window, cx| {
             let _ = window.draw(cx);
         });
