@@ -84,6 +84,7 @@ use crate::theme::{self, Theme};
 use crate::thread::{self, ThreadChain};
 use crate::toggle::{ToggleState, ToggleStatus};
 use crate::usage;
+use crate::window_state;
 use crate::x_api::{
     Denial, Denied, Draft, PostLink, PostMedia, PostMetrics, QuotedPost, RepliedTo, TimelineItem,
     XClient, action_post_id,
@@ -153,6 +154,19 @@ pub(crate) struct TimelineView {
     /// 切り替えを覚えておく場所 ([`Paths::selection_file`])｡fixture の
     /// ウィンドウでは `None` — [`list_picker::saved_selection_for`] を見よ｡
     selection_file: Option<PathBuf>,
+    /// ウィンドウを置いた場所を覚えておく場所 ([`Paths::window_state_file`],
+    /// #211)｡`selection_file` と同じく fixture のウィンドウでは `None` で､
+    /// 読み取り側 ([`crate::window_state::initial_bounds`]) も同じように
+    /// 塞いである｡
+    window_state_file: Option<PathBuf>,
+    /// ウィンドウの矩形が変わったことを知らせる購読 (#211)｡resize でも
+    /// 移動でも発火する｡drop すると通知が止まるので､view と同じだけ生きる
+    /// 必要がある — 名前の `_` はそれが読まれずに保持されるものである印だ｡
+    _window_bounds_subscription: Subscription,
+    /// 矩形を書くまでの間を空けるタイマー (#211)｡ドラッグの最中は通知が
+    /// 連続で来るので､新しい task を入れて前のものを落とし､手が止まって
+    /// から 1 度だけ書く｡
+    window_state_save: Option<Task<()>>,
     /// 直近の home-timeline レスポンスの `meta.next_token` があればそれ
     /// (#11)｡"Load older" ボタンが出るかを決める — [`offers_load_older`] を
     /// 見よ｡これ以上遡って取るものが無いとき､またはまだネットワークから

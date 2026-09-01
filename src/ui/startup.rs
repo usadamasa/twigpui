@@ -84,6 +84,12 @@ impl TimelineView {
         );
         let owned_lists = list_picker::cached_lists_or_empty(&paths);
         let selection_file = matches!(startup, Startup::Live).then(|| paths.selection_file());
+        // #211: 読み取り側 (`window_state::initial_bounds`) と同じ条件で
+        // 塞ぐ｡fixture を撮るために広げたウィンドウが､次の live 起動の
+        // 大きさを決めてはならない｡
+        let window_state_file = matches!(startup, Startup::Live).then(|| paths.window_state_file());
+        let window_bounds_subscription =
+            cx.observe_window_bounds(window, |this, window, cx| this.remember_bounds(window, cx));
         // #22: `source` と同じく､下で `config` が move される前に取る｡
         let follow = FollowMode::from_config(config.follow_new_posts);
 
@@ -104,6 +110,9 @@ impl TimelineView {
             owned_lists,
             lists_fetch: None,
             selection_file,
+            window_state_file,
+            _window_bounds_subscription: window_bounds_subscription,
+            window_state_save: None,
             next_page_token: None,
             threads: HashMap::new(),
             thread_fetches: HashMap::new(),
@@ -168,6 +177,43 @@ impl TimelineView {
         }
         this.refresh_usage(cx);
         this
+    }
+
+    /// ウィンドウが止まったと見なすまでの間 (#211)｡
+    ///
+    /// ドラッグの最中は移動と resize の通知が 1 フレームごとに来る｡その
+    /// たびに書けば 1 回の移動で数十回の write になるので､最後の 1 回だけ
+    /// 残す｡`cmd-q` がこの間に入ると最後の変更は落ちるが､その代償は
+    /// ウィンドウを一度置き直すことでしかない｡
+    pub(super) const WINDOW_STATE_DEBOUNCE: Duration = Duration::from_millis(400);
+
+    /// ウィンドウの今の矩形を覚える (#211)｡
+    ///
+    /// [`Context::observe_window_bounds`] から呼ばれる｡doc は "resized" と
+    /// 言うが macOS の移動も同じ購読へ流れるので､位置の変更もここへ来る｡
+    ///
+    /// 保存するのは矩形だけで､最大化やフルスクリーンであったことは覚え
+    /// ない — [`crate::window_state`] のモジュール doc を見よ｡
+    fn remember_bounds(&mut self, window: &Window, cx: &mut Context<'_, Self>) {
+        let Some(path) = self.window_state_file.clone() else {
+            return;
+        };
+        let bounds = window_state::SavedBounds::from(window.window_bounds());
+        // 前の task を落とすのが debounce そのものである｡gpui の `Task` は
+        // drop で取り消されるので､連続する通知のうち最後の 1 つだけが
+        // 時間を待ち切る｡
+        self.window_state_save.take();
+        self.window_state_save = Some(cx.spawn(async move |_this, cx| {
+            cx.background_executor()
+                .timer(Self::WINDOW_STATE_DEBOUNCE)
+                .await;
+            let state = window_state::WindowState {
+                bounds: Some(bounds),
+            };
+            if let Err(error) = window_state::save(&path, &state) {
+                log::warn(&format!("could not remember the window bounds: {error:#}"));
+            }
+        }));
     }
 
     /// fixture が未読の post を抑えておく時間｡それを運んできたはずの poll
