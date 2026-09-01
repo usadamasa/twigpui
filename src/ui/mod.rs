@@ -482,11 +482,13 @@ mod tests {
     use super::render::offers::is_own_post;
     use super::render::post::{avatar_initial, post_permalink, profile_url};
     use super::{
-        ComposeStatus, Cooldown, CooldownTick, Denial, Denied, Fade, Fixture, PostLink, PostMedia,
+        ComposeStatus, Cooldown, CooldownTick, Denial, Denied, Fade, Fixture, MediaArrangement,
+        PostLink, PostMedia,
         PostMetrics, ReloadNotice, ReloadTrigger, RepliedTo, RowCounts, Startup, SyncOff,
         SyncStatus, Theme, ThreadFetchState, TimelineItem, TimelineState, ToggleState,
         action_post_id, at_the_post_cap, byline, compose_error_message, cooldown_label,
-        cooldown_tick, format_timestamp, media_aspect, media_badge, media_row_sizes, offers_delete,
+        cooldown_tick, format_timestamp, media_arrangement, media_aspect, media_badge,
+        media_column_sizes, media_row_sizes, offers_delete,
         offers_like, offers_load_older, offers_quote, offers_reauthorize, offers_reply,
         offers_repost, pending_after_poll, rate_limit, reload_failure_outcome, reload_gate,
         reload_start_state, reply_banner_label, reply_target_label, repost_banner_label,
@@ -909,6 +911,54 @@ mod tests {
     #[test]
     fn no_media_gives_no_sizes() {
         assert!(row_sizes(&[]).is_empty(), "nothing to lay out");
+    }
+
+    #[test]
+    fn portrait_photos_sit_side_by_side() {
+        // 縦長どうしは横に並べる — 縦長は幅が余るので隣が置ける｡
+        assert_eq!(media_arrangement(&[0.5, 0.75]), MediaArrangement::Row);
+        assert_eq!(
+            media_arrangement(&[0.5, 0.6, 1.5]),
+            MediaArrangement::Row,
+            "portraits outnumber the landscape"
+        );
+    }
+
+    #[test]
+    fn landscape_photos_stack_into_a_column() {
+        // 横長どうしは縦に積む — 横に並べると 1 枚 1 枚が小さすぎる｡
+        assert_eq!(media_arrangement(&[1.78, 1.78]), MediaArrangement::Column);
+        assert_eq!(
+            media_arrangement(&[1.78, 1.78, 0.5]),
+            MediaArrangement::Column
+        );
+        assert_eq!(
+            media_arrangement(&[1.78, 0.5]),
+            MediaArrangement::Column,
+            "a tie stacks: a landscape shrinks the most in a row"
+        );
+        assert_eq!(media_arrangement(&[1.0]), MediaArrangement::Column);
+    }
+
+    #[test]
+    fn a_stacked_photo_gets_the_lone_photos_size() {
+        // Column の各枚は 1 枚のときと同じ式で箱に収まる｡
+        let aspects = [16.0 / 9.0, 9.0 / 16.0, 1.0];
+        let stacked = media_column_sizes(&aspects);
+        assert_eq!(stacked.len(), 3, "one size per photo");
+        for (&aspect, size) in aspects.iter().zip(&stacked) {
+            let alone = media_row_sizes(&[aspect])
+                .first()
+                .copied()
+                .unwrap_or_default();
+            assert!(
+                about(f32::from(size.width), f32::from(alone.width))
+                    && about(f32::from(size.height), f32::from(alone.height)),
+                "a stacked photo keeps the lone size: {:?} vs {:?}",
+                size,
+                alone
+            );
+        }
     }
 
     #[test]
@@ -2323,18 +2373,18 @@ mod tests {
         );
     }
 
-    /// #256: 複数枚は横 1 段に並び､高さを揃え､幅は縦横比に比例する (Tumblr
-    /// の photoset)｡段の全体は `MEDIA_MAX_WIDTH` に収まる｡
+    /// #256: 縦長の写真どうしは横 1 段に並び､高さを揃え､幅は縦横比に比例
+    /// する (Tumblr の photoset)｡段の全体は `MEDIA_MAX_WIDTH` に収まる｡
     #[gpui::test]
-    fn several_photos_share_one_row(cx: &mut gpui::TestAppContext) {
+    fn portrait_photos_share_one_row(cx: &mut gpui::TestAppContext) {
         let fixture = Fixture {
             items: vec![item_with_media(
                 "3",
                 &[
-                    ("media/a.png", 320, 180),
-                    ("media/b.png", 180, 320),
-                    ("media/c.png", 320, 180),
-                    ("media/d.png", 320, 320),
+                    ("media/a.png", 180, 320),
+                    ("media/b.png", 160, 320),
+                    ("media/c.png", 180, 320),
+                    ("media/d.png", 240, 320),
                 ],
             )],
             ..fixture_with(&[], &[])
@@ -2368,15 +2418,15 @@ mod tests {
             "the four sit side by side in order"
         );
         assert!(
-            b.size.width < d.size.width && d.size.width < a.size.width,
-            "widths follow aspect: portrait {} < square {} < landscape {}",
+            b.size.width < a.size.width && a.size.width < d.size.width,
+            "widths follow aspect: {} < {} < {}",
             b.size.width,
-            d.size.width,
-            a.size.width
+            a.size.width,
+            d.size.width
         );
         assert!(
             close(f32::from(a.size.width), f32::from(c.size.width)),
-            "two landscapes of one aspect share a width: {} vs {}",
+            "two portraits of one aspect share a width: {} vs {}",
             a.size.width,
             c.size.width
         );
@@ -2386,6 +2436,51 @@ mod tests {
             a.left(),
             d.right()
         );
+    }
+
+    /// #256: 横長の写真どうしは縦に積む — 横に並べると 1 枚 1 枚が読めない
+    /// ほど小さくなる｡積まれた各枚は 1 枚のときと同じ寸法を取る｡
+    #[gpui::test]
+    fn landscape_photos_stack_below_one_another(cx: &mut gpui::TestAppContext) {
+        let fixture = Fixture {
+            items: vec![item_with_media(
+                "3",
+                &[("media/a.png", 320, 180), ("media/b.png", 128, 72)],
+            )],
+            ..fixture_with(&[], &[])
+        };
+        let (window, _timeline) = fixture_window(cx, fixture);
+        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+        draw_until_parked(&mut visual, cx);
+
+        let close = |left: f32, right: f32| (left - right).abs() < 1.0;
+        let max_width = f32::from(super::render::post::MEDIA_MAX_WIDTH);
+        let a = laid_out(&mut visual, "media-frame-media/a.png");
+        let b = laid_out(&mut visual, "media-frame-media/b.png");
+        assert!(
+            b.top() >= a.bottom(),
+            "the second landscape sits below the first: {} vs {}",
+            b.top(),
+            a.bottom()
+        );
+        assert!(
+            close(f32::from(b.left()), f32::from(a.left())),
+            "both start at the column's left edge: {} vs {}",
+            b.left(),
+            a.left()
+        );
+        for (name, frame) in [("a", &a), ("b", &b)] {
+            assert!(
+                close(f32::from(frame.size.width), max_width),
+                "{name} takes the lone photo's width: {}",
+                frame.size.width
+            );
+            assert!(
+                close(f32::from(frame.size.height), max_width * 9.0 / 16.0),
+                "{name} keeps 16:9: {}",
+                frame.size.height
+            );
+        }
     }
 
     /// #146: fixture のウィンドウは `XClient` をまったく構築しない｡
