@@ -20,6 +20,7 @@ use super::TimelineView;
 use super::render::Addressable as _;
 use crate::log;
 use crate::menu::CloseWindow;
+use crate::profile::Profile;
 use crate::theme::{self, Theme};
 use crate::x_api::PostMedia;
 
@@ -90,14 +91,8 @@ pub(in crate::ui) fn open(
     };
     let display = cx.primary_display().map(|display| display.bounds().size);
     let bounds = Bounds::centered(None, initial_size(Some(photo), display), cx);
-    let options = WindowOptions {
+    let mut options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
-        titlebar: Some(TitlebarOptions {
-            // URL もパスもクエリも出さない (#188)｡タイトルバーは肩越しに
-            // 一番読まれるところで､そこに出して得るものが無い｡
-            title: Some("Photo".into()),
-            ..Default::default()
-        }),
         ..Default::default()
     };
 
@@ -105,9 +100,20 @@ pub(in crate::ui) fn open(
     // クリックハンドラから呼ばれ､そのあいだ `TimelineView` は lease に
     // 出ている｡`open_window` はその場で 1 フレーム描き､viewer の render は
     // timeline を読むので､ここで開くと "cannot read TimelineView while it is
-    // already being updated" で落ちる｡
+    // already being updated" で落ちる｡title の解決も同じ理由でここへ移す —
+    // `timeline.read(cx)` を `open` の本体で呼ぶと同じ panic を踏む｡
     let timeline = timeline.clone();
     cx.defer(move |cx| {
+        // URL もパスもクエリも出さない (#188)｡タイトルバーは肩越しに一番
+        // 読まれるところで､そこに出して得るものが無い｡`Profile::current()`
+        // を直に呼ばず `timeline` の `paths` から読むので (`main.rs` の
+        // window title と同じ理由)､タイトルが一方の profile を名乗りながら
+        // 読んでいるファイルはもう一方､とはなり得ない｡
+        let profile = timeline.read(cx).paths.profile();
+        options.titlebar = Some(TitlebarOptions {
+            title: Some(title(profile).into()),
+            ..Default::default()
+        });
         // root は素の `ImageViewer` (#188)｡`gpui_component::Root` で包むのは
         // そのウィジェットを使うウィンドウだけで､ここは `img` と文字しか
         // 描かない｡
@@ -118,6 +124,13 @@ pub(in crate::ui) fn open(
             log::error(&format!("could not open the image viewer: {error:#}"));
         }
     });
+}
+
+/// viewer window の title (#188)｡`profile.rs` の `photo_window_title` を
+/// 素通しする以上のことはしない — この 1 段があるおかげで
+/// [`open`] が固定文字列へ戻らないことをテストで押さえられる｡
+fn title(profile: Profile) -> String {
+    profile.photo_window_title()
 }
 
 /// 開く大きさ (#188)｡
@@ -729,10 +742,13 @@ mod tests {
 
     /// #188: viewer window の title は profile を名乗る｡`"Photo"` 固定だと
     /// dev と release を並べて開いたとき見分けが付かず (`profile.rs` の
-    /// invariant)、目視確認の `--title` 絞り込みも効かなくなる｡
+    /// invariant)､目視確認の `--title` 絞り込みも効かなくなる｡
     #[test]
     fn the_viewer_title_is_built_from_the_profile_not_a_literal() {
-        for profile in [crate::profile::Profile::Dev, crate::profile::Profile::Release] {
+        for profile in [
+            crate::profile::Profile::Dev,
+            crate::profile::Profile::Release,
+        ] {
             assert_eq!(super::title(profile), profile.photo_window_title());
         }
     }

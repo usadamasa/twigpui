@@ -87,6 +87,13 @@ impl Profile {
         }
     }
 
+    /// 画像 viewer ウィンドウ (#188) のタイトルバー文字列｡[`Self::window_title`]
+    /// と同じ理由でプロファイルごとに違える — dev と release を並べて開いても
+    /// どちらの viewer かが分かる｡
+    pub(crate) fn photo_window_title(self) -> String {
+        format!("{} — Photo", self.window_title())
+    }
+
     /// `X_LIST_ID` も `config.toml` の `list_id` も List を指定しないときに
     /// このプロファイルが fallback する先の List (#161, #169)｡
     ///
