@@ -28,7 +28,7 @@ mod fade;
 // #188: `main` がキーバインドを登録するので､ここだけ crate へ開く｡
 pub(crate) mod image_viewer;
 mod layout;
-mod list_picker;
+mod source_picker;
 mod list_sync;
 mod post_row;
 mod reload_policy;
@@ -138,7 +138,7 @@ pub(crate) struct TimelineView {
     /// 出る — [`render::header_title`] を見よ｡
     home_username: Option<String>,
     /// どの timeline がウィンドウを埋めるか (#161): [`Self::new`] の中で
-    /// [`list_picker::initial_source`] が決め､再代入するのは
+    /// [`source_picker::initial_source`] が決め､再代入するのは
     /// [`Self::switch_source`] (#164) だけで､そこではウィンドウではなく
     /// 一つの source に属する下記のものもすべてリセットする｡
     ///
@@ -154,7 +154,7 @@ pub(crate) struct TimelineView {
     /// 取り消す契約であり､二度目のクリックを止めるものでもある｡
     lists_fetch: Option<Task<()>>,
     /// 切り替えを覚えておく場所 ([`Paths::selection_file`])｡fixture の
-    /// ウィンドウでは `None` — [`list_picker::saved_selection_for`] を見よ｡
+    /// ウィンドウでは `None` — [`source_picker::saved_selection_for`] を見よ｡
     selection_file: Option<PathBuf>,
     /// ウィンドウを置いた場所を覚えておく場所 ([`Paths::window_state_file`],
     /// #211)｡`selection_file` と同じく fixture のウィンドウでは `None` で､
@@ -4357,10 +4357,10 @@ mod tests {
         visual.simulate_click(segment.center(), gpui::Modifiers::none());
         cx.run_until_parked();
 
-        let remembered = super::list_picker::load_selection(&paths.selection_file());
+        let remembered = super::source_picker::load_selection(&paths.selection_file());
         assert_eq!(
             remembered.selected,
-            Some(super::list_picker::Selection::List {
+            Some(super::source_picker::Selection::List {
                 id: "9131".to_string()
             })
         );

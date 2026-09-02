@@ -78,11 +78,11 @@ impl TimelineView {
         let compose_input_subscription = cx.subscribe(&compose_input, Self::on_compose_input_event);
 
         // #161/#164: 下で `config` が move される前に取っておく｡
-        let source = list_picker::initial_source(
-            list_picker::saved_selection_for(&startup, &paths),
+        let source = source_picker::initial_source(
+            source_picker::saved_selection_for(&startup, &paths),
             config.list_id.as_deref(),
         );
-        let owned_lists = list_picker::cached_lists_or_empty(&paths);
+        let owned_lists = source_picker::cached_lists_or_empty(&paths);
         let selection_file = matches!(startup, Startup::Live).then(|| paths.selection_file());
         // #211: 読み取り側 (`window_state::initial_bounds`) と同じ条件で
         // 塞ぐ｡fixture を撮るために広げたウィンドウが､次の live 起動の
