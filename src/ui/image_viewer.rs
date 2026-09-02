@@ -20,7 +20,7 @@ use super::TimelineView;
 use super::render::Addressable as _;
 use crate::log;
 use crate::menu::CloseWindow;
-use crate::theme;
+use crate::theme::{self, Theme};
 use crate::x_api::PostMedia;
 
 gpui::actions!(
@@ -50,6 +50,10 @@ const FALLBACK_HEIGHT: f32 = 600.0;
 /// ときにタイトルバーごと外へ出るので､余白を残す｡
 const SCREEN_FRACTION: f32 = 0.9;
 
+/// 画像を出せないときの文言 (#188)｡取りそこねたときと､timeline がもう
+/// 無いときの両方で使う — 読み手にとってはどちらも同じことだ｡
+const UNAVAILABLE: &str = "Could not load this image";
+
 /// viewer のキーバインドを登録する (#188)｡`main` が `menu::init` の隣で
 /// 一度だけ呼ぶ — これらへ dispatch するウィンドウが存在する前に｡
 ///
@@ -72,8 +76,11 @@ pub(crate) fn init(cx: &mut App) {
 ///
 /// ウィンドウを開けなかったことは記録するだけで､呼び出し元へは返さない｡
 /// 写真を出せなかったのは timeline が読めなくなる理由ではない｡
+///
+/// `timeline` を借りるだけなのは､viewer が持つのが弱い handle だからだ
+/// ([`ImageViewer::timeline`])｡
 pub(in crate::ui) fn open(
-    timeline: Entity<TimelineView>,
+    timeline: &Entity<TimelineView>,
     photos: Vec<PostMedia>,
     index: usize,
     cx: &mut App,
@@ -94,15 +101,23 @@ pub(in crate::ui) fn open(
         ..Default::default()
     };
 
-    // root は素の `ImageViewer` (#188)｡`gpui_component::Root` で包むのは
-    // そのウィジェットを使うウィンドウだけで､ここは `img` と文字しか
-    // 描かない｡
-    let opened = cx.open_window(options, |window, cx| {
-        cx.new(|cx| ImageViewer::new(timeline, photos, index, window, cx))
+    // `defer` で今の update を抜けてから開く (#188)｡`open` はサムネイルの
+    // クリックハンドラから呼ばれ､そのあいだ `TimelineView` は lease に
+    // 出ている｡`open_window` はその場で 1 フレーム描き､viewer の render は
+    // timeline を読むので､ここで開くと "cannot read TimelineView while it is
+    // already being updated" で落ちる｡
+    let timeline = timeline.clone();
+    cx.defer(move |cx| {
+        // root は素の `ImageViewer` (#188)｡`gpui_component::Root` で包むのは
+        // そのウィジェットを使うウィンドウだけで､ここは `img` と文字しか
+        // 描かない｡
+        let opened = cx.open_window(options, |window, cx| {
+            cx.new(|cx| ImageViewer::new(&timeline, photos, index, window, cx))
+        });
+        if let Err(error) = opened {
+            log::error(&format!("could not open the image viewer: {error:#}"));
+        }
     });
-    if let Err(error) = opened {
-        log::error(&format!("could not open the image viewer: {error:#}"));
-    }
 }
 
 /// 開く大きさ (#188)｡
@@ -138,11 +153,19 @@ fn side(pixels: Option<u32>) -> Option<f32> {
 pub(in crate::ui) struct ImageViewer {
     /// `media_paths` と `media_failed` を毎 render で読む先｡自分では
     /// コピーを持たない — 開いた後に画像が届いても描き直るためだ｡
-    timeline: Entity<TimelineView>,
+    ///
+    /// 弱い handle である｡強く持つと､timeline のウィンドウを閉じても
+    /// `TimelineView` が生き残る｡`auto_refresh` のループが終わるのは entity
+    /// が消えたときだけなので (`auto_refresh` の doc)､画面に timeline が
+    /// 無いまま課金される取得と `ioreg` の probe が回りつづけることになる｡
+    timeline: gpui::WeakEntity<TimelineView>,
     /// この post の写真だけ｡動画とアニメーション GIF は入らない｡
     photos: Vec<PostMedia>,
     /// いま見せている [`Self::photos`] の位置｡
     index: usize,
+    /// 開いた時点の配色｡`Copy` なので写しを持つ — timeline が消えた後も
+    /// 描かねばならず､配色は起動時に一度決まったきり変わらない｡
+    theme: Theme,
     /// これが無いとフォーカスの経路に viewer が乗らず､[`KEY_CONTEXT`] へ
     /// bind したキーがどれも届かない (#118 が timeline で踏んだのと同じ)｡
     focus_handle: FocusHandle,
@@ -154,15 +177,20 @@ pub(in crate::ui) struct ImageViewer {
 impl ImageViewer {
     /// 開いた直後の viewer｡フォーカスは最初のフレームから viewer に置く｡
     fn new(
-        timeline: Entity<TimelineView>,
+        timeline: &Entity<TimelineView>,
         photos: Vec<PostMedia>,
         index: usize,
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) -> Self {
-        let timeline_changed = cx.observe(&timeline, |_this, _timeline, cx| cx.notify());
+        // `observe` は強い handle を要るので､downgrade する前に張る｡
+        let timeline_changed = cx.observe(timeline, |_this, _timeline, cx| cx.notify());
         let this = Self {
-            timeline,
+            // 一度だけ読む｡配色は起動時に決まったきり変わらないし､timeline が
+            // 消えた後も描かねばならない｡`open` が `defer` の中で呼ぶので､
+            // ここで読んでも lease には当たらない｡
+            theme: timeline.read(cx).theme,
+            timeline: timeline.downgrade(),
             photos,
             index,
             focus_handle: cx.focus_handle(),
@@ -180,21 +208,28 @@ impl ImageViewer {
     /// いま見せている写真のファイル｡まだ手元に無ければ `None`｡
     fn path(&self, cx: &App) -> Option<PathBuf> {
         let photo = self.current()?;
-        self.timeline.read(cx).media_paths.get(&photo.url).cloned()
+        let timeline = self.timeline.upgrade()?;
+        timeline.read(cx).media_paths.get(&photo.url).cloned()
     }
 
     /// 画像の代わりに出す文言 (#188)｡画像があれば `None`｡
     ///
     /// 取りそこねたものと､まだ着いていないものを言い分ける｡失敗した URL に
     /// 「読み込み中」と出しつづけると､読み手は着かないものを待つことになる｡
+    ///
+    /// timeline がもう無いとき (そのウィンドウを先に閉じた) も同じ文言に
+    /// する｡読み手にとっては同じこと — この画像はもう出せない｡
     fn notice(&self, cx: &App) -> Option<SharedString> {
         let photo = self.current()?;
-        let timeline = self.timeline.read(cx);
+        let Some(timeline) = self.timeline.upgrade() else {
+            return Some(UNAVAILABLE.into());
+        };
+        let timeline = timeline.read(cx);
         if timeline.media_paths.contains_key(&photo.url) {
             return None;
         }
         if timeline.media_failed.contains(&photo.url) {
-            return Some("Could not load this image".into());
+            return Some(UNAVAILABLE.into());
         }
         Some("Loading…".into())
     }
@@ -231,7 +266,7 @@ impl ImageViewer {
 
 impl Render for ImageViewer {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
-        let theme = self.timeline.read(cx).theme;
+        let theme = self.theme;
         let body = match self.path(cx) {
             // 幅と高さを両方与えたうえで `Contain` に吸収させる (#256)｡
             // 片方だけだと gpui が画像の縦横比を layout に持ち込み､枠を
@@ -350,16 +385,11 @@ mod tests {
         let (_window, timeline) = fixture_window(cx, fixture_with(&["1"], &[]));
         assert_eq!(window_count(cx), 1, "the timeline is the only window");
 
-        cx.update(|cx| super::open(timeline.clone(), Vec::new(), 0, cx));
+        cx.update(|cx| super::open(&timeline, Vec::new(), 0, cx));
         assert_eq!(window_count(cx), 1, "no photo means no window");
 
         cx.update(|cx| {
-            super::open(
-                timeline.clone(),
-                vec![photo("media/a.png", 800, 600)],
-                0,
-                cx,
-            );
+            super::open(&timeline, vec![photo("media/a.png", 800, 600)], 0, cx);
         });
         assert_eq!(window_count(cx), 2, "a photo opens a window of its own");
     }
@@ -374,7 +404,7 @@ mod tests {
             photo("media/b.png", 800, 600),
             photo("media/c.png", 800, 600),
         ];
-        cx.update(|cx| super::open(timeline, photos, 0, cx));
+        cx.update(|cx| super::open(&timeline, photos, 0, cx));
         let viewer = viewer_window(cx);
         let mut visual = gpui::VisualTestContext::from_window(viewer.into(), cx);
         draw_until_parked(&mut visual, cx);
@@ -409,12 +439,7 @@ mod tests {
         let scrolled = cx.update(|cx| f32::from(timeline.read(cx).list_scroll.offset().y));
 
         cx.update(|cx| {
-            super::open(
-                timeline.clone(),
-                vec![photo("media/a.png", 800, 600)],
-                0,
-                cx,
-            );
+            super::open(&timeline, vec![photo("media/a.png", 800, 600)], 0, cx);
         });
         assert_eq!(window_count(cx), 2, "the viewer opened");
 
@@ -460,7 +485,7 @@ mod tests {
             photo("media/wide.png", 1600, 400),
             photo("media/tall.png", 400, 1600),
         ];
-        cx.update(|cx| super::open(timeline, photos, 0, cx));
+        cx.update(|cx| super::open(&timeline, photos, 0, cx));
         let viewer = viewer_window(cx);
         let mut visual = gpui::VisualTestContext::from_window(viewer.into(), cx);
 
@@ -508,7 +533,7 @@ mod tests {
             photo("media/failed.png", 800, 600),
             photo("media/waiting.png", 800, 600),
         ];
-        cx.update(|cx| super::open(timeline, photos, 0, cx));
+        cx.update(|cx| super::open(&timeline, photos, 0, cx));
         let viewer = viewer_window(cx);
         let mut visual = gpui::VisualTestContext::from_window(viewer.into(), cx);
         draw_until_parked(&mut visual, cx);
@@ -576,6 +601,36 @@ mod tests {
         }
     }
 
+    /// #188: サムネイルをクリックした本物の経路が viewer を開く｡
+    ///
+    /// `open` を直に呼ぶテストでは足りない｡クリックハンドラの中では
+    /// `TimelineView` が lease に出ていて､`open_window` はその場で 1 フレーム
+    /// 描く — viewer の render は timeline を読むので､`open` が `cx.defer` を
+    /// 挟まないと `cannot read TimelineView while it is already being updated`
+    /// で落ちる｡実際にそれを踏んだので､経路ごと押さえる｡
+    ///
+    /// クリックの振り分けそのもの (どの `kind` がどちらへ行くか) は Task 3 の
+    /// `media_click_target` が引き受ける｡
+    #[gpui::test]
+    fn clicking_a_thumbnail_opens_the_viewer(cx: &mut gpui::TestAppContext) {
+        use crate::ui::tests::item_with_media;
+        let fixture = crate::fixture::Fixture {
+            items: vec![item_with_media("1", &[("media/a.png", 800, 600)])],
+            ..fixture_with(&[], &[])
+        };
+        let (window, _timeline) = fixture_window(cx, fixture);
+        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+        draw_until_parked(&mut visual, cx);
+        let cell = laid_out(&mut visual, "media-media/a.png");
+        visual.simulate_click(cell.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(
+            window_count(cx),
+            2,
+            "the click opened the viewer without panicking"
+        );
+    }
+
     /// #188: viewer は timeline を生かし続けない｡
     ///
     /// 強い handle を持つと､timeline のウィンドウを閉じても viewer が
@@ -587,12 +642,7 @@ mod tests {
         let (window, timeline) = fixture_window(cx, fixture_with(&["1"], &[]));
         let weak = timeline.downgrade();
         cx.update(|cx| {
-            super::open(
-                timeline.clone(),
-                vec![photo("media/a.png", 800, 600)],
-                0,
-                cx,
-            );
+            super::open(&timeline, vec![photo("media/a.png", 800, 600)], 0, cx);
         });
         let viewer = viewer_window(cx);
         let mut visual = gpui::VisualTestContext::from_window(viewer.into(), cx);
@@ -632,7 +682,7 @@ mod tests {
             photo("media/a.png", 800, 600),
             photo("media/b.png", 800, 600),
         ];
-        cx.update(|cx| super::open(timeline, photos, 0, cx));
+        cx.update(|cx| super::open(&timeline, photos, 0, cx));
         let viewer = viewer_window(cx);
         let mut visual = gpui::VisualTestContext::from_window(viewer.into(), cx);
         draw_until_parked(&mut visual, cx);
@@ -662,12 +712,7 @@ mod tests {
     fn a_photo_that_arrives_late_replaces_the_notice(cx: &mut gpui::TestAppContext) {
         let (_window, timeline) = fixture_window(cx, fixture_with(&["1"], &[]));
         cx.update(|cx| {
-            super::open(
-                timeline.clone(),
-                vec![photo("media/late.png", 800, 600)],
-                0,
-                cx,
-            );
+            super::open(&timeline, vec![photo("media/late.png", 800, 600)], 0, cx);
         });
         let viewer = viewer_window(cx);
         let mut visual = gpui::VisualTestContext::from_window(viewer.into(), cx);

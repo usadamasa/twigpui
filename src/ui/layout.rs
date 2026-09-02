@@ -218,10 +218,15 @@ impl Render for TimelineView {
                 window.minimize_window();
             }))
             .on_action(cx.listener(|_this, _: &CloseWindow, window, _cx| {
-                // ウィンドウが 1 つなのでこれはアプリを終える｡`cmd-q` と
+                // これが最後のウィンドウならアプリが終わる｡`cmd-q` と
                 // まったく同じで､`cmd-q` と同様に先に確認もしない (#109)｡
                 // 未送信の下書きも道連れになる — `cmd-q` が昔から持っていた
                 // 危険と同じもので､これが新しく持ち込むものではない｡
+                //
+                // 写真の viewer が開いていれば最後の 1 枚ではないので､
+                // アプリは残る (#188)｡数えているのは `main` の
+                // `on_window_closed` で､viewer は timeline を弱く持つので
+                // ここで `TimelineView` も落ちる｡
                 window.remove_window();
             }))
             .flex()

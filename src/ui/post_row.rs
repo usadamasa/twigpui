@@ -136,7 +136,7 @@ impl TimelineView {
             .on_click(
                 cx.listener(move |this, _event, _window, cx| match viewer.clone() {
                     Some((photos, index)) => {
-                        image_viewer::open(timeline.clone(), photos, index, cx);
+                        image_viewer::open(&timeline, photos, index, cx);
                     }
                     None => this.open_in_browser(url.clone(), cx),
                 }),

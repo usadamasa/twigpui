@@ -2328,7 +2328,7 @@ mod tests {
     }
 
     /// `(url, 幅, 高さ)` の写真を添付に持つ [`item_with`]｡
-    fn item_with_media(id: &str, photos: &[(&str, u32, u32)]) -> TimelineItem {
+    pub(super) fn item_with_media(id: &str, photos: &[(&str, u32, u32)]) -> TimelineItem {
         TimelineItem {
             media: photos
                 .iter()
