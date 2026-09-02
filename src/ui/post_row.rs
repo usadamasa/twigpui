@@ -14,7 +14,8 @@ use super::*;
 pub(in crate::ui) enum MediaClickTarget {
     /// このアプリの viewer ウィンドウで開く ([`super::image_viewer`])｡
     Viewer,
-    /// 原寸の画像をブラウザで開く (#70)｡
+    /// 原寸の画像をブラウザで開く (#70)｡動画・GIF・種類不明のものも含め､
+    /// 写真以外はすべてここへ回る｡
     Browser,
 }
 
@@ -114,7 +115,7 @@ impl TimelineView {
         let url = media.url.clone();
         // #188: 行き先は `media_click_target` に一本化する｡viewer 向けの
         // ときだけ `photos` の何枚目かを覚えておく — viewer が `←` / `→` で
-        // 同じ post の残りへ動けるようにするためだ｡
+        // 同じ post の残りへ動けるようにするため｡
         let timeline = cx.entity();
         let viewer = matches!(
             media_click_target(media.kind.as_deref()),
