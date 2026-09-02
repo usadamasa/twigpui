@@ -4110,6 +4110,60 @@ mod tests {
         );
     }
 
+    /// #192 の判別テスト: 13 本目 (最後) のリストを選択中にしたとき､本番の
+    /// 実寸 429px でその区画に到達できること｡`overflow_hidden` が右側の
+    /// コントロールを守る代わりにタブそのものを画面外へ追いやっていた
+    /// (`the_toolbar_action_stays_on_screen_under_a_dozen_tabs` はそちらを
+    /// 守らない側しか見ていない)｡
+    ///
+    /// トリガーが無い今の実装では `if let` が素通りし､`tab-list-9113` は
+    /// 描かれてはいるが viewport の外にあるので落ちる｡ドロップダウンを
+    /// 実装した後は開いて同じ名前の bounds を viewport の内側で見つける｡
+    #[gpui::test]
+    fn the_thirteenth_list_is_reachable_at_429px(cx: &mut gpui::TestAppContext) {
+        let lists: [(&str, &str); 13] = [
+            ("9101", "The Illustrated Compendium"),
+            ("9102", "Watercolour and gouache people"),
+            ("9103", "Neighbourhood announcements"),
+            ("9104", "International correspondents"),
+            ("9105", "Machine fabrication weekly"),
+            ("9106", "Dollhouse district news"),
+            ("9107", "Secondary creation circle"),
+            ("9108", "Drinking club coordination"),
+            ("9109", "Probe accounts for twigpui"),
+            ("9110", "Long-form essay writers"),
+            ("9111", "Camera gear enthusiasts"),
+            ("9112", "Weekend hiking companions"),
+            ("9113", "Yet another list"),
+        ];
+        let (mut visual, timeline) = drawn(cx, fixture_with_lists(&["1"], &lists));
+        cx.update(|cx| {
+            timeline.update(cx, |view, cx| {
+                view.source = crate::cache::TimelineSource::List("9113".to_string());
+                cx.notify();
+            });
+        });
+        visual.simulate_resize(gpui::size(gpui::px(429.), gpui::px(700.)));
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        if let Some(trigger) = visual.debug_bounds("source-picker-trigger") {
+            visual.simulate_click(trigger.center(), gpui::Modifiers::none());
+            visual.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+        }
+        let item = visual
+            .debug_bounds("tab-list-9113")
+            .expect("every list must be addressable by its own name");
+        let viewport = visual.update(|window, _| window.viewport_size());
+        assert!(
+            item.right() <= viewport.width,
+            "the selected list is not reachable at 429px: {item:?} in {viewport:?}"
+        );
+    }
+
     /// #164: fixture のウィンドウには client が無いので､ツールバーの中で
     /// リクエストを使う唯一のボタンを出してはならない｡
     #[gpui::test]
