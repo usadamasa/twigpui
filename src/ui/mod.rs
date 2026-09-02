@@ -496,6 +496,8 @@ pub(crate) struct TimelineView {
 mod tests {
     use super::auto_refresh::{Poll, Situation};
     use super::countdown;
+    use super::image_viewer::ImageViewer;
+    use super::post_row::{MediaClickTarget, media_click_target};
     use super::reload_policy::{
         newly_arrived, preserved_scroll_target, reload_cooldown, reload_outcome_label,
     };
@@ -999,6 +1001,19 @@ mod tests {
         // なく素の静止画として描かれるべきだ｡
         assert_eq!(media_badge(Some("hologram")), None);
         assert_eq!(media_badge(None), None);
+    }
+
+    #[test]
+    fn media_click_target_sends_only_photos_to_the_viewer() {
+        // 静止画だけが viewer へ行く｡動画と GIF はここでは再生できないので
+        // ブラウザのまま (#188)｡
+        assert_eq!(media_click_target(Some("photo")), MediaClickTarget::Viewer);
+        assert_eq!(media_click_target(Some("video")), MediaClickTarget::Browser);
+        assert_eq!(
+            media_click_target(Some("animated_gif")),
+            MediaClickTarget::Browser
+        );
+        assert_eq!(media_click_target(None), MediaClickTarget::Browser);
     }
 
     // --- #72: 削除 ---
@@ -2491,6 +2506,93 @@ mod tests {
                     "a url that resolved successfully lands in media_paths"
                 );
             });
+        });
+    }
+
+    /// #188: サムネイルをクリックした本物の経路で行き先が分かれる｡写真は
+    /// viewer を開き､クリックした 1 枚を渡す — 同じ post に動画が混ざって
+    /// いても viewer には入らない (`media_click_target` の判断どおり)｡
+    #[gpui::test]
+    fn clicking_a_photo_thumbnail_opens_the_viewer_at_that_photo(cx: &mut gpui::TestAppContext) {
+        let mut item =
+            item_with_media("1", &[("media/a.png", 100, 100), ("media/b.png", 100, 100)]);
+        item.media.push(PostMedia {
+            url: "media/v.mp4".to_string(),
+            kind: Some("video".to_string()),
+            width: Some(100),
+            height: Some(100),
+            alt_text: None,
+        });
+        let fixture = Fixture {
+            items: vec![item],
+            ..fixture_with(&[], &[])
+        };
+        let (window, _timeline) = fixture_window(cx, fixture);
+        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+        draw_until_parked(&mut visual, cx);
+
+        let cell = laid_out(&mut visual, "media-media/a.png");
+        visual.simulate_click(cell.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+
+        assert_eq!(
+            cx.update(|cx| cx.windows().len()),
+            2,
+            "clicking a photo opens the viewer"
+        );
+        let viewer = cx
+            .update(|cx| {
+                cx.windows()
+                    .into_iter()
+                    .find_map(|window| window.downcast::<ImageViewer>())
+            })
+            .expect("the viewer window has to be open");
+        cx.update(|cx| {
+            let view = viewer.read(cx).expect("the viewer is open");
+            assert_eq!(
+                view.photos.len(),
+                2,
+                "only the photos, not the video, reach the viewer"
+            );
+            assert_eq!(view.index, 0, "it opens at the photo that was clicked");
+        });
+    }
+
+    /// #188: 動画のサムネイルは viewer を開かず､ブラウザへ飛ばす task が
+    /// 走るだけ｡`run_until_parked` を挟まない — 挟むと spawn した task が
+    /// 本物のブラウザを開こうとする (テストはネットワークも `browser::open`
+    /// も叩かない)｡
+    #[gpui::test]
+    fn clicking_a_video_thumbnail_stays_in_the_browser(cx: &mut gpui::TestAppContext) {
+        let mut item = item_with_media("1", &[("media/a.png", 100, 100)]);
+        item.media.push(PostMedia {
+            url: "media/v.mp4".to_string(),
+            kind: Some("video".to_string()),
+            width: Some(100),
+            height: Some(100),
+            alt_text: None,
+        });
+        let fixture = Fixture {
+            items: vec![item],
+            ..fixture_with(&[], &[])
+        };
+        let (window, timeline) = fixture_window(cx, fixture);
+        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+        draw_until_parked(&mut visual, cx);
+
+        let cell = laid_out(&mut visual, "media-media/v.mp4");
+        visual.simulate_click(cell.center(), gpui::Modifiers::none());
+
+        assert_eq!(
+            cx.update(|cx| cx.windows().len()),
+            1,
+            "a video does not open the viewer"
+        );
+        cx.update(|cx| {
+            assert!(
+                timeline.read(cx).open_task.is_some(),
+                "the click still spawns the browser-open task"
+            );
         });
     }
 
