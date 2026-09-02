@@ -9,6 +9,25 @@ use gpui::{Pixels, Size};
 
 use super::*;
 
+/// サムネイルをクリックしたときの行き先 (#188)｡
+#[derive(Debug, PartialEq, Eq)]
+pub(in crate::ui) enum MediaClickTarget {
+    /// このアプリの viewer ウィンドウで開く ([`super::image_viewer`])｡
+    Viewer,
+    /// 原寸の画像をブラウザで開く (#70)｡動画・GIF・種類不明のものも含め､
+    /// 写真以外はすべてここへ回る｡
+    Browser,
+}
+
+/// クリックの行き先 (#188)｡静止画だけが viewer､動画と GIF は再生できないので
+/// ブラウザのまま｡
+pub(in crate::ui) fn media_click_target(kind: Option<&str>) -> MediaClickTarget {
+    match kind {
+        Some("photo") => MediaClickTarget::Viewer,
+        _ => MediaClickTarget::Browser,
+    }
+}
+
 impl TimelineView {
     /// `post_id` について描く like ボタンの状態 (#68) — これが倣っている
     /// [`Self::repost_state_for`] を見よ｡
@@ -41,9 +60,17 @@ impl TimelineView {
             MediaArrangement::Column => (div().flex().flex_col(), media_column_sizes(&aspects)),
         };
 
+        // #188: viewer が動く先は写真だけ｡動画とアニメーション GIF は
+        // ここでは再生できないので､今までどおりブラウザへ渡す｡
+        let photos: Vec<PostMedia> = media
+            .iter()
+            .filter(|media| media.kind.as_deref() == Some("photo"))
+            .cloned()
+            .collect();
+
         let mut grid = grid.items_start().gap(MEDIA_GAP).max_w_full();
         for (media, size) in shown.into_iter().zip(sizes) {
-            grid = grid.child(self.media_cell(media, size, theme, cx));
+            grid = grid.child(self.media_cell(media, size, theme, &photos, cx));
         }
         grid.into_any_element()
     }
@@ -60,10 +87,12 @@ impl TimelineView {
     }
 
     /// サムネイル一つ: ダウンロードした画像が着いていればそれ､無ければ同じ
-    /// 大きさの枠 (#65)｡クリックすると原寸の画像をブラウザで開く (#70) —
-    /// このアプリに lightbox は無く､ちゃんと見る手段の無いサムネイルは機能
-    /// の半分でしかない｡動画やアニメーション GIF は静止画と､それがどちらか
-    /// を示す badge を出す; どちらもここでは再生されない｡
+    /// 大きさの枠 (#65)｡ちゃんと見る手段の無いサムネイルは機能の半分でしか
+    /// ないので､クリックには行き先がある — [`media_click_target`] が言う
+    /// とおり､写真は viewer のウィンドウ ([`super::image_viewer`], #188)､
+    /// それ以外は原寸の画像をブラウザで (#70)｡動画やアニメーション GIF は
+    /// 静止画と､それがどちらかを示す badge を出す; どちらもここでは
+    /// 再生されない｡
     ///
     /// 枠は `size` そのもの (#256): [`media_row_sizes`] が API の寸法から出した
     /// 幅と高さを枠にも画像にも与えるので､画像が着く前と後で枠の形は変わら
@@ -80,9 +109,25 @@ impl TimelineView {
         media: &PostMedia,
         size: Size<Pixels>,
         theme: Theme,
+        photos: &[PostMedia],
         cx: &mut Context<'_, TimelineView>,
     ) -> AnyElement {
         let url = media.url.clone();
+        // #188: 行き先は `media_click_target` に一本化する｡viewer 向けの
+        // ときだけ `photos` の何枚目かを覚えておく — viewer が `←` / `→` で
+        // 同じ post の残りへ動けるようにするため｡
+        let timeline = cx.entity();
+        let viewer = matches!(
+            media_click_target(media.kind.as_deref()),
+            MediaClickTarget::Viewer
+        )
+        .then(|| {
+            let index = photos
+                .iter()
+                .position(|photo| photo.url == media.url)
+                .unwrap_or(0);
+            (photos.to_vec(), index)
+        });
 
         let frame = div()
             .addressable(format!("media-frame-{}", media.url))
@@ -115,9 +160,14 @@ impl TimelineView {
             .min_w_0()
             .gap_1()
             .child(inner)
-            .on_click(cx.listener(move |this, _event, _window, cx| {
-                this.open_in_browser(url.clone(), cx);
-            }));
+            .on_click(
+                cx.listener(move |this, _event, _window, cx| match viewer.clone() {
+                    Some((photos, index)) => {
+                        image_viewer::open(&timeline, photos, index, cx);
+                    }
+                    None => this.open_in_browser(url.clone(), cx),
+                }),
+            );
 
         if let Some(badge) = media_badge(media.kind.as_deref()) {
             cell = cell.child(div().text_color(rgb(theme.text_muted)).child(badge));

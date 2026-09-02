@@ -87,6 +87,13 @@ impl Profile {
         }
     }
 
+    /// 画像 viewer ウィンドウ (#188) のタイトルバー文字列｡[`Self::window_title`]
+    /// と同じ理由でプロファイルごとに違える — dev と release を並べて開いても
+    /// どちらの viewer かが分かる｡
+    pub(crate) fn photo_window_title(self) -> String {
+        format!("{} — Photo", self.window_title())
+    }
+
     /// `X_LIST_ID` も `config.toml` の `list_id` も List を指定しないときに
     /// このプロファイルが fallback する先の List (#161, #169)｡
     ///
@@ -143,6 +150,28 @@ mod tests {
     #[test]
     fn the_two_profiles_never_share_a_window_title() {
         assert_ne!(Profile::Dev.window_title(), Profile::Release.window_title());
+    }
+
+    #[test]
+    fn the_two_profiles_never_share_a_photo_window_title() {
+        // #188 の viewer が `window_title` と同じ invariant を持つことの確認｡
+        assert_ne!(
+            Profile::Dev.photo_window_title(),
+            Profile::Release.photo_window_title()
+        );
+    }
+
+    #[test]
+    fn the_photo_window_title_names_no_url_or_path() {
+        // タイトルバーは肩越しに一番読まれる場所なので (#188)､URL もパスも
+        // クエリも出してはならない｡
+        for profile in [Profile::Dev, Profile::Release] {
+            let title = profile.photo_window_title();
+            assert!(
+                !title.contains('/') && !title.contains("http") && !title.contains('?'),
+                "{title:?}"
+            );
+        }
     }
 
     #[test]
