@@ -52,7 +52,7 @@ const FALLBACK_HEIGHT: f32 = 600.0;
 const SCREEN_FRACTION: f32 = 0.9;
 
 /// 画像を出せないときの文言 (#188)｡取りそこねたときと､timeline がもう
-/// 無いときの両方で使う — 読み手にとってはどちらも同じことだ｡
+/// 無いときの両方で使う — 読み手にとってはどちらも同じこと｡
 const UNAVAILABLE: &str = "Could not load this image";
 
 /// viewer のキーバインドを登録する (#188)｡`main` が `menu::init` の隣で
@@ -67,7 +67,7 @@ pub(crate) fn init(cx: &mut App) {
         gpui::KeyBinding::new("right", NextPhoto, Some(KEY_CONTEXT)),
         gpui::KeyBinding::new("left", PreviousPhoto, Some(KEY_CONTEXT)),
         // 閉じ方は timeline と同じアクションを使う (#188)｡`cmd-w` に加えて
-        // `escape` も受けるのは､これが読むためだけに開いた覆いだからだ｡
+        // `escape` も受けるのは､これが読むためだけに開いた覆いだから｡
         gpui::KeyBinding::new("cmd-w", CloseWindow, Some(KEY_CONTEXT)),
         gpui::KeyBinding::new("escape", CloseWindow, Some(KEY_CONTEXT)),
     ]);
@@ -78,7 +78,7 @@ pub(crate) fn init(cx: &mut App) {
 /// ウィンドウを開けなかったことは記録するだけで､呼び出し元へは返さない｡
 /// 写真を出せなかったのは timeline が読めなくなる理由ではない｡
 ///
-/// `timeline` を借りるだけなのは､viewer が持つのが弱い handle だからだ
+/// `timeline` を借りるだけなのは､viewer が持つのが弱い handle だから
 /// ([`ImageViewer::timeline`])｡
 pub(in crate::ui) fn open(
     timeline: &Entity<TimelineView>,
@@ -136,7 +136,7 @@ fn title(profile: Profile) -> String {
 /// 開く大きさ (#188)｡
 ///
 /// 写真の API 寸法を画面の [`SCREEN_FRACTION`] に収まるまで縮める｡拡大は
-/// しない — 小さな画像を引き伸ばしたウィンドウは中身より大きいだけだ｡
+/// しない — 小さな画像を引き伸ばしたウィンドウは中身より大きいだけ｡
 /// 写真の寸法が分からないとき､そして画面の寸法が分からないとき (テストの
 /// ハーネスにはディスプレイが無いことがある) は決め打ちの大きさで開く｡
 fn initial_size(photo: Option<&PostMedia>, display: Option<Size<Pixels>>) -> Size<Pixels> {
@@ -165,9 +165,9 @@ fn side(pixels: Option<u32>) -> Option<f32> {
 /// 1 つの post の写真を 1 枚ずつ見せるウィンドウ (#188)｡
 pub(in crate::ui) struct ImageViewer {
     /// `media_paths` と `media_failed` を毎 render で読む先｡自分では
-    /// コピーを持たない — 開いた後に画像が届いても描き直るためだ｡
+    /// コピーを持たない — 開いた後に画像が届いても描き直るため｡
     ///
-    /// 弱い handle である｡強く持つと､timeline のウィンドウを閉じても
+    /// 弱い handle｡強く持つと､timeline のウィンドウを閉じても
     /// `TimelineView` が生き残る｡`auto_refresh` のループが終わるのは entity
     /// が消えたときだけなので (`auto_refresh` の doc)､画面に timeline が
     /// 無いまま課金される取得と `ioreg` の probe が回りつづけることになる｡
@@ -412,7 +412,7 @@ mod tests {
     }
 
     /// #188: `→` / `←` は 1 枚ずつ動き､端で止まる｡巻き戻らないのは､
-    /// 3 枚目の次が 1 枚目に戻ると何枚目を見ているのか分からなくなるからだ｡
+    /// 3 枚目の次が 1 枚目に戻ると何枚目を見ているのか分からなくなるため｡
     #[gpui::test]
     fn the_arrows_move_between_photos_and_stop_at_the_ends(cx: &mut gpui::TestAppContext) {
         let (_window, timeline) = fixture_window(cx, fixture_with(&["1"], &[]));
