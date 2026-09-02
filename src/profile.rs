@@ -146,6 +146,28 @@ mod tests {
     }
 
     #[test]
+    fn the_two_profiles_never_share_a_photo_window_title() {
+        // #188 の viewer が `window_title` と同じ invariant を持つことの確認｡
+        assert_ne!(
+            Profile::Dev.photo_window_title(),
+            Profile::Release.photo_window_title()
+        );
+    }
+
+    #[test]
+    fn the_photo_window_title_names_no_url_or_path() {
+        // タイトルバーは肩越しに一番読まれる場所なので (#188)､URL もパスも
+        // クエリも出してはならない｡
+        for profile in [Profile::Dev, Profile::Release] {
+            let title = profile.photo_window_title();
+            assert!(
+                !title.contains('/') && !title.contains("http") && !title.contains('?'),
+                "{title:?}"
+            );
+        }
+    }
+
+    #[test]
     fn the_release_profile_keeps_the_names_that_predate_this_split() {
         // どちらを変えても既存のインストールのファイルが迷子になり､
         // Developer Portal に登録済みの redirect URI が無効になる｡これらは

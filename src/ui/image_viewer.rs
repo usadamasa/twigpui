@@ -708,6 +708,35 @@ mod tests {
         assert_eq!(window_count(cx), 1, "cmd-w closes the viewer");
     }
 
+    /// #188: `escape` も viewer を閉じる｡`cmd-w` と同じ経路 ([`init`] が
+    /// 両方を [`super::CloseWindow`] へ bind している) だが､綴りを間違えれば
+    /// 別に落ちる｡
+    #[gpui::test]
+    fn the_escape_key_closes_the_viewer(cx: &mut gpui::TestAppContext) {
+        cx.update(super::init);
+        let (_window, timeline) = fixture_window(cx, fixture_with(&["1"], &[]));
+        cx.update(|cx| {
+            super::open(&timeline, vec![photo("media/a.png", 800, 600)], 0, cx);
+        });
+        let viewer = viewer_window(cx);
+        let mut visual = gpui::VisualTestContext::from_window(viewer.into(), cx);
+        draw_until_parked(&mut visual, cx);
+
+        visual.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert_eq!(window_count(cx), 1, "escape closes the viewer");
+    }
+
+    /// #188: viewer window の title は profile を名乗る｡`"Photo"` 固定だと
+    /// dev と release を並べて開いたとき見分けが付かず (`profile.rs` の
+    /// invariant)、目視確認の `--title` 絞り込みも効かなくなる｡
+    #[test]
+    fn the_viewer_title_is_built_from_the_profile_not_a_literal() {
+        for profile in [crate::profile::Profile::Dev, crate::profile::Profile::Release] {
+            assert_eq!(super::title(profile), profile.photo_window_title());
+        }
+    }
+
     /// #188: 開いた後に届いた画像がそのまま出る｡
     ///
     /// viewer は `media_paths` のコピーを持たず `cx.observe` で通知を受ける｡
