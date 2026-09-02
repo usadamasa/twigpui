@@ -441,8 +441,9 @@ mod tests {
 
     /// #188: 画像はウィンドウからはみ出さない — 横長も縦長も｡
     ///
-    /// `object_fit` を外すか幅か高さの片方だけを与えると､縦長の画像が
-    /// 枠を突き抜ける (#256 が timeline で踏んだのと同じ罠)｡
+    /// 幅か高さの片方だけを与えると､gpui が画像の縦横比を layout に持ち込み､
+    /// 縦長の画像が枠を突き抜ける (#256 が timeline で踏んだのと同じ罠)｡
+    /// `object_fit` のほうは paint の側なので､ここの bounds では動かない｡
     #[gpui::test]
     fn the_photo_stays_inside_the_window(cx: &mut gpui::TestAppContext) {
         let arrived = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/AppIcon.png");
@@ -573,5 +574,134 @@ mod tests {
                 "{what} falls back to 800x600: {fallback:?}"
             );
         }
+    }
+
+    /// #188: viewer は timeline を生かし続けない｡
+    ///
+    /// 強い handle を持つと､timeline のウィンドウを閉じても viewer が
+    /// `TimelineView` を握ったままになる｡`auto_refresh` のループは entity が
+    /// 消えたときにしか終わらないので (`auto_refresh.rs` の doc)､画面に
+    /// timeline が無いまま課金される取得と `ioreg` の probe が回りつづける｡
+    #[gpui::test]
+    fn the_viewer_does_not_keep_the_timeline_alive(cx: &mut gpui::TestAppContext) {
+        let (window, timeline) = fixture_window(cx, fixture_with(&["1"], &[]));
+        let weak = timeline.downgrade();
+        cx.update(|cx| {
+            super::open(
+                timeline.clone(),
+                vec![photo("media/a.png", 800, 600)],
+                0,
+                cx,
+            );
+        });
+        let viewer = viewer_window(cx);
+        let mut visual = gpui::VisualTestContext::from_window(viewer.into(), cx);
+        draw_until_parked(&mut visual, cx);
+
+        // timeline のウィンドウを閉じ､テストが持っている handle も手放す｡
+        drop(timeline);
+        let mut behind = gpui::VisualTestContext::from_window(window.into(), cx);
+        behind.update(|window, _cx| window.remove_window());
+        cx.run_until_parked();
+
+        assert!(
+            cx.update(|_cx| weak.upgrade().is_none()),
+            "the viewer must not be the last thing holding the timeline alive"
+        );
+        assert_eq!(window_count(cx), 1, "the viewer itself stays open");
+
+        // timeline を失った viewer も描けねばならない｡
+        draw_until_parked(&mut visual, cx);
+        assert!(
+            visual.debug_bounds("image-viewer-notice").is_some(),
+            "with no timeline to read, the viewer says so instead of panicking"
+        );
+    }
+
+    /// #188: 本物のキーストロークが viewer に届く｡
+    ///
+    /// `dispatch_action` はハンドラを直に叩くので､キーの綴りが間違って
+    /// いても､`window.focus` を忘れていても通ってしまう｡#109 の `cmd-w` で
+    /// 一度出荷したのがまさにその不具合なので､`init` を呼んで打つ経路も
+    /// 押さえる｡
+    #[gpui::test]
+    fn the_arrow_and_close_keys_reach_the_viewer(cx: &mut gpui::TestAppContext) {
+        cx.update(super::init);
+        let (_window, timeline) = fixture_window(cx, fixture_with(&["1"], &[]));
+        let photos = vec![
+            photo("media/a.png", 800, 600),
+            photo("media/b.png", 800, 600),
+        ];
+        cx.update(|cx| super::open(timeline, photos, 0, cx));
+        let viewer = viewer_window(cx);
+        let mut visual = gpui::VisualTestContext::from_window(viewer.into(), cx);
+        draw_until_parked(&mut visual, cx);
+
+        visual.simulate_keystrokes("right");
+        draw_until_parked(&mut visual, cx);
+        assert_eq!(
+            viewer_index(viewer, cx),
+            1,
+            "the right arrow key moves to the next photo"
+        );
+
+        visual.simulate_keystrokes("left");
+        draw_until_parked(&mut visual, cx);
+        assert_eq!(viewer_index(viewer, cx), 0, "the left arrow key moves back");
+
+        visual.simulate_keystrokes("cmd-w");
+        cx.run_until_parked();
+        assert_eq!(window_count(cx), 1, "cmd-w closes the viewer");
+    }
+
+    /// #188: 開いた後に届いた画像がそのまま出る｡
+    ///
+    /// viewer は `media_paths` のコピーを持たず `cx.observe` で通知を受ける｡
+    /// これが無いと､開くのが速すぎた読み手は着かない "Loading…" を見つづける｡
+    #[gpui::test]
+    fn a_photo_that_arrives_late_replaces_the_notice(cx: &mut gpui::TestAppContext) {
+        let (_window, timeline) = fixture_window(cx, fixture_with(&["1"], &[]));
+        cx.update(|cx| {
+            super::open(
+                timeline.clone(),
+                vec![photo("media/late.png", 800, 600)],
+                0,
+                cx,
+            );
+        });
+        let viewer = viewer_window(cx);
+        let mut visual = gpui::VisualTestContext::from_window(viewer.into(), cx);
+        draw_until_parked(&mut visual, cx);
+        assert_eq!(
+            viewer_notice(viewer, cx),
+            Some("Loading…".into()),
+            "nothing has arrived yet"
+        );
+
+        let arrived = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/AppIcon.png");
+        cx.update(|cx| {
+            timeline.update(cx, |view, cx| {
+                view.media_paths
+                    .insert("media/late.png".to_string(), arrived);
+                cx.notify();
+            });
+        });
+        for _ in 0..2 {
+            draw_until_parked(&mut visual, cx);
+        }
+
+        assert_eq!(
+            viewer_notice(viewer, cx),
+            None,
+            "the image that arrived replaces the notice"
+        );
+        // 「文言が消えた」を `debug_bounds` では見ない｡あれはフレームを
+        // またいで溜まるので､前のフレームの bounds が残る (`ui::tests` の
+        // `laid_out` の doc がすでに言っているとおり)｡消えたことは
+        // `notice` が `None` を返すことで見る｡
+        assert!(
+            visual.debug_bounds("image-viewer-image").is_some(),
+            "and the image is laid out"
+        );
     }
 }
