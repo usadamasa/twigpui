@@ -2558,6 +2558,40 @@ mod tests {
         });
     }
 
+    /// #188: `a.png` (0 枚目) をクリックしたときの `index == 0` だけでは
+    /// `post_row::media_cell` の `unwrap_or(0)` フォールバックと区別が
+    /// つかない｡`b.png` (1 枚目) をクリックし､`position` が実際に効いて
+    /// いることを別に押さえる｡
+    #[gpui::test]
+    fn clicking_the_second_photo_opens_the_viewer_at_index_one(cx: &mut gpui::TestAppContext) {
+        let fixture = Fixture {
+            items: vec![item_with_media(
+                "1",
+                &[("media/a.png", 100, 100), ("media/b.png", 100, 100)],
+            )],
+            ..fixture_with(&[], &[])
+        };
+        let (window, _timeline) = fixture_window(cx, fixture);
+        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+        draw_until_parked(&mut visual, cx);
+
+        let cell = laid_out(&mut visual, "media-media/b.png");
+        visual.simulate_click(cell.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+
+        let viewer = cx
+            .update(|cx| {
+                cx.windows()
+                    .into_iter()
+                    .find_map(|window| window.downcast::<ImageViewer>())
+            })
+            .expect("the viewer window has to be open");
+        cx.update(|cx| {
+            let view = viewer.read(cx).expect("the viewer is open");
+            assert_eq!(view.index, 1, "it opens at the second photo, not the first");
+        });
+    }
+
     /// #188: 動画のサムネイルは viewer を開かず､ブラウザへ飛ばす task が
     /// 走るだけ｡`run_until_parked` を挟まない — 挟むと spawn した task が
     /// 本物のブラウザを開こうとする (テストはネットワークも `browser::open`
