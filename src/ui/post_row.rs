@@ -9,6 +9,24 @@ use gpui::{Pixels, Size};
 
 use super::*;
 
+/// サムネイルをクリックしたときの行き先 (#188)｡
+#[derive(Debug, PartialEq, Eq)]
+pub(in crate::ui) enum MediaClickTarget {
+    /// このアプリの viewer ウィンドウで開く ([`super::image_viewer`])｡
+    Viewer,
+    /// 原寸の画像をブラウザで開く (#70)｡
+    Browser,
+}
+
+/// クリックの行き先 (#188)｡静止画だけが viewer､動画と GIF は再生できないので
+/// ブラウザのまま｡
+pub(in crate::ui) fn media_click_target(kind: Option<&str>) -> MediaClickTarget {
+    match kind {
+        Some("photo") => MediaClickTarget::Viewer,
+        _ => MediaClickTarget::Browser,
+    }
+}
+
 impl TimelineView {
     /// `post_id` について描く like ボタンの状態 (#68) — これが倣っている
     /// [`Self::repost_state_for`] を見よ｡
@@ -69,10 +87,11 @@ impl TimelineView {
 
     /// サムネイル一つ: ダウンロードした画像が着いていればそれ､無ければ同じ
     /// 大きさの枠 (#65)｡ちゃんと見る手段の無いサムネイルは機能の半分でしか
-    /// ないので､クリックには行き先がある — 写真は viewer のウィンドウ
-    /// ([`super::image_viewer`], #188)､それ以外は原寸の画像をブラウザで
-    /// (#70)｡動画やアニメーション GIF は静止画と､それがどちらかを示す
-    /// badge を出す; どちらもここでは再生されない｡
+    /// ないので､クリックには行き先がある — [`media_click_target`] が言う
+    /// とおり､写真は viewer のウィンドウ ([`super::image_viewer`], #188)､
+    /// それ以外は原寸の画像をブラウザで (#70)｡動画やアニメーション GIF は
+    /// 静止画と､それがどちらかを示す badge を出す; どちらもここでは
+    /// 再生されない｡
     ///
     /// 枠は `size` そのもの (#256): [`media_row_sizes`] が API の寸法から出した
     /// 幅と高さを枠にも画像にも与えるので､画像が着く前と後で枠の形は変わら
@@ -93,14 +112,21 @@ impl TimelineView {
         cx: &mut Context<'_, TimelineView>,
     ) -> AnyElement {
         let url = media.url.clone();
-        // #188: 写真はブラウザではなく viewer のウィンドウで開く｡`photos`
-        // の何枚目かを覚えておくのは､viewer が `←` / `→` で同じ post の
-        // 残りへ動けるようにするためだ｡
+        // #188: 行き先は `media_click_target` に一本化する｡viewer 向けの
+        // ときだけ `photos` の何枚目かを覚えておく — viewer が `←` / `→` で
+        // 同じ post の残りへ動けるようにするためだ｡
         let timeline = cx.entity();
-        let viewer = photos
-            .iter()
-            .position(|photo| photo.url == media.url)
-            .map(|index| (photos.to_vec(), index));
+        let viewer = matches!(
+            media_click_target(media.kind.as_deref()),
+            MediaClickTarget::Viewer
+        )
+        .then(|| {
+            let index = photos
+                .iter()
+                .position(|photo| photo.url == media.url)
+                .unwrap_or(0);
+            (photos.to_vec(), index)
+        });
 
         let frame = div()
             .addressable(format!("media-frame-{}", media.url))

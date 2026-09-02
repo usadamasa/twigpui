@@ -160,9 +160,13 @@ pub(in crate::ui) struct ImageViewer {
     /// 無いまま課金される取得と `ioreg` の probe が回りつづけることになる｡
     timeline: gpui::WeakEntity<TimelineView>,
     /// この post の写真だけ｡動画とアニメーション GIF は入らない｡
-    photos: Vec<PostMedia>,
-    /// いま見せている [`Self::photos`] の位置｡
-    index: usize,
+    ///
+    /// `pub(super)` は `crate::ui::tests` (Task 3 のクリックテスト) が
+    /// クリックの経路そのものから開いた viewer の中身を読むためだ｡
+    pub(super) photos: Vec<PostMedia>,
+    /// いま見せている [`Self::photos`] の位置｡[`Self::photos`] と同じ理由で
+    /// `pub(super)`｡
+    pub(super) index: usize,
     /// 開いた時点の配色｡`Copy` なので写しを持つ — timeline が消えた後も
     /// 描かねばならず､配色は起動時に一度決まったきり変わらない｡
     theme: Theme,
