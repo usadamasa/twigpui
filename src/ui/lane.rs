@@ -46,26 +46,38 @@ pub(super) fn load_composite_timeline(
     sources: &[TimelineSource],
     user_id: &str,
 ) -> Composed {
+    let per_source = sources
+        .iter()
+        .map(|source| {
+            let items = cache::load_primary_timeline(paths, source, user_id)
+                .unwrap_or_else(|error| {
+                    crate::log::warn(&format!("could not read the cached timeline: {error:#}"));
+                    None
+                })
+                .unwrap_or_default();
+            (source.clone(), items)
+        })
+        .collect();
+    compose_with_provenance(per_source)
+}
+
+/// per-source の `(source, items)` の組から [`Composed`] を作る (#43)｡
+/// ディスクには触れない — `load_composite_timeline` から核だけを切り出した
+/// もので、fixture (`TimelineView::show_fixture`) がメモリ上のデータから
+/// 同じ形を組むのにも使う。
+pub(super) fn compose_with_provenance(
+    per_source: Vec<(TimelineSource, Vec<TimelineItem>)>,
+) -> Composed {
     let mut provenance = HashMap::new();
-    let mut per_source = Vec::with_capacity(sources.len());
-    for source in sources {
-        let items = cache::load_primary_timeline(paths, source, user_id)
-            .unwrap_or_else(|error| {
-                crate::log::warn(&format!("could not read the cached timeline: {error:#}"));
-                None
-            })
-            .unwrap_or_default();
-        for item in &items {
+    for (source, items) in &per_source {
+        for item in items {
             provenance
                 .entry(item.id.clone())
                 .or_insert_with(|| source.clone());
         }
-        per_source.push(items);
     }
-    Composed {
-        items: compose(per_source),
-        provenance,
-    }
+    let items = compose(per_source.into_iter().map(|(_, items)| items).collect());
+    Composed { items, provenance }
 }
 
 /// `sources` の全キャッシュから `post_id` を消し、再合成する

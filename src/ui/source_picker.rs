@@ -89,7 +89,7 @@ impl Selection {
     /// `Config::resolve` なら受け付けないものなら `None` — 手で編集された
     /// ファイルは､書いてある内容からリクエスト URL を組むのではなく
     /// フォールバックすべきだ｡
-    fn into_source(self) -> Option<TimelineSource> {
+    pub(super) fn into_source(self) -> Option<TimelineSource> {
         match self {
             Self::Home => Some(TimelineSource::Home),
             Self::List { id } => (!id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit()))
@@ -965,6 +965,9 @@ mod tests {
             pending: Vec::new(),
             lists: Vec::new(),
             sync: None,
+            sources: Vec::new(),
+            list_items: std::collections::BTreeMap::new(),
+            picker_open: false,
         };
         assert_eq!(
             saved_selection_for(&Startup::Fixture(Box::new(fixture)), &paths),

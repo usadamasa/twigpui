@@ -34,7 +34,7 @@ mod post_row;
 mod reload_policy;
 mod render;
 mod scroll;
-mod source_picker;
+pub(crate) mod source_picker;
 mod startup;
 mod state;
 mod sync_row;
@@ -2287,6 +2287,9 @@ mod tests {
                 .collect(),
             lists: Vec::new(),
             sync: None,
+            sources: Vec::new(),
+            list_items: std::collections::BTreeMap::new(),
+            picker_open: false,
         }
     }
 
@@ -4168,6 +4171,48 @@ mod tests {
             trigger.right(),
             title.left()
         );
+    }
+
+    /// #43: fixture が `sources` (複数) と `picker_open` を宣言できること｡
+    /// `--fixture` の窓はクリックを合成できないので (`fixture-visual-check`)、
+    /// 開いた状態・複数選択の画面を撮るにはこの経路しかない｡
+    #[gpui::test]
+    fn a_fixture_can_declare_multiple_sources_and_start_the_menu_open(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let mut fixture = fixture_with_lists(&["1"], &[("9101", "rust")]);
+        fixture.sources = vec![
+            super::source_picker::Selection::Home,
+            super::source_picker::Selection::List {
+                id: "9101".to_string(),
+            },
+        ];
+        fixture.list_items = std::collections::BTreeMap::from([(
+            "9101".to_string(),
+            vec![item_with("2", "someone", None)],
+        )]);
+        fixture.picker_open = true;
+
+        let (mut visual, timeline) = drawn(cx, fixture);
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        cx.update(|cx| {
+            timeline.update(cx, |view, _cx| {
+                assert_eq!(
+                    view.sources,
+                    vec![
+                        crate::cache::TimelineSource::Home,
+                        crate::cache::TimelineSource::List("9101".to_string()),
+                    ]
+                );
+                assert!(view.source_picker_open.is_open());
+                assert_eq!(shown_ids(view), ["2", "1"]);
+            });
+        });
+        // メニューが開いた状態で描かれているので､項目に到達できる｡
+        assert!(visual.debug_bounds("tab-list-9101").is_some());
     }
 
     /// 実測した失敗 (2026-08-24): 560px でリストのタブが 11 個あるウィンドウは､
