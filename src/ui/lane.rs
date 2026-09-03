@@ -80,24 +80,32 @@ pub(super) fn compose_with_provenance(
     Composed { items, provenance }
 }
 
-/// `sources` の全キャッシュから `post_id` を消し、再合成する
+/// `sources` の全キャッシュから `post_id` を消す
 /// (`TimelineView::confirm_delete` から呼ぶ)｡出自の表示用 map は見ない —
 /// 複数 source に同じ post が載っていても、表示中の source だけから消すと
 /// 載っていない方に残ったままになり、次の再合成で復活する (#72 が名指しで
 /// 潰した失敗と同じ形、opus-advisor A-1)。`cache::forget_post` はキャッシュ
 /// ファイルが無い source にも post が入っていない source にも安全な no-op
 /// なので、全部回すのが最短かつ正しい。ネットワークには触れない。
+///
+/// 再合成はここでは行わない (opus-advisor 指摘): 呼び出し側が spawn 時に
+/// 捕獲した `sources` ではなく、`update` クロージャの中で完了時点の
+/// `this.sources` を使って `load_composite_timeline` を呼ぶこと —
+/// `reload_sources` の完了ハンドラ (opus-advisor A-4) と同じ理由で、削除が
+/// 飛んでいる間にトグルされても古い集合でレーンを組み直さないようにする。
+/// キャッシュから消す側は捕獲した `sources` のままでよい — 余分に回しても
+/// 上のno-opの理由により安全。
 pub(super) fn forget_post_everywhere(
     paths: &Paths,
     sources: &[TimelineSource],
     user_id: &str,
     post_id: &str,
     now: i64,
-) -> Result<Composed> {
+) -> Result<()> {
     for source in sources {
         cache::forget_post(paths, source, user_id, post_id, now)?;
     }
-    Ok(load_composite_timeline(paths, sources, user_id))
+    Ok(())
 }
 
 /// `item_id` の出自ラベル (#43、`post_row.rs` から呼ぶ): `sources_len` が
@@ -145,12 +153,15 @@ pub(super) fn missing_sources(
 }
 
 /// N-source reload が使ったもの: 成功・失敗の本数、`sources.len() == 1` の
-/// ときだけ意味を持つ `next_token`、解決した `/me`｡
+/// ときだけ意味を持つ `next_token`、解決した `/me`｡`me` は `Option` ではなく
+/// `MeEntry` そのもの — `successes == 0` は下の `reload_all` が `Err` で
+/// 弾くので、`Ok` に載る時点で必ず解決済みだからだ (opus-advisor 指摘)。
+/// 呼び出し側に「成功したのに `None`」という到達しない分岐を書かせない。
 pub(super) struct ReloadOutcome {
     pub successes: usize,
     pub failures: usize,
     pub next_token: Option<String>,
-    pub me: Option<MeEntry>,
+    pub me: MeEntry,
 }
 
 /// `sources` を順に reload する (#43、直列 — 並列化は ponytail の天井)｡
@@ -191,12 +202,12 @@ pub(super) fn reload_all(
             }
         }
     }
-    if successes == 0 {
-        // `sources` が空でもここへ来る (呼び出し側が非空 invariant を
-        // 守っていれば起きない) ので `expect` ではなくフォールバックの
-        // エラーを用意する。
+    // `successes == 0` (`sources` が空の場合も含む — 呼び出し側が非空
+    // invariant を守っていれば起きない) なら `me` は `None` のままなので、
+    // ここで一緒に弾く。これで下の `Ok` に載る `me` は必ず解決済みになる。
+    let Some(me) = me else {
         return Err(last_error.unwrap_or_else(|| anyhow::anyhow!("no sources to reload")));
-    }
+    };
     Ok(ReloadOutcome {
         successes,
         failures,
@@ -340,10 +351,11 @@ mod tests {
         )
         .unwrap();
 
-        let composed =
-            forget_post_everywhere(&paths, &[list_a.clone(), list_b.clone()], "me", "1", 1)
-                .unwrap();
-        // 消えた post は再合成の結果に残らない｡
+        forget_post_everywhere(&paths, &[list_a.clone(), list_b.clone()], "me", "1", 1).unwrap();
+
+        // 消えた post は再合成の結果に残らない (呼び出し側と同じく、削除の
+        // 後で改めて load_composite_timeline を呼ぶ — opus-advisor 指摘)。
+        let composed = load_composite_timeline(&paths, &[list_a.clone(), list_b.clone()], "me");
         assert_eq!(
             composed
                 .items

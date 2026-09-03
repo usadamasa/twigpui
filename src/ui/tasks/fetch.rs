@@ -246,36 +246,37 @@ impl TimelineView {
                 this.reloading = false;
                 match result {
                     Ok(outcome) => {
-                        // `successes > 0` (`lane::reload_all` の契約) なら
-                        // `me` は必ず `Some`｡
-                        if let Some(me) = outcome.me {
-                            this.home_user_id = Some(me.id.clone());
-                            this.home_username = Some(me.username);
-                            this.next_page_token = if this.sources.len() == 1 {
-                                outcome.next_token
-                            } else {
-                                None
-                            };
-                            let composed =
-                                lane::load_composite_timeline(&this.paths, &this.sources, &me.id);
-                            this.keep_the_reader_in_place(&composed.items);
-                            // #141: scroll の目標と同じ理由で､`state` が
-                            // 置き換わる前に求める — 両方の一覧が要る｡
-                            let label = this.reload_outcome(&composed.items);
-                            this.state = TimelineState::Loaded(composed.items);
-                            this.item_provenance = composed.provenance;
-                            this.reload_notice = Some(ReloadNotice::Outcome(
-                                partial_failure_label(label, outcome.failures, outcome.successes)
-                                    .into(),
-                            ));
-                            // 上の single-user の分岐と同じ理由｡
-                            this.cooldown_ticker = None;
-                            // #21: この fetch は poll が溜めたものより厳密に
-                            // 新しく､新しい post をすでに画面へ出している —
-                            // だから pill は､その背後に見えている post を
-                            // 差し出すことになってしまう｡
-                            this.clear_pending();
-                        }
+                        // `outcome.me` は常に解決済み (`ReloadOutcome` の
+                        // doc を見よ)｡
+                        this.home_user_id = Some(outcome.me.id.clone());
+                        this.home_username = Some(outcome.me.username);
+                        this.next_page_token = if this.sources.len() == 1 {
+                            outcome.next_token
+                        } else {
+                            None
+                        };
+                        let composed = lane::load_composite_timeline(
+                            &this.paths,
+                            &this.sources,
+                            &outcome.me.id,
+                        );
+                        this.keep_the_reader_in_place(&composed.items);
+                        // #141: scroll の目標と同じ理由で､`state` が
+                        // 置き換わる前に求める — 両方の一覧が要る｡
+                        let label = this.reload_outcome(&composed.items);
+                        this.state = TimelineState::Loaded(composed.items);
+                        this.item_provenance = composed.provenance;
+                        this.reload_notice = Some(ReloadNotice::Outcome(
+                            partial_failure_label(label, outcome.failures, outcome.successes)
+                                .into(),
+                        ));
+                        // 上の single-user の分岐と同じ理由｡
+                        this.cooldown_ticker = None;
+                        // #21: この fetch は poll が溜めたものより厳密に
+                        // 新しく､新しい post をすでに画面へ出している —
+                        // だから pill は､その背後に見えている post を
+                        // 差し出すことになってしまう｡
+                        this.clear_pending();
                     }
                     Err(error) => this.apply_reload_failure(&error, cx),
                 }

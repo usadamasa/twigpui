@@ -165,6 +165,12 @@ impl TimelineView {
     /// 全部回して `cache::forget_post` を呼ぶ — キャッシュファイルが
     /// 無い source にも post が入っていない source にも安全な no-op
     /// なので (同関数の doc を見よ)､全部回すのが最短かつ正しい｡
+    ///
+    /// 削除そのもの (キャッシュから消す側) は spawn 時に捕獲した `sources`
+    /// で行うが (多めに消しても安全な no-op)､再合成は違う: `update`
+    /// クロージャの中で完了時点の `this.sources` を読み直す (opus-advisor
+    /// 指摘、`reload_sources` の完了ハンドラ (A-4) と同じ理由) — 削除が
+    /// 飛んでいる間にトグルされても､古い集合でレーンを組み直さないため｡
     pub(in crate::ui) fn confirm_delete(&mut self, post_id: String, cx: &mut Context<'_, Self>) {
         let Some(client) = self.client.clone() else {
             return;
@@ -200,10 +206,16 @@ impl TimelineView {
             let _ = this.update(cx, |this, cx| {
                 this.refresh_usage(cx);
                 match result {
-                    Ok(composed) => {
+                    Ok(()) => {
                         this.delete_failures.remove(&post_id);
-                        this.item_provenance = composed.provenance;
-                        this.state = TimelineState::Loaded(composed.items);
+                        // 完了時点の `this.sources` (捕獲した `sources`
+                        // ではなく) で読み直す｡
+                        if let Some(user_id) = this.home_user_id.clone() {
+                            let composed =
+                                lane::load_composite_timeline(&this.paths, &this.sources, &user_id);
+                            this.item_provenance = composed.provenance;
+                            this.state = TimelineState::Loaded(composed.items);
+                        }
                         // #21: 削除より前に取られた buffer は削除された
                         // post をまだ持っている｡後から適用すると画面へ
                         // 戻してしまう — #72 がキャッシュファイルを書き

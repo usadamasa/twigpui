@@ -566,20 +566,17 @@ impl TimelineView {
                 return Poll::Halt;
             }
         };
-        // #43: `successes > 0` (`lane::reload_all` の契約) なら `me` は
-        // 必ず `Some`｡部分失敗はここでは無視して静かに続ける — `apply_poll`
-        // の doc が言うとおり poll は失敗を画面に出さない｡
-        let Some(me) = outcome.me else {
-            return Poll::Continue;
-        };
-
+        // #43: `outcome.me` は常に解決済み (`ReloadOutcome` の doc を見よ)｡
+        // 部分失敗はここでは無視して静かに続ける — `apply_poll` の doc が
+        // 言うとおり poll は失敗を画面に出さない｡
+        //
         // ヘッダーはサインイン中のアカウントを名指しし､いくつかの操作は
         // その id を必要とする｡ポーリングはどちらもただで解決するので､
         // 起動時の fetch が埋められなかったなら､ここで埋めてしまってよい｡
-        self.home_user_id = Some(me.id.clone());
-        self.home_username = Some(me.username);
+        self.home_user_id = Some(outcome.me.id.clone());
+        self.home_username = Some(outcome.me.username);
 
-        let composed = lane::load_composite_timeline(&self.paths, &self.sources, &me.id);
+        let composed = lane::load_composite_timeline(&self.paths, &self.sources, &outcome.me.id);
         self.item_provenance = composed.provenance;
 
         let displayed: Vec<&str> = match &self.state {
