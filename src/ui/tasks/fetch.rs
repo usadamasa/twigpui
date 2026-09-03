@@ -179,9 +179,9 @@ impl TimelineView {
     /// 完了ハンドラは `sources` (捕獲した集合) ではなく `this.sources`
     /// (完了時点の集合) で再合成する: 直列 fetch の途中でユーザーが
     /// source を off にしたら､もう表示しないはずの source の post を
-    /// 着地させないため (opus-advisor A-4)｡`next_page_token` は
+    /// 着地させないため｡`next_page_token` は
     /// `this.sources.len() == 1` のときだけ書く — 複数選択中は常に `None`
-    /// にする不変条件 (§3.6, opus-advisor B-6)｡部分失敗
+    /// にする不変条件｡部分失敗
     /// ([`lane::reload_all`] のドキュメントを見よ) は取れた分を合成して
     /// 1 回だけ画面を更新し､`reload_notice` に失敗数を添える｡
     pub(in crate::ui) fn reload_sources(

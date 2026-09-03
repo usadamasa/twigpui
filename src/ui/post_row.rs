@@ -387,7 +387,7 @@ impl TimelineView {
                                 .child(format!("· {}", reply_banner_label(replied_to))),
                         )
                     })
-                    // #43: 合成レーンでだけ出自を出す (team-lead の指示)。
+                    // #43: 合成レーンでだけ出自を出す。
                     // list 由来の post だけに付き、Home にしか無い post には
                     // 付かない。`item_provenance` は表示専用の派生値で、
                     // 複数 list に載っている post なら表示順で最初の 1 つ

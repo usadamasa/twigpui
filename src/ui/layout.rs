@@ -177,9 +177,8 @@ impl Render for TimelineView {
                 // 届かなくなり､次のクリックまで `esc` がショートカットと
                 // メニューバーの半分を無効にしていた｡
                 window.focus(&this.focus_handle);
-                // #43: 同じ `esc` で source picker のドロップダウンも閉じる
-                // (team-lead の指示)｡新しい KeyBinding は足さず既存の
-                // escape を共有する｡
+                // #43: 同じ `esc` で source picker のドロップダウンも閉じる｡
+                // 新しい KeyBinding は足さず既存の escape を共有する｡
                 if this.source_picker_open.is_open() {
                     this.source_picker_open = source_picker::SourcePickerVisibility::Closed;
                     cx.notify();

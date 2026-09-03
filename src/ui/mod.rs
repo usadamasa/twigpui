@@ -4384,7 +4384,7 @@ mod tests {
         );
     }
 
-    /// #164, team-lead の指示で #192/#43 で移動: client を持つウィンドウは
+    /// #164 (#192/#43 でメニューへ移動): client を持つウィンドウは
     /// list fetch のボタンを出す — ただし今はツールバーではなく開いた
     /// メニューの末尾 (セパレータの後)｡閉じた状態のトリガーは幅を食わない｡
     ///
@@ -4508,7 +4508,7 @@ mod tests {
     /// #43: 区画は「切り替える」ではなく「トグルする」。list を足してから
     /// Home を外し、結局は #164 が確かめていたのと同じ単一選択の終着点
     /// (list だけ) へたどり着くことを確認する — メニューは項目クリックで
-    /// 閉じないので (team-lead の指示)、2 回続けてクリックできる。
+    /// 閉じないので、2 回続けてクリックできる。
     #[gpui::test]
     fn toggling_segments_changes_the_source_and_drops_the_old_buffer(
         cx: &mut gpui::TestAppContext,
@@ -4564,7 +4564,7 @@ mod tests {
         });
     }
 
-    /// opus-advisor A-3 (ブロッカー): source を on/off するトグルは
+    /// #43: source を on/off するトグルは
     /// auto-refresh のループを再起動する｡ループは開始時点の `sources` を
     /// capture するので､再起動しないと off にした source を poll し続け､
     /// #43 の完了条件「オフのソースが API リクエストを消費しない」に

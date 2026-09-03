@@ -370,7 +370,7 @@ impl TimelineView {
     /// Escape も閉じる経路の一つだが､それは `layout.rs` の `BlurComposer`
     /// ハンドラが既存の escape バインディングへ相乗りして担う｡
     ///
-    /// 項目クリックではメニューを閉じない (team-lead の指示): チェックを
+    /// 項目クリックではメニューを閉じない: チェックを
     /// 複数付け外しする操作なので､1 回ごとに閉じると #43 の「任意の
     /// タイミングでオン・オフ」が面倒になる｡macOS のメニューは選択で
     /// 閉じるのが標準だが､ここは意図的に逸脱する｡
@@ -433,7 +433,7 @@ impl TimelineView {
     /// list の名前を取得するボタン (#164)｡取得する手立てが無いときは
     /// `None` — [`offers_list_fetch`] を参照｡取得が飛んでいる間はただの
     /// テキストになる: 2 度目のクリックは同じページを 2 回買うだけだ｡
-    /// team-lead の指示でメニュー末尾に移った (#192): ツールバーの閉じた
+    /// メニュー末尾に移した (#192): ツールバーの閉じた
     /// トリガーは固定幅なので､ここに居ては閉じた状態の幅を食うだけだった｡
     pub(super) fn lists_control(&self, cx: &mut Context<'_, Self>) -> Option<AnyElement> {
         if !offers_list_fetch(self.client.is_some(), self.home_user_id.is_some()) {
@@ -465,11 +465,11 @@ impl TimelineView {
     /// poll のバッファ (`clear_pending` の doc)､開いているスレッド､そして
     /// スクロール位置｡そのうえでキャッシュ済みの分だけ即座に再合成して
     /// 画面へ出し (off にした分は消え､on にした分は載る)､一度も取得して
-    /// いない source だけを reload する — 画面は空にせず (team-lead の指示)
+    /// いない source だけを reload する — 画面は空にせず
     /// `reloading` フラグとスピナーだけで示す｡
     ///
-    /// auto-refresh のループは動かしたままにせず再起動する
-    /// (opus-advisor A-3、ブロッカー): ループは開始時点の `sources` を
+    /// auto-refresh のループは動かしたままにせず再起動する:
+    /// ループは開始時点の `sources` を
     /// 捕まえており､再起動しないと off にした source を poll し続けて
     /// しまう — #43 の完了条件「オフのソースが API リクエストを消費
     /// しない」への違反になる｡
@@ -517,8 +517,13 @@ impl TimelineView {
             self.item_provenance = composed.provenance;
             self.state = TimelineState::Loaded(composed.items);
             cx.notify();
+            // client が無ければ取りに行けない (fixture､サインアウト済み)｡
+            // `reload_sources` に渡すと `NotAuthenticated` へ落ちて､いま
+            // キャッシュから組んだレーンが消える｡CI の
+            // `a_fixture_switch_leaves_no_selection_behind` は Home の
+            // キャッシュが無い新しい環境でこれを踏んだ｡
             let missing = lane::missing_sources(&self.paths, &self.sources, &user_id);
-            if !missing.is_empty() {
+            if !missing.is_empty() && self.client.is_some() {
                 self.reload_sources(missing, ReloadTrigger::UserAction, cx);
             }
         }
@@ -760,7 +765,7 @@ mod tests {
 
     #[test]
     fn an_active_set_with_only_invalid_ids_falls_back_rather_than_panicking() {
-        // opus-advisor B-5: `filter_map` の結果が空になっても非空
+        // `filter_map` の結果が空になっても非空
         // invariant は panic せず次の段 (`selected`) へフォールバックする｡
         assert_eq!(
             initial_sources(

@@ -84,14 +84,14 @@ pub(super) fn compose_with_provenance(
 /// (`TimelineView::confirm_delete` から呼ぶ)｡出自の表示用 map は見ない —
 /// 複数 source に同じ post が載っていても、表示中の source だけから消すと
 /// 載っていない方に残ったままになり、次の再合成で復活する (#72 が名指しで
-/// 潰した失敗と同じ形、opus-advisor A-1)。`cache::forget_post` はキャッシュ
+/// 潰した失敗と同じ形)。`cache::forget_post` はキャッシュ
 /// ファイルが無い source にも post が入っていない source にも安全な no-op
 /// なので、全部回すのが最短かつ正しい。ネットワークには触れない。
 ///
-/// 再合成はここでは行わない (opus-advisor 指摘): 呼び出し側が spawn 時に
+/// 再合成はここでは行わない: 呼び出し側が spawn 時に
 /// 捕獲した `sources` ではなく、`update` クロージャの中で完了時点の
 /// `this.sources` を使って `load_composite_timeline` を呼ぶこと —
-/// `reload_sources` の完了ハンドラ (opus-advisor A-4) と同じ理由で、削除が
+/// `reload_sources` の完了ハンドラと同じ理由で、削除が
 /// 飛んでいる間にトグルされても古い集合でレーンを組み直さないようにする。
 /// キャッシュから消す側は捕獲した `sources` のままでよい — 余分に回しても
 /// 上のno-opの理由により安全。
@@ -155,8 +155,8 @@ pub(super) fn missing_sources(
 /// N-source reload が使ったもの: 成功・失敗の本数、`sources.len() == 1` の
 /// ときだけ意味を持つ `next_token`、解決した `/me`｡`me` は `Option` ではなく
 /// `MeEntry` そのもの — `successes == 0` は下の `reload_all` が `Err` で
-/// 弾くので、`Ok` に載る時点で必ず解決済みだからだ (opus-advisor 指摘)。
-/// 呼び出し側に「成功したのに `None`」という到達しない分岐を書かせない。
+/// 弾くので、`Ok` に載る時点で必ず解決済み｡呼び出し側に「成功したのに
+/// `None`」という到達しない分岐を書かせない。
 pub(super) struct ReloadOutcome {
     pub successes: usize,
     pub failures: usize,
@@ -192,8 +192,8 @@ pub(super) fn reload_all(
                 next_token = reloaded.next_token;
                 me = Some(reloaded.me);
                 // `items` は使わない: 呼び出し側は完了時点の `sources` で
-                // `load_composite_timeline` を通して読み直す (opus-advisor
-                // A-4)。ここでのアキュムレータには使えない。
+                // `load_composite_timeline` を通して読み直す。ここでの
+                // アキュムレータには使えない。
                 let _ = reloaded.items;
             }
             Err(error) => {
@@ -321,7 +321,7 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
     }
 
-    // --- forget_post_everywhere (opus-advisor A-1) ---
+    // --- forget_post_everywhere ---
 
     #[test]
     fn deleting_a_post_present_in_two_sources_removes_it_from_both() {
@@ -354,7 +354,7 @@ mod tests {
         forget_post_everywhere(&paths, &[list_a.clone(), list_b.clone()], "me", "1", 1).unwrap();
 
         // 消えた post は再合成の結果に残らない (呼び出し側と同じく、削除の
-        // 後で改めて load_composite_timeline を呼ぶ — opus-advisor 指摘)。
+        // 後で改めて load_composite_timeline を呼ぶ)。
         let composed = load_composite_timeline(&paths, &[list_a.clone(), list_b.clone()], "me");
         assert_eq!(
             composed
@@ -365,8 +365,7 @@ mod tests {
             vec!["2"]
         );
         // 個別のキャッシュファイルからも消えている — 表示していない方の
-        // source に残ったままだと、次にそちらを on にしたときに復活する
-        // (opus-advisor A-1)。
+        // source に残ったままだと、次にそちらを on にしたときに復活する。
         let remaining_a = cache::load_primary_timeline(&paths, &list_a, "me")
             .unwrap()
             .unwrap();

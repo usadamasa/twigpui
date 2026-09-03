@@ -161,15 +161,15 @@ impl TimelineView {
     /// #43: 削除は `item_provenance` (出自の表示専用 map) を引かない —
     /// 複数 list に載っている post を最初の 1 つだけ消すと､載っていない
     /// もう片方のキャッシュに残ったままになり､次の再合成で復活する
-    /// (#72 が名指しで潰した失敗と同じ形｡opus-advisor A-1)｡`sources` を
+    /// (#72 が名指しで潰した失敗と同じ形)｡`sources` を
     /// 全部回して `cache::forget_post` を呼ぶ — キャッシュファイルが
     /// 無い source にも post が入っていない source にも安全な no-op
     /// なので (同関数の doc を見よ)､全部回すのが最短かつ正しい｡
     ///
     /// 削除そのもの (キャッシュから消す側) は spawn 時に捕獲した `sources`
     /// で行うが (多めに消しても安全な no-op)､再合成は違う: `update`
-    /// クロージャの中で完了時点の `this.sources` を読み直す (opus-advisor
-    /// 指摘、`reload_sources` の完了ハンドラ (A-4) と同じ理由) — 削除が
+    /// クロージャの中で完了時点の `this.sources` を読み直す
+    /// (`reload_sources` の完了ハンドラと同じ理由) — 削除が
     /// 飛んでいる間にトグルされても､古い集合でレーンを組み直さないため｡
     pub(in crate::ui) fn confirm_delete(&mut self, post_id: String, cx: &mut Context<'_, Self>) {
         let Some(client) = self.client.clone() else {

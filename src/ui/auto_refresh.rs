@@ -422,7 +422,7 @@ impl TimelineView {
         // #43: N ソースなら 1 tick で N request になる (`lane::reload_all`
         // が直列に呼ぶ)。`Endpoint::ListTimeline` は全 list id で 1
         // バケット共有なので、on にする本数が多いほどそのバケットを速く
-        // 消費する — 上限は設けていない (ponytail、opus-advisor B-8)。
+        // 消費する — 上限は設けていない (ponytail: `×N` の開示で足りる)。
         let sources = self.sources.clone();
         let max_results = self.config.max_results;
         let interval_seconds = self.config.auto_refresh_interval_seconds;
