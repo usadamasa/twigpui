@@ -42,7 +42,7 @@ pub(super) use actions::{
 };
 pub(super) use frame::{
     compose_error_message, header_title_element, notice, reload_notice_banner,
-    session_notice_banner, sign_in_pill, tab_segment, tab_trough, usage_color, usage_label,
+    session_notice_banner, sign_in_pill, tab_segment, usage_color, usage_label,
 };
 pub(super) use offers::{
     offers_delete, offers_like, offers_quote, offers_reauthorize, offers_reply, offers_repost,

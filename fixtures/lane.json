@@ -1,0 +1,67 @@
+{
+  "signed_in_as": { "id": "5685672", "username": "usadamasa" },
+  "items": [
+    {
+      "id": "9200000000000000001",
+      "text": "Home only: this post never appears in any list's cache.",
+      "created_at": "2026-08-22T09:50:00.000Z",
+      "author_name": "Home Only",
+      "author_username": "homeonly"
+    },
+    {
+      "id": "9200000000000000002",
+      "text": "This post is on Home and also on the twigpui probe list — it must appear once in the merged lane, and the byline must not show an origin (Home takes no badge).",
+      "created_at": "2026-08-22T09:45:00.000Z",
+      "author_name": "Shared Post",
+      "author_username": "sharedpost"
+    }
+  ],
+  "lists": [
+    { "id": "2091351590695588200", "name": "Following mirror" },
+    { "id": "9100000000000000002", "name": "twigpui probe" },
+    { "id": "9100000000000000003", "name": "Illustrators" },
+    { "id": "9100000000000000004", "name": "酒を飲む" },
+    { "id": "9100000000000000005", "name": "C" },
+    { "id": "9100000000000000006", "name": "二次" },
+    { "id": "9100000000000000007", "name": "近所" },
+    { "id": "9100000000000000008", "name": "国際" },
+    { "id": "9100000000000000009", "name": "MF" },
+    { "id": "9100000000000000010", "name": "人形町" },
+    { "id": "9100000000000000011", "name": "R" },
+    { "id": "9100000000000000012", "name": "ANE" },
+    { "id": "9100000000000000013", "name": "" }
+  ],
+  "sources": [
+    { "kind": "home" },
+    { "kind": "list", "id": "9100000000000000002" },
+    { "kind": "list", "id": "9100000000000000003" }
+  ],
+  "list_items": {
+    "9100000000000000002": [
+      {
+        "id": "9200000000000000002",
+        "text": "This post is on Home and also on the twigpui probe list — it must appear once in the merged lane, and the byline must not show an origin (Home takes no badge).",
+        "created_at": "2026-08-22T09:45:00.000Z",
+        "author_name": "Shared Post",
+        "author_username": "sharedpost"
+      },
+      {
+        "id": "9200000000000000003",
+        "text": "twigpui probe only: the byline should say '· twigpui probe'.",
+        "created_at": "2026-08-22T09:42:00.000Z",
+        "author_name": "Probe Poster",
+        "author_username": "probeposter"
+      }
+    ],
+    "9100000000000000003": [
+      {
+        "id": "9200000000000000004",
+        "text": "Illustrators only: the byline should say '· Illustrators'.",
+        "created_at": "2026-08-22T09:40:00.000Z",
+        "author_name": "Illustrator",
+        "author_username": "illustrator"
+      }
+    ]
+  },
+  "picker_open": true
+}

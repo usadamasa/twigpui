@@ -76,6 +76,22 @@ pub(crate) struct Fixture {
     /// list sync が置かれている状態 (#205)｡無ければ sync の行は出ない｡
     #[serde(default)]
     pub sync: Option<FixtureSync>,
+    /// 起動時に on にする source の集合 (#43)｡空なら Home 1 件 —
+    /// `saved_selection_for` は fixture の選択を無視するので (毎回同じ
+    /// 画面という約束)、その代わりにここが初期値になる｡
+    #[serde(default)]
+    pub sources: Vec<crate::ui::source_picker::Selection>,
+    /// list id → その list の post (#43)｡`items` は Home の post のまま —
+    /// 合成レーンの出自表示 (list 由来の post だけに list 名) を撮るには
+    /// list ごとの post が要る｡
+    #[serde(default)]
+    pub list_items: std::collections::BTreeMap<String, Vec<TimelineItem>>,
+    /// 起動直後に source picker のドロップダウンを開いた状態にするか (#43,
+    /// #192)｡widget の開閉状態を fixture に持つのはこのモジュールの規則の
+    /// 例外だが、`--fixture` の窓はクリックを合成する手段が無く、開いた
+    /// 状態を撮るにはここで宣言する以外に道が無い｡
+    #[serde(default)]
+    pub picker_open: bool,
 }
 
 /// フィクスチャが言う list sync の状態 (#205)｡

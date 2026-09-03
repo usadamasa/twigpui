@@ -4,6 +4,7 @@
 //!
 //! `ui/mod.rs` にあったものをそのまま移した｡
 
+use super::lane;
 use super::*;
 
 /// ウィンドウの最初の一画面がどこから来るか (#146)｡
@@ -77,12 +78,12 @@ impl TimelineView {
         });
         let compose_input_subscription = cx.subscribe(&compose_input, Self::on_compose_input_event);
 
-        // #161/#164: 下で `config` が move される前に取っておく｡
-        let source = list_picker::initial_source(
-            list_picker::saved_selection_for(&startup, &paths),
+        // #161/#164/#43: 下で `config` が move される前に取っておく｡
+        let sources = source_picker::initial_sources(
+            source_picker::saved_selection_for(&startup, &paths),
             config.list_id.as_deref(),
         );
-        let owned_lists = list_picker::cached_lists_or_empty(&paths);
+        let owned_lists = source_picker::cached_lists_or_empty(&paths);
         let selection_file = matches!(startup, Startup::Live).then(|| paths.selection_file());
         // #211: 読み取り側 (`window_state::initial_bounds`) と同じ条件で
         // 塞ぐ｡fixture を撮るために広げたウィンドウが､次の live 起動の
@@ -106,7 +107,9 @@ impl TimelineView {
             signed_in_with_oauth: false,
             home_user_id: None,
             home_username: None,
-            source,
+            sources,
+            item_provenance: HashMap::new(),
+            source_picker_open: source_picker::SourcePickerVisibility::default(),
             owned_lists,
             lists_fetch: None,
             selection_file,
@@ -251,7 +254,43 @@ impl TimelineView {
         self.home_user_id = Some(fixture.signed_in_as.id);
         self.home_username = Some(fixture.signed_in_as.username);
         self.owned_lists = fixture.lists;
-        self.state = TimelineState::Loaded(fixture.items);
+        self.source_picker_open = if fixture.picker_open {
+            source_picker::SourcePickerVisibility::Open
+        } else {
+            source_picker::SourcePickerVisibility::Closed
+        };
+        // #43: `sources` が空なら単一 source (Home) のままの元の挙動を
+        // 保つ — `compose` の created_at ソートを経由すると、`created_at`
+        // 無しの item を末尾へ沈める既存の並び替え規則が単一選択の
+        // フィクスチャにも掛かってしまい、書いた順を信じているケースを
+        // 壊しかねないため、経由しない。
+        let sources: Vec<cache::TimelineSource> = fixture
+            .sources
+            .into_iter()
+            .filter_map(source_picker::Selection::into_source)
+            .collect();
+        if sources.is_empty() {
+            self.sources = vec![cache::TimelineSource::Home];
+            self.state = TimelineState::Loaded(fixture.items);
+        } else {
+            let per_source: Vec<(cache::TimelineSource, Vec<TimelineItem>)> = sources
+                .iter()
+                .cloned()
+                .map(|source| {
+                    let items = match &source {
+                        cache::TimelineSource::Home => fixture.items.clone(),
+                        cache::TimelineSource::List(id) => {
+                            fixture.list_items.get(id).cloned().unwrap_or_default()
+                        }
+                    };
+                    (source, items)
+                })
+                .collect();
+            let composed = lane::compose_with_provenance(per_source);
+            self.sources = sources;
+            self.item_provenance = composed.provenance;
+            self.state = TimelineState::Loaded(composed.items);
+        }
         // #21: 本物の poll のバッファと同じやり方で､同じ純粋関数から組む —
         // fixture が供給するのは件数ではなく post なので､bar が poll には
         // 言えないことを言うことはありえない｡バッファは表示することになる

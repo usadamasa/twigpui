@@ -57,24 +57,25 @@ impl TimelineView {
             .bg(rgb(theme.bg_header))
             .border_b_1()
             .border_color(rgb(theme.border))
-            // #95 の枠に #164 の segment: Home と所有するすべての list —
-            // ウィンドウより広い picker が右側の操作 (サインイン､reload) を
-            // 画面の外へ押し出すのではなく､縮んで切り取られるように包んで
-            // ある｡flex item を中身が望むより狭くできるのが `min_w(0)` で､
-            // これが無いと 560px で 11 個のタブが "Sign in with X" を
-            // ウィンドウの外へ追い出し､body の文はそれをクリックせよと
-            // 言っていた｡切り取られたタブをもっとうまく見せること
-            // (スクロール､ドロップダウン) は #192 の仕事｡
+            // #95 の枠に #192/#43 の pull-down trigger: 幅は最大 160px の
+            // 固定で個数に依存しないので、旧 segmented control が要った
+            // `overflow_hidden` はもう trigger 自体には要らない —
+            // ヘッダタイトルだけを縮められるよう内側にだけ残す｡ドロップ
+            // ダウン本体は `deferred()` で画面の最前面に描かれるので、この
+            // 行の `overflow_hidden` の影響は受けない｡
             .child(
                 div()
                     .flex()
                     .items_center()
                     .gap_3()
-                    .min_w(px(0.))
-                    .overflow_hidden()
-                    .child(self.list_picker(cx))
-                    .children(self.lists_control(cx))
-                    .child(header_title_element(self.home_username.as_deref(), theme)),
+                    .child(self.source_picker_trigger(cx))
+                    .children(self.source_picker_menu(cx))
+                    .child(
+                        div()
+                            .min_w(px(0.))
+                            .overflow_hidden()
+                            .child(header_title_element(self.home_username.as_deref(), theme)),
+                    ),
             )
             .child(
                 div()
@@ -91,7 +92,9 @@ impl TimelineView {
                         offers_reauthorize(
                             self.signed_in_with_oauth,
                             self.oauth_scope.as_deref(),
-                            matches!(self.source, cache::TimelineSource::List(_)),
+                            self.sources
+                                .iter()
+                                .any(|source| matches!(source, cache::TimelineSource::List(_))),
                         ),
                         |row| row.child(sign_in_pill("reauthorize", "Re-authorize", theme, cx)),
                     )
@@ -108,8 +111,27 @@ impl TimelineView {
                                 .child(label),
                         )
                     })
+                    .children(self.reload_cost_control())
                     .child(self.primary_action_control(&label, busy, action, cx)),
             )
+    }
+
+    /// #43: 選択中の source が複数のとき reload の値段を出す (`×N`) —
+    /// `x-api-budget` の「押す前に最悪ケースを見せる」を守る｡1 件のときは
+    /// 何も出さない (今の暗黙の 1 request のまま変える理由が無い)｡
+    fn reload_cost_control(&self) -> Option<AnyElement> {
+        if self.sources.len() <= 1 {
+            return None;
+        }
+        let theme = self.theme;
+        Some(
+            div()
+                .addressable("reload-cost")
+                .text_size(theme::TEXT_META)
+                .text_color(rgb(theme.text_tertiary))
+                .child(format!("×{}", self.sources.len()))
+                .into_any_element(),
+        )
     }
 
     /// toolbar の唯一の action: reload､あるいはまだ session が無いときは

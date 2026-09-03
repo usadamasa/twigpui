@@ -108,10 +108,19 @@ pub(super) fn reload_failure_outcome(
 /// 払った no-op であり､キャッシュ全体がまさにそれを避けるために存在する
 /// このプロジェクトでは筋が通らない｡ボタンが黙って消えないよう､
 /// [`at_the_post_cap`] がその場所に説明を描く｡
-pub(super) fn offers_load_older(next_page_token: Option<&str>, state: &TimelineState) -> bool {
+///
+/// `single_source` は #43 の天井: 複数 source を同時にページングし結果を
+/// どう合成するかは解いていない (`sources.len() != 1` のときは
+/// `next_page_token` 自体が常に `None` になるので実質この条件だけで足りる
+/// が､呼び出し側の意図を隠さないよう明示的に取る)｡
+pub(super) fn offers_load_older(
+    next_page_token: Option<&str>,
+    state: &TimelineState,
+    single_source: bool,
+) -> bool {
     match state {
         TimelineState::Loaded(items) => {
-            next_page_token.is_some() && items.len() < cache::MAX_CACHED_POSTS
+            single_source && next_page_token.is_some() && items.len() < cache::MAX_CACHED_POSTS
         }
         _ => false,
     }
@@ -274,5 +283,25 @@ pub(super) fn reload_outcome_label(new_posts: usize) -> String {
         0 => "No new posts.".to_string(),
         1 => "1 new post.".to_string(),
         n => format!("{n} new posts."),
+    }
+}
+
+/// N-source reload (#43) が一部失敗したとき [`reload_outcome_label`] へ足す
+/// 一言｡`failures` が 0 なら `base` をそのまま返す — 全部成功した reload は
+/// 今までどおり静かだ｡`Endpoint::ListTimeline` が全 list id で 1 バケットを
+/// 共有するため､1 本が rate limit に当たれば以降も弾かれやすく (`x-api-budget`)､
+/// 「取れた分を出す」がこの下で実質的な既定動作になる — この一言はその事実を
+/// 読み手にも見せる｡
+pub(super) fn partial_failure_label(base: String, failures: usize, successes: usize) -> String {
+    if failures == 0 {
+        base
+    } else {
+        // `lane::reload_all` の `sources` は高々数十件で溢れる現実的な
+        // 経路が無いが、これも呼び出し元が制御しない値の合算なので
+        // `saturating_add` で止める。
+        format!(
+            "{base} ({failures} of {} sources failed)",
+            failures.saturating_add(successes)
+        )
     }
 }
