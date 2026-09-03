@@ -517,15 +517,7 @@ impl TimelineView {
             self.item_provenance = composed.provenance;
             self.state = TimelineState::Loaded(composed.items);
             cx.notify();
-            // client が無ければ取りに行けない (fixture､サインアウト済み)｡
-            // `reload_sources` に渡すと `NotAuthenticated` へ落ちて､いま
-            // キャッシュから組んだレーンが消える｡CI の
-            // `a_fixture_switch_leaves_no_selection_behind` は Home の
-            // キャッシュが無い新しい環境でこれを踏んだ｡
-            let missing = lane::missing_sources(&self.paths, &self.sources, &user_id);
-            if !missing.is_empty() && self.client.is_some() {
-                self.reload_sources(missing, ReloadTrigger::UserAction, cx);
-            }
+            self.fill_missing_sources(&user_id, ReloadTrigger::UserAction, cx);
         }
         // #43: off にしたぶんを二度と poll しないよう必ず再起動する｡
         self.start_auto_refresh(cx);

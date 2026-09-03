@@ -102,13 +102,7 @@ impl TimelineView {
                                 this.item_provenance = composed.provenance;
                                 this.state = TimelineState::Loaded(composed.items);
                                 cx.notify();
-                                // #43: キャッシュが無い source だけ埋める｡
-                                // 1 つも欠けていなければ reload は起きない｡
-                                let missing =
-                                    lane::missing_sources(&this.paths, &this.sources, &me.id);
-                                if !missing.is_empty() {
-                                    this.reload_sources(missing, ReloadTrigger::Polling, cx);
-                                }
+                                this.fill_missing_sources(&me.id, ReloadTrigger::Polling, cx);
                             }
                             // `/me` が未解決なら合成のしようが無いので通常の
                             // reload へ落ちる — 上の `Some` 分岐と同じ理由｡
@@ -149,6 +143,29 @@ impl TimelineView {
     pub(in crate::ui) fn reload(&mut self, trigger: ReloadTrigger, cx: &mut Context<'_, Self>) {
         let sources = self.sources.clone();
         self.reload_sources(sources, trigger, cx);
+    }
+
+    /// 選択中の source のうちキャッシュの無いものだけを reload する (#43)｡
+    /// 起動時とトグル時の両方から呼ぶ｡1 つも欠けていなければ何も起きない｡
+    ///
+    /// client が無ければ (fixture､サインアウト済み) 何もしない: 取りに
+    /// 行けないものを `reload_sources` へ渡すと `NotAuthenticated` へ落ちて､
+    /// 直前にキャッシュから組んだレーンが消える｡CI の
+    /// `a_fixture_switch_leaves_no_selection_behind` は Home のキャッシュが
+    /// 無い新しい環境でこれを踏んだ｡
+    pub(in crate::ui) fn fill_missing_sources(
+        &mut self,
+        user_id: &str,
+        trigger: ReloadTrigger,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if self.client.is_none() {
+            return;
+        }
+        let missing = lane::missing_sources(&self.paths, &self.sources, user_id);
+        if !missing.is_empty() {
+            self.reload_sources(missing, trigger, cx);
+        }
     }
 
     /// `sources` を対象に reload の credit を使う (#43)｡client 無しで
