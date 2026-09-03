@@ -1,11 +1,12 @@
-//! ツールバーの list picker (#164): ウィンドウがどの timeline を見せるか､
-//! その選択が再起動をどう生き延びるか､区画がどこから名前を得るか｡
+//! ツールバーの source picker (#43, #192): ウィンドウがどの timeline の
+//! *集合* を見せるか､その選択が再起動をどう生き延びるか､pull-down の
+//! メニュー項目がどこから名前を得るか｡
 //!
-//! #161 は List をウィンドウの primary source にしたが､それは起動時に
-//! `config.list_id` から決まる 1 つの List だった｡#95 はすでに切り替え元と
-//! なる segmented control を描いていた — 区画は 1 つ､クリックハンドラは
-//! 無し｡切り替える *先* が無かったからだ｡このファイルが残りの区画と
-//! クリックを供給する｡
+//! #164 まではここが単一選択の segmented control だった｡所有リストが
+//! 十数本あるアカウントでは既定幅 (429px) のツールバーが壊れ (#192)､
+//! かつ「合成レーン」(#43) は複数選択そのものを要求する｡どちらも
+//! macOS の pull-down button + チェックマーク付きメニューで一度に解決する
+//! (他アプリ調査と HIG の根拠は `PLAN.md` を見よ)｡
 //!
 //! 並びは [`super::list_sync`] と同じ: まず純粋な関数とそのテスト､続いて
 //! ウィンドウに触れるかリクエストを使う部分の `impl TimelineView`
@@ -13,40 +14,41 @@
 //!
 //! # 金がかかるのはどこか
 //!
-//! 切り替えは何も使わない｡ウィンドウは `source` のキャッシュファイルが
-//! 持つものを描くだけで､一度も読まれていない list — キャッシュファイルが
-//! そもそも無い場合 — だけが通常の reload へ落ちる｡それは初回起動が出すのと
-//! 同じリクエストだ｡すでに読んだ list の間を行き来する分には､何度やっても
-//! リクエストは 0 だ｡issue の 3 つ目の完了条件がまさにそれで､`ui` の
-//! テストの `switching_between_cached_sources_sends_nothing` がそれを
-//! 押さえている｡
+//! トグルは即座にキャッシュから再合成するだけで何も送らない｡一度も
+//! 読まれていない source — キャッシュファイルがそもそも無い場合 — だけが
+//! reload に落ちる｡それは初回起動が出すのと同じリクエストだ｡すでに読んだ
+//! source の間を行き来する分には､何度やってもリクエストは 0 だ｡
+//! `ui` のテストの `switching_between_cached_sources_sends_nothing` が
+//! それを押さえている｡
 //!
 //! 区画に名前を付けるのはリクエストを 1 つ使う: `GET
 //! /2/users/:id/owned_lists` は返された list ごとに課金される
-//! (`x-api-budget`)｡ウィンドウの独断で送られることは決してない — picker は
-//! いくらかかるかを言うボタンを出し､結果は TTL 無しでキャッシュされるので､
-//! 再び使う唯一の道はもう一度ボタンを押すことだ｡
+//! (`x-api-budget`)｡ウィンドウの独断で送られることは決してない — メニューは
+//! いくらかかるかを言うボタンを末尾に出し､結果は TTL 無しでキャッシュ
+//! されるので､再び使う唯一の道はもう一度ボタンを押すことだ｡
 //!
 //! # 起動時に何が勝つか
 //!
-//! 保存された選択が `config.list_id` に勝ち､したがって `X_LIST_ID` にも
-//! 勝つ｡これは通常の「ファイルより環境変数」のルールの逆であり､意図的だ:
-//! dev プロファイルは常に既定の list を持つので (`Profile::default_list_id`)､
-//! 設定が勝てば dev ビルドは起動のたびにその list へ戻り､picker の選択が
-//! ウィンドウより長生きすることは決してなくなる｡設定は誰かが選ぶまでの
-//! ウィンドウの *出発点* であり､選択はより後の､より具体的な決定だ｡
+//! 保存された `active` (無ければ `selected`) が `config.list_id` に勝ち､
+//! したがって `X_LIST_ID` にも勝つ｡これは通常の「ファイルより環境変数」の
+//! ルールの逆であり､意図的だ: dev プロファイルは常に既定の list を持つので
+//! (`Profile::default_list_id`)､設定が勝てば dev ビルドは起動のたびにその
+//! list へ戻り､picker の選択がウィンドウより長生きすることは決してなくなる｡
+//! 設定は誰も選ばなかったときのウィンドウの *出発点* であり､選択はより後の､
+//! より具体的な決定だ｡
 
 use std::path::Path;
 
 use anyhow::{Context as _, Result};
+use gpui::{anchored, deferred, point, px};
 use serde::{Deserialize, Serialize};
 
 // `use super::*` ではなく書き下している｡理由は [`super::list_sync`] と同じ｡
-use super::render::{Addressable as _, tab_segment, tab_trough};
+use super::render::{Addressable as _, tab_segment};
 use super::{
-    AnyElement, Context, IntoElement as _, ParentElement as _, ReloadNotice, ReloadTrigger,
-    Startup, StatefulInteractiveElement as _, Styled as _, TimelineState, TimelineView, div, log,
-    oauth, rgb,
+    AnyElement, Context, InteractiveElement as _, IntoElement as _, ParentElement as _,
+    ReloadNotice, ReloadTrigger, Startup, StatefulInteractiveElement as _, Styled as _,
+    TimelineState, TimelineView, div, lane, log, oauth, rgb,
 };
 use crate::cache::{self, TimelineSource};
 use crate::paths::Paths;
@@ -96,17 +98,42 @@ impl Selection {
     }
 }
 
+/// ドロップダウンの開閉 (#192, #43)｡`bool` ではなく専用の 2 値 enum に
+/// してある — `TimelineView` はすでに clippy の `struct_excessive_bools`
+/// (上限 3) に達する本数の `bool` フィールドを持っており､これ以上増やさない｡
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(super) enum SourcePickerVisibility {
+    #[default]
+    Closed,
+    Open,
+}
+
+impl SourcePickerVisibility {
+    pub(super) fn is_open(self) -> bool {
+        matches!(self, Self::Open)
+    }
+
+    pub(super) fn toggled(self) -> Self {
+        match self {
+            Self::Closed => Self::Open,
+            Self::Open => Self::Closed,
+        }
+    }
+}
+
 /// [`Paths::selection_file`] の中身すべて｡
 ///
-/// フィールドは 1 つだが､それでも struct にしてある — [`crate::sync::SyncState`]
-/// と同じ理由だ: picker について次に覚える価値のあるものが､入るために
-/// ファイルの形を変えずに済むようにするためだ｡
+/// `selected` は #164 が単一選択だった頃の名残で､`active` (#43 の複数選択)
+/// が空のときのフォールバックとしてだけ読む｡新しいビルドは `active` に
+/// 現在の集合を書き､互換のため先頭要素を `selected` へも鏡写しする｡
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub(crate) struct SelectionState {
-    /// 最後に切り替えた先の timeline｡picker が一度も使われていなければ
-    /// `None`｡
+    /// 最後に切り替えた先の timeline (後方互換用)｡`active` が空のときだけ読む｡
     #[serde(default)]
     pub selected: Option<Selection>,
+    /// 表示中の source 集合 (#43)｡空なら `selected` にフォールバックする｡
+    #[serde(default)]
+    pub active: Vec<Selection>,
 }
 
 /// picker が保存した選択を `path` から読み戻す｡
@@ -127,22 +154,33 @@ pub(crate) fn save_selection(path: &Path, state: &SelectionState) -> Result<()> 
     std::fs::write(path, json).with_context(|| format!("could not write {}", path.display()))
 }
 
-/// ウィンドウがどの timeline で開くか (#161, #164)｡
+/// ウィンドウがどの timeline の集合で開くか (#161, #164, #43)｡
 ///
-/// まず保存された選択､次に `config.list_id`､最後に Home — ファイルが設定に
-/// 勝つ理由はモジュール doc を参照｡保存された list は､アカウントが今も
-/// それを所有しているかどうかに関わらず尊重される: どの list id でも読める
-/// し､#161 の設定された list も所有している必要は無い｡
-pub(super) fn initial_source(
-    saved: Option<Selection>,
+/// まず保存された `active`､次に保存された `selected` (後方互換)､次に
+/// `config.list_id`､最後に Home — ファイルが設定に勝つ理由はモジュール doc を
+/// 参照｡保存された list は､アカウントが今もそれを所有しているかどうかに
+/// 関わらず尊重される: どの list id でも読めるし､#161 の設定された list も
+/// 所有している必要は無い｡`active` の要素に不正な list id (手編集など) しか
+/// 無く `filter_map` の結果が空になった場合も､次の段 (`selected`) へ
+/// フォールバックする — 非空 invariant を守るためにここで panic はしない｡
+pub(super) fn initial_sources(
+    state: SelectionState,
     configured_list_id: Option<&str>,
-) -> TimelineSource {
-    if let Some(source) = saved.and_then(Selection::into_source) {
-        return source;
+) -> Vec<TimelineSource> {
+    let active: Vec<TimelineSource> = state
+        .active
+        .into_iter()
+        .filter_map(Selection::into_source)
+        .collect();
+    if !active.is_empty() {
+        return active;
+    }
+    if let Some(source) = state.selected.and_then(Selection::into_source) {
+        return vec![source];
     }
     match configured_list_id {
-        Some(list_id) => TimelineSource::List(list_id.to_string()),
-        None => TimelineSource::Home,
+        Some(list_id) => vec![TimelineSource::List(list_id.to_string())],
+        None => vec![TimelineSource::Home],
     }
 }
 
@@ -152,10 +190,47 @@ pub(super) fn initial_source(
 /// ファイルが､どの区画を持ち上げて描くかを変えられてはならない｡書き込み側も
 /// 同じように塞いである｡`TimelineView::selection_file` が `None` になる
 /// ことによってだ｡
-pub(super) fn saved_selection_for(startup: &Startup, paths: &Paths) -> Option<Selection> {
+pub(super) fn saved_selection_for(startup: &Startup, paths: &Paths) -> SelectionState {
     match startup {
-        Startup::Live => load_selection(&paths.selection_file()).selected,
-        Startup::Fixture(_) => None,
+        Startup::Live => load_selection(&paths.selection_file()),
+        Startup::Fixture(_) => SelectionState::default(),
+    }
+}
+
+/// `sources` に `target` を足す・外す (#43)｡非空 invariant: 最後の 1 つは
+/// 外せない — そのクリックは無視する｡表示順を保つため､足すのは末尾へ
+/// 追加ではなく `segments` が持つ順序に合わせて呼び出し側が並べ直す
+/// (`TimelineView::toggle_source` を見よ)｡
+pub(super) fn toggle(
+    mut sources: Vec<TimelineSource>,
+    target: &TimelineSource,
+) -> Vec<TimelineSource> {
+    match sources.iter().position(|source| source == target) {
+        Some(index) if sources.len() > 1 => {
+            sources.remove(index);
+        }
+        Some(_) => {}
+        None => sources.push(target.clone()),
+    }
+    sources
+}
+
+/// ツールバーのトリガーが言うこと (#192, #43)｡1 件なら名前をそのまま､
+/// 複数なら表示順で先頭の名前 + `+N`｡`owned` から名前を引けない source
+/// (所有していない list) は `segment_label` 相当のフォールバックにはせず
+/// id をそのまま出す — トリガーは常に何か読めるものを返す必要がある｡
+pub(super) fn trigger_label(sources: &[TimelineSource], owned: &[ListSummary]) -> String {
+    let name = |source: &TimelineSource| match source {
+        TimelineSource::Home => "Home".to_string(),
+        TimelineSource::List(id) => owned
+            .iter()
+            .find(|list| &list.id == id)
+            .map_or_else(|| id.clone(), segment_label),
+    };
+    match sources {
+        [] => String::new(),
+        [only] => name(only),
+        [first, rest @ ..] => format!("{} +{}", name(first), rest.len()),
     }
 }
 
@@ -189,10 +264,10 @@ pub(super) struct Segment {
 }
 
 /// picker の区画を描画順に並べたもの: Home､次に所有する list を API が
-/// 並べた順に､そして — ウィンドウが所有していない list を表示している
-/// ときだけ､通常は #161 の設定された list がそれだ — その list｡選択中の
-/// 区画が必ず存在し､trough から持ち上げられるようにするためだ｡
-pub(super) fn segments(current: &TimelineSource, owned: &[ListSummary]) -> Vec<Segment> {
+/// 並べた順に､そして — 表示中の source に､ウィンドウが所有していない list
+/// (通常は #161 の設定された list) が混ざっているときだけ､その list｡選択中の
+/// 区画が必ず存在し､メニューから見失われないようにするためだ｡
+pub(super) fn segments(current: &[TimelineSource], owned: &[ListSummary]) -> Vec<Segment> {
     let mut segments = vec![segment(TimelineSource::Home, "Home".to_string(), current)];
     for list in owned {
         segments.push(segment(
@@ -201,19 +276,21 @@ pub(super) fn segments(current: &TimelineSource, owned: &[ListSummary]) -> Vec<S
             current,
         ));
     }
-    if let TimelineSource::List(id) = current
-        && !owned.iter().any(|list| &list.id == id)
-    {
-        segments.push(segment(current.clone(), "List".to_string(), current));
+    for source in current {
+        if let TimelineSource::List(id) = source
+            && !owned.iter().any(|list| &list.id == id)
+        {
+            segments.push(segment(source.clone(), "List".to_string(), current));
+        }
     }
     segments
 }
 
-fn segment(source: TimelineSource, label: String, current: &TimelineSource) -> Segment {
+fn segment(source: TimelineSource, label: String, current: &[TimelineSource]) -> Segment {
     Segment {
         name: segment_name(&source),
+        selected: current.contains(&source),
         label,
-        selected: &source == current,
         source,
     }
 }
@@ -267,27 +344,97 @@ pub(super) fn switch_waits_for_startup(state: &TimelineState, has_client: bool) 
 }
 
 impl TimelineView {
-    /// ツールバーの segmented control (#95)｡今はどの区画もクリックできる
-    /// (#164)｡
-    pub(super) fn list_picker(&self, cx: &mut Context<'_, Self>) -> AnyElement {
+    /// ツールバーの pull-down トリガー (#192, #43)｡ラベルは [`trigger_label`]
+    /// (1 件ならその名前､複数なら先頭の名前 + `+N`)｡クリックでドロップ
+    /// ダウンの開閉をトグルするだけで､選択そのものはメニュー側の項目が担う｡
+    pub(super) fn source_picker_trigger(&self, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = self.theme;
-        let mut trough = tab_trough(theme);
-        for segment in segments(&self.source, &self.owned_lists) {
+        let label = format!("{} ⌄", trigger_label(&self.sources, &self.owned_lists));
+        tab_segment(&label, true, theme)
+            .addressable("source-picker")
+            .max_w(px(160.0))
+            .truncate()
+            .on_click(cx.listener(|this, _event, _window, cx| {
+                this.source_picker_open = this.source_picker_open.toggled();
+                cx.notify();
+            }))
+            .into_any_element()
+    }
+
+    /// ドロップダウンのメニュー本体 (#192, #43)｡開いていなければ `None`｡
+    ///
+    /// `anchored()` + `deferred()` でツールバーの `overflow_hidden` の外へ
+    /// 描画する (`sync_row.rs::sync_dialog` の `absolute()` + `inset_0()` は
+    /// 全画面中央のモーダル向けで､ここには使わない — トリガー直下に
+    /// 左詰めで出す)｡`on_mouse_down_out` で外側クリックを検知して閉じる｡
+    /// Escape も閉じる経路の一つだが､それは `layout.rs` の `BlurComposer`
+    /// ハンドラが既存の escape バインディングへ相乗りして担う｡
+    ///
+    /// 項目クリックではメニューを閉じない (team-lead の指示): チェックを
+    /// 複数付け外しする操作なので､1 回ごとに閉じると #43 の「任意の
+    /// タイミングでオン・オフ」が面倒になる｡macOS のメニューは選択で
+    /// 閉じるのが標準だが､ここは意図的に逸脱する｡
+    pub(super) fn source_picker_menu(&self, cx: &mut Context<'_, Self>) -> Option<AnyElement> {
+        if !self.source_picker_open.is_open() {
+            return None;
+        }
+        let theme = self.theme;
+        let mut menu = div()
+            .addressable("source-menu")
+            .w(px(220.0))
+            .flex()
+            .flex_col()
+            .bg(rgb(theme.bg_header))
+            .border_1()
+            .border_color(rgb(theme.border))
+            .rounded(theme::RADIUS_MENU)
+            .shadow_md()
+            .on_mouse_down_out(cx.listener(|this, _event, _window, cx| {
+                this.source_picker_open = SourcePickerVisibility::Closed;
+                cx.notify();
+            }));
+
+        for segment in segments(&self.sources, &self.owned_lists) {
             let source = segment.source;
-            trough = trough.child(
-                tab_segment(&segment.label, segment.selected, theme)
+            let mark = if segment.selected { "✓" } else { "" };
+            menu = menu.child(
+                div()
                     .addressable(segment.name)
+                    .flex()
+                    .items_center()
+                    .h(px(24.0))
+                    .px_2()
+                    .gap_2()
+                    .text_size(theme::TEXT_BODY)
+                    .child(div().w(px(20.0)).child(mark))
+                    .child(div().min_w(px(0.0)).truncate().child(segment.label))
                     .on_click(cx.listener(move |this, _event, _window, cx| {
-                        this.switch_source(source.clone(), cx);
+                        this.toggle_source(&source, cx);
                     })),
             );
         }
-        trough.into_any_element()
+
+        if let Some(control) = self.lists_control(cx) {
+            menu = menu
+                .child(div().h(px(1.0)).bg(rgb(theme.border)))
+                .child(div().px_2().py_1().child(control));
+        }
+
+        Some(
+            deferred(
+                anchored()
+                    .position(point(theme::ROW_PAD_X, theme::TOOLBAR_HEIGHT))
+                    .child(menu),
+            )
+            .into_any_element(),
+        )
     }
 
     /// list の名前を取得するボタン (#164)｡取得する手立てが無いときは
     /// `None` — [`offers_list_fetch`] を参照｡取得が飛んでいる間はただの
     /// テキストになる: 2 度目のクリックは同じページを 2 回買うだけだ｡
+    /// team-lead の指示でメニュー末尾に移った (#192): ツールバーの閉じた
+    /// トリガーは固定幅なので､ここに居ては閉じた状態の幅を食うだけだった｡
     pub(super) fn lists_control(&self, cx: &mut Context<'_, Self>) -> Option<AnyElement> {
         if !offers_list_fetch(self.client.is_some(), self.home_user_id.is_some()) {
             return None;
@@ -309,27 +456,42 @@ impl TimelineView {
         )
     }
 
-    /// 今表示しているものの代わりに `source` を見せる (#164)｡
+    /// `target` を表示中の source 集合へ足す・外す (#164, #43)｡最後の 1 つは
+    /// 外せない — [`toggle`] の非空 invariant がそのクリックを無視する｡
     ///
-    /// 前の source に属していたものはすべて一緒に消える: 飛行中の reload や
-    /// "Load older" (その結果が誤った区画の下に着地してしまう)､ページング
-    /// カーソル (Home のカーソルは list のエンドポイントには何の意味も
-    /// 無い)､poll のバッファ (`clear_pending` の doc)､開いているスレッド､
-    /// そしてスクロール位置｡そのうえで新しい source のキャッシュを画面へ
-    /// 出し､それが無い場合にだけ初回起動と同じ reload を使う｡
+    /// 集合が変わったら前の集合に属していたものはすべて一緒に消える: 飛行中
+    /// の reload や "Load older" (その結果が誤った source の下に着地して
+    /// しまう)､ページングカーソル (複数選択では意味を持たない — §3.6)､
+    /// poll のバッファ (`clear_pending` の doc)､開いているスレッド､そして
+    /// スクロール位置｡そのうえでキャッシュ済みの分だけ即座に再合成して
+    /// 画面へ出し (off にした分は消え､on にした分は載る)､一度も取得して
+    /// いない source だけを reload する — 画面は空にせず (team-lead の指示)
+    /// `reloading` フラグとスピナーだけで示す｡
     ///
-    /// auto-refresh のループは動かしたままにせず再起動する: ループは開始
-    /// 時点の source を捕まえており､そのまま古いほうを poll し続ける —
-    /// 古い list の post を新しいほうの画面へ書き込むことになる｡
-    pub(super) fn switch_source(&mut self, source: TimelineSource, cx: &mut Context<'_, Self>) {
-        if self.source == source || switch_waits_for_startup(&self.state, self.client.is_some()) {
+    /// auto-refresh のループは動かしたままにせず再起動する
+    /// (opus-advisor A-3、ブロッカー): ループは開始時点の `sources` を
+    /// 捕まえており､再起動しないと off にした source を poll し続けて
+    /// しまう — #43 の完了条件「オフのソースが API リクエストを消費
+    /// しない」への違反になる｡
+    pub(super) fn toggle_source(&mut self, target: &TimelineSource, cx: &mut Context<'_, Self>) {
+        if switch_waits_for_startup(&self.state, self.client.is_some()) {
             return;
         }
-        self.source = source;
+        let next = toggle(self.sources.clone(), target);
+        if next == self.sources {
+            // 非空 invariant で無視された (最後の 1 つを外そうとした)｡
+            return;
+        }
+        self.sources = next;
         self.fetch = None;
         self.reloading = false;
-        self.next_page_token = None;
         self.reload_notice = None;
+        // §3.6: 複数選択のあいだ `next_page_token` は常に `None` を保つ
+        // 不変条件｡`reload_sources` も N > 1 のときは書かないが､ここでも
+        // 切り替わった瞬間に明示して二重に守る｡
+        if self.sources.len() != 1 {
+            self.next_page_token = None;
+        }
         self.clear_pending();
         self.threads.clear();
         self.thread_fetches.clear();
@@ -340,7 +502,8 @@ impl TimelineView {
         // reload しに行くことになる｡
         if let Some(selection_file) = &self.selection_file {
             let remembered = SelectionState {
-                selected: Some(Selection::of(&self.source)),
+                selected: self.sources.first().map(Selection::of),
+                active: self.sources.iter().map(Selection::of).collect(),
             };
             if let Err(error) = save_selection(selection_file, &remembered) {
                 log::warn(&format!(
@@ -349,18 +512,17 @@ impl TimelineView {
             }
         }
 
-        let cached = self.home_user_id.as_deref().and_then(|user_id| {
-            cache::load_primary_timeline(&self.paths, &self.source, user_id).unwrap_or_else(
-                |error| {
-                    log::warn(&format!("could not read the cached timeline: {error:#}"));
-                    None
-                },
-            )
-        });
-        match cached {
-            Some(items) => self.state = TimelineState::Loaded(items),
-            None => self.reload(ReloadTrigger::UserAction, cx),
+        if let Some(user_id) = self.home_user_id.clone() {
+            let composed = lane::load_composite_timeline(&self.paths, &self.sources, &user_id);
+            self.item_provenance = composed.provenance;
+            self.state = TimelineState::Loaded(composed.items);
+            cx.notify();
+            let missing = lane::missing_sources(&self.paths, &self.sources, &user_id);
+            if !missing.is_empty() {
+                self.reload_sources(missing, ReloadTrigger::UserAction, cx);
+            }
         }
+        // #43: off にしたぶんを二度と poll しないよう必ず再起動する｡
         self.start_auto_refresh(cx);
         // `state` を差し替えた後で｡理由は `start` と同じ (#120)｡
         self.refresh_images(cx);
@@ -437,9 +599,10 @@ mod tests {
     fn a_selection_round_trips_through_its_file() {
         let path = scratch("roundtrip");
         let state = SelectionState {
-            selected: Some(Selection::List {
+            selected: None,
+            active: vec![Selection::List {
                 id: "2091351590695588200".to_string(),
-            }),
+            }],
         };
         save_selection(&path, &state).unwrap();
         assert_eq!(load_selection(&path), state);
@@ -455,6 +618,7 @@ mod tests {
             &path,
             &SelectionState {
                 selected: Some(Selection::Home),
+                active: Vec::new(),
             },
         )
         .unwrap();
@@ -481,11 +645,37 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
     }
 
-    // --- ウィンドウがどの timeline で開くか ---
+    #[test]
+    fn a_legacy_file_without_active_still_reads_as_one_source() {
+        // #43 より前の形 (`active` キー無し) を新しいビルドが読めることの
+        // テスト｡`#[serde(default)]` が空 `Vec` を補う｡
+        let path = scratch("legacy");
+        std::fs::write(
+            &path,
+            br#"{"selected":{"kind":"list","id":"2091351590695588200"}}"#,
+        )
+        .unwrap();
+        let state = load_selection(&path);
+        assert_eq!(state.active, Vec::new());
+        assert_eq!(
+            initial_sources(state, None),
+            vec![TimelineSource::List("2091351590695588200".to_string())]
+        );
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    // --- ウィンドウがどの timeline の集合で開くか ---
+
+    fn state(selected: Option<Selection>, active: Vec<Selection>) -> SelectionState {
+        SelectionState { selected, active }
+    }
 
     #[test]
     fn nothing_configured_and_nothing_saved_reads_the_home_timeline() {
-        assert_eq!(initial_source(None, None), TimelineSource::Home);
+        assert_eq!(
+            initial_sources(state(None, Vec::new()), None),
+            vec![TimelineSource::Home]
+        );
     }
 
     #[test]
@@ -493,27 +683,53 @@ mod tests {
         // 補うのではなく置き換える (#161): #157 の後､home の timeline には
         // フォールバックする価値のあるものが残っていない｡
         assert_eq!(
-            initial_source(None, Some("2091351590695588200")),
-            TimelineSource::List("2091351590695588200".to_string())
+            initial_sources(state(None, Vec::new()), Some("2091351590695588200")),
+            vec![TimelineSource::List("2091351590695588200".to_string())]
         );
     }
 
     #[test]
-    fn a_saved_selection_beats_the_configured_list() {
+    fn a_saved_active_set_beats_the_configured_list() {
         // dev プロファイルは常に list を設定する｡それが勝てば dev ビルドは
         // 起動のたびに picker の選択を忘れる｡
         assert_eq!(
-            initial_source(
-                Some(Selection::List {
-                    id: "7".to_string()
-                }),
+            initial_sources(
+                state(
+                    None,
+                    vec![
+                        Selection::Home,
+                        Selection::List {
+                            id: "7".to_string()
+                        }
+                    ]
+                ),
                 Some("2091351590695588200")
             ),
-            TimelineSource::List("7".to_string())
+            vec![TimelineSource::Home, TimelineSource::List("7".to_string())]
+        );
+    }
+
+    #[test]
+    fn a_saved_selected_beats_the_configured_list_when_active_is_empty() {
+        // `active` が空なら旧フィールド `selected` へフォールバックする｡
+        assert_eq!(
+            initial_sources(
+                state(
+                    Some(Selection::List {
+                        id: "7".to_string()
+                    }),
+                    Vec::new()
+                ),
+                Some("2091351590695588200")
+            ),
+            vec![TimelineSource::List("7".to_string())]
         );
         assert_eq!(
-            initial_source(Some(Selection::Home), Some("2091351590695588200")),
-            TimelineSource::Home
+            initial_sources(
+                state(Some(Selection::Home), Vec::new()),
+                Some("2091351590695588200")
+            ),
+            vec![TimelineSource::Home]
         );
     }
 
@@ -522,17 +738,41 @@ mod tests {
         // `Config::resolve` が `list_id` に適用するのと同じルールを､
         // 人が手で編集できるファイルに適用する｡
         assert_eq!(
-            initial_source(
-                Some(Selection::List {
-                    id: "not-a-list".to_string()
-                }),
+            initial_sources(
+                state(
+                    None,
+                    vec![Selection::List {
+                        id: "not-a-list".to_string()
+                    }]
+                ),
                 Some("2091351590695588200")
             ),
-            TimelineSource::List("2091351590695588200".to_string())
+            vec![TimelineSource::List("2091351590695588200".to_string())]
         );
         assert_eq!(
-            initial_source(Some(Selection::List { id: String::new() }), None),
-            TimelineSource::Home
+            initial_sources(
+                state(None, vec![Selection::List { id: String::new() }]),
+                None
+            ),
+            vec![TimelineSource::Home]
+        );
+    }
+
+    #[test]
+    fn an_active_set_with_only_invalid_ids_falls_back_rather_than_panicking() {
+        // opus-advisor B-5: `filter_map` の結果が空になっても非空
+        // invariant は panic せず次の段 (`selected`) へフォールバックする｡
+        assert_eq!(
+            initial_sources(
+                state(
+                    Some(Selection::Home),
+                    vec![Selection::List {
+                        id: "not-a-list".to_string()
+                    }]
+                ),
+                None
+            ),
+            vec![TimelineSource::Home]
         );
     }
 
@@ -547,11 +787,79 @@ mod tests {
         );
     }
 
+    // --- トグル (#43) ---
+
+    #[test]
+    fn toggling_an_absent_source_appends_it() {
+        let sources = toggle(
+            vec![TimelineSource::Home],
+            &TimelineSource::List("1".to_string()),
+        );
+        assert_eq!(
+            sources,
+            vec![TimelineSource::Home, TimelineSource::List("1".to_string())]
+        );
+    }
+
+    #[test]
+    fn toggling_a_present_source_removes_it() {
+        let sources = toggle(
+            vec![TimelineSource::Home, TimelineSource::List("1".to_string())],
+            &TimelineSource::List("1".to_string()),
+        );
+        assert_eq!(sources, vec![TimelineSource::Home]);
+    }
+
+    #[test]
+    fn the_last_source_cannot_be_toggled_off() {
+        let sources = toggle(vec![TimelineSource::Home], &TimelineSource::Home);
+        assert_eq!(sources, vec![TimelineSource::Home]);
+    }
+
+    // --- トリガーのラベル (#192, #43) ---
+
+    #[test]
+    fn a_single_selection_shows_its_own_name() {
+        assert_eq!(
+            trigger_label(&[TimelineSource::Home], &[]),
+            "Home".to_string()
+        );
+        assert_eq!(
+            trigger_label(
+                &[TimelineSource::List("1".to_string())],
+                &[list("1", "rust")]
+            ),
+            "rust".to_string()
+        );
+    }
+
+    #[test]
+    fn multiple_selections_summarize_as_the_first_name_plus_a_count() {
+        assert_eq!(
+            trigger_label(
+                &[TimelineSource::Home, TimelineSource::List("1".to_string())],
+                &[list("1", "rust")]
+            ),
+            "Home +1".to_string()
+        );
+        assert_eq!(
+            trigger_label(
+                &[
+                    TimelineSource::Home,
+                    TimelineSource::List("1".to_string()),
+                    TimelineSource::List("2".to_string())
+                ],
+                &[list("1", "rust"), list("2", "art")]
+            ),
+            "Home +2".to_string()
+        );
+    }
+
     // --- 区画 ---
 
     #[test]
     fn home_comes_first_then_the_owned_lists_in_api_order() {
-        let current = TimelineSource::List("2".to_string());
+        let current = [TimelineSource::List("2".to_string())];
         let segments = segments(&current, &[list("2", "second"), list("1", "first")]);
         assert_eq!(
             segments
@@ -573,20 +881,33 @@ mod tests {
     }
 
     #[test]
+    fn multiple_selected_sources_are_all_checked() {
+        let current = [TimelineSource::Home, TimelineSource::List("1".to_string())];
+        let segments = segments(&current, &[list("1", "mine"), list("2", "other")]);
+        assert_eq!(
+            segments
+                .iter()
+                .map(|segment| segment.selected)
+                .collect::<Vec<_>>(),
+            vec![true, true, false]
+        );
+    }
+
+    #[test]
     fn a_list_the_account_does_not_own_still_gets_a_segment_while_showing() {
         // #161 の設定された list は所有しているものである必要が無い｡
-        // これが無いと trough に持ち上がった区画が 1 つも無くなる｡
-        let current = TimelineSource::List("9".to_string());
+        // これが無いとメニューに持ち上がった区画が 1 つも無くなる｡
+        let current = [TimelineSource::List("9".to_string())];
         let segments = segments(&current, &[list("1", "mine")]);
         assert_eq!(segments.len(), 3);
         assert_eq!(segments[2].label, "List");
         assert!(segments[2].selected);
-        assert_eq!(segments[2].source, current);
+        assert_eq!(segments[2].source, current[0]);
     }
 
     #[test]
     fn with_no_lists_cached_the_picker_is_just_home() {
-        let segments = segments(&TimelineSource::Home, &[]);
+        let segments = segments(&[TimelineSource::Home], &[]);
         assert_eq!(segments.len(), 1);
         assert!(segments[0].selected);
     }
@@ -626,12 +947,13 @@ mod tests {
             &paths.selection_file(),
             &SelectionState {
                 selected: Some(Selection::Home),
+                active: Vec::new(),
             },
         )
         .unwrap();
 
         assert_eq!(
-            saved_selection_for(&Startup::Live, &paths),
+            saved_selection_for(&Startup::Live, &paths).selected,
             Some(Selection::Home)
         );
         let fixture = crate::fixture::Fixture {
@@ -646,7 +968,7 @@ mod tests {
         };
         assert_eq!(
             saved_selection_for(&Startup::Fixture(Box::new(fixture)), &paths),
-            None
+            SelectionState::default()
         );
         std::fs::remove_dir_all(&home).unwrap();
     }

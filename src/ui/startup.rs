@@ -77,8 +77,8 @@ impl TimelineView {
         });
         let compose_input_subscription = cx.subscribe(&compose_input, Self::on_compose_input_event);
 
-        // #161/#164: 下で `config` が move される前に取っておく｡
-        let source = source_picker::initial_source(
+        // #161/#164/#43: 下で `config` が move される前に取っておく｡
+        let sources = source_picker::initial_sources(
             source_picker::saved_selection_for(&startup, &paths),
             config.list_id.as_deref(),
         );
@@ -106,7 +106,9 @@ impl TimelineView {
             signed_in_with_oauth: false,
             home_user_id: None,
             home_username: None,
-            source,
+            sources,
+            item_provenance: HashMap::new(),
+            source_picker_open: source_picker::SourcePickerVisibility::default(),
             owned_lists,
             lists_fetch: None,
             selection_file,

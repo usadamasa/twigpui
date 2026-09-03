@@ -45,6 +45,7 @@
 // `impl` ブロックは `ui` が import するものの大半に手を伸ばすし､2 つの
 // 子モジュールの前置きを同じ形に保つことのほうが､メソッドが出入りする
 // たびに書き換えないといけない正確なリストより価値がある｡
+use super::lane;
 use super::*;
 
 /// 読み手が始めた fetch がまだ飛んでいるとき､tick が次に見るまで待つ
@@ -418,7 +419,11 @@ impl TimelineView {
         self.auto_refresh_notice = None;
 
         let paths = self.paths.clone();
-        let source = self.source.clone();
+        // #43: N ソースなら 1 tick で N request になる (`lane::reload_all`
+        // が直列に呼ぶ)。`Endpoint::ListTimeline` は全 list id で 1
+        // バケット共有なので、on にする本数が多いほどそのバケットを速く
+        // 消費する — 上限は設けていない (ponytail、opus-advisor B-8)。
+        let sources = self.sources.clone();
         let max_results = self.config.max_results;
         let interval_seconds = self.config.auto_refresh_interval_seconds;
         let started_at = oauth::unix_now();
@@ -469,14 +474,14 @@ impl TimelineView {
                         let _ = this.update(cx, |this, _| this.last_reload_at = Some(now));
 
                         let result = {
-                            let (paths, client, source) =
-                                (paths.clone(), client.clone(), source.clone());
+                            let (paths, client, sources) =
+                                (paths.clone(), client.clone(), sources.clone());
                             cx.background_executor()
                                 .spawn(async move {
-                                    cache::reload_primary(
+                                    lane::reload_all(
                                         &paths,
                                         &client,
-                                        &source,
+                                        &sources,
                                         max_results,
                                         oauth::unix_now(),
                                     )
@@ -540,12 +545,12 @@ impl TimelineView {
     /// ことであり､**取得が止まったこと自体を隠すこと** ではない｡
     pub(super) fn apply_poll(
         &mut self,
-        result: anyhow::Result<cache::ReloadedPrimary>,
+        result: anyhow::Result<lane::ReloadOutcome>,
         cx: &mut Context<'_, Self>,
     ) -> Poll {
         self.refresh_usage(cx);
-        let reloaded = match result {
-            Ok(reloaded) => reloaded,
+        let outcome = match result {
+            Ok(outcome) => outcome,
             Err(error) => {
                 // `log::redact` は出ていく途中で走る — API のエラーは
                 // それを生んだリクエストを引用しうる｡
@@ -561,18 +566,27 @@ impl TimelineView {
                 return Poll::Halt;
             }
         };
+        // #43: `successes > 0` (`lane::reload_all` の契約) なら `me` は
+        // 必ず `Some`｡部分失敗はここでは無視して静かに続ける — `apply_poll`
+        // の doc が言うとおり poll は失敗を画面に出さない｡
+        let Some(me) = outcome.me else {
+            return Poll::Continue;
+        };
 
         // ヘッダーはサインイン中のアカウントを名指しし､いくつかの操作は
         // その id を必要とする｡ポーリングはどちらもただで解決するので､
         // 起動時の fetch が埋められなかったなら､ここで埋めてしまってよい｡
-        self.home_user_id = Some(reloaded.me.id);
-        self.home_username = Some(reloaded.me.username);
+        self.home_user_id = Some(me.id.clone());
+        self.home_username = Some(me.username);
+
+        let composed = lane::load_composite_timeline(&self.paths, &self.sources, &me.id);
+        self.item_provenance = composed.provenance;
 
         let displayed: Vec<&str> = match &self.state {
             TimelineState::Loaded(items) => items.iter().map(|item| item.id.as_str()).collect(),
             _ => Vec::new(),
         };
-        let Some(pending) = pending_after_poll(&displayed, reloaded.items) else {
+        let Some(pending) = pending_after_poll(&displayed, composed.items) else {
             // 新着無し｡notice すら出さない — このメソッドの doc を見よ｡
             return Poll::Continue;
         };

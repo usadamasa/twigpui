@@ -27,13 +27,14 @@ mod countdown;
 mod fade;
 // #188: `main` がキーバインドを登録するので､ここだけ crate へ開く｡
 pub(crate) mod image_viewer;
+mod lane;
 mod layout;
-mod source_picker;
 mod list_sync;
 mod post_row;
 mod reload_policy;
 mod render;
 mod scroll;
+mod source_picker;
 mod startup;
 mod state;
 mod sync_row;
@@ -51,8 +52,8 @@ use fade::Fade;
 use list_sync::{SyncOff, SyncStatus, SyncTrigger};
 use reload_policy::{
     CooldownTick, at_the_post_cap, cooldown_label, cooldown_tick, newly_arrived, offers_load_older,
-    preserved_scroll_target, reload_failure_outcome, reload_gate, reload_outcome_label,
-    reload_start_state,
+    partial_failure_label, preserved_scroll_target, reload_failure_outcome, reload_gate,
+    reload_outcome_label, reload_start_state,
 };
 use render::Addressable as _;
 use render::{
@@ -137,16 +138,25 @@ pub(crate) struct TimelineView {
     /// サインインしたユーザー自身の screen name (これも `/me` から)｡header に
     /// 出る — [`render::header_title`] を見よ｡
     home_username: Option<String>,
-    /// どの timeline がウィンドウを埋めるか (#161): [`Self::new`] の中で
-    /// [`source_picker::initial_source`] が決め､再代入するのは
-    /// [`Self::switch_source`] (#164) だけで､そこではウィンドウではなく
-    /// 一つの source に属する下記のものもすべてリセットする｡
+    /// どの timeline の集合がウィンドウを埋めるか (#161, #43): [`Self::new`] の
+    /// 中で [`source_picker::initial_sources`] が決め､再代入するのは
+    /// [`Self::toggle_source`] (#164, #43) だけで､そこではウィンドウではなく
+    /// この集合に属する下記のものもすべてリセットする｡非空 invariant: 最後の
+    /// 1 つは外せない｡
     ///
     /// timeline に触る経路はすべてこれを読む: [`Self::start`]､
     /// [`Self::reload`]､[`Self::load_older`]､[`Self::confirm_delete`] は
-    /// どれもこれを取り､読む cache ファイル､リクエストを使う endpoint､
-    /// delete が書き換えるファイルが同じ source になるようにしている｡
-    source: cache::TimelineSource,
+    /// どれもこれを取り､読む cache ファイル群､リクエストを使う endpoint 群､
+    /// delete が書き換えるファイル群が同じ source 集合になるようにしている｡
+    sources: Vec<cache::TimelineSource>,
+    /// 投稿ごとの出自 (#43): post id → 表示順で最初に載っていた source｡
+    /// `lane::load_composite_timeline` が合成のたびに作り直す表示専用の
+    /// 派生値で､削除の真実の情報源にはしない — [`Self::confirm_delete`] は
+    /// これを見ず `sources` を全部回す｡`sources.len() == 1` のときは
+    /// 描画側が出自を出さないので中身を読まない｡
+    item_provenance: HashMap<String, cache::TimelineSource>,
+    /// source picker のドロップダウンが開いているかどうか (#43, #192)｡
+    source_picker_open: source_picker::SourcePickerVisibility,
     /// picker が名前を挙げられる list (#164)｡cache か直近の fetch から来る｡
     /// fetch ボタンが一度押されるまでは空｡
     owned_lists: Vec<crate::x_api::ListSummary>,
@@ -494,12 +504,16 @@ pub(crate) struct TimelineView {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::auto_refresh::{Poll, Situation};
     use super::countdown;
     use super::image_viewer::ImageViewer;
+    use super::lane::provenance_label;
     use super::post_row::{MediaClickTarget, media_click_target};
     use super::reload_policy::{
-        newly_arrived, preserved_scroll_target, reload_cooldown, reload_outcome_label,
+        newly_arrived, partial_failure_label, preserved_scroll_target, reload_cooldown,
+        reload_outcome_label,
     };
     use super::render::actions::{like_action_label, repost_action_label};
     use super::render::frame::header_title;
@@ -1290,13 +1304,89 @@ mod tests {
     fn offers_load_older_when_a_next_page_token_is_present_and_the_timeline_is_loaded() {
         assert!(offers_load_older(
             Some("cursor-abc"),
-            &TimelineState::Loaded(Vec::new())
+            &TimelineState::Loaded(Vec::new()),
+            true
         ));
     }
 
     #[test]
     fn does_not_offer_load_older_without_a_next_page_token() {
-        assert!(!offers_load_older(None, &TimelineState::Loaded(Vec::new())));
+        assert!(!offers_load_older(
+            None,
+            &TimelineState::Loaded(Vec::new()),
+            true
+        ));
+    }
+
+    /// #43 の天井: 複数 source を同時にページングし合成するアルゴリズムは
+    /// 解いていない｡`next_page_token` があっても複数選択中はボタンを出さない｡
+    #[test]
+    fn does_not_offer_load_older_with_multiple_sources_selected() {
+        assert!(!offers_load_older(
+            Some("cursor-abc"),
+            &TimelineState::Loaded(Vec::new()),
+            false
+        ));
+    }
+
+    // --- 出自表示 (#43) ---
+
+    #[test]
+    fn a_single_selection_shows_no_provenance() {
+        let mut provenance = HashMap::new();
+        provenance.insert(
+            "1".to_string(),
+            crate::cache::TimelineSource::List("9".to_string()),
+        );
+        assert_eq!(provenance_label(1, &provenance, &[], "1"), None);
+    }
+
+    #[test]
+    fn a_post_found_only_in_home_shows_no_provenance() {
+        let mut provenance = HashMap::new();
+        provenance.insert("1".to_string(), crate::cache::TimelineSource::Home);
+        assert_eq!(provenance_label(2, &provenance, &[], "1"), None);
+    }
+
+    #[test]
+    fn a_list_post_names_its_list_when_multiple_sources_are_selected() {
+        let mut provenance = HashMap::new();
+        provenance.insert(
+            "1".to_string(),
+            crate::cache::TimelineSource::List("9".to_string()),
+        );
+        let owned = [crate::x_api::ListSummary {
+            id: "9".to_string(),
+            name: "rust".to_string(),
+        }];
+        assert_eq!(
+            provenance_label(2, &provenance, &owned, "1"),
+            Some("rust".to_string())
+        );
+    }
+
+    #[test]
+    fn a_list_post_not_in_the_provenance_map_shows_nothing() {
+        let provenance = HashMap::new();
+        assert_eq!(provenance_label(2, &provenance, &[], "1"), None);
+    }
+
+    // --- 部分失敗の文言 (#43) ---
+
+    #[test]
+    fn no_failures_leaves_the_outcome_label_unchanged() {
+        assert_eq!(
+            partial_failure_label("3 new posts.".to_string(), 0, 3),
+            "3 new posts."
+        );
+    }
+
+    #[test]
+    fn some_failures_name_how_many_of_how_many() {
+        assert_eq!(
+            partial_failure_label("3 new posts.".to_string(), 1, 2),
+            "3 new posts. (1 of 3 sources failed)"
+        );
     }
 
     #[test]
@@ -1322,7 +1412,7 @@ mod tests {
             .collect();
         let state = TimelineState::Loaded(full);
 
-        assert!(!offers_load_older(Some("cursor-abc"), &state));
+        assert!(!offers_load_older(Some("cursor-abc"), &state, true));
         // ...そしてボタンがただ消えるのではなく､本文が自分で説明する｡
         assert!(at_the_post_cap(&state));
     }
@@ -1336,7 +1426,8 @@ mod tests {
     fn does_not_offer_load_older_while_not_in_the_loaded_state() {
         assert!(!offers_load_older(
             Some("cursor-abc"),
-            &TimelineState::Loading
+            &TimelineState::Loading,
+            true
         ));
     }
 
@@ -3794,6 +3885,28 @@ mod tests {
         fixture
     }
 
+    /// `ids` を Home のキャッシュ済み timeline として smoke 用のディレクトリ
+    /// へ書く (`cache_list` の Home 版)｡#43 のトグルは Home を含めた集合を
+    /// 都度再合成するので､Home にもキャッシュが無いと `missing_sources` が
+    /// 埋めようとして client 無しの reload に落ち (`NotAuthenticated`)、
+    /// 複数 source を行き来するテストが成立しない｡
+    fn cache_home(ids: &[&str]) {
+        let paths = smoke_paths();
+        paths.ensure_dirs().unwrap();
+        let items: Vec<TimelineItem> = ids
+            .iter()
+            .map(|id| item_with(id, "someone", None))
+            .collect();
+        crate::cache::save_primary_timeline(
+            &paths,
+            &crate::cache::TimelineSource::Home,
+            "5685672",
+            &items,
+            0,
+        )
+        .unwrap();
+    }
+
     /// `ids` を `list_id` のキャッシュ済み timeline として smoke 用の
     /// ディレクトリへ書く｡そこへ切り替えたときに､client 無しでも描くものが
     /// あるようにするためだ｡
@@ -4012,15 +4125,24 @@ mod tests {
         );
     }
 
-    /// #164: どの区画も配置され､Home が先頭で､どれも重ならない —
-    /// `the_status_bars_segments_keep_apart` がステータスバーについて述べる
-    /// のと同じ主張を､同じ理由で述べている｡
+    /// #192, #43: 開いたメニューでは､どの項目も配置され､Home が先頭で､
+    /// どれも重ならない — segmented control (#164) が横一列だったのに
+    /// 対し､ドロップダウンは縦に積む｡`the_status_bars_segments_keep_apart`
+    /// がステータスバーについて述べるのと同じ主張を､同じ理由で述べている｡
     #[gpui::test]
-    fn the_picker_lays_out_home_and_every_list_left_to_right(cx: &mut gpui::TestAppContext) {
+    fn the_open_menu_lists_home_and_every_list_top_to_bottom(cx: &mut gpui::TestAppContext) {
         let (mut visual, _timeline) = drawn(
             cx,
             fixture_with_lists(&["1"], &[("9101", "Following mirror"), ("9102", "Rust")]),
         );
+
+        let trigger = visual
+            .debug_bounds("source-picker")
+            .expect("the trigger is always shown");
+        visual.simulate_click(trigger.center(), gpui::Modifiers::none());
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
 
         let home = visual
             .debug_bounds("tab-home")
@@ -4031,18 +4153,19 @@ mod tests {
         let second = visual
             .debug_bounds("tab-list-9102")
             .expect("the second fixture list is a segment");
-        assert!(first.left() >= home.right(), "{home:?} then {first:?}");
-        assert!(second.left() >= first.right(), "{first:?} then {second:?}");
+        assert!(first.top() >= home.bottom(), "{home:?} then {first:?}");
+        assert!(second.top() >= first.bottom(), "{first:?} then {second:?}");
 
         // 1 段上でまた #182: ツールバーの行の `gap` はタイトルを溝に密着させた
-        // ままにするので､`List@usadamasa` と読めてしまう｡
+        // ままにするので､`List@usadamasa` と読めてしまう｡トリガー自体は
+        // 固定幅なので､メニューが開いていてもツールバー行の並びは変わらない｡
         let title = visual
             .debug_bounds("header-title")
             .expect("the title is always shown");
         assert!(
-            title.left() > second.right(),
-            "the title runs into the picker: picker ends at {:?}, title starts at {:?}",
-            second.right(),
+            title.left() > trigger.right(),
+            "the title runs into the trigger: trigger ends at {:?}, title starts at {:?}",
+            trigger.right(),
             title.left()
         );
     }
@@ -4139,7 +4262,7 @@ mod tests {
         let (mut visual, timeline) = drawn(cx, fixture_with_lists(&["1"], &lists));
         cx.update(|cx| {
             timeline.update(cx, |view, cx| {
-                view.source = crate::cache::TimelineSource::List("9113".to_string());
+                view.sources = vec![crate::cache::TimelineSource::List("9113".to_string())];
                 cx.notify();
             });
         });
@@ -4148,7 +4271,7 @@ mod tests {
             let _ = window.draw(cx);
         });
 
-        if let Some(trigger) = visual.debug_bounds("source-picker-trigger") {
+        if let Some(trigger) = visual.debug_bounds("source-picker") {
             visual.simulate_click(trigger.center(), gpui::Modifiers::none());
             visual.update(|window, cx| {
                 let _ = window.draw(cx);
@@ -4175,8 +4298,9 @@ mod tests {
         );
     }
 
-    /// #164: client を持つ同じウィンドウはそれを*出す*｡picker の右､ツール
-    /// バーの内側に配置される｡
+    /// #164, team-lead の指示で #192/#43 で移動: client を持つウィンドウは
+    /// list fetch のボタンを出す — ただし今はツールバーではなく開いた
+    /// メニューの末尾 (セパレータの後)｡閉じた状態のトリガーは幅を食わない｡
     ///
     /// このボタンが実際に描かれる唯一の場所はサインイン済みの live ウィンドウ
     /// だが､それはどのテストにも構築できない — そこでここでは fixture の
@@ -4184,7 +4308,7 @@ mod tests {
     /// 送らない)､描き直す｡これが無いと､ボタンの最初の描画がユーザーの最初の
     /// 起動になる｡「ボタンが無い」と報告されたのはそういう経緯だ｡
     #[gpui::test]
-    fn a_signed_in_window_offers_the_list_fetch_beside_the_picker(cx: &mut gpui::TestAppContext) {
+    fn a_signed_in_menu_offers_the_list_fetch_after_the_segments(cx: &mut gpui::TestAppContext) {
         let (mut visual, timeline) = drawn(cx, fixture_with_lists(&["1"], &[("9101", "Rust")]));
         cx.update(|cx| {
             timeline.update(cx, |view, cx| {
@@ -4196,26 +4320,28 @@ mod tests {
             let _ = window.draw(cx);
         });
 
+        assert!(
+            visual.debug_bounds("load-lists").is_none(),
+            "the closed trigger must not offer the fetch directly"
+        );
+
+        let trigger = visual
+            .debug_bounds("source-picker")
+            .expect("the trigger is always shown");
+        visual.simulate_click(trigger.center(), gpui::Modifiers::none());
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
         let button = visual
             .debug_bounds("load-lists")
-            .expect("a window with a client and a known user offers the fetch");
+            .expect("a window with a client and a known user offers the fetch in the open menu");
         let last_segment = visual
             .debug_bounds("tab-list-9101")
             .expect("the fixture list is a segment");
         assert!(
-            button.left() >= last_segment.right(),
-            "the button sits after the picker: {last_segment:?} then {button:?}"
-        );
-        // live のウィンドウは `Load lists (1 request)@usadamasa` と表示して
-        // いた — #182 がステータスバーで見つけたのと同じ gap 0 だ｡
-        let title = visual
-            .debug_bounds("header-title")
-            .expect("the title is always shown");
-        assert!(
-            title.left() > button.right(),
-            "the title runs into the button: button ends at {:?}, title starts at {:?}",
-            button.right(),
-            title.left()
+            button.top() >= last_segment.bottom(),
+            "the button sits after the picker's segments: {last_segment:?} then {button:?}"
         );
         assert!(
             button.size.width > gpui::px(0.0) && button.size.height > gpui::px(0.0),
@@ -4223,16 +4349,18 @@ mod tests {
         );
     }
 
-    /// #164 の 2 つ目の完了条件: すでにキャッシュ済みの timeline どうしの
-    /// 切り替えでは何も送らない｡
+    /// #164 の 2 つ目の完了条件 (#43 でトグルへ拡張): すでにキャッシュ済みの
+    /// source どうしを行き来しても何も送らない｡
     ///
-    /// リストが 2 つ､どちらも前もってキャッシュしてある｡ウィンドウは一方から
-    /// もう一方へ､そしてまた戻るようにクリックされ､各クリックの後にはきっかり
-    /// キャッシュ済みの行を表示する｡client はまだ無く `last_reload_at` も
-    /// 動いていないので､何も出ていないし試みられてもいない —
-    /// `showing_new_posts_sends_nothing` が頼るのと同じ証拠だ｡
+    /// Home と list が 2 つ､すべて前もってキャッシュしてある (Home は空)｡
+    /// ウィンドウは Home を外し､list を行き来するようにトグルされ (メニューは
+    /// 項目クリックで閉じないので連続でクリックできる)､各クリックの後には
+    /// きっかりキャッシュ済みの行を表示する｡client はまだ無く
+    /// `last_reload_at` も動いていないので､何も出ていないし試みられても
+    /// いない — `showing_new_posts_sends_nothing` が頼るのと同じ証拠だ｡
     #[gpui::test]
-    fn switching_between_cached_sources_sends_nothing(cx: &mut gpui::TestAppContext) {
+    fn toggling_between_cached_sources_sends_nothing(cx: &mut gpui::TestAppContext) {
+        cache_home(&[]);
         cache_list("9111", &["12", "11"]);
         cache_list("9112", &["22", "21"]);
         let (mut visual, timeline) = drawn(
@@ -4240,10 +4368,19 @@ mod tests {
             fixture_with_lists(&["1"], &[("9111", "first"), ("9112", "second")]),
         );
 
-        for (segment, expected) in [
-            ("tab-list-9111", ["12", "11"]),
-            ("tab-list-9112", ["22", "21"]),
-            ("tab-list-9111", ["12", "11"]),
+        let trigger = visual
+            .debug_bounds("source-picker")
+            .expect("the trigger is always shown");
+        visual.simulate_click(trigger.center(), gpui::Modifiers::none());
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        for segment in [
+            "tab-list-9111", // sources: Home, 9111
+            "tab-home",      // sources: 9111
+            "tab-list-9112", // sources: 9111, 9112
+            "tab-list-9111", // sources: 9112
         ] {
             let bounds = visual
                 .debug_bounds(segment)
@@ -4253,11 +4390,11 @@ mod tests {
 
             cx.update(|cx| {
                 timeline.update(cx, |view, _cx| {
-                    assert_eq!(shown_ids(view), expected, "after clicking {segment}");
                     assert!(view.client.is_none());
                     assert!(
                         view.last_reload_at.is_none(),
-                        "a switch to a cached list must not count as a fetch"
+                        "a toggle between cached sources must not count as a fetch \
+                         (after clicking {segment})"
                     );
                 });
             });
@@ -4267,13 +4404,27 @@ mod tests {
                 let _ = window.draw(cx);
             });
         }
+
+        cx.update(|cx| {
+            timeline.update(cx, |view, _cx| {
+                assert_eq!(
+                    view.sources,
+                    vec![crate::cache::TimelineSource::List("9112".to_string())]
+                );
+                assert_eq!(shown_ids(view), ["22", "21"]);
+            });
+        });
     }
 
     /// #164: クリックは区画の上に落ち､切り替えは前の取得元に属していたものを
     /// リセットする — ここでは poll のバッファで､そうしなければ古いリストの
     /// post を新しいリストに被せて出してしまう｡
+    /// #43: 区画は「切り替える」ではなく「トグルする」。list を足してから
+    /// Home を外し、結局は #164 が確かめていたのと同じ単一選択の終着点
+    /// (list だけ) へたどり着くことを確認する — メニューは項目クリックで
+    /// 閉じないので (team-lead の指示)、2 回続けてクリックできる。
     #[gpui::test]
-    fn clicking_a_segment_switches_the_source_and_drops_the_old_buffer(
+    fn toggling_segments_changes_the_source_and_drops_the_old_buffer(
         cx: &mut gpui::TestAppContext,
     ) {
         cache_list("9121", &["32", "31"]);
@@ -4283,22 +4434,39 @@ mod tests {
 
         cx.update(|cx| {
             timeline.update(cx, |view, _cx| {
-                assert_eq!(view.source, crate::cache::TimelineSource::Home);
+                assert_eq!(view.sources, vec![crate::cache::TimelineSource::Home]);
                 assert!(view.pending.is_some(), "the fixture's buffer is waiting");
             });
         });
 
-        let segment = visual
+        let trigger = visual
+            .debug_bounds("source-picker")
+            .expect("the trigger is always shown");
+        visual.simulate_click(trigger.center(), gpui::Modifiers::none());
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let list_item = visual
             .debug_bounds("tab-list-9121")
             .expect("the segment has to be laid out before a click can reach it");
-        visual.simulate_click(segment.center(), gpui::Modifiers::none());
+        visual.simulate_click(list_item.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let home_item = visual
+            .debug_bounds("tab-home")
+            .expect("home stays addressable while the menu is open");
+        visual.simulate_click(home_item.center(), gpui::Modifiers::none());
         cx.run_until_parked();
 
         cx.update(|cx| {
             timeline.update(cx, |view, _cx| {
                 assert_eq!(
-                    view.source,
-                    crate::cache::TimelineSource::List("9121".to_string())
+                    view.sources,
+                    vec![crate::cache::TimelineSource::List("9121".to_string())]
                 );
                 assert_eq!(shown_ids(view), ["32", "31"]);
                 assert!(
@@ -4306,6 +4474,52 @@ mod tests {
                     "a buffer polled against Home must not be offered over a list"
                 );
                 assert!(view.next_page_token.is_none());
+            });
+        });
+    }
+
+    /// opus-advisor A-3 (ブロッカー): source を on/off するトグルは
+    /// auto-refresh のループを再起動する｡ループは開始時点の `sources` を
+    /// capture するので､再起動しないと off にした source を poll し続け､
+    /// #43 の完了条件「オフのソースが API リクエストを消費しない」に
+    /// 違反する｡ここでは「トグル後もループが生きている (`auto_refresh` が
+    /// `Some`)」ことまでを押さえる — 具体的にどの source を poll するかは
+    /// `apply_poll`/`lane::reload_all` の担当で、そちらは別のユニット
+    /// テストで押さえてある｡
+    #[gpui::test]
+    fn toggling_a_source_restarts_the_auto_refresh_loop(cx: &mut gpui::TestAppContext) {
+        let (mut visual, timeline) = drawn(cx, fixture_with_lists(&["1"], &[("9161", "Rust")]));
+        cx.update(|cx| {
+            timeline.update(cx, |view, cx| {
+                view.client = Some(crate::x_api::XClient::new("token".to_string()));
+                view.config.auto_refresh = true;
+                cx.notify();
+            });
+        });
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let trigger = visual
+            .debug_bounds("source-picker")
+            .expect("the trigger is always shown");
+        visual.simulate_click(trigger.center(), gpui::Modifiers::none());
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let list_item = visual
+            .debug_bounds("tab-list-9161")
+            .expect("the segment has to be laid out before a click can reach it");
+        visual.simulate_click(list_item.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+
+        cx.update(|cx| {
+            timeline.update(cx, |view, _cx| {
+                assert!(
+                    view.auto_refresh.is_some(),
+                    "toggling a source must restart the auto-refresh loop"
+                );
             });
         });
     }
@@ -4351,6 +4565,14 @@ mod tests {
             });
         });
 
+        let trigger = visual
+            .debug_bounds("source-picker")
+            .expect("the trigger is always shown");
+        visual.simulate_click(trigger.center(), gpui::Modifiers::none());
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
         let segment = visual
             .debug_bounds("tab-list-9131")
             .expect("the segment has to be laid out before a click can reach it");
@@ -4359,10 +4581,13 @@ mod tests {
 
         let remembered = super::source_picker::load_selection(&paths.selection_file());
         assert_eq!(
-            remembered.selected,
-            Some(super::source_picker::Selection::List {
-                id: "9131".to_string()
-            })
+            remembered.active,
+            vec![
+                super::source_picker::Selection::Home,
+                super::source_picker::Selection::List {
+                    id: "9131".to_string()
+                }
+            ]
         );
         std::fs::remove_dir_all(&home).unwrap();
     }
@@ -4378,6 +4603,14 @@ mod tests {
         let _ = std::fs::remove_file(&selection_file);
         let (mut visual, timeline) = drawn(cx, fixture_with_lists(&["1"], &[("9151", "Rust")]));
 
+        let trigger = visual
+            .debug_bounds("source-picker")
+            .expect("the trigger is always shown");
+        visual.simulate_click(trigger.center(), gpui::Modifiers::none());
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
         let segment = visual
             .debug_bounds("tab-list-9151")
             .expect("the segment has to be laid out before a click can reach it");
@@ -4386,7 +4619,10 @@ mod tests {
 
         cx.update(|cx| {
             timeline.update(cx, |view, _cx| {
-                assert_eq!(shown_ids(view), ["51"], "the switch itself still happens");
+                assert!(
+                    shown_ids(view).iter().any(|id| id == "51"),
+                    "the toggle itself still happens"
+                );
             });
         });
         assert!(
@@ -4399,9 +4635,17 @@ mod tests {
     /// #164: すでに持ち上がっているセグメントをクリックしても何も起きない —
     /// 後の timeline は､単に読み込まれたままなのではなく同一だ｡
     #[gpui::test]
-    fn clicking_the_showing_segment_changes_nothing(cx: &mut gpui::TestAppContext) {
+    fn clicking_the_only_showing_segment_changes_nothing(cx: &mut gpui::TestAppContext) {
         let (mut visual, timeline) =
             drawn(cx, fixture_with_lists(&["2", "1"], &[("9141", "Rust")]));
+
+        let trigger = visual
+            .debug_bounds("source-picker")
+            .expect("the trigger is always shown");
+        visual.simulate_click(trigger.center(), gpui::Modifiers::none());
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
 
         let home = visual
             .debug_bounds("tab-home")
@@ -4411,7 +4655,8 @@ mod tests {
 
         cx.update(|cx| {
             timeline.update(cx, |view, _cx| {
-                assert_eq!(view.source, crate::cache::TimelineSource::Home);
+                // 非空 invariant: 唯一の source は外せない｡
+                assert_eq!(view.sources, vec![crate::cache::TimelineSource::Home]);
                 assert_eq!(shown_ids(view), ["2", "1"]);
             });
         });

@@ -3,6 +3,7 @@
 
 // 列挙ではなく glob にしているのは [`crate::ui::render`] と
 // [`crate::ui::auto_refresh`] に合わせたもの｡
+use crate::ui::lane;
 use crate::ui::*;
 
 impl TimelineView {
@@ -157,6 +158,13 @@ impl TimelineView {
     ///
     /// 失敗した削除は API 自身のメッセージを添えて行をその場に残す｡それ
     /// が正直な結末だ — post はまだ存在している｡
+    /// #43: 削除は `item_provenance` (出自の表示専用 map) を引かない —
+    /// 複数 list に載っている post を最初の 1 つだけ消すと､載っていない
+    /// もう片方のキャッシュに残ったままになり､次の再合成で復活する
+    /// (#72 が名指しで潰した失敗と同じ形｡opus-advisor A-1)｡`sources` を
+    /// 全部回して `cache::forget_post` を呼ぶ — キャッシュファイルが
+    /// 無い source にも post が入っていない source にも安全な no-op
+    /// なので (同関数の doc を見よ)､全部回すのが最短かつ正しい｡
     pub(in crate::ui) fn confirm_delete(&mut self, post_id: String, cx: &mut Context<'_, Self>) {
         let Some(client) = self.client.clone() else {
             return;
@@ -164,9 +172,7 @@ impl TimelineView {
         let Some(user_id) = self.home_user_id.clone() else {
             return;
         };
-        // #161: 削除がどのキャッシュファイルから消さねばならないかは､
-        // ウィンドウが描画しているものによる｡
-        let source = self.source.clone();
+        let sources = self.sources.clone();
 
         self.pending_delete = None;
         cx.notify();
@@ -181,16 +187,23 @@ impl TimelineView {
                     client.delete_post(&paths, &request_id, oauth::unix_now())?;
                     // X が削除を認めてからにする: 先にローカルで忘れると
                     // まだ存在する post を隠すことになる｡
-                    cache::forget_post(&paths, &source, &user_id, &request_id, oauth::unix_now())
+                    lane::forget_post_everywhere(
+                        &paths,
+                        &sources,
+                        &user_id,
+                        &request_id,
+                        oauth::unix_now(),
+                    )
                 })
                 .await;
 
             let _ = this.update(cx, |this, cx| {
                 this.refresh_usage(cx);
                 match result {
-                    Ok(remaining) => {
+                    Ok(composed) => {
                         this.delete_failures.remove(&post_id);
-                        this.state = TimelineState::Loaded(remaining);
+                        this.item_provenance = composed.provenance;
+                        this.state = TimelineState::Loaded(composed.items);
                         // #21: 削除より前に取られた buffer は削除された
                         // post をまだ持っている｡後から適用すると画面へ
                         // 戻してしまう — #72 がキャッシュファイルを書き

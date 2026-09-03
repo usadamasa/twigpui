@@ -4,6 +4,7 @@
 // 列挙ではなく glob にしているのは [`crate::ui::render`] と
 // [`crate::ui::auto_refresh`] に合わせたもの｡`ui` が import しているものの
 // ほとんどに手を伸ばす｡
+use crate::ui::lane;
 use crate::ui::*;
 
 impl TimelineView {
@@ -11,15 +12,21 @@ impl TimelineView {
     /// れば refresh し､無ければ bearer token) を解決し､さらに #9 以降は
     /// 常に reload するのではなくローカルキャッシュからそのまま描画する｡
     /// キャッシュに当たれば起動は API リクエストを一切使わない; 外れたら
-    /// [`Self::reload`] へ落ち､そちらは使う｡ディスクに触れ､token の
+    /// [`Self::reload_sources`] へ落ち､そちらは使う｡ディスクに触れ､token の
     /// refresh やキャッシュミスではネットワークにも触れるので background
     /// executor で動かす｡
+    ///
+    /// #43: `cache::startup_primary` の all-or-nothing (`/me` と *その 1
+    /// source* のキャッシュが両方揃わないと `None`) は N ソースにそのまま
+    /// 使えない｡代わりに `/me` だけ解決し､`update` クロージャ側でキャッシュ
+    /// のある source だけ合成して即座に描き､欠けている source だけを
+    /// [`Self::reload_sources`] へ回す (§3.5 の「on にする」規則を起動時にも
+    /// 適用する)｡
     pub(in crate::ui) fn start(&mut self, cx: &mut Context<'_, Self>) {
         self.state = TimelineState::Loading;
 
         let config = self.config.clone();
         let paths = self.paths.clone();
-        let source = self.source.clone();
 
         self.fetch = Some(cx.spawn(async move |this, cx| {
             let result = cx
@@ -35,16 +42,10 @@ impl TimelineView {
                     let Some(credential) = resolution.credential else {
                         return anyhow::Ok(StartOutcome::NotAuthenticated { session_notice });
                     };
-                    // #161: どの timeline かは `config.list_id` が決め､
-                    // 構築時に `self.source` へ解決される｡#33 は分岐を
-                    // まるごと消していた (それを決めていた唯一のもの､
-                    // app-only の bearer token が無くなったため); #157 が
-                    // 一つ戻した｡home timeline が follow 先の post を運ば
-                    // なくなり､それを読む手段が List になったからだ｡
-                    let cached = cache::startup_primary(&paths, &source, oauth::unix_now())?;
+                    let me = cache::cached_me(&paths, oauth::unix_now())?;
                     anyhow::Ok(StartOutcome::Home {
                         credential,
-                        cached,
+                        me,
                         session_notice,
                     })
                 })
@@ -72,7 +73,7 @@ impl TimelineView {
                     }
                     Ok(StartOutcome::Home {
                         credential,
-                        cached,
+                        me,
                         session_notice,
                     }) => {
                         // credential が解決できた上での demotion (bearer
@@ -89,18 +90,32 @@ impl TimelineView {
                         // 条件にし､借りるからだ; 下の fetch より前に置く｡
                         // どちらにせよ依存していないからだ｡
                         this.start_sync(SyncTrigger::Scheduled, cx);
-                        match cached {
-                            Some((me, items)) => {
-                                this.home_user_id = Some(me.id);
+                        match me {
+                            Some(me) => {
+                                this.home_user_id = Some(me.id.clone());
                                 this.home_username = Some(me.username);
-                                this.state = TimelineState::Loaded(items);
+                                let composed = lane::load_composite_timeline(
+                                    &this.paths,
+                                    &this.sources,
+                                    &me.id,
+                                );
+                                this.item_provenance = composed.provenance;
+                                this.state = TimelineState::Loaded(composed.items);
                                 cx.notify();
+                                // #43: キャッシュが無い source だけ埋める｡
+                                // 1 つも欠けていなければ reload は起きない｡
+                                let missing =
+                                    lane::missing_sources(&this.paths, &this.sources, &me.id);
+                                if !missing.is_empty() {
+                                    this.reload_sources(missing, ReloadTrigger::Polling, cx);
+                                }
                             }
-                            // 上の `SingleUser` と同じ理由｡
+                            // `/me` が未解決なら合成のしようが無いので通常の
+                            // reload へ落ちる — 上の `Some` 分岐と同じ理由｡
                             None => this.reload(ReloadTrigger::Polling, cx),
                         }
-                        // #21: `cached` の match の後に置く｡決して前では
-                        // ない｡miss の arm は `reload` を呼び､それが
+                        // #21: `me` の match の後に置く｡決して前ではない｡
+                        // miss の arm は reload を呼び､それが
                         // `last_reload_at` — 最初の poll を測る起点 — を
                         // 立てる｡先に始めるとループはウィンドウが開いた
                         // 時刻を起点にしてしまい､着いたばかりの fetch の
@@ -128,12 +143,22 @@ impl TimelineView {
     }
 
     /// reload は毎回 API のクレジットを使うので､明示的な操作でしか走らな
-    /// い｡client 無しで呼ばれたら何もしない ([`TimelineState::NotAuthenticated`]
-    /// へ落ちる) — その状態で "Reload" ボタンは出ないが､呼び出し側が
-    /// 正しくやったと決めてかからずここでも守る｡素の fetch ではなく
-    /// [`cache::reload`] を通す: user id がキャッシュされていればリクエスト
-    /// は 2 回でなく 1 回になり､結果はローカルキャッシュを丸ごと置き換え
-    /// るのではなくそこへ merge (して永続化) される｡
+    /// い｡選択中の全 source を対象にする [`Self::reload_sources`] の薄い
+    /// ラッパー — 呼び出し側のほとんどはこれで十分で､対象を選びたいのは
+    /// [`Self::start`] の欠損補充だけだ｡
+    pub(in crate::ui) fn reload(&mut self, trigger: ReloadTrigger, cx: &mut Context<'_, Self>) {
+        let sources = self.sources.clone();
+        self.reload_sources(sources, trigger, cx);
+    }
+
+    /// `sources` を対象に reload の credit を使う (#43)｡client 無しで
+    /// 呼ばれたら何もしない ([`TimelineState::NotAuthenticated`] へ落ちる)
+    /// — その状態で "Reload" ボタンは出ないが､呼び出し側が正しくやったと
+    /// 決めてかからずここでも守る｡素の fetch ではなく [`lane::reload_all`]
+    /// (内部で [`cache::reload_primary`]) を通す: user id がキャッシュ
+    /// されていればリクエストは 2 回でなく 1 回になり､結果はローカル
+    /// キャッシュを丸ごと置き換えるのではなくそこへ merge (して永続化)
+    /// される｡
     ///
     /// さらに､何かを spawn する前に `config.min_fetch_interval_seconds`
     /// (#10) を課す｡ただし `trigger` が [`ReloadTrigger::UserAction`] (#57)
@@ -150,7 +175,21 @@ impl TimelineView {
     /// [`ReloadNotice`] の doc を見よ｡まだ何も読み込めていない reload は
     /// `TimelineState::Loading`/`RateLimited`/`Failed` へ落ちる｡その場合
     /// body が描けるものは他に無いからだ｡
-    pub(in crate::ui) fn reload(&mut self, trigger: ReloadTrigger, cx: &mut Context<'_, Self>) {
+    ///
+    /// 完了ハンドラは `sources` (捕獲した集合) ではなく `this.sources`
+    /// (完了時点の集合) で再合成する: 直列 fetch の途中でユーザーが
+    /// source を off にしたら､もう表示しないはずの source の post を
+    /// 着地させないため (opus-advisor A-4)｡`next_page_token` は
+    /// `this.sources.len() == 1` のときだけ書く — 複数選択中は常に `None`
+    /// にする不変条件 (§3.6, opus-advisor B-6)｡部分失敗
+    /// ([`lane::reload_all`] のドキュメントを見よ) は取れた分を合成して
+    /// 1 回だけ画面を更新し､`reload_notice` に失敗数を添える｡
+    pub(in crate::ui) fn reload_sources(
+        &mut self,
+        sources: Vec<cache::TimelineSource>,
+        trigger: ReloadTrigger,
+        cx: &mut Context<'_, Self>,
+    ) {
         let Some(client) = self.client.clone() else {
             self.state = TimelineState::NotAuthenticated;
             cx.notify();
@@ -191,16 +230,12 @@ impl TimelineView {
 
         let paths = self.paths.clone();
         let max_results = self.config.max_results;
-        let source = self.source.clone();
 
-        // #161: どの endpoint にリクエストを使い､結果がどのキャッシュ
-        // ファイルへ落ちるかは `source` が決める｡single-user の endpoint
-        // とそのキャッシュは､`--fetch-only` のために対象外のままにする｡
         self.fetch = Some(cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    cache::reload_primary(&paths, &client, &source, max_results, oauth::unix_now())
+                    lane::reload_all(&paths, &client, &sources, max_results, oauth::unix_now())
                 })
                 .await;
 
@@ -210,23 +245,37 @@ impl TimelineView {
                 this.refresh_liked_ids(cx);
                 this.reloading = false;
                 match result {
-                    Ok(reloaded) => {
-                        this.home_user_id = Some(reloaded.me.id);
-                        this.home_username = Some(reloaded.me.username);
-                        this.next_page_token = reloaded.next_token;
-                        this.keep_the_reader_in_place(&reloaded.items);
-                        // #141: scroll の目標と同じ理由で､`state` が
-                        // 置き換わる前に求める — 両方の一覧が要る｡
-                        let outcome = this.reload_outcome(&reloaded.items);
-                        this.state = TimelineState::Loaded(reloaded.items);
-                        this.reload_notice = Some(ReloadNotice::Outcome(outcome.into()));
-                        // 上の single-user の分岐と同じ理由｡
-                        this.cooldown_ticker = None;
-                        // #21: この fetch は poll が溜めたものより厳密に
-                        // 新しく､新しい post をすでに画面へ出している —
-                        // だから pill は､その背後に見えている post を
-                        // 差し出すことになってしまう｡
-                        this.clear_pending();
+                    Ok(outcome) => {
+                        // `successes > 0` (`lane::reload_all` の契約) なら
+                        // `me` は必ず `Some`｡
+                        if let Some(me) = outcome.me {
+                            this.home_user_id = Some(me.id.clone());
+                            this.home_username = Some(me.username);
+                            this.next_page_token = if this.sources.len() == 1 {
+                                outcome.next_token
+                            } else {
+                                None
+                            };
+                            let composed =
+                                lane::load_composite_timeline(&this.paths, &this.sources, &me.id);
+                            this.keep_the_reader_in_place(&composed.items);
+                            // #141: scroll の目標と同じ理由で､`state` が
+                            // 置き換わる前に求める — 両方の一覧が要る｡
+                            let label = this.reload_outcome(&composed.items);
+                            this.state = TimelineState::Loaded(composed.items);
+                            this.item_provenance = composed.provenance;
+                            this.reload_notice = Some(ReloadNotice::Outcome(
+                                partial_failure_label(label, outcome.failures, outcome.successes)
+                                    .into(),
+                            ));
+                            // 上の single-user の分岐と同じ理由｡
+                            this.cooldown_ticker = None;
+                            // #21: この fetch は poll が溜めたものより厳密に
+                            // 新しく､新しい post をすでに画面へ出している —
+                            // だから pill は､その背後に見えている post を
+                            // 差し出すことになってしまう｡
+                            this.clear_pending();
+                        }
                     }
                     Err(error) => this.apply_reload_failure(&error, cx),
                 }
@@ -382,13 +431,20 @@ impl TimelineView {
     /// ではない (行そのものは busy/disabled の別スタイルを持たず､この
     /// 修正の前から変わっていない)｡
     pub(in crate::ui) fn load_older(&mut self, cx: &mut Context<'_, Self>) {
-        let (Some(client), Some(user_id), Some(token)) = (
+        // #43: 複数選択中はそもそも `next_page_token` が常に `None`
+        // (`reload_sources` を見よ) なので､下の `let else` で自然に
+        // 何もしない｡`[TimelineSource; 1]` を明示的に要求はしないが､
+        // 単一選択という前提は `offers_load_older` (`sources.len() == 1`
+        // を条件に足した) がボタンの表示で守っている｡
+        let (Some(client), Some(user_id), Some(token), [source]) = (
             self.client.clone(),
             self.home_user_id.clone(),
             self.next_page_token.clone(),
+            self.sources.as_slice(),
         ) else {
             return;
         };
+        let source = source.clone();
 
         self.reload_notice = None;
         // `reload` の判定を通った分岐と同じ理由: fetch がこれから出て
@@ -400,7 +456,6 @@ impl TimelineView {
 
         let paths = self.paths.clone();
         let max_results = self.config.max_results;
-        let source = self.source.clone();
 
         self.fetch = Some(cx.spawn(async move |this, cx| {
             let result = cx

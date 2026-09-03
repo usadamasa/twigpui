@@ -169,25 +169,12 @@ pub(in crate::ui) fn header_title_element(
         .child(header_title(home_username))
 }
 
-/// ツールバーの timeline 切り替えの trough (#95)｡macOS の segmented
-/// control の形をしている: [`tab_segment`] が収まる一本のトラックがあり､
-/// 選択中のものだけがウィンドウ自身の背景色でそこから持ち上がる｡
-///
-/// segment と分けた (かつてはラベルのスライスを取る一つの関数だった) のは､
-/// #164 の segment が各々クリックを担い､クリックハンドラには view の `cx`
-/// が要るからだ — それは `ui::list_picker` が持つものであって､この
-/// ファイルのものではない｡ここに残るのは control の見た目だけである｡
-pub(in crate::ui) fn tab_trough(theme: Theme) -> Div {
-    div()
-        .flex()
-        .items_center()
-        .p(px(2.0))
-        .rounded(theme::RADIUS_CONTROL)
-        .bg(rgb(theme.control_trough))
-        .text_size(theme::TEXT_META)
-}
-
-/// 切り替えの segment 一つ — [`tab_trough`] を見よ｡
+/// pull-down のトリガー (#192, #43) とメニュー項目に共通の chip｡かつては
+/// segmented control の 1 区画で `tab_trough` という一本のトラックへ並んで
+/// いたが (#164)､#192/#43 でドロップダウンへ置き換わり trough は不要に
+/// なった｡`selected` は今もトリガー自身の常時「持ち上がった」見た目
+/// (`source_picker.rs::source_picker_trigger`) と､メニュー項目のチェック
+/// 済み表現の両方に使う｡
 pub(in crate::ui) fn tab_segment(label: &str, selected: bool, theme: Theme) -> Div {
     div()
         .px_2()

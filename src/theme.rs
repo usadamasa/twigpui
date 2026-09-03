@@ -52,6 +52,10 @@ pub(crate) const RADIUS_CONTROL: Pixels = px(6.0);
 /// 画像のサムネイル｡コントロールより 1 段きつい (#95)｡
 pub(crate) const RADIUS_THUMB: Pixels = px(5.0);
 
+/// ドロップダウンやダイアログのようなメニュー面 (#95, #43)｡コントロールより
+/// 1 段ゆるい — [`RADIUS_CONTROL`] の 6px に対して 8px。
+pub(crate) const RADIUS_MENU: Pixels = px(8.0);
+
 /// ツールバーのアイコンを描く大きさ (#95) — body ではなく meta のテキスト
 /// サイズに合わせてある｡ツールバーのアイコンは散文ではなくコントロールの
 /// ラベルだからだ｡

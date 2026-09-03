@@ -7,6 +7,7 @@
 
 use gpui::{Pixels, Size};
 
+use super::lane;
 use super::*;
 
 /// サムネイルをクリックしたときの行き先 (#188)｡
@@ -305,6 +306,16 @@ impl TimelineView {
         repost_row(&item.id, target, &state, self.theme, cx)
     }
 
+    /// `item` の出自ラベル (#43)｡[`lane::provenance_label`] の薄いラッパー｡
+    fn post_provenance(&self, item: &TimelineItem) -> Option<String> {
+        lane::provenance_label(
+            self.sources.len(),
+            &self.item_provenance,
+            &self.owned_lists,
+            &item.id,
+        )
+    }
+
     pub(super) fn post_row(&self, item: &TimelineItem, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = self.theme;
         let byline = byline(&item.author_username);
@@ -370,6 +381,20 @@ impl TimelineView {
                             div()
                                 .text_color(rgb(theme.text_tertiary))
                                 .child(format!("· {}", reply_banner_label(replied_to))),
+                        )
+                    })
+                    // #43: 合成レーンでだけ出自を出す (team-lead の指示)。
+                    // list 由来の post だけに付き、Home にしか無い post には
+                    // 付かない。`item_provenance` は表示専用の派生値で、
+                    // 複数 list に載っている post なら表示順で最初の 1 つ
+                    // だけを見せる。
+                    .when_some(self.post_provenance(item), |line, name| {
+                        line.child(
+                            div()
+                                .max_w(px(120.0))
+                                .truncate()
+                                .text_color(rgb(theme.text_tertiary))
+                                .child(format!("· {name}")),
                         )
                     }),
             )

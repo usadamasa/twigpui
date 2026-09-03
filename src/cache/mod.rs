@@ -309,30 +309,6 @@ pub(crate) fn save_primary_timeline(
     save_timeline_file(&source.cache_file(paths, user_id), items, now)
 }
 
-/// ウィンドウの timeline をキャッシュから直接描画する: `Some` になるのは
-/// `/me` と `source` 自身の timeline がどちらもキャッシュ済みで､かつ `/me` が
-/// まだ TTL の内側にあるときだけだ — [`startup`] を写したもので､対象は
-/// ウィンドウの主ソースになっている (#11｡#161 で list へ広げた)｡解決した
-/// [`MeEntry`] を items と一緒に返すので､呼び出し側 (`ui.rs`) はキャッシュ
-/// だけの描画でもヘッダと "Load older" に要る id を埋められる｡
-///
-/// list モードでも `/me` は要る｡list の request がそれを必要としなくてもだ:
-/// ヘッダはサインイン中のアカウントを名指しするし､list の行から like や
-/// repost をすると､サインイン中の id をパスに取る endpoint を呼ぶ｡
-pub(crate) fn startup_primary(
-    paths: &Paths,
-    source: &TimelineSource,
-    now: i64,
-) -> Result<Option<(MeEntry, Vec<TimelineItem>)>> {
-    let Some(me) = cached_me(paths, now)? else {
-        return Ok(None);
-    };
-    let Some(items) = load_primary_timeline(paths, source, &me.id)? else {
-        return Ok(None);
-    };
-    Ok(Some((me, items)))
-}
-
 /// ディスク上のキャッシュ済み timeline から `post_id` を落とし､残ったものを
 /// 返す (#72)｡
 ///
@@ -494,9 +470,9 @@ pub(crate) fn reload_primary(
 /// (#11 の "Load older"): キャッシュ済みのものの後ろへ足し — [`Side::Behind`]
 /// であって決して [`Side::Ahead`] ではない — 合わせた結果を永続化し､次の
 /// `meta.next_token` と一緒に返す (これ以上後ろが無ければ `None`)｡`user_id` を
-/// 渡すのは呼び出し側の責任だ — `ui.rs` は直近の [`reload_primary`] か
-/// [`startup_primary`] のものを持ち回している｡既に表示している中身をさらに
-/// 後ろへ辿るためだけに `/me` を解決し直す理由はこの関数に無いからだ｡
+/// 渡すのは呼び出し側の責任だ — `ui.rs` は `home_user_id` に持ち回っている
+/// 解決済みの id をそのまま渡す｡既に表示している中身をさらに後ろへ辿る
+/// ためだけに `/me` を解決し直す理由はこの関数に無いからだ｡
 ///
 /// list を後ろへ辿るのも同じように動く: `pagination_token` は
 /// `GET /2/lists/:id/tweets` が home timeline と共有する唯一のパラメータで､
@@ -1529,94 +1505,6 @@ mod tests {
         assert_eq!(
             ids(&load_primary_timeline(&paths, &list, "me").unwrap().unwrap()),
             ["2"]
-        );
-
-        std::fs::remove_dir_all(&root).unwrap();
-    }
-
-    #[test]
-    fn startup_primary_renders_a_list_from_cache() {
-        let root = temp_root("startup-list");
-        let paths = test_paths(&root);
-        paths.ensure_dirs().unwrap();
-
-        let list = TimelineSource::List("2091351590695588200".to_string());
-        save_me(&paths, "2244994945", "alice", 0).unwrap();
-        save_primary_timeline(&paths, &list, "2244994945", &[item("1")], 0).unwrap();
-
-        let (me, items) = startup_primary(&paths, &list, 0).unwrap().unwrap();
-        assert_eq!(me.username, "alice");
-        assert_eq!(ids(&items), ["1"]);
-
-        std::fs::remove_dir_all(&root).unwrap();
-    }
-
-    #[test]
-    fn startup_primary_is_none_for_a_list_with_only_the_home_cache_on_file() {
-        // home timeline で動いてきたインストールに list を設定したとき､
-        // home timeline の post が list の名前の下に描かれてはならない｡
-        let root = temp_root("startup-list-miss");
-        let paths = test_paths(&root);
-        paths.ensure_dirs().unwrap();
-
-        save_me(&paths, "2244994945", "alice", 0).unwrap();
-        save_primary_timeline(&paths, &TimelineSource::Home, "2244994945", &[item("1")], 0)
-            .unwrap();
-
-        let list = TimelineSource::List("2091351590695588200".to_string());
-        assert_eq!(startup_primary(&paths, &list, 0).unwrap(), None);
-
-        std::fs::remove_dir_all(&root).unwrap();
-    }
-
-    // --- startup_primary ---
-
-    #[test]
-    fn startup_primary_renders_from_cache_when_both_me_and_the_timeline_are_cached() {
-        let root = temp_root("startup-home-hit");
-        let paths = test_paths(&root);
-        paths.ensure_dirs().unwrap();
-
-        save_me(&paths, "2244994945", "alice", 0).unwrap();
-        let items = vec![item("2"), item("1")];
-        save_primary_timeline(&paths, &TimelineSource::Home, "2244994945", &items, 0).unwrap();
-
-        let rendered = startup_primary(&paths, &TimelineSource::Home, 0).unwrap();
-        let (me, rendered_items) = rendered.unwrap();
-        assert_eq!(me.id, "2244994945");
-        assert_eq!(me.username, "alice");
-        assert_eq!(rendered_items, items);
-
-        std::fs::remove_dir_all(&root).unwrap();
-    }
-
-    #[test]
-    fn startup_primary_is_none_when_me_is_not_cached() {
-        let root = temp_root("startup-home-no-me");
-        let paths = test_paths(&root);
-        paths.ensure_dirs().unwrap();
-
-        assert!(
-            startup_primary(&paths, &TimelineSource::Home, 0)
-                .unwrap()
-                .is_none()
-        );
-
-        std::fs::remove_dir_all(&root).unwrap();
-    }
-
-    #[test]
-    fn startup_primary_is_none_when_me_is_cached_but_the_timeline_is_not() {
-        let root = temp_root("startup-home-no-timeline");
-        let paths = test_paths(&root);
-        paths.ensure_dirs().unwrap();
-
-        save_me(&paths, "2244994945", "alice", 0).unwrap();
-
-        assert!(
-            startup_primary(&paths, &TimelineSource::Home, 0)
-                .unwrap()
-                .is_none()
         );
 
         std::fs::remove_dir_all(&root).unwrap();
