@@ -327,8 +327,12 @@ impl TimelineView {
         let body = div()
             .flex()
             .flex_col()
-            .flex_1()
-            // #140: `flex_1` が取るのは *余った* 幅であって､中身より狭く
+            // `flex_1` ではなく `flex_grow` (#43): basis 0 だと一覧がウィンドウ
+            // より短いとき､折り返す行の高さが列の余りまで伸びる (4 行の
+            // fixture で実測 180px の空白)｡basis auto なら高さは中身で決まる｡
+            // `ui` の `a_wrapping_row_keeps_its_height_when_the_lane_is_short`｡
+            .flex_grow()
+            // #140: `flex_grow` が取るのは *余った* 幅であって､中身より狭く
             // 縮むことは許さない｡flex の子の `min-width` の既定が `auto`
             // だからだ｡そのため長い文が列を行より広く押し広げ､はみ出しは
             // 切り取られていた｡代わりに折り返させるのが `min_w_0` である｡
@@ -431,6 +435,7 @@ impl TimelineView {
             });
 
         div()
+            .addressable(format!("post-row-{}", item.id))
             .flex()
             .flex_col()
             .child(

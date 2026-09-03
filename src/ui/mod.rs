@@ -4215,6 +4215,47 @@ mod tests {
         assert!(visual.debug_bounds("tab-list-9101").is_some());
     }
 
+    /// `fixtures/lane.json` の撮影で見つかった不具合 (#43): 一覧がウィンドウ
+    /// より短いとき､本文が折り返す行の下に約 180px の空白が挟まった｡
+    /// 行の高さは中身だけで決まるべきで､一覧の残りの長さに依存してはいけない｡
+    /// 同じ post を､短い一覧 (4 行) と長い一覧 (24 行) で描いて高さを比べる｡
+    #[gpui::test]
+    fn a_wrapping_row_keeps_its_height_when_the_lane_is_short(cx: &mut gpui::TestAppContext) {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/lane.json");
+        let short = crate::fixture::load(&path).expect("fixtures/lane.json must load");
+        let mut long = short.clone();
+        let filler = long.items[0].clone();
+        for n in 0..20 {
+            let mut item = filler.clone();
+            item.id = format!("92000000000000001{n:02}");
+            long.items.push(item);
+        }
+
+        let height_in = |cx: &mut gpui::TestAppContext, fixture: Fixture| {
+            let (mut visual, _timeline) = drawn(cx, fixture);
+            // 実機の既定ウィンドウ幅 (560px)｡gpui テストの既定幅では本文が
+            // 折り返さず再現しない｡
+            visual.simulate_resize(gpui::size(gpui::px(560.), gpui::px(852.)));
+            visual.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            visual
+                .debug_bounds("post-row-9200000000000000002")
+                .expect("the wrapping row is laid out")
+                .size
+                .height
+        };
+        let in_short = height_in(cx, short);
+        let in_long = height_in(cx, long);
+        // `Pixels` の四則は `arithmetic_side_effects` に弾かれるので f32 で｡
+        // 半ピクセルの丸めは許し､180px の空白だけを捕まえる｡
+        let gap = (f32::from(in_short) - f32::from(in_long)).abs();
+        assert!(
+            gap < 1.0,
+            "the row is {in_short:?} in a short lane but {in_long:?} in a long one"
+        );
+    }
+
     /// 実測した失敗 (2026-08-24): 560px でリストのタブが 11 個あるウィンドウは､
     /// ツールバーの "Sign in with X" を右端の外へ押し出したうえ､本文の助言は
     /// それをクリックしろというものだけだった｡X が更新を拒否したばかりの

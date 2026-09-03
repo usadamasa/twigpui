@@ -10,7 +10,7 @@
     },
     {
       "id": "9200000000000000002",
-      "text": "This post is on Home and also on the Rust list — it must appear once in the merged lane, and the byline must not show an origin (Home takes no badge).",
+      "text": "This post is on Home and also on the twigpui probe list — it must appear once in the merged lane, and the byline must not show an origin (Home takes no badge).",
       "created_at": "2026-08-22T09:45:00.000Z",
       "author_name": "Shared Post",
       "author_username": "sharedpost"
@@ -40,7 +40,7 @@
     "9100000000000000002": [
       {
         "id": "9200000000000000002",
-        "text": "This post is on Home and also on the Rust list — it must appear once in the merged lane, and the byline must not show an origin (Home takes no badge).",
+        "text": "This post is on Home and also on the twigpui probe list — it must appear once in the merged lane, and the byline must not show an origin (Home takes no badge).",
         "created_at": "2026-08-22T09:45:00.000Z",
         "author_name": "Shared Post",
         "author_username": "sharedpost"
