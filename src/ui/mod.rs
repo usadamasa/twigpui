@@ -4058,6 +4058,36 @@ mod tests {
         );
     }
 
+    /// #156, D5: Delete は他の 5 つから離して行の右端に置く｡`ml_auto` が
+    /// 外れれば delete は open のすぐ右へ戻り、この余白が消える。
+    #[gpui::test]
+    fn delete_sits_apart_at_the_row_end(cx: &mut gpui::TestAppContext) {
+        let fixture = Fixture {
+            items: vec![item_with("1", "usadamasa", None)],
+            ..fixture_with(&[], &[])
+        };
+        let (mut visual, _timeline) = drawn(cx, fixture);
+        let open = visual
+            .debug_bounds("open-1")
+            .expect("a shown post always offers Open in X");
+        let delete = visual
+            .debug_bounds("delete-1")
+            .expect("one's own post always offers Delete");
+        let gap = f32::from(delete.left()) - f32::from(open.right());
+        // `gap_4` (the row's normal inter-button gap) alone measures 16px;
+        // `ml_auto` pushing to the window's edge measures over 1000px in
+        // this test window. 50px sits well clear of both, so the assert
+        // only passes when `ml_auto` is actually doing its job.
+        assert!(
+            gap > 50.0,
+            "delete must sit apart at the row's end, not right beside open \
+             with just the ordinary gap_4: open ends at {:?}, delete starts \
+             at {:?} (gap {gap})",
+            open.right(),
+            delete.left()
+        );
+    }
+
     /// auto-refresh のループが最初の起床で写すもの (#214)｡`smoke_config` は
     /// auto-refresh を切っていて fixture のウィンドウは client を持たない
     /// ので､ループは決して始まらず､テストはこれを直接置く｡
