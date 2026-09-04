@@ -223,15 +223,26 @@ pub(crate) struct DedupBucket {
 /// `BTreeSet` なのは `HashSet` と違って serialize の順序が安定するからで､
 /// `usage.json` の diff を読みやすくする以上の意味は無い｡
 pub(crate) fn dedup(bucket: DedupBucket, ids: &[String], now: i64) -> (DedupBucket, u64) {
-    // ponytail-red(#162): まだ実装していない｡何も新規と認めない誤った
-    // stub で､RED を確認するために置いてある｡
-    let _ = ids;
+    let day = epoch_day(now);
+    let mut ids_set = if bucket.epoch_day == day {
+        bucket.ids
+    } else {
+        BTreeSet::new()
+    };
+
+    let mut billed = 0u64;
+    for id in ids {
+        if ids_set.insert(id.clone()) {
+            billed = billed.saturating_add(1);
+        }
+    }
+
     (
         DedupBucket {
-            epoch_day: epoch_day(now),
-            ids: bucket.ids,
+            epoch_day: day,
+            ids: ids_set,
         },
-        0,
+        billed,
     )
 }
 
@@ -273,9 +284,11 @@ fn load_file(paths: &Paths) -> Result<UsageFile> {
         }
     };
     let file: UsageFile = serde_json::from_str(&contents).unwrap_or_default();
-    // ponytail-red(#162): まだバージョンを見ていない｡RED を確認するための
-    // stub — 古いファイルもそのまま通してしまう誤った振る舞い｡
-    Ok(file)
+    if file.version == CURRENT_VERSION {
+        Ok(file)
+    } else {
+        Ok(UsageFile::default())
+    }
 }
 
 /// `file` を [`CURRENT_VERSION`] を刻んでディスクへ書く｡[`load_file`] の

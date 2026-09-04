@@ -56,10 +56,21 @@ impl Endpoint {
     /// ここを更新し忘れるとコンパイルが落ちる — [`Endpoint::ALL`] の doc が
     /// 同じ理由で挙げている失敗モードだ｡
     pub(crate) fn kind(self) -> ResourceKind {
-        // ponytail-red(#162): まだ対応表を実装していない｡すべて Posts を
-        // 返す誤った既定値で､id 抽出とセットで RED を確認するための stub｡
-        let _ = self;
-        ResourceKind::Posts
+        match self {
+            Self::UserLookup | Self::Following | Self::ListMembers => ResourceKind::Users,
+            Self::Me | Self::OwnedLists => ResourceKind::Owned,
+            Self::Timeline | Self::HomeTimeline | Self::ListTimeline | Self::TweetById => {
+                ResourceKind::Posts
+            }
+            Self::CreatePost
+            | Self::CreateRepost
+            | Self::DeleteRepost
+            | Self::CreateLike
+            | Self::DeleteLike
+            | Self::DeletePost
+            | Self::AddListMember
+            | Self::RemoveListMember => ResourceKind::Write,
+        }
     }
 }
 
@@ -79,9 +90,26 @@ impl Endpoint {
 /// が Users 単価で別課金されているかは未検証** — 外れていたら､ここで
 /// `includes.users` も見るよう直す｡
 pub(crate) fn extract_resource_ids(body: &str) -> Vec<String> {
-    // ponytail-red(#162): まだ抽出していない｡RED を確認するための stub｡
-    let _ = body;
-    Vec::new()
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(body) else {
+        return Vec::new();
+    };
+    let Some(data) = value.get("data") else {
+        return Vec::new();
+    };
+    match data {
+        serde_json::Value::Array(items) => items
+            .iter()
+            .filter_map(|item| item.get("id"))
+            .filter_map(serde_json::Value::as_str)
+            .map(str::to_string)
+            .collect(),
+        serde_json::Value::Object(_) => data
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .map(|id| vec![id.to_string()])
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
 }
 
 #[cfg(test)]
