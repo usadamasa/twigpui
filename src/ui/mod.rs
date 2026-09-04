@@ -4058,8 +4058,26 @@ mod tests {
         );
     }
 
-    /// #156, D5: Delete は他の 5 つから離して行の右端に置く｡`ml_auto` が
-    /// 外れれば delete は open のすぐ右へ戻り、この余白が消える。
+    /// #156: hover の塗りは padding の内側に収まり、要素の bounds を変えない
+    /// (ux-spec §1.4)｡色そのものはテストから見えないので、寸法だけ押さえる｡
+    #[gpui::test]
+    fn hovering_an_action_does_not_move_it(cx: &mut gpui::TestAppContext) {
+        let (mut visual, _timeline) = drawn(cx, fixture_with_metrics("1"));
+        let before = visual
+            .debug_bounds("like-1")
+            .expect("a shown post always offers Like");
+        visual.simulate_mouse_move(before.center(), None, gpui::Modifiers::none());
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let after = visual
+            .debug_bounds("like-1")
+            .expect("the button is still shown after hovering it");
+        assert_eq!(before, after, "hovering the button must not move it");
+    }
+
+    /// #156: Delete は他の 5 つから離して行の右端に置く (D5)｡`justify_between`
+    /// が外れれば delete は open のすぐ右へ戻り、この余白が消える。
     #[gpui::test]
     fn delete_sits_apart_at_the_row_end(cx: &mut gpui::TestAppContext) {
         let fixture = Fixture {
