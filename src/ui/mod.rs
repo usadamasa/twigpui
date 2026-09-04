@@ -4,8 +4,8 @@ use std::time::Duration;
 
 use gpui::{
     AnyElement, Context, Div, Entity, FocusHandle, Focusable as _, FontWeight, ObjectFit,
-    ScrollHandle, SharedString, Subscription, Task, Window, div, img, prelude::*, px, rgb, rgba,
-    svg,
+    ScrollHandle, SharedString, Stateful, Subscription, Task, Window, div, img, prelude::*, px,
+    rgb, rgba, svg,
 };
 use gpui_component::input::{Input, InputEvent, InputState};
 
@@ -58,13 +58,13 @@ use reload_policy::{
 use render::Addressable as _;
 use render::{
     AVATAR_SIZE, MAX_RENDERED_MEDIA, MEDIA_GAP, MediaArrangement, author_link, avatar_placeholder,
-    byline, compose_error_message, format_timestamp, header_title_element, like_row, link_row,
-    media_arrangement, media_aspect, media_badge, media_column_sizes, media_row_sizes, notice,
-    offers_delete, offers_like, offers_quote, offers_reauthorize, offers_reply, offers_repost,
-    open_post_link, quote_card, quote_row, reload_notice_banner, render_thread_chain,
-    reply_banner_label, reply_row, reply_target_label, repost_banner_label, repost_row,
-    session_notice_banner, sign_in_pill, thread_action_label, thread_toggle_row, usage_color,
-    usage_label, with_count,
+    byline, compose_error_message, format_timestamp, header_title_element, icon_button, like_row,
+    link_row, media_arrangement, media_aspect, media_badge, media_column_sizes, media_row_sizes,
+    notice, offers_delete, offers_like, offers_quote, offers_reauthorize, offers_reply,
+    offers_repost, open_post_link, quote_card, quote_row, reload_notice_banner,
+    render_thread_chain, reply_banner_label, reply_row, reply_target_label, repost_banner_label,
+    repost_row, session_notice_banner, sign_in_pill, thread_action_label, thread_toggle_row,
+    usage_color, usage_label, with_count,
 };
 use render::{RowCounts, row_counts};
 pub(crate) use startup::Startup;

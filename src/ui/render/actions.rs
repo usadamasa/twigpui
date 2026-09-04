@@ -2,8 +2,47 @@
 //! リンクの chip｡どれもクリックのために `cx` を取る｡どれを描くかは
 //! [`super::offers`] が決める｡
 
+use gpui_component::tooltip::Tooltip;
+
 use super::post::{post_permalink, profile_url};
 use crate::ui::*;
+
+/// 記号 1 つのボタン (#156)｡ツールバーのリロードと post の操作の双方が使う
+/// — 5 個コピーしない｡
+///
+/// 塗りは padding の内側に収まり､要素の bounds は hover でも押下でも
+/// 変わらない — `hover` / `active` が触るのは背景だけで､大きさではない｡
+///
+/// click handler は引数に取らない: `Option<impl Fn>` は型が書けず､呼び出し
+/// ごとにクロージャの型が違うので単相化できない｡呼び出し側が
+/// `.when(state.can_toggle(), |b| b.on_click(cx.listener(..)))` を続ける｡
+pub(in crate::ui) fn icon_button(
+    name: impl Into<SharedString>,
+    icon: &'static str,
+    color: u32,
+    tooltip: impl Into<SharedString>,
+    interactive: bool,
+    theme: Theme,
+) -> Stateful<Div> {
+    let tooltip = tooltip.into();
+    div()
+        .addressable(name)
+        .p_1()
+        .rounded(theme::RADIUS_CONTROL)
+        .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+        .child(
+            svg()
+                .path(icon)
+                .size(theme::ICON_SIZE)
+                .text_color(rgb(color)),
+        )
+        .when(interactive, |button| {
+            button
+                .cursor_pointer()
+                .hover(|style| style.bg(rgba(theme.control_hover_overlay)))
+                .active(|style| style.bg(rgba(theme.control_pressed_overlay)))
+        })
+}
 
 /// 一つの post の repost/un-repost の toggle (#15): repost していなければ
 /// "Repost"､していれば "Reposted" — どちらもクリックできる (repost は

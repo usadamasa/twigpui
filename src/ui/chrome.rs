@@ -162,22 +162,24 @@ impl TimelineView {
         });
 
         match action {
-            PrimaryAction::Reload => div()
-                .addressable("primary-action")
-                .p_1()
-                .rounded(theme::RADIUS_CONTROL)
-                .child(
-                    svg()
-                        .path(assets::RELOAD_ICON)
-                        .size(theme::ICON_SIZE)
-                        .text_color(rgb(if busy {
-                            theme.text_tertiary
-                        } else {
-                            theme.text_muted
-                        })),
-                )
-                .on_click(on_click)
-                .into_any_element(),
+            PrimaryAction::Reload => icon_button(
+                "primary-action",
+                assets::RELOAD_ICON,
+                if busy {
+                    theme.text_tertiary
+                } else {
+                    theme.text_muted
+                },
+                if busy {
+                    label.to_string()
+                } else {
+                    "Reload".to_string()
+                },
+                !busy,
+                theme,
+            )
+            .on_click(on_click)
+            .into_any_element(),
             PrimaryAction::SignIn => div()
                 .addressable("primary-action")
                 .px_2()

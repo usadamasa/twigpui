@@ -37,8 +37,8 @@ pub(super) mod offers;
 pub(super) mod post;
 
 pub(super) use actions::{
-    author_link, like_row, link_row, open_post_link, quote_row, reply_row, reply_target_label,
-    repost_row,
+    author_link, icon_button, like_row, link_row, open_post_link, quote_row, reply_row,
+    reply_target_label, repost_row,
 };
 pub(super) use frame::{
     compose_error_message, header_title_element, notice, reload_notice_banner,
