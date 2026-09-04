@@ -3879,6 +3879,40 @@ mod tests {
         );
     }
 
+    /// #162: `the_status_bars_segments_keep_apart` の続き — footer が常時
+    /// 見積り金額を出すようになり (`~$X.XX`)、旧 `Today: N req · Total: M req`
+    /// より長くなった。5 桁の today/total という最悪ケースでもまだ次の区画に
+    /// 触れないことを確かめる。
+    #[gpui::test]
+    fn the_status_usage_segment_survives_worst_case_numbers(cx: &mut gpui::TestAppContext) {
+        let (mut visual, timeline) = drawn(cx, fixture_with_sync(&["2", "1"], 0));
+
+        visual.update(|window, cx| {
+            timeline.update(cx, |view, _cx| {
+                view.usage_totals = usage::Totals {
+                    today: 9_999,
+                    total: 99_999,
+                };
+            });
+            let _ = window.draw(cx);
+        });
+
+        let usage = visual
+            .debug_bounds("status-usage")
+            .expect("the usage summary is always shown");
+        let next = visual
+            .debug_bounds("status-sync-next")
+            .expect("an idle sync has a next time to show");
+
+        assert!(
+            next.left() > usage.right(),
+            "large usage numbers must not run into the next segment: \
+             usage ends at {:?}, next sync starts at {:?}",
+            usage.right(),
+            next.left()
+        );
+    }
+
     /// #21: もう一度押しても何も変わらない｡
     ///
     /// 単に落ちなかったことではなく､timeline が*同一*であることを assert する｡
