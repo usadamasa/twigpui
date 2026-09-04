@@ -712,8 +712,7 @@ mod tests {
 
     #[test]
     fn offers_like_on_ones_own_post() {
-        // #68 が明言している｡X は自分の post のリポストは拒むが､いいねは
-        // 受け入れる｡だから `is_own_post` を #15 から持ち越してはいけない｡
+        // #68 が明言している｡X は自分の post への like を受け入れる｡
         assert!(offers_like(
             true,
             Some("me-id"),
@@ -1182,15 +1181,6 @@ mod tests {
     fn offers_like_on_a_repost_row() {
         let item = repost_row_item("activity-id", "original-id", "alice");
         assert!(offers_like(true, Some("me-id"), &item));
-    }
-
-    #[test]
-    fn a_repost_row_still_withholds_repost_when_the_original_is_ones_own_post() {
-        // `is_own_post` のガードは今や*元投稿の*投稿者と比べる｡実際に
-        // リポストされるのはその人の post だからだ — リポストした人の
-        // ハンドルは､API が何を拒むかとは関係が無い｡
-        let item = repost_row_item("activity-id", "original-id", "bob");
-        assert!(!offers_repost(true, Some("2244994945"), Some("bob"), &item));
     }
 
     #[test]
@@ -1890,9 +1880,11 @@ mod tests {
     }
 
     #[test]
-    fn does_not_offer_repost_on_ones_own_post() {
+    fn offers_repost_on_ones_own_post() {
+        // #266: #15 が置いた `is_own_post` のガードは「API が自分の post の
+        // repost を拒む」という前提に立っていたが、実測すると 200 が返る。
         let item = item_with("1", "bob", None);
-        assert!(!offers_repost(true, Some("2244994945"), Some("bob"), &item));
+        assert!(offers_repost(true, Some("2244994945"), Some("bob"), &item));
     }
 
     // --- offers_quote (#16) ---
@@ -1913,9 +1905,7 @@ mod tests {
 
     #[test]
     fn offers_quote_on_ones_own_post() {
-        // `offers_repost` と違い､自分の post の引用は許される — #16 の設計
-        // 判断のとおり API が拒否しないので､repost の同等のケースが `false`
-        // であっても､ここは `true` のままでなければならない｡
+        // #16 の設計判断: API は自分の post の引用を拒否しない｡
         let item = item_with("1", "bob", None);
         assert!(offers_quote(true, &item));
     }
@@ -4121,7 +4111,24 @@ mod tests {
         );
     }
 
-    /// #156: 自分の post の行 (repost 無し､末尾に `justify_between` で
+    /// #266: 自分の post の行にも repost の toggle が出る｡述語だけでなく
+    /// 行の組み立てまで届いていることを押さえる — fixture の
+    /// `signed_in_as` が `home_username` を埋めるので､この行は自分の
+    /// post として描かれる｡
+    #[gpui::test]
+    fn ones_own_post_offers_repost(cx: &mut gpui::TestAppContext) {
+        let fixture = Fixture {
+            items: vec![item_with("1", "usadamasa", None)],
+            ..fixture_with(&[], &[])
+        };
+        let (mut visual, _timeline) = drawn(cx, fixture);
+        assert!(
+            visual.debug_bounds("repost-1").is_some(),
+            "one's own post must offer Repost too"
+        );
+    }
+
+    /// #156: 自分の post の行 (末尾に `justify_between` で
     /// 開かれる delete) でも like の件数とその右の quote は `gap_3`
     /// (12px) 以上離れているべきで､右端寄せの実装のせいで隣の gap が
     /// つぶれてはいけない｡
