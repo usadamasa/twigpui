@@ -106,6 +106,13 @@ impl TimelineView {
                         row.child(
                             div()
                                 .addressable("auto-refresh-countdown")
+                                // #156, D10: HIG の "Keep actions with text
+                                // labels separate" — 記号 (reload) との間隔を
+                                // クラスタ全体の gap_2 (8px) より広げる｡
+                                // クラスタを gap_3 へ上げると 3 箇所すべてが
+                                // 4px 増えて 429px の余裕を食うので､この
+                                // 要素だけへ mr_1 (4px) を足す｡
+                                .mr_1()
                                 .text_size(theme::TEXT_META)
                                 .text_color(rgb(theme.text_tertiary))
                                 .child(label),
@@ -193,9 +200,20 @@ impl TimelineView {
                         .text_color(rgb(theme.text_tertiary))
                 })
                 .when(!busy, |button| {
+                    // #156: accent の上に control_hover/control_pressed を
+                    // 重ねる｡`hover()` は下地を置き換えるので (D2)､合成後の
+                    // 色をその場で `blend` して渡す — パレットに専用の
+                    // hover 色は増やさない｡
                     button
                         .bg(rgb(theme.accent))
                         .text_color(rgb(theme.button_label))
+                        .cursor_pointer()
+                        .hover(|style| {
+                            style.bg(rgb(theme.accent).blend(rgba(theme.control_hover_overlay)))
+                        })
+                        .active(|style| {
+                            style.bg(rgb(theme.accent).blend(rgba(theme.control_pressed_overlay)))
+                        })
                 })
                 .child(label.to_string())
                 .on_click(on_click)

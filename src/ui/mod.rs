@@ -36,6 +36,7 @@ mod reload_policy;
 mod render;
 mod scroll;
 pub(crate) mod source_picker;
+mod source_picker_menu;
 mod startup;
 mod state;
 mod sync_row;

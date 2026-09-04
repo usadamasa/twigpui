@@ -195,9 +195,21 @@ impl TimelineView {
                                 // 代わりに塗りを
                                 // 抜く｡
                                 .when(can_submit, |button| {
+                                    // #156: 主ボタンと同じ blend (D2, D10) —
+                                    // `can_submit` は `is_submitting` を
+                                    // 含むので "Posting…" のときは塗らない｡
                                     button
                                         .bg(rgb(theme.accent))
                                         .text_color(rgb(theme.button_label))
+                                        .cursor_pointer()
+                                        .hover(|style| {
+                                            style.bg(rgb(theme.accent)
+                                                .blend(rgba(theme.control_hover_overlay)))
+                                        })
+                                        .active(|style| {
+                                            style.bg(rgb(theme.accent)
+                                                .blend(rgba(theme.control_pressed_overlay)))
+                                        })
                                 })
                                 .when(!can_submit, |button| {
                                     button
