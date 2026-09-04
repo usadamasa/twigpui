@@ -239,6 +239,10 @@ impl TimelineView {
             .flex_wrap()
             .items_center()
             .justify_between()
+            // #156: delete は actions の子ではなく兄弟なので､ここに無いと
+            // root の TEXT_BODY (13px) を継いで "Delete permanently" /
+            // "Cancel" と失敗メッセージだけ行の他より太って描かれる。
+            .text_size(theme::TEXT_META)
             .child(actions)
             .when(
                 offers_delete(
