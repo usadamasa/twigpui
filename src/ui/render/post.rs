@@ -435,7 +435,9 @@ pub(in crate::ui) fn with_count(
 /// X 自身の UI と同じやり方で件数を略記する — `12345` は `12.3K` になる —
 /// 人気の post が七桁の幅でタイムスタンプと byline を押しのけられない
 /// ように｡末尾の `.0` は落とす (`1000` は `1.0K` ではなく `1K`); 1000 未満
-/// はそのままの数字を見せる｡
+/// はそのままの数字を見せる｡単位の前が 3 桁に達したら小数も落とす
+/// (`123456` は `123K`) ので､結果は必ず 5 文字以内 —
+/// [`theme::COUNT_WIDTH`] の枠はその幅で切ってある｡
 fn compact_count(count: u64) -> String {
     #[expect(
         clippy::cast_precision_loss,
@@ -446,7 +448,7 @@ fn compact_count(count: u64) -> String {
         // 小数一桁を､丸めずに切り捨てる｡ラベルが post の実際より多くの
         // エンゲージメントを主張しないようにするためだ｡
         let tenths = (value * 10.0).floor() / 10.0;
-        if (tenths.fract()).abs() < f64::EPSILON {
+        if tenths >= 100.0 || (tenths.fract()).abs() < f64::EPSILON {
             format!("{}{suffix}", tenths.trunc())
         } else {
             format!("{tenths:.1}{suffix}")
