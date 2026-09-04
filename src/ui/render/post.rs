@@ -397,7 +397,8 @@ fn non_zero_count(count: u64) -> Option<String> {
 }
 
 /// アクション一つと､その傍らのエンゲージメント件数 (#95, #156)｡見せる件数が
-/// 無ければアクション単独｡
+/// 無くても [`theme::COUNT_WIDTH`] の枠は空けておく — 件数を持つ post と
+/// 持たない post で action の縦の並びが揃うように｡
 ///
 /// 件数をアクション自身の要素の一部ではなく兄弟にしてあるのは､数字を
 /// クリックしても何も起きないようにするためだ: アクションはリクエストを
@@ -413,8 +414,13 @@ pub(in crate::ui) fn with_count(
     count: Option<&str>,
     color: u32,
 ) -> AnyElement {
-    let Some(count) = count else {
-        return action;
+    let slot = div().min_w(theme::COUNT_WIDTH).text_color(rgb(color));
+    let slot = match count {
+        Some(count) => slot
+            .addressable(format!("{name}-count"))
+            .child(count.to_string())
+            .into_any_element(),
+        None => slot.into_any_element(),
     };
 
     div()
@@ -422,12 +428,7 @@ pub(in crate::ui) fn with_count(
         .items_center()
         .gap_1()
         .child(action)
-        .child(
-            div()
-                .addressable(format!("{name}-count"))
-                .text_color(rgb(color))
-                .child(count.to_string()),
-        )
+        .child(slot)
         .into_any_element()
 }
 

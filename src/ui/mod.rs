@@ -4092,14 +4092,14 @@ mod tests {
             .debug_bounds("delete-1")
             .expect("one's own post always offers Delete");
         let gap = f32::from(delete.left()) - f32::from(open.right());
-        // 通常の隣接 gap (`gap_4`) は 16px｡`justify_between` がこの
+        // 通常の隣接 gap (`gap_3`) は 12px｡`justify_between` がこの
         // テスト窓の右端まで開くと 1000px を超える｡50px はその両方から
         // 十分離れているので､この assert は `justify_between` が実際に
         // 効いているときだけ通る｡
         assert!(
             gap > 50.0,
             "delete must sit apart at the row's end, not right beside open \
-             with just the ordinary gap_4: open ends at {:?}, delete starts \
+             with just the ordinary gap_3: open ends at {:?}, delete starts \
              at {:?} (gap {gap})",
             open.right(),
             delete.left()
@@ -4107,8 +4107,8 @@ mod tests {
     }
 
     /// #156: 自分の post の行 (repost 無し､末尾に `justify_between` で
-    /// 開かれる delete) でも like の件数とその右の quote は `gap_4`
-    /// (16px) 以上離れているべきで､右端寄せの実装のせいで隣の gap が
+    /// 開かれる delete) でも like の件数とその右の quote は `gap_3`
+    /// (12px) 以上離れているべきで､右端寄せの実装のせいで隣の gap が
     /// つぶれてはいけない｡
     #[gpui::test]
     fn a_count_keeps_its_gap_next_to_the_following_action_on_ones_own_post(
@@ -4145,8 +4145,8 @@ mod tests {
             .expect("one's own post always offers Quote");
         let gap = f32::from(quote.left()) - f32::from(count.right());
         assert!(
-            gap >= 16.0,
-            "the like count must keep the row's gap_4 before quote: \
+            gap >= 12.0,
+            "the like count must keep the row's gap_3 before quote: \
              count ends at {:?}, quote starts at {:?} (gap {gap})",
             count.right(),
             quote.left()

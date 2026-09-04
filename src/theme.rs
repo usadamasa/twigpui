@@ -61,6 +61,11 @@ pub(crate) const RADIUS_MENU: Pixels = px(8.0);
 /// ラベルだからだ｡
 pub(crate) const ICON_SIZE: Pixels = px(15.0);
 
+/// action の傍らに置く件数の枠の幅｡件数が無い post でも同じ幅を空けて､
+/// 上下の post で action の縦の並びを揃える｡[`TEXT_META`] で `5.6K` が
+/// 収まる幅｡`min_w` なので五桁の `12.3K` はその行だけ押し広げる｡
+pub(crate) const COUNT_WIDTH: Pixels = px(24.0);
+
 /// 添付画像を横に並べた 1 段の幅の上限 (#256)｡1 枚ならその画像の幅の上限｡
 ///
 /// 本番ウィンドウ (429px) の本文列は 365px ほどで､それより狭くしてあるのは

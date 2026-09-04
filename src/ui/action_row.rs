@@ -162,7 +162,7 @@ impl TimelineView {
             .flex()
             .flex_wrap()
             .items_center()
-            .gap_4()
+            .gap_3()
             .text_size(theme::TEXT_META)
             .text_color(rgb(theme.text_muted))
             // #71: "Reply" — composer の対象を設定する; 下書きが submit
