@@ -412,9 +412,7 @@ pub(in crate::ui) fn with_count(
     action: AnyElement,
     count: Option<&str>,
     color: u32,
-    theme: Theme,
 ) -> AnyElement {
-    let _ = theme;
     let Some(count) = count else {
         return action;
     };

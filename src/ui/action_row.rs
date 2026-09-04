@@ -173,7 +173,6 @@ impl TimelineView {
                     reply_row(item, theme, cx),
                     counts.replies.as_deref(),
                     theme.text_muted,
-                    theme,
                 ))
             })
             // #15: repost/un-repost — どの post に付くかは `offers_repost`
@@ -198,7 +197,6 @@ impl TimelineView {
                         self.repost_button(item, cx),
                         counts.reposts.as_deref(),
                         color,
-                        theme,
                     ))
                 },
             )
@@ -218,7 +216,6 @@ impl TimelineView {
                         self.like_button(item, cx),
                         counts.likes.as_deref(),
                         color,
-                        theme,
                     ))
                 },
             )
