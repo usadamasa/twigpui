@@ -40,12 +40,13 @@ pub(crate) struct Config {
     /// [`log::Level::Info`]｡認識できない値は `theme` とまったく同じく､起動を
     /// 失敗させるのではなくそこへ落ちる｡
     pub log_level: log::Level,
-    /// API request 1 回あたりの価格 (#18)｡単位は運用者が念頭に置くものなら
-    /// 何でもよい — この crate が通貨を仮定することは無い｡既定は `None`:
-    /// request あたりの価格はアカウントのプラン次第で､ここから知る手段は
-    /// 無いので､明示的に設定しない限り見積り額が表示されることは無い｡
-    /// `usage.rs` のモジュール doc を見よ｡
-    pub request_price: Option<f64>,
+    /// Posts の resource 1 件あたりの価格 (#162､#18 の後継)｡単位は USD
+    /// 固定 — X 自身が USD 建てで単価を公開している
+    /// (`https://docs.x.com/x-api/getting-started/pricing`) ので､#18 が
+    /// 課していた「通貨を仮定しない」規則はここでは意図して外してある｡
+    /// 既定は [`DEFAULT_POST_RESOURCE_PRICE`]｡`usage` のモジュール doc の
+    /// [`crate::usage::estimated_amount`] を見よ｡
+    pub post_resource_price: f64,
     /// timeline がウィンドウを埋める list (#161)｡`None` なら､それ以前のどの
     /// 起動もそうだったように home timeline を表示する｡
     ///
@@ -55,13 +56,13 @@ pub(crate) struct Config {
     /// そもそも list しか無い｡[`Config::resolve`] がすべて ASCII の数字である
     /// ことを検証する: この値は URL のパスセグメントへ埋め込まれる｡
     pub list_id: Option<String>,
-    /// 1 日の request 数の予算 (#18): 追跡しているすべての endpoint にわたる
-    /// 今日の合計がこれに近づくか達すると､ヘッダの使用量行が warning/danger
-    /// の色へ切り替わる — `usage::budget_status` を見よ｡金額ではなく request
-    /// 数なのは意図的だ: `request_price` と違い､こちらは比較する値が常にある
-    /// (request 数は常に判っている)｡だから価格が設定されていてもいなくても
-    /// 機能する｡
-    pub daily_request_budget: Option<u32>,
+    /// 1 日の Posts resource 数の予算 (#162､#18 の後継): 今日の Posts の
+    /// resource 数の合計がこれに近づくか達すると､ヘッダの使用量行が
+    /// warning/danger の色へ切り替わる — `usage::budget_status` を見よ｡
+    /// 金額ではなく件数なのは意図的だ: `post_resource_price` と違い､
+    /// こちらは比較する値が常にある (resource 数は常に判っている)｡
+    /// 既定は [`DEFAULT_DAILY_POST_BUDGET`]｡
+    pub daily_post_budget: u32,
     /// ウィンドウが動いている間､`list_id` のメンバーシップをこのアプリが
     /// フォローしているアカウントに合わせ続けるかどうか｡
     ///
@@ -132,6 +133,26 @@ pub(crate) struct Config {
 const DEFAULT_USERNAME: &str = "XDevelopers";
 const DEFAULT_MAX_RESULTS: u32 = 20;
 const MAX_RESULTS_RANGE: std::ops::RangeInclusive<u32> = 5..=100;
+
+/// Posts の resource 1 件あたりの既定価格: USD $0.005 (#162)｡出典は
+/// `https://docs.x.com/x-api/getting-started/pricing` (`x-api-budget`
+/// skill の `pricing.md` が同じ表を最終確認 2026-08-23 で引いている)｡
+/// #18 は「組み込みの既定価格は置かない」規則を持っていたが､それは単位の
+/// 定まらない数 (当時は request 数) に価格を掛けないためのものだった｡
+/// #162 で単位が Posts の resource 数に定まり､X 自身が USD 建てで単価を
+/// 公開している以上､この値は推測ではなく出典のある数になったので､ここで
+/// 意図してその規則を上書きする｡X が改定したら､この定数と上の出典の
+/// 日付を合わせて更新する｡
+const DEFAULT_POST_RESOURCE_PRICE: f64 = 0.005;
+
+/// 1 日の Posts resource 数の既定予算: 1000 (#162)｡
+///
+/// 同日 dedup が効くので､定常で積むのは「その日に実際に増えた post 数」
+/// だけになる — list 1 本のタイムラインなら概ね 300〜700 / 日に収まる
+/// (`x-api-budget` skill を見よ)｡1000 なら 80% の警告 (800) が重い日に
+/// だけ立ち､鳴りっぱなしにはならない｡[`DEFAULT_POST_RESOURCE_PRICE`]
+/// と掛けると $5.00 / 日 が上限の目安になる｡
+const DEFAULT_DAILY_POST_BUDGET: u32 = 1000;
 /// 60 秒: X の endpoint ごとの厳しめな rate limit の窓に対してさえ､reload
 /// 1 回 (request 1 ないし 2 回) の窓あたり費用を余裕をもって上回りつつ､
 /// reload ボタンを押す人間に対しては反応良くいられる長さだ｡
@@ -233,40 +254,40 @@ struct FileSettings {
     /// shell で設定した環境変数は一切見えない (#40)｡
     #[serde(default)]
     log_level: Option<String>,
-    /// 秘密ではない ([`Config::request_price`] の doc を見よ)｡だから上の
+    /// 秘密ではない ([`Config::post_resource_price`] の doc を見よ)｡だから上の
     /// `oauth_client_id` と同じくこのキーは `config.toml` に置いてよい｡
     #[serde(default)]
-    request_price: Option<f64>,
-    /// 秘密ではない｡`request_price` と同じ理由だ｡
+    post_resource_price: Option<f64>,
+    /// 秘密ではない｡`post_resource_price` と同じ理由だ｡
     #[serde(default)]
-    daily_request_budget: Option<u32>,
-    /// 秘密ではない｡`request_price` と同じ理由だ｡Finder から起動した `.app`
+    daily_post_budget: Option<u32>,
+    /// 秘密ではない｡`post_resource_price` と同じ理由だ｡Finder から起動した `.app`
     /// にとって効いてくるのはこのキーで､そこでは shell の変数は見えない
     /// (#40) — `log_level` がここにあるのと同じ理由だ｡
     #[serde(default)]
     auto_sync_list: Option<bool>,
-    /// 秘密ではない｡`request_price` と同じ理由だ｡
+    /// 秘密ではない｡`post_resource_price` と同じ理由だ｡
     #[serde(default)]
     sync_interval_seconds: Option<u32>,
-    /// 秘密ではない｡`request_price` と同じ理由だ｡`u8` ではなく `u32` なのは､
+    /// 秘密ではない｡`post_resource_price` と同じ理由だ｡`u8` ではなく `u32` なのは､
     /// ファイル中の `300` を serde が型 error で弾くのではなく､`resolve` が
     /// キー名を挙げて拒めるようにするためだ｡
     #[serde(default)]
     sync_prune_limit_percent: Option<u32>,
-    /// 秘密ではない｡`request_price` と同じ理由だ｡`u32` なのは
+    /// 秘密ではない｡`post_resource_price` と同じ理由だ｡`u32` なのは
     /// `sync_prune_limit_percent` と同じ理由による｡
     #[serde(default)]
     sync_writes_per_batch: Option<u32>,
-    /// 秘密ではない｡`request_price` と同じ理由だ｡上の `auto_sync_list` と
+    /// 秘密ではない｡`post_resource_price` と同じ理由だ｡上の `auto_sync_list` と
     /// 同じく､Finder から起動した `.app` にとって効いてくるのはこのキーで､
     /// そこでは shell の変数は見えない (#40) — そしてこれは､ウィンドウが自ら
     /// 何かを送るのをやめさせる唯一のスイッチだ｡
     #[serde(default)]
     auto_refresh: Option<bool>,
-    /// 秘密ではない｡`request_price` と同じ理由だ｡
+    /// 秘密ではない｡`post_resource_price` と同じ理由だ｡
     #[serde(default)]
     auto_refresh_interval_seconds: Option<u32>,
-    /// 秘密ではない｡`request_price` と同じ理由だ｡
+    /// 秘密ではない｡`post_resource_price` と同じ理由だ｡
     #[serde(default)]
     follow_new_posts: Option<bool>,
     /// 生の `list_id` 値 (#161)｡秘密ではない — list id は x.com 上でその list
@@ -418,8 +439,8 @@ impl Config {
 
         let list_id = resolve_list_id(&var, file.list_id, profile)?;
 
-        let request_price = resolve_request_price(&var, file.request_price)?;
-        let daily_request_budget = resolve_daily_request_budget(&var, file.daily_request_budget)?;
+        let post_resource_price = resolve_post_resource_price(&var, file.post_resource_price)?;
+        let daily_post_budget = resolve_daily_post_budget(&var, file.daily_post_budget)?;
 
         let auto_sync_list = resolve_switch("X_AUTO_SYNC_LIST", &var, file.auto_sync_list)?;
         let sync_interval_seconds = resolve_sync_interval(&var, file.sync_interval_seconds)?;
@@ -445,9 +466,9 @@ impl Config {
             min_fetch_interval_seconds,
             theme,
             log_level,
-            request_price,
+            post_resource_price,
             list_id,
-            daily_request_budget,
+            daily_post_budget,
             auto_sync_list,
             sync_interval_seconds,
             sync_prune_limit_percent,
@@ -684,16 +705,6 @@ fn resolve_auto_refresh_interval(
     Ok(seconds)
 }
 
-/// `request_price` を解決する (#18): env > file > 未設定｡[`Config::resolve`]
-/// の他のどの設定とも同じ優先順位で — そこから切り出してあるのは､あの
-/// 関数を clippy の行数 lint の下に収めるためだけであって､ロジック自体を
-/// 他所で再利用しているからではない｡
-///
-/// `Config::resolve` がインラインで扱うどの数値設定とも違い､ここでは値が
-/// *無い* ことが通常であって､既定値で片付けるものではない — 組み込みの
-/// 既定値が無い理由は [`Config::request_price`] の doc を見よ｡ただし値が
-/// あればどちらの source からでも検証する: 負や非有限の価格は､下流の
-/// 見積り額をすべて黙って壊す｡
 /// `theme` を解決する (#19): env > file > 既定値｡
 ///
 /// 数値の設定とは違い､ここで認識できない値に `bail!` してはならない —
@@ -760,47 +771,65 @@ fn resolve_log_level(
         .unwrap_or_default()
 }
 
-fn resolve_request_price(
+/// `post_resource_price` を解決する (#162､#18 の後継): env > file >
+/// [`DEFAULT_POST_RESOURCE_PRICE`]｡[`Config::resolve`] の他のどの設定とも
+/// 同じ優先順位で — そこから切り出してあるのは､あの関数を clippy の行数
+/// lint の下に収めるためだけであって､ロジック自体を他所で再利用している
+/// からではない｡
+///
+/// #18 時点では価格が*無い*ことが通常で､既定値で片付けるものではなかった
+/// ([`Config::post_resource_price`] の doc を見よ)｡#162 でその前提が変わる:
+/// 数える対象が Posts の resource 数に定まり､X 自身が USD 建てで単価を
+/// 公開している以上､既定値は当てずっぽうではなく出典のある数になる｡
+/// どちらの source から来た値でも検証はする: 負や非有限の価格は､下流の
+/// 見積り額をすべて黙って壊す｡
+fn resolve_post_resource_price(
     var: &impl Fn(&str) -> Option<String>,
     file_value: Option<f64>,
-) -> Result<Option<f64>> {
-    let (value, source) = match var("X_REQUEST_PRICE") {
+) -> Result<f64> {
+    let (value, source) = match var("X_POST_RESOURCE_PRICE") {
         Some(raw) => {
             let value = raw
                 .trim()
                 .parse::<f64>()
-                .with_context(|| format!("X_REQUEST_PRICE is not a number: {raw:?}"))?;
-            (Some(value), "X_REQUEST_PRICE")
+                .with_context(|| format!("X_POST_RESOURCE_PRICE is not a number: {raw:?}"))?;
+            (value, "X_POST_RESOURCE_PRICE")
         }
-        None => (file_value, "request_price in config.toml"),
+        None => match file_value {
+            Some(value) => (value, "post_resource_price in config.toml"),
+            None => return Ok(DEFAULT_POST_RESOURCE_PRICE),
+        },
     };
-    if let Some(value) = value
-        && (!value.is_finite() || value < 0.0)
-    {
+    if !value.is_finite() || value < 0.0 {
         bail!("{source} must be a non-negative number, got {value}");
     }
     Ok(value)
 }
 
-/// `daily_request_budget` を解決する (#18): env > file > 未設定｡切り出した
-/// 理由は [`resolve_request_price`] と同じ｡`u32` として parse する以上の
+/// `daily_post_budget` を解決する (#162､#18 の後継): env > file >
+/// [`DEFAULT_DAILY_POST_BUDGET`]｡切り出した理由は
+/// [`resolve_post_resource_price`] と同じ｡`u32` として parse する以上の
 /// 検証はしない: その範囲のどの値も (0 を含めて) `usage::budget_status` に
 /// とって意味がある｡
-fn resolve_daily_request_budget(
+fn resolve_daily_post_budget(
     var: &impl Fn(&str) -> Option<String>,
     file_value: Option<u32>,
-) -> Result<Option<u32>> {
-    match var("X_DAILY_REQUEST_BUDGET") {
-        Some(raw) => Ok(Some(raw.trim().parse::<u32>().with_context(|| {
-            format!("X_DAILY_REQUEST_BUDGET is not a number: {raw:?}")
-        })?)),
-        None => Ok(file_value),
+) -> Result<u32> {
+    match var("X_DAILY_POST_BUDGET") {
+        Some(raw) => raw
+            .trim()
+            .parse::<u32>()
+            .with_context(|| format!("X_DAILY_POST_BUDGET is not a number: {raw:?}")),
+        None => Ok(file_value.unwrap_or(DEFAULT_DAILY_POST_BUDGET)),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, DEFAULT_MAX_RESULTS, DEFAULT_USERNAME, FileSettings};
+    use super::{
+        Config, DEFAULT_DAILY_POST_BUDGET, DEFAULT_MAX_RESULTS, DEFAULT_POST_RESOURCE_PRICE,
+        DEFAULT_USERNAME, FileSettings,
+    };
     use crate::profile::Profile;
     use crate::theme::ThemeMode;
 
@@ -811,6 +840,14 @@ mod tests {
             .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
             .collect();
         move |key| pairs.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone())
+    }
+
+    /// 呼び出し側で `clippy::float_cmp` に引っかからない浮動小数の等値比較
+    /// (#162)｡ここで比較する値はどちらも同じ 10 進リテラルから
+    /// `str::parse::<f64>` を通っただけなので、丸め誤差が入る余地は無い —
+    /// それでも exact 比較を lint がそう読めないので、念のための epsilon｡
+    fn approx_eq(a: f64, b: f64) -> bool {
+        (a - b).abs() < 1e-9
     }
 
     #[test]
@@ -1283,151 +1320,154 @@ mod tests {
         assert_eq!(config.theme, ThemeMode::default());
     }
 
-    // --- request_price / daily_request_budget (#18) ---
+    // --- post_resource_price / daily_post_budget (#162, #18 の後継) ---
 
     #[test]
-    fn request_price_and_daily_budget_are_unset_by_default() {
+    fn post_resource_price_and_daily_budget_fall_back_to_their_defaults() {
         let config = Config::resolve(
             vars(&[("X_OAUTH_CLIENT_ID", "client-123")]),
             FileSettings::default(),
         )
         .unwrap();
-        assert_eq!(config.request_price, None);
-        assert_eq!(config.daily_request_budget, None);
+        assert!(approx_eq(
+            config.post_resource_price,
+            DEFAULT_POST_RESOURCE_PRICE
+        ));
+        assert_eq!(config.daily_post_budget, DEFAULT_DAILY_POST_BUDGET);
     }
 
     #[test]
-    fn parses_the_request_price_from_env() {
+    fn parses_the_post_resource_price_from_env() {
         let config = Config::resolve(
             vars(&[
                 ("X_OAUTH_CLIENT_ID", "client-123"),
-                ("X_REQUEST_PRICE", "0.015"),
+                ("X_POST_RESOURCE_PRICE", "0.015"),
             ]),
             FileSettings::default(),
         )
         .unwrap();
-        assert_eq!(config.request_price, Some(0.015));
+        assert!(approx_eq(config.post_resource_price, 0.015));
     }
 
     #[test]
-    fn rejects_a_non_numeric_request_price() {
+    fn rejects_a_non_numeric_post_resource_price() {
         let error = Config::resolve(
             vars(&[
                 ("X_OAUTH_CLIENT_ID", "client-123"),
-                ("X_REQUEST_PRICE", "free"),
+                ("X_POST_RESOURCE_PRICE", "free"),
             ]),
             FileSettings::default(),
         )
         .unwrap_err()
         .to_string();
-        assert!(error.contains("X_REQUEST_PRICE"), "{error}");
+        assert!(error.contains("X_POST_RESOURCE_PRICE"), "{error}");
     }
 
     #[test]
-    fn rejects_a_negative_request_price() {
+    fn rejects_a_negative_post_resource_price() {
         let error = Config::resolve(
             vars(&[
                 ("X_OAUTH_CLIENT_ID", "client-123"),
-                ("X_REQUEST_PRICE", "-0.01"),
+                ("X_POST_RESOURCE_PRICE", "-0.01"),
             ]),
             FileSettings::default(),
         )
         .unwrap_err()
         .to_string();
-        assert!(error.contains("X_REQUEST_PRICE"), "{error}");
+        assert!(error.contains("X_POST_RESOURCE_PRICE"), "{error}");
     }
 
     #[test]
-    fn resolve_reads_the_request_price_from_the_file_when_env_is_unset() {
+    fn resolve_reads_the_post_resource_price_from_the_file_when_env_is_unset() {
         let file = FileSettings {
-            request_price: Some(0.02),
+            post_resource_price: Some(0.02),
             ..FileSettings::default()
         };
         let config = Config::resolve(vars(&[("X_OAUTH_CLIENT_ID", "client-123")]), file).unwrap();
-        assert_eq!(config.request_price, Some(0.02));
+        assert!(approx_eq(config.post_resource_price, 0.02));
     }
 
     #[test]
-    fn resolve_prefers_the_env_request_price_over_the_file() {
+    fn resolve_prefers_the_env_post_resource_price_over_the_file() {
         let file = FileSettings {
-            request_price: Some(0.02),
+            post_resource_price: Some(0.02),
             ..FileSettings::default()
         };
         let config = Config::resolve(
             vars(&[
                 ("X_OAUTH_CLIENT_ID", "client-123"),
-                ("X_REQUEST_PRICE", "0.05"),
+                ("X_POST_RESOURCE_PRICE", "0.05"),
             ]),
             file,
         )
         .unwrap();
-        assert_eq!(config.request_price, Some(0.05));
+        assert!(approx_eq(config.post_resource_price, 0.05));
     }
 
     #[test]
-    fn resolve_rejects_a_negative_request_price_from_the_file() {
+    fn resolve_rejects_a_negative_post_resource_price_from_the_file() {
         let file = FileSettings {
-            request_price: Some(-1.0),
+            post_resource_price: Some(-1.0),
             ..FileSettings::default()
         };
         let error = Config::resolve(vars(&[("X_OAUTH_CLIENT_ID", "client-123")]), file)
             .unwrap_err()
             .to_string();
-        assert!(error.contains("request_price"), "{error}");
+        assert!(error.contains("post_resource_price"), "{error}");
     }
 
     #[test]
-    fn parses_the_daily_request_budget_from_env() {
+    fn parses_the_daily_post_budget_from_env() {
         let config = Config::resolve(
             vars(&[
                 ("X_OAUTH_CLIENT_ID", "client-123"),
-                ("X_DAILY_REQUEST_BUDGET", "500"),
+                ("X_DAILY_POST_BUDGET", "500"),
             ]),
             FileSettings::default(),
         )
         .unwrap();
-        assert_eq!(config.daily_request_budget, Some(500));
+        assert_eq!(config.daily_post_budget, 500);
     }
 
     #[test]
-    fn rejects_a_non_numeric_daily_request_budget() {
+    fn rejects_a_non_numeric_daily_post_budget() {
         let error = Config::resolve(
             vars(&[
                 ("X_OAUTH_CLIENT_ID", "client-123"),
-                ("X_DAILY_REQUEST_BUDGET", "lots"),
+                ("X_DAILY_POST_BUDGET", "lots"),
             ]),
             FileSettings::default(),
         )
         .unwrap_err()
         .to_string();
-        assert!(error.contains("X_DAILY_REQUEST_BUDGET"), "{error}");
+        assert!(error.contains("X_DAILY_POST_BUDGET"), "{error}");
     }
 
     #[test]
-    fn resolve_reads_the_daily_request_budget_from_the_file_when_env_is_unset() {
+    fn resolve_reads_the_daily_post_budget_from_the_file_when_env_is_unset() {
         let file = FileSettings {
-            daily_request_budget: Some(200),
+            daily_post_budget: Some(200),
             ..FileSettings::default()
         };
         let config = Config::resolve(vars(&[("X_OAUTH_CLIENT_ID", "client-123")]), file).unwrap();
-        assert_eq!(config.daily_request_budget, Some(200));
+        assert_eq!(config.daily_post_budget, 200);
     }
 
     #[test]
-    fn resolve_prefers_the_env_daily_request_budget_over_the_file() {
+    fn resolve_prefers_the_env_daily_post_budget_over_the_file() {
         let file = FileSettings {
-            daily_request_budget: Some(200),
+            daily_post_budget: Some(200),
             ..FileSettings::default()
         };
         let config = Config::resolve(
             vars(&[
                 ("X_OAUTH_CLIENT_ID", "client-123"),
-                ("X_DAILY_REQUEST_BUDGET", "50"),
+                ("X_DAILY_POST_BUDGET", "50"),
             ]),
             file,
         )
         .unwrap();
-        assert_eq!(config.daily_request_budget, Some(50));
+        assert_eq!(config.daily_post_budget, 50);
     }
 
     #[test]

@@ -93,18 +93,19 @@ pub(in crate::ui) fn reload_notice_banner(
         .child(message)
 }
 
-/// ヘッダの簡潔な usage 要約 (#18): リクエスト数は無条件に必ず出す —
-/// 見積り金額を添えるのは `request_price` が設定されてからだけで､推測の
-/// 価格は価格を出さないより悪い､という issue の中核の規則に従う｡
-pub(in crate::ui) fn usage_label(today: u64, total: u64, request_price: Option<f64>) -> String {
-    match usage::estimated_amount(today, request_price) {
-        Some(amount) => format!("Today: {today} req (~{amount:.2}) · Total: {total} req"),
-        None => format!("Today: {today} req · Total: {total} req"),
-    }
+/// ヘッダの簡潔な usage 要約 (#162､#18 の後継): 数えるのは Posts の
+/// resource 数で､リクエスト本数ではない — `usage::posts_totals` が既に
+/// Posts kind だけへ絞っているので､ここは受け取った数をそのまま出す｡
+/// 見積り金額 (USD) は常に添える: `post_resource_price` はもう既定値
+/// (`config` の `DEFAULT_POST_RESOURCE_PRICE`) を持つので､「価格が未設定」
+/// という状態は無くなった｡
+pub(in crate::ui) fn usage_label(today: u64, total: u64, post_resource_price: f64) -> String {
+    let amount = usage::estimated_amount(today, post_resource_price);
+    format!("Posts today: {today} (~${amount:.2}) · total: {total}")
 }
 
 /// usage の行をどの theme のスロットで描くか: 今日の件数が
-/// `daily_request_budget` に近づくか超えると `warning`/`danger` になり､
+/// `daily_post_budget` に近づくか超えると `warning`/`danger` になり､
 /// [`usage::budget_status`] が返す深刻度に対応する; 立てる旗が無ければ､
 /// timestamp や byline がすでに使っているのと同じ muted のスロットだ｡
 pub(in crate::ui) fn usage_color(status: usage::BudgetStatus, theme: Theme) -> u32 {

@@ -279,11 +279,11 @@ pub(crate) struct TimelineView {
     /// [`Self::start_cooldown_ticker`] を
     /// 見よ｡
     cooldown_ticker: Option<Task<()>>,
-    /// 追跡しているすべての endpoint を通じたリクエスト数の合計 (#18)｡header
-    /// に出る — [`Self::refresh_usage`] を見よ｡最初の refresh が終わるまで
-    /// ゼロだが､これはプレースホルダではなく正直な「まだ何も観測していない」
-    /// である｡空の `usage.json` を読んでも `usage::Totals::default()` と
-    /// まったく同じになるからだ｡
+    /// Posts の resource 数の合計 (#162､#18 の後継) — `usage::posts_totals`
+    /// が返すもの｡header に出る — [`Self::refresh_usage`] を見よ｡最初の
+    /// refresh が終わるまでゼロだが､これはプレースホルダではなく正直な
+    /// 「まだ何も観測していない」である｡空の `usage.json` を読んでも
+    /// `usage::Totals::default()` とまったく同じになるからだ｡
     usage_totals: usage::Totals,
     /// これを保持している間は header の usage refresh が生きつづける;
     /// `fetch` の drop で取り消す契約に倣う｡代入し直す (別の refresh) と､
@@ -1808,24 +1808,22 @@ mod tests {
         assert_eq!(thread_action_label(Some(&loaded)), None);
     }
 
-    // --- usage_label / usage_color (#18) ---
+    // --- usage_label / usage_color (#162､#18 の後継) ---
 
     #[test]
-    fn usage_label_shows_counts_only_without_a_configured_price() {
-        assert_eq!(usage_label(3, 42, None), "Today: 3 req · Total: 42 req");
-    }
-
-    #[test]
-    fn usage_label_appends_an_estimated_amount_once_a_price_is_configured() {
+    fn usage_label_shows_posts_counts_with_an_estimated_amount() {
         assert_eq!(
-            usage_label(4, 40, Some(2.5)),
-            "Today: 4 req (~10.00) · Total: 40 req"
+            usage_label(4, 40, 2.5),
+            "Posts today: 4 (~$10.00) · total: 40"
         );
     }
 
     #[test]
     fn usage_label_shows_zero_counts_plainly() {
-        assert_eq!(usage_label(0, 0, None), "Today: 0 req · Total: 0 req");
+        assert_eq!(
+            usage_label(0, 0, 0.005),
+            "Posts today: 0 (~$0.00) · total: 0"
+        );
     }
 
     #[test]
@@ -2085,8 +2083,8 @@ mod tests {
             min_fetch_interval_seconds: 60,
             theme: theme::ThemeMode::Light,
             log_level: crate::log::Level::default(),
-            request_price: None,
-            daily_request_budget: None,
+            post_resource_price: 0.005,
+            daily_post_budget: 1000,
             list_id: None,
             // smoke テストでは off: これらはウィンドウを描画するもので､
             // 金のかかるバックグラウンドのループは検査の対象ではない｡
@@ -5236,8 +5234,8 @@ mod tests {
             min_fetch_interval_seconds: 60,
             theme: theme::ThemeMode::Light,
             log_level: crate::log::Level::default(),
-            request_price: None,
-            daily_request_budget: None,
+            post_resource_price: 0.005,
+            daily_post_budget: 1000,
             list_id: None,
             // smoke テストでは off: これらはウィンドウを描画するもので､
             // 金のかかるバックグラウンドのループは検査の対象ではない｡

@@ -227,9 +227,10 @@ impl TimelineView {
     /// 最初に読まれる座をアカウント名と奪い合っていた｡macOS はウィンドウの
     /// 累計を代わりに status bar に置く — Finder の項目数が同じ考えだ —
     /// ので､こちらもそこへ置く｡#18 の段階的な色づけは移動しても変わらない:
-    /// 数は今も `daily_request_budget` へ近づけば `warning` になり､
-    /// 超えれば `danger` に
-    /// なる｡
+    /// 数は今も `daily_post_budget` へ近づけば `warning` になり､超えれば
+    /// `danger` になる｡#162 でここが見せる数字自体が Posts の resource 数へ
+    /// 変わった (`usage_label` の doc を見よ) — 色付けの規則自体は変わって
+    /// いない｡
     ///
     /// 保持している post の数は timeline が読み込まれてからしか出さない｡
     /// サインイン中や取得中には出せる数が無いし､"0 / 200" は答えの無い
@@ -237,15 +238,15 @@ impl TimelineView {
     pub(super) fn status_bar(&self, density: countdown::Density) -> impl IntoElement {
         let theme = self.theme;
 
-        // #18: リクエスト数は常に出す; 見積り金額は `request_price` が
-        // 設定されているときだけ後ろに足す (`usage_label` の doc を
+        // #162: Posts の resource 数を常に出す; 見積り金額 (USD､常に
+        // 設定されている単価から) を隣に添える (`usage_label` の doc を
         // 見よ)｡
         let usage_status =
-            usage::budget_status(self.usage_totals.today, self.config.daily_request_budget);
+            usage::budget_status(self.usage_totals.today, self.config.daily_post_budget);
         let usage_text = usage_label(
             self.usage_totals.today,
             self.usage_totals.total,
-            self.config.request_price,
+            self.config.post_resource_price,
         );
         let kept = match self.state {
             TimelineState::Loaded(ref items) => Some(items.len()),

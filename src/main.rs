@@ -3,7 +3,7 @@
 //!
 //! この binary crate がアプリケーション全体である: `ui` がウィンドウを描き､
 //! `menu` がキーバインドとメニューバーを持ち､`x_api` が X と話し､
-//! `cache`/`usage`/`rate_limit` がリクエスト単位の課金を抑え､そしてこの
+//! `cache`/`usage`/`rate_limit` が resource 単位の課金を抑え､そしてこの
 //! モジュールがエントリポイントと､headless な `--fetch-only` /
 //! `--fetch-post` / `--usage` の経路を担う｡
 
@@ -598,12 +598,13 @@ fn fetch_post(config: &config::Config, paths: &paths::Paths, arg: &str) -> i32 {
     }
 }
 
-/// `usage::build_report` の数字を JSON で stdout へ印字する (#18) — そもそも
-/// リクエスト数を `state_dir` の下に永続化する狙いは､外部のツールがウィンド
-/// ウを開かずにヘッダが見せるのと同じ数字を読めることにある｡独自のテキスト
-/// 形式ではなく JSON なのは､このプロジェクトが永続化する他のすべてで既に
-/// `serde_json` に依存しているからで､機械が読む消費者には scrape せねば
-/// ならない形式ではなく parse できる構造が要るからだ｡
+/// `usage::build_report` の数字を JSON で stdout へ印字する (#162､#18 の
+/// 後継) — そもそも resource 数を `state_dir` の下に永続化する狙いは､
+/// 外部のツールがウィンドウを開かずにヘッダが見せるのと同じ数字を読める
+/// ことにある｡独自のテキスト形式ではなく JSON なのは､このプロジェクトが
+/// 永続化する他のすべてで既に `serde_json` に依存しているからで､機械が
+/// 読む消費者には scrape せねばならない形式ではなく parse できる構造が
+/// 要るからだ｡
 fn usage_only(config: &config::Config, paths: &paths::Paths) -> i32 {
     let entries = match usage::load_all(paths) {
         Ok(entries) => entries,
@@ -616,8 +617,8 @@ fn usage_only(config: &config::Config, paths: &paths::Paths) -> i32 {
     let report = usage::build_report(
         &entries,
         oauth::unix_now(),
-        config.request_price,
-        config.daily_request_budget,
+        config.post_resource_price,
+        config.daily_post_budget,
     );
 
     match serde_json::to_string_pretty(&report) {

@@ -21,7 +21,7 @@ impl TimelineView {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    usage::load_all(&paths).map(|entries| usage::totals(&entries, now))
+                    usage::load_all(&paths).map(|entries| usage::posts_totals(&entries, now))
                 })
                 .await;
 
