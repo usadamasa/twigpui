@@ -20,6 +20,7 @@ use crate::fixture::Fixture;
 use crate::image_cache;
 use crate::like;
 use crate::log;
+mod action_row;
 mod auto_refresh;
 mod chrome;
 mod composer;
