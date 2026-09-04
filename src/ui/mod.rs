@@ -3880,9 +3880,9 @@ mod tests {
     }
 
     /// #162: `the_status_bars_segments_keep_apart` の続き — footer が常時
-    /// 見積り金額を出すようになり (`~$X.XX`)、旧 `Today: N req · Total: M req`
-    /// より長くなった。5 桁の today/total という最悪ケースでもまだ次の区画に
-    /// 触れないことを確かめる。
+    /// 見積り金額を出すようになり (`~$X.XX`)､旧 `Today: N req · Total: M req`
+    /// より長くなった｡5 桁の today/total という最悪ケースでもまだ次の区画に
+    /// 触れないことを確かめる｡
     #[gpui::test]
     fn the_status_usage_segment_survives_worst_case_numbers(cx: &mut gpui::TestAppContext) {
         let (mut visual, timeline) = drawn(cx, fixture_with_sync(&["2", "1"], 0));
