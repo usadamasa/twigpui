@@ -11,6 +11,14 @@
       "metrics": { "replies": 12, "reposts": 34, "likes": 5600 }
     },
     {
+      "id": "9000000000000000007",
+      "text": "My own post: the only row that offers Delete, and the one that withholds Repost (#15, #72).",
+      "created_at": "2026-08-22T09:10:00.000Z",
+      "author_name": "UCHIDA Masaru",
+      "author_username": "usadamasa",
+      "metrics": { "replies": 0, "reposts": 0, "likes": 1 }
+    },
+    {
       "id": "9000000000000000002",
       "text": "https://example.com/a/path/that/never/breaks/because/it/contains/no/spaces/at/all/and/keeps/going",
       "created_at": "2026-08-22T09:35:00.000Z",
@@ -94,14 +102,6 @@
         "author_name": "Developers",
         "author_username": "XDevelopers"
       }
-    },
-    {
-      "id": "9000000000000000007",
-      "text": "My own post: the only row that offers Delete, and the one that withholds Repost (#15, #72).",
-      "created_at": "2026-08-22T09:10:00.000Z",
-      "author_name": "UCHIDA Masaru",
-      "author_username": "usadamasa",
-      "metrics": { "replies": 0, "reposts": 0, "likes": 1 }
     },
     {
       "id": "9000000000000000008",
