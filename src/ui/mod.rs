@@ -1168,7 +1168,7 @@ mod tests {
         // id であるためにここでボタンを出さなかった｡#52 は元投稿の id を
         // 運ぶので､ボタンを出しても安全だ｡
         let item = repost_row_item("activity-id", "original-id", "alice");
-        assert!(offers_repost(true, Some("2244994945"), Some("bob"), &item));
+        assert!(offers_repost(true, Some("2244994945"), &item));
     }
 
     #[test]
@@ -1852,23 +1852,18 @@ mod tests {
         );
     }
 
-    // --- offers_repost / is_own_post (#15) ---
+    // --- offers_repost (#15, #266) ---
 
     #[test]
     fn offers_repost_once_signed_in_with_a_resolved_home_id_on_someone_elses_post() {
         let item = item_with("1", "alice", None);
-        assert!(offers_repost(true, Some("2244994945"), Some("bob"), &item));
+        assert!(offers_repost(true, Some("2244994945"), &item));
     }
 
     #[test]
     fn does_not_offer_repost_without_oauth() {
         let item = item_with("1", "alice", None);
-        assert!(!offers_repost(
-            false,
-            Some("2244994945"),
-            Some("bob"),
-            &item
-        ));
+        assert!(!offers_repost(false, Some("2244994945"), &item));
     }
 
     #[test]
@@ -1876,15 +1871,15 @@ mod tests {
         // #11: repost のエンドポイントは*この*アカウントとして作用し､その id は
         // `/me` しか解決しない — それが無いうちは呼ぶものが無い｡
         let item = item_with("1", "alice", None);
-        assert!(!offers_repost(true, None, Some("bob"), &item));
+        assert!(!offers_repost(true, None, &item));
     }
 
     #[test]
     fn offers_repost_on_ones_own_post() {
         // #266: #15 が置いた `is_own_post` のガードは「API が自分の post の
-        // repost を拒む」という前提に立っていたが、実測すると 200 が返る。
+        // repost を拒む」という前提に立っていたが､実測すると 200 が返る｡
         let item = item_with("1", "bob", None);
-        assert!(offers_repost(true, Some("2244994945"), Some("bob"), &item));
+        assert!(offers_repost(true, Some("2244994945"), &item));
     }
 
     // --- offers_quote (#16) ---

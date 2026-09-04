@@ -25,8 +25,8 @@ URL の組み立ては `src/x_api/client/urls.rs` の各 builder が正本。
 | `HomeTimeline` | `GET /2/users/{id}/timelines/reverse_chronological` | `tweet.read` `users.read` | 180 |
 | `TweetById` | `GET /2/tweets?ids=` | `tweet.read` `users.read` | 5000 |
 | `CreatePost` | `POST /2/tweets` | + `tweet.write` | 未計測 |
-| `CreateRepost` | `POST /2/users/{id}/retweets` | + `tweet.write` | 未計測 |
-| `DeleteRepost` | `DELETE /2/users/{id}/retweets/{source_tweet_id}` | + `tweet.write` | 未計測 |
+| `CreateRepost` | `POST /2/users/{id}/retweets` | + `tweet.write` | **50** |
+| `DeleteRepost` | `DELETE /2/users/{id}/retweets/{source_tweet_id}` | + `tweet.write` | **50** |
 | `CreateLike` | `POST /2/users/{id}/likes` | + `like.write` | 未計測 |
 | `DeleteLike` | `DELETE /2/users/{id}/likes/{tweet_id}` | + `like.write` | 未計測 |
 | `DeletePost` | `DELETE /2/tweets/{id}` | + `tweet.write` | 未計測 |
@@ -38,7 +38,19 @@ URL の組み立ては `src/x_api/client/urls.rs` の各 builder が正本。
 上限 15 は他の読み取りより 1 桁小さいので、リフレッシュを連打すると先に枯れる。
 Lists read の resource 課金は Developer Console で未確認。
 
-書き込み系は実アカウントを変更するため意図的に計測していない。
+repost の 2 本は 2026-09-04 に dev profile のトークンで実測 (#266、2 リクエスト)。
+自分の post (`2091457407226712157`) を repost して戻した。
+
+| リクエスト | 結果 |
+| --- | --- |
+| `POST /2/users/5685672/retweets` `{"tweet_id": "..."}` | 200 `{"data":{"rest_id":"...","retweeted":true}}` |
+| `DELETE /2/users/5685672/retweets/...` | 200 `{"data":{"retweeted":false}}` |
+
+どちらも `x-rate-limit-limit: 50`、`x-access-level: read-write`。
+**API は自分の post の repost を拒まない。** #15 の計画にあった
+「自分の投稿はリポストできない」は根拠の無い前提だった。
+
+残りの書き込み系は実アカウントを変更するため意図的に計測していない。
 必要になったら投稿内容とクリーンアップをユーザーに確認してから撃つ。
 
 ### `BearerToken` を受け付けないもの (spec 由来・未計測)
