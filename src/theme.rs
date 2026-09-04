@@ -202,6 +202,15 @@ pub(crate) struct Theme {
     /// リポストした post のアクション (#95) — systemGreen の色相を､`like` と
     /// 同じやり方で同じ理由から暗くしたもの｡
     pub(crate) repost: u32,
+    /// クリックできるものに hover したとき､その上に重ねる膜 (#156)｡
+    /// `rgba` なので下 8 bit が不透明度 — [`SCRIM`] と同じ読み方で､rgb の
+    /// スロット (`bg`, `accent`, ...) とは型が違う｡名前の `_overlay` が
+    /// その区別を持つ｡テキストではないので､モジュール doc の AA の表は
+    /// 増えない｡
+    pub(crate) control_hover_overlay: u32,
+    /// 押されている間の膜 (#156)｡[`Self::control_hover_overlay`] の 1 段
+    /// 濃い版｡
+    pub(crate) control_pressed_overlay: u32,
 }
 
 impl Theme {
@@ -232,6 +241,10 @@ impl Theme {
             // `light` がこの 2 つにやることの鏡像だ (#95)｡
             like: 0xff_6b_6b,
             repost: 0x4c_d9_8f,
+            // 白のアルファ 8% / 16% (#156)｡macOS の dark mode はクリック
+            // できるものへの hover / 押下を明るくする — light の逆向き｡
+            control_hover_overlay: 0xffff_ff14,
+            control_pressed_overlay: 0xffff_ff29,
         }
     }
 
@@ -266,6 +279,9 @@ impl Theme {
             like: 0xc4_1e_3a,
             // systemGreen を 1.8:1 から 4.9:1 へ暗くした (#95)｡
             repost: 0x1f_7a_4d,
+            // 黒のアルファ 6% / 12% (#156)｡
+            control_hover_overlay: 0x0000_000f,
+            control_pressed_overlay: 0x0000_001f,
         }
     }
 }
