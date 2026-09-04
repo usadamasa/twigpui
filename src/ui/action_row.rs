@@ -143,8 +143,10 @@ impl TimelineView {
             // されるまで何も送られない｡
             .when(offers_reply(self.signed_in_with_oauth, item), |row| {
                 row.child(with_count(
+                    &format!("reply-{}", item.id),
                     reply_row(item, theme, cx),
                     counts.replies.as_deref(),
+                    theme.text_muted,
                     theme,
                 ))
             })
@@ -158,9 +160,18 @@ impl TimelineView {
                     item,
                 ),
                 |row| {
+                    // #156, D7: 件数の色は記号 (`repost_button`) と同じ値を
+                    // 渡す — ただし pending だけは記号 (`text_tertiary`) と
+                    // ずれて `text_muted` に留まる｡そのために
+                    // `toggle_count_color` を別に呼ぶ｡
+                    let target = action_post_id(item);
+                    let color =
+                        toggle_count_color(&self.repost_state_for(target), theme.repost, theme);
                     row.child(with_count(
+                        &format!("repost-{}", item.id),
                         self.repost_button(item, cx),
                         counts.reposts.as_deref(),
+                        color,
                         theme,
                     ))
                 },
@@ -174,9 +185,13 @@ impl TimelineView {
                     item,
                 ),
                 |row| {
+                    let target = action_post_id(item);
+                    let color = toggle_count_color(&self.like_state_for(target), theme.like, theme);
                     row.child(with_count(
+                        &format!("like-{}", item.id),
                         self.like_button(item, cx),
                         counts.likes.as_deref(),
+                        color,
                         theme,
                     ))
                 },

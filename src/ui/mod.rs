@@ -65,7 +65,7 @@ use render::{
     offers_repost, open_post_link, quote_card, quote_row, reload_notice_banner,
     render_thread_chain, reply_banner_label, reply_row, reply_target_label, repost_banner_label,
     repost_row, session_notice_banner, sign_in_pill, thread_action_label, thread_toggle_row,
-    usage_color, usage_label, with_count,
+    toggle_count_color, usage_color, usage_label, with_count,
 };
 use render::{RowCounts, row_counts};
 pub(crate) use startup::Startup;
@@ -506,6 +506,8 @@ pub(crate) struct TimelineView {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+
+    use crate::theme;
 
     use super::auto_refresh::{Poll, Situation};
     use super::countdown;
@@ -2080,7 +2082,7 @@ mod tests {
             target_username: "XDevelopers".to_string(),
             max_results: 20,
             min_fetch_interval_seconds: 60,
-            theme: crate::theme::ThemeMode::Light,
+            theme: theme::ThemeMode::Light,
             log_level: crate::log::Level::default(),
             request_price: None,
             daily_request_budget: None,
@@ -2292,6 +2294,34 @@ mod tests {
             list_items: std::collections::BTreeMap::new(),
             picker_open: false,
         }
+    }
+
+    /// [`fixture_with`] の 1 行版で､件数を持つ (#156)｡`with_count` が件数の
+    /// 要素を描くかどうかの分岐 (`Option<&str>`) をテストが越えるには要る —
+    /// `item_with` は `metrics: None` で固定なので使えない｡著者は
+    /// `fixture_with` と同じ `"someone"`｡
+    fn fixture_with_metrics(id: &str) -> Fixture {
+        let mut fixture = fixture_with(&[], &[]);
+        fixture.items = vec![TimelineItem {
+            id: id.to_string(),
+            text: String::new(),
+            created_at: None,
+            author_name: String::new(),
+            author_username: "someone".to_string(),
+            reposted_by: None,
+            quoted: None,
+            replied_to: None,
+            metrics: Some(PostMetrics {
+                replies: 1,
+                reposts: 2,
+                likes: 3,
+            }),
+            links: Vec::new(),
+            author_avatar_url: None,
+            original_post_id: None,
+            media: Vec::new(),
+        }];
+        fixture
     }
 
     /// list sync が何かを負っている [`fixture_with`] (#205)｡sync の行が出て
@@ -3944,6 +3974,52 @@ mod tests {
         (visual, timeline)
     }
 
+    /// #156: post の操作は文字ラベルではなく記号 — その矩形は正方形で､
+    /// 記号 (`theme::ICON_SIZE`) より小さくならない｡文字ラベルのままなら
+    /// 横長になり落ちる｡
+    #[gpui::test]
+    fn an_action_is_a_square_button_around_its_icon(cx: &mut gpui::TestAppContext) {
+        let (mut visual, _timeline) = drawn(cx, fixture_with_metrics("1"));
+        let like = visual
+            .debug_bounds("like-1")
+            .expect("a shown post always offers Like");
+        assert_eq!(
+            like.size.width, like.size.height,
+            "the like button must be a square around its icon, not a text label: {like:?}"
+        );
+        assert!(
+            like.size.width >= theme::ICON_SIZE,
+            "the button must be at least as big as the icon it holds: {:?} < {:?}",
+            like.size.width,
+            theme::ICON_SIZE
+        );
+    }
+
+    /// #156: 件数は記号の矩形の外に座る (D7) — 重ならず､右に 4px 前後空く｡
+    /// `with_count` に名前を渡していない今は `like-1-count` が存在しない
+    /// ので落ちる｡
+    #[gpui::test]
+    fn a_count_sits_beside_its_action_without_overlapping(cx: &mut gpui::TestAppContext) {
+        let (mut visual, _timeline) = drawn(cx, fixture_with_metrics("1"));
+        let like = visual
+            .debug_bounds("like-1")
+            .expect("a shown post always offers Like");
+        let count = visual
+            .debug_bounds("like-1-count")
+            .expect("a post with a like count must name that count");
+        assert!(
+            count.left() >= like.right(),
+            "the count overlaps the button: count starts at {:?}, button ends at {:?}",
+            count.left(),
+            like.right()
+        );
+        let gap = f32::from(count.left()) - f32::from(like.right());
+        assert!(
+            (0.0..10.0).contains(&gap),
+            "the gap between the button and its count should be about 4px, got {gap}"
+        );
+    }
+
     /// auto-refresh のループが最初の起床で写すもの (#214)｡`smoke_config` は
     /// auto-refresh を切っていて fixture のウィンドウは client を持たない
     /// ので､ループは決して始まらず､テストはこれを直接置く｡
@@ -4987,7 +5063,7 @@ mod tests {
             target_username: "XDevelopers".to_string(),
             max_results: 20,
             min_fetch_interval_seconds: 60,
-            theme: crate::theme::ThemeMode::Light,
+            theme: theme::ThemeMode::Light,
             log_level: crate::log::Level::default(),
             request_price: None,
             daily_request_budget: None,
