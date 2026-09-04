@@ -30,9 +30,10 @@ impl TimelineView {
         cx.notify();
     }
 
-    /// 一つの post の delete の affordance (#72): "Delete"､あるいは
+    /// 一つの post の delete の affordance (#72, #156): 記号の入口､あるいは
     /// クリックされたあとの確認の二つ組｡直近の試みが失敗していれば､その
-    /// 理由も添える｡
+    /// 理由も添える｡確認の 2 つは文字のまま — 破壊的操作は言葉で読ませる
+    /// (ux-spec §1.5)｡
     fn delete_row(&self, item: &TimelineItem, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = self.theme;
         let asking = self.pending_delete.as_deref() == Some(item.id.as_str());
@@ -45,6 +46,11 @@ impl TimelineView {
                 .child(
                     div()
                         .addressable(format!("delete-confirm-{}", item.id))
+                        .px_1()
+                        .rounded(theme::RADIUS_CONTROL)
+                        .cursor_pointer()
+                        .hover(|style| style.bg(rgba(theme.control_hover_overlay)))
+                        .active(|style| style.bg(rgba(theme.control_pressed_overlay)))
                         .text_color(rgb(theme.danger))
                         .child("Delete permanently")
                         .on_click(cx.listener(move |this, _event, _window, cx| {
@@ -54,6 +60,11 @@ impl TimelineView {
                 .child(
                     div()
                         .addressable(format!("delete-cancel-{}", item.id))
+                        .px_1()
+                        .rounded(theme::RADIUS_CONTROL)
+                        .cursor_pointer()
+                        .hover(|style| style.bg(rgba(theme.control_hover_overlay)))
+                        .active(|style| style.bg(rgba(theme.control_pressed_overlay)))
                         .text_color(rgb(theme.text_muted))
                         .child("Cancel")
                         .on_click(cx.listener(|this, _event, _window, cx| {
@@ -63,13 +74,17 @@ impl TimelineView {
         } else {
             let ask_id = item.id.clone();
             div().child(
-                div()
-                    .addressable(format!("delete-{}", item.id))
-                    .text_color(rgb(theme.text_muted))
-                    .child("Delete")
-                    .on_click(cx.listener(move |this, _event, _window, cx| {
-                        this.ask_to_delete(ask_id.clone(), cx);
-                    })),
+                icon_button(
+                    format!("delete-{}", item.id),
+                    assets::DELETE_ICON,
+                    theme.text_muted,
+                    "Delete",
+                    true,
+                    theme,
+                )
+                .on_click(cx.listener(move |this, _event, _window, cx| {
+                    this.ask_to_delete(ask_id.clone(), cx);
+                })),
             )
         };
 
