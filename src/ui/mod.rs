@@ -2293,6 +2293,8 @@ mod tests {
             sources: Vec::new(),
             list_items: std::collections::BTreeMap::new(),
             picker_open: false,
+            liked: Vec::new(),
+            reposted: Vec::new(),
         }
     }
 
@@ -2322,6 +2324,41 @@ mod tests {
             media: Vec::new(),
         }];
         fixture
+    }
+
+    /// #156: fixture が直接 `liked` を言えば `like_state_for` が on を返す —
+    /// `toggle::load_all` の永続ファイルに触らずに済む｡`Fixture` は
+    /// `deny_unknown_fields` を使っていないので (D8)、JSON ではなく構造体
+    /// リテラルで書く。
+    #[gpui::test]
+    fn a_fixture_can_say_a_post_is_already_liked(cx: &mut gpui::TestAppContext) {
+        let fixture = Fixture {
+            liked: vec!["1".to_string()],
+            ..fixture_with(&["1"], &[])
+        };
+        let (_window, timeline) = fixture_window(cx, fixture);
+        cx.update(|cx| {
+            assert!(
+                timeline.read(cx).like_state_for("1").is_on(),
+                "a fixture-declared liked post must show as on"
+            );
+        });
+    }
+
+    /// [`a_fixture_can_say_a_post_is_already_liked`] の repost 版｡
+    #[gpui::test]
+    fn a_fixture_can_say_a_post_is_already_reposted(cx: &mut gpui::TestAppContext) {
+        let fixture = Fixture {
+            reposted: vec!["1".to_string()],
+            ..fixture_with(&["1"], &[])
+        };
+        let (_window, timeline) = fixture_window(cx, fixture);
+        cx.update(|cx| {
+            assert!(
+                timeline.read(cx).repost_state_for("1").is_on(),
+                "a fixture-declared reposted post must show as on"
+            );
+        });
     }
 
     /// list sync が何かを負っている [`fixture_with`] (#205)｡sync の行が出て

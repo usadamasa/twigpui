@@ -965,6 +965,8 @@ mod tests {
             sources: Vec::new(),
             list_items: std::collections::BTreeMap::new(),
             picker_open: false,
+            liked: Vec::new(),
+            reposted: Vec::new(),
         };
         assert_eq!(
             saved_selection_for(&Startup::Fixture(Box::new(fixture)), &paths),

@@ -92,6 +92,14 @@ pub(crate) struct Fixture {
     /// 状態を撮るにはここで宣言する以外に道が無い｡
     #[serde(default)]
     pub picker_open: bool,
+    /// いいね済みとして描く post id (#156)｡`toggle::load_all` の永続ファイルを
+    /// 読む代わりに、fixture が直接そう言う。撮る画面は毎回同じでなければ
+    /// ならないので、手元の状態ファイルに依存させられない。
+    #[serde(default)]
+    pub liked: Vec<String>,
+    /// repost 済みとして描く post id (#156)｡[`Fixture::liked`] と同じ。
+    #[serde(default)]
+    pub reposted: Vec<String>,
 }
 
 /// フィクスチャが言う list sync の状態 (#205)｡

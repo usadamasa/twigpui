@@ -142,5 +142,7 @@
     { "id": "9100000000000000012", "name": "ANE" },
     { "id": "9100000000000000013", "name": "" }
   ],
-  "sync": { "pending": 1204, "blocked_for_seconds": 5400, "refusals": 3 }
+  "sync": { "pending": 1204, "blocked_for_seconds": 5400, "refusals": 3 },
+  "liked": ["9000000000000000001"],
+  "reposted": ["9000000000000000002"]
 }

@@ -239,6 +239,12 @@ impl TimelineView {
     /// 欠けてしまう｡
     fn show_fixture(&mut self, fixture: Fixture, cx: &mut Context<'_, Self>) {
         self.signed_in_with_oauth = true;
+        // #156: `like_state_for`/`repost_state_for` が読む on/off の素の値は
+        // 本物なら `refresh_liked_ids`/`refresh_reposted_ids` が埋めるが､
+        // fixture は `client` が無く fetch を一度も走らせないので､ここで
+        // 入れた値は誰にも上書きされない｡永続ファイルにも触らない｡
+        self.liked_ids = fixture.liked.into_iter().collect();
+        self.reposted_ids = fixture.reposted.into_iter().collect();
         // アプリが要求するすべての scope｡scope が足りないせいで affordance
         // が引っ込むことのないようにする｡fixture は決して fetch しないが
         // `list.read` (#161) はここに要る: `offers_reauthorize` が読むのは
