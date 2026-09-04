@@ -60,7 +60,7 @@ Posts 単価。
 > If you request and are charged for a resource (such as a Post), requesting
 > the same resource again within that window will not incur an additional charge.
 
-窓は UTC の日境界で、`src/usage.rs` が使っている日境界
+窓は UTC の日境界で、`src/usage/mod.rs` が使っている日境界
 (`unix_seconds.div_euclid(86_400)`) と同じ。
 
 失敗したリクエストは課金されない ("Only successful responses that return data are billed")。

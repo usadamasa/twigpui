@@ -125,8 +125,8 @@ export し直すのを覚えていなくても効くようにしたいなら､`
 | `X_LIST_ID` | いいえ | 未設定 (development ビルドは自身のリストを既定にする, #169) | ホームタイムラインの**代わりに**ウィンドウへ表示する X List の数値 id — `config.toml` では `list_id` (#161) |
 | `X_MIN_FETCH_INTERVAL_SECONDS` | いいえ | `60` | 取得を実行できる間隔の下限 (秒) (#10) |
 | `X_THEME` | いいえ | `light` | カラーテーマ: `light`, `dark`, `system` (OS の外観に従う) — `config.toml` では `theme` (#19) |
-| `X_REQUEST_PRICE` | いいえ | 未設定 | API リクエスト 1 回あたりの価格｡単位は任意 — `config.toml` では `request_price` (#18, [Usage tracking](.claude/skills/x-api-budget/reference/app-behavior.md#usage-tracking) を参照) |
-| `X_DAILY_REQUEST_BUDGET` | いいえ | 未設定 | 1 日のリクエスト数の予算｡近づくとヘッダーの使用量の行が色付く — `config.toml` では `daily_request_budget` (#18) |
+| `X_POST_RESOURCE_PRICE` | いいえ | `0.005` (USD、X 公開の Posts 単価) | Posts の resource 1 件あたりの価格 (USD 固定) — `config.toml` では `post_resource_price` (#162, [Usage tracking](.claude/skills/x-api-budget/reference/app-behavior.md#usage-tracking) を参照) |
+| `X_DAILY_POST_BUDGET` | いいえ | `1000` | 1 日の Posts resource 数の予算｡近づくとヘッダーの使用量の行が色付く — `config.toml` では `daily_post_budget` (#162) |
 | `X_AUTO_SYNC_LIST` | いいえ | `true` | アプリの実行中､`X_LIST_ID` のメンバーをフォローに追従させつづける — `config.toml` では `auto_sync_list`｡**タイマーで課金する**; 後述 |
 | `X_SYNC_INTERVAL_SECONDS` | いいえ | `21600` (6 時間) | バックグラウンド同期が diff の間に待つ時間｡`900` 未満の値は拒否する — `config.toml` では `sync_interval_seconds` |
 | `X_SYNC_PRUNE_LIMIT_PERCENT` | いいえ | `10` | バックグラウンド同期が 1 回の diff で削除できるメンバーの上限 (パーセント)｡超えた分の削除は保留し､`--sync-list --apply --prune` での確認に回す; `100` で上限を外す — `config.toml` では `sync_prune_limit_percent` (#176) |
@@ -356,7 +356,7 @@ spec](https://specifications.freedesktop.org/basedir-spec/latest/) に従って
 | --- | --- | --- |
 | `XDG_CONFIG_HOME` | `~/.config/twigpui/` | `config.toml` |
 | `XDG_CACHE_HOME` | `~/.cache/twigpui/` | レスポンスキャッシュ: `user_ids.json`, `timeline-<user_id>.json` (#9), `me.json`, `home-timeline-<user_id>.json` (#11), `thread-<reply_id>.json` (#12), `avatars/` (#64), `media/` (#65) |
-| `XDG_STATE_HOME` | `~/.local/state/twigpui/` | `oauth_tokens.json` (mode `0600`), `rate_limit.json` (#10), `usage.json` (#18), `reposted_posts.json` (#15), `liked_posts.json` (#68), `logs/` (#49) |
+| `XDG_STATE_HOME` | `~/.local/state/twigpui/` | `oauth_tokens.json` (mode `0600`), `rate_limit.json` (#10), `usage.json` (#18, #162), `reposted_posts.json` (#15), `liked_posts.json` (#68), `logs/` (#49) |
 
 `XDG_*` 変数は､空でない絶対パスが設定されているときにだけ尊重される｡相対パスや
 空の値は spec に従って既定値へ落ちる｡
@@ -428,8 +428,8 @@ list_id = "2091351590695588200"
 min_fetch_interval_seconds = 60
 oauth_client_id = "…"
 theme = "light"
-request_price = 0.02
-daily_request_budget = 500
+post_resource_price = 0.02
+daily_post_budget = 500
 auto_sync_list = true
 sync_interval_seconds = 21600
 sync_prune_limit_percent = 10

@@ -107,21 +107,26 @@ impl XClient {
     /// retry しない: 普通の rate limit は自分のスケジュールで回復する
     /// (retry したところで早まらない) し､usage cap の 429 はそもそも回復しない｡
     ///
-    /// #18: 実際に HTTP を送るたび [`Self::send_once`] の直前に
-    /// [`usage::record_request`] で数える — retry も含めてだ｡X は結果に関わらず
-    /// 受け取った送信ごとに課金する (5xx でもサーバーには届いている) ので､
-    /// retry したリクエストは論理的な呼び出し 1 回ごとではなく試行 1 回ごとに
-    /// 数える｡上の [`rate_limit::decision`] が送る前に拒んだリクエストは､
-    /// 何も出ていないので数えない｡クレート全体で `usage.rs` へ書くのはここ
-    /// だけであり､意図してそうしてある: このメソッドを通らずにリクエストを
-    /// 使うことはできない｡
+    /// #162 (#18 の後継): 実際に HTTP を送るたび [`Self::send_once`] の
+    /// 直前ではなく応答を受け取った直後に [`usage::record_response`] で
+    /// 数える — retry も含めてだ｡書き込み endpoint (`Endpoint::kind` が
+    /// `Write`) は結果に関わらず受け取った送信ごとに 1 件課金する (5xx でも
+    /// サーバーには届いている) ので､retry したリクエストは論理的な呼び出し
+    /// 1 回ごとではなく試行 1 回ごとに数える｡読み取り endpoint はそうでは
+    /// ない: `body` の `data` から実際に返ってきた resource だけを数えるので､
+    /// retry で得た 5xx の body には `data` が無く 0 件になる — 課金される
+    /// のは成功して resource を運んだ応答だけだ｡上の [`rate_limit::decision`]
+    /// が送る前に拒んだリクエストは､何も出ていないので数えない｡クレート
+    /// 全体で `usage` へ書くのはここだけであり､意図してそうしてある: この
+    /// メソッドを通らずにリクエストを使うことはできない｡
     ///
     /// 直接の unit test は無い — `cache::reload` がそうでないのと同じく､
     /// ネットワークと､`paths` 経由でファイルシステムに触れるからだ｡この
     /// 振る舞いのテストカバレッジを実際に担っている純粋な継ぎ目は
     /// `rate_limit::decision`､`rate_limit::backoff_delay`､
     /// `rate_limit::parse_headers`､`rate_limit::classify_429` (下の
-    /// [`check_status`] 経由)､そして `usage::record` だ｡
+    /// [`check_status`] 経由)､そして `usage::record`/`usage::dedup`/
+    /// `usage::extract_resource_ids` だ｡
     fn get(&self, paths: &Paths, endpoint: Endpoint, url: &str, now: i64) -> Result<String> {
         Self::send_with_retry(paths, endpoint, now, || self.send_once(url, now))
     }
@@ -179,14 +184,11 @@ impl XClient {
                     // 送信前ではなくここで数える｡X が実際にリクエストを処理
                     // した (つまり課金した) 証拠は､レスポンスが返ってくること
                     // しかないからだ｡先に数えると､届かなかった接続まで
-                    // ユーザーに請求することになる — 不安定なネットワークでは
-                    // `MAX_RETRIES` 回まで retry するので､1 回のリロードが
-                    // 実在しない 5 件のリクエストをでっち上げかねない｡retry
-                    // したリクエストは再び課金されるので､呼び出し単位ではなく
-                    // 送信単位で数える｡残る不正確さは逆の場合だ: X が処理した
-                    // のにレスポンスが途中で失われたリクエストは､課金されるが
-                    // ここでは数えられない｡
-                    usage::record_request(paths, endpoint, now)?;
+                    // ユーザーに請求することになる｡#162: 読み取りは `body` の
+                    // `data` から返ってきた resource だけを数えるので､届いた
+                    // が中身の無い応答 (4xx/5xx) は自然に 0 件になる — 書き
+                    // 込みだけが送信単位で 1 件を数える｡
+                    usage::record_response(paths, endpoint, &body, now)?;
 
                     // 2xx でないレスポンスでも永続化する — 使い切った
                     // ウィンドウ自身の 429 こそ､*次の* 呼び出しがそもそも送信を

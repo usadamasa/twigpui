@@ -51,9 +51,9 @@ project の日次カウンタが 20 から 119 へ動いた。返却は 98 件�
 
 | 操作 | リクエスト | resource (上限) |
 | --- | --- | --- |
-| 起動・リロード | 2 | Users 1 (`/users/me`、30 日キャッシュで通常 0) + Posts 20 |
+| 起動・リロード | 2 | Owned 1 (`/users/me`、30 日キャッシュで通常 0) + Posts 20 |
 | 「Load older」1 クリック | 1 | Posts 20 |
-| `--fetch-only` | 2 | Users 1 + Posts (Owned Reads) 20 |
+| `--fetch-only` | 2 | Users 1 (`target_username` の解決) + Posts 20 |
 | 「Show thread」1 クリック | 最大 5 | Posts 最大 5 |
 | 自動更新 1 ポーリング (#21) | 1 | Posts 20 (同日 dedup 後は新着分のみ) |
 | 「N new posts」バーを押す | 0 | 0 |
@@ -109,19 +109,32 @@ task slot を差し替えても実行中の tick は止まらない (background 
 - **件数が可変なら先に最悪ケースを数える。** フォロー一覧の全件取得のように
   ページングが伸びるものは、resource 数がそのまま請求になる。
 - ユーザーのクリック 1 回で複数リクエストが飛ぶなら、**押す前に最悪ケースを UI に出す**
-  (「Show thread (up to 5 requests)」がその形)。件数で課金される以上、
-  この表示も本来はリクエスト数ではなく件数で出すべき。
+  (「Show thread (up to 5 requests)」がその形)。件数で課金される以上、この表示は
+  今もリクエスト数のままで、resource 数の上限ではない (「Show thread」はリクエストと
+  resource がほぼ 1 対 1 なので実害は小さいが、直すなら request 数ではなく resource 数
+  の見込みを出す)。
 
-## アプリの消費集計は今まちがっている
+## アプリの消費集計 (`src/usage/`)
 
-`src/usage.rs` は**リクエスト本数**を数えている。実際の課金は resource 単位なので、
-表示されている数字は実態と 1 桁から 2 桁ずれる。#162 で直す。
-それまでは「何回呼びに行ったか」であって「いくらかかったか」ではない。
+#162 で resource 単位に直した。数える場所は `x_api::client::XClient::send_with_retry`
+の 1 か所のまま (`usage::record_response`)。レスポンス body の `data` から実際に
+返ってきた id を数え、`(種別, id)` をキーに UTC 24 時間で重複排除する — このスキルが
+書いている X 側の dedup (`pricing.md`) をそのまま再現したものだ。書き込みは今も
+request 単位 (`Endpoint::kind()` が `Write` を返すもの)。
 
-正しい消費を見る手段は 2 つ。手順は `reference/pricing.md`。
+種別 (`usage::ResourceKind`) は Posts/Users/Owned/Write の 4 つ。footer と
+`daily_post_budget` が見せるのは **Posts の resource 数だけ** — X の
+`project_usage` と同じ単位で、Developer Console の数字と直接照合できる。
+Users/Owned/Write は `--usage` の JSON (`by_kind`) に残るが、ヘッダには出ない。
 
-1. Developer Console の Usage / Billing の明細 (金額が見える唯一の場所)
-2. `GET /2/usage/tweets` (Post 消費のみ。app-only Bearer 必須)
+`Endpoint::kind()` は 2 か所で安全側 (高い方の単価) に倒している: `Timeline` は
+見ている相手が自分自身の post でも Posts ($0.005) のまま (`Owned Reads` $0.001 に
+仕分けない)、`Following`/`ListMembers` も自分のフォロー一覧を Users ($0.010) のまま
+数える。どちらも著者や自分の id と突き合わせるコストを払わないための意図した
+過大見積りで、`src/usage/kind.rs` に `ponytail:` コメントで天井と上げ方を残してある。
+
+`GET /2/usage/tweets` (Post 消費のみ、app-only Bearer 必須) や Developer Console の
+明細と突き合わせて裏取りしたい手順は `reference/pricing.md` を見よ。
 
 ## 残高が尽きたとき
 

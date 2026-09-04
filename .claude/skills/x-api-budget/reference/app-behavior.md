@@ -85,30 +85,46 @@ HTTP `429` として現れるが挙動は似ても似つかない — 残高上�
 <a id="usage-tracking"></a>
 ## 消費集計
 
-**この節が書いている内容は､X の実際の課金と一致しない｡** ここが数えるのは
-リクエスト数だが､読み取りは resource 単位で課金される (`pricing.md`) ので､下の数字は
-読み取りを 1〜2 桁小さく見せる｡修正は #162 で追っている｡それまでは､この数を
-「いくら掛かったか」ではなく「アプリが何回外へ出たか」として読む｡
+#162 で resource 単位に直した｡読み取りは返ってきた resource の数で数え
+(`pricing.md` の課金の単位)､同じ日の同じ `(種別, id)` は 1 回しか課金しない (同節の
+重複排除)｡書き込みは今も request 単位｡本当の数字と突き合わせたいときの手は
+`pricing.md` にある 2 つ (Developer Console の明細､`GET /2/usage/tweets`) のまま｡
 
-本当の数字を見る手は 2 つ｡Developer Console の Usage / Billing の明細か､
-`GET /2/usage/tweets` — どちらも `pricing.md` に書いてある｡
+twigpui は実際の resource 数 (書き込みは request 数) をすべて数えて永続化するので､
+累計はウィンドウからもコマンドラインからも見える｡
 
-twigpui は実際に送ったリクエストをすべて数えて永続化するので､累計はウィンドウからも
-コマンドラインからも見える｡
+**何を数えるか｡** `x_api::client` の中央にある `send_with_retry` から HTTP 応答を
+受け取るたび `usage::record_response` が数える — リトライも含む｡書き込み endpoint
+(`Endpoint::kind()` が `Write`) はレスポンスの中身を見ずに 1 件を数える (5xx でも
+サーバーには届いている､という #18 時点の理屈がそのまま生きる)｡読み取り endpoint は
+レスポンス body の `data` から返ってきた id を数える｡`data` が配列ならその要素数､
+`/2/users/me` のような単一オブジェクトなら 1 件｡`data` が無い応答 (4xx/5xx を含む)
+は自然に 0 件になる — 失敗したレスポンスは課金されないという X の規則
+(`pricing.md`) とここで揃う｡`#10` のレートリミット追跡がそもそも送信を拒んだ
+リクエストは何も出ていないので数え**ない**｡`includes` は数えない (`pricing.md` の
+実測ログ 4)｡
 
-**何を数えるか｡** `x_api::client` の中央にある 1 つの `get` メソッドから数えた､実際の
-HTTP 送信すべて — リトライも含む｡ネットワークエラーや `5xx` の後にリトライした
-リクエストは試行ごとに 1 回数える｡どれも API へ届く (あるいは届こうとする) 実際の
-送信であり､それに応じて課金されるからだ｡`#10` のレートリミット追跡がそもそも送信を
-拒んだリクエストは､何も出ていないので数え**ない**｡カウントはエンドポイントごとに
-保持し (#10 がすでに別々に追っているのと同じ 5 つの `Endpoint`)､下に出す合計は
-それを足し上げたもの｡
+**resource の種別｡** 単価が種別ごとに 10 倍違うので､`usage::ResourceKind`
+(Posts/Users/Owned/Write) ごとに分けて持つ — `Endpoint::kind()`
+(`src/usage/kind.rs`) が endpoint ごとの対応表だ｡2 か所は安全側 (高い方の単価) に
+倒してある: `Timeline` は自分自身の post を見ていても Posts のまま (Owned Reads に
+仕分けない)､`Following`/`ListMembers` も自分のフォロー一覧を Users のまま数える｡
+
+**同日 dedup｡** X は resource を UTC 24 時間の窓で重複排除する (`pricing.md`)｡
+`usage::dedup` がキー `(種別, id)` でこれを再現する — 同じ post が `Timeline` と
+`ListTimeline` の両方から返っても 1 回しか課金しない｡dedup を Users/Owned にも
+同じ関数で適用しているのは､X が文書化しているのは Posts の dedup だけだが､
+`(kind, id)` を素直に一般化した先が今のコードだからで､Posts 以外の実測はまだ無い｡
 
 **どこに置くか｡** `$XDG_STATE_HOME/twigpui/usage.json` (cache ではなく state —
-この区別がここでも効く理由は上のレートリミットの節を見る)｡エンドポイントごとの
-エントリが､全期間の合計と現在の UTC 日のカウントを持つ｡ファイルが無い､または壊れて
-いる場合は､壊れたレスポンスキャッシュやレートリミットのファイルと同じく「まだ何も
-追っていない」として素直に扱い､起動の失敗にはしない｡
+この区別がここでも効く理由は上のレートリミットの節を見る)｡endpoint ごとの
+エントリが､全期間の合計 (resource 数､書き込みは request 数) と現在の UTC 日の
+カウントを持つ｡resource 種別ごとの同日 dedup 状態も同じファイルに持つ｡ファイルが
+無い､または壊れている場合は､壊れたレスポンスキャッシュやレートリミットのファイルと
+同じく「まだ何も追っていない」として素直に扱い､起動の失敗にはしない｡**`version`
+が現在の版と違う場合も同じに扱う** — #18 まではリクエスト本数を数えていて resource
+数とは単位が違うため､そのまま読み継がず初期化する｡全期間の累計は #162 の切り替え
+で一度リセットされている｡
 
 **日付の境界は UTC｡** 「今日」はマシンのローカルの深夜ではなく UTC の深夜にリセット
 される｡理由は 2 つ｡X API の `created_at` のタイムスタンプがそもそも UTC なので､
@@ -119,24 +135,24 @@ HTTP 送信すべて — リトライも含む｡ネットワークエラーや 
 タイムスタンプに対する `unix_seconds.div_euclid(86_400)` にすぎない｡引き換えに､
 UTC より西にいる人には「今日」が自分の深夜ではなくローカルの昼過ぎに切り替わる｡
 
-**単価が設定されていない限り､金額は一切表示しない｡** リクエストあたりの単価は
-アカウントのプランに依存し､ここからは知りようがない — なので既定ではヘッダーと
-`--usage` (下記) はリクエストの*件数*だけを出す｡`X_REQUEST_PRICE` (`config.toml` では
-`request_price`) を､頭にある任意の単位で設定すると､その件数が見積もり金額
-(`count × price`) に変わる｡当てずっぽうの間違った単価は単価が無いより悪いので､
-twigpui が組み込みの既定を勝手に作ることはない｡
+**単価には既定値がある｡** #18 は「組み込みの既定価格は置かない」規則を持っていた
+(単位の定まらない request 数に価格を掛けないため)｡#162 で単位が Posts の resource
+数に定まり､X 自身が USD 建てで単価を公開している (`pricing.md`) 以上､既定値は
+当てずっぽうではなく出典のある数になった｡`X_POST_RESOURCE_PRICE`
+(`config.toml` では `post_resource_price`) の既定は USD $0.005 / Posts resource —
+`pricing.md` の単価表と同じ数で､変えたい価格 (割引プランなど) があるときだけ上書きする｡
 
-**予算の色付け｡** `X_DAILY_REQUEST_BUDGET` (`config.toml` では
-`daily_request_budget`) は金額ではなくリクエスト件数の予算｡これは意図的で､
-リクエスト件数は常に分かるため､単価が設定されていてもいなくても効く｡全エンドポイント
-を合わせた今日の合計が予算の 80% に達すると､ヘッダーの消費行が警告色に変わる｡
-予算そのものに達するかそれを超えると､エラーやレートリミットのカウントダウンと同じ色に
-変わる｡
+**予算の色付け｡** `X_DAILY_POST_BUDGET` (`config.toml` では `daily_post_budget`､
+既定 1000) は金額ではなく Posts の resource 数の予算｡同日 dedup が効くので､
+定常で積むのは「その日に実際に増えた post 数」だけになる (list 1 本なら概ね
+300〜700 / 日)｡**Posts だけ** の今日の合計が予算の 80% に達すると､ヘッダーの
+消費行が警告色に変わる｡予算そのものに達するかそれを超えると､エラーやレートリミット
+のカウントダウンと同じ色に変わる｡Users/Owned/Write は色付けの対象に入らない｡
 
-**ウィンドウでの見え方｡** ヘッダーはタイトルの下に常に短い 1 行を出す｡今日の
-リクエスト件数と全期間の合計で､単価が設定されていれば見積もり金額が後ろに付く —
-例えば `Today: 3 req (~0.06) · Total: 42 req`､単価が無ければ
-`Today: 3 req · Total: 42 req`｡
+**ウィンドウでの見え方｡** ヘッダーはタイトルの下に常に短い 1 行を出す｡**Posts の
+resource 数だけ** (X の `project_usage` と同じ単位で､Developer Console の数字と
+直接照合できる)｡今日の数と全期間の合計､単価から出した見積り金額 (USD､既定値が
+あるので常に付く) — 例えば `Posts today: 3 (~$0.02) · total: 42`｡
 
 **コマンドラインから: `--usage`｡** 同じ数字を JSON で標準出力へ出して終了する｡
 ウィンドウは開かず､ネットワーク呼び出しもしない (`usage.json` を読むだけ):
@@ -148,19 +164,25 @@ cargo run -- --usage
 ```json
 {
   "endpoints": {
-    "user_lookup": { "total": 12, "today": 3 },
-    "timeline": { "total": 12, "today": 3 },
-    "me": { "total": 0, "today": 0 },
-    "home_timeline": { "total": 0, "today": 0 },
-    "tweet_by_id": { "total": 0, "today": 0 }
+    "user_lookup": { "kind": "users", "total": 12, "today": 3 },
+    "timeline": { "kind": "posts", "total": 12, "today": 3 },
+    "me": { "kind": "owned", "total": 0, "today": 0 },
+    "home_timeline": { "kind": "posts", "total": 0, "today": 0 },
+    "tweet_by_id": { "kind": "posts", "total": 0, "today": 0 }
+  },
+  "by_kind": {
+    "posts": { "total": 12, "today": 3 },
+    "users": { "total": 12, "today": 3 },
+    "owned": { "total": 0, "today": 0 },
+    "write": { "total": 0, "today": 0 }
   },
   "total": {
-    "total_requests": 24,
-    "today_requests": 6,
-    "price_per_request": null,
-    "estimated_amount_total": null,
-    "estimated_amount_today": null,
-    "daily_budget": null,
+    "posts_total": 12,
+    "posts_today": 3,
+    "post_resource_price": 0.005,
+    "estimated_amount_total": 0.06,
+    "estimated_amount_today": 0.015,
+    "daily_post_budget": 1000,
     "budget_status": "ok"
   }
 }
@@ -169,10 +191,10 @@ cargo run -- --usage
 独自のテキスト形式ではなく JSON にしたのは､このプロジェクトが永続化する他のものは
 すべてすでに `serde_json` に依存しているからであり､機械が読む側 (スクリプトや別の
 ツール) は削り取らねばならない形式ではなくパースできる構造を必要とするからだ｡
-`price_per_request` と `estimated_amount_*` のフィールドは､`X_REQUEST_PRICE` が
-設定されていない限り `null` で､ヘッダー自身の規則と揃えてある｡`budget_status` は
-`"ok"`､`"near"` (設定した予算の 80%)､`"exceeded"` のいずれか｡予算が設定されて
-いなければ常に `"ok"`｡
+`endpoints` は endpoint ごとの生の数 (読み取りは resource 数､書き込みは request 数､
+`kind` フィールドがどちらの単価表か言う)｡`by_kind` は種別ごとに足し上げたもの｡
+`total` は Posts だけを見せる — ヘッダーが見せるのと同じ数字で､`budget_status` は
+`"ok"`､`"near"` (設定した予算の 80%)､`"exceeded"` のいずれか｡
 
 <a id="local-cache"></a>
 ## ローカルキャッシュ
