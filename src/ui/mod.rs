@@ -613,6 +613,21 @@ mod tests {
         assert_eq!(counts.likes.as_deref(), Some("2.4M"));
     }
 
+    /// 3 桁に達した単位は小数を落として 5 文字で頭打ちにする (X の UI と
+    /// 同じ)｡`theme::COUNT_WIDTH` は 5 文字ぶんしか無いので､ここが 6 文字
+    /// を返すとその行だけ列が押されて崩れる｡
+    #[test]
+    fn a_count_never_exceeds_five_characters() {
+        let counts = row_counts(Some(&PostMetrics {
+            replies: 123_456,
+            reposts: 999_999,
+            likes: 123_000_000,
+        }));
+        assert_eq!(counts.replies.as_deref(), Some("123K"));
+        assert_eq!(counts.reposts.as_deref(), Some("999K"));
+        assert_eq!(counts.likes.as_deref(), Some("123M"));
+    }
+
     // --- #64: アバター ---
 
     #[test]
