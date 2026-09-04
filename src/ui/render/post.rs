@@ -397,7 +397,8 @@ fn non_zero_count(count: u64) -> Option<String> {
 }
 
 /// アクション一つと､その傍らのエンゲージメント件数 (#95, #156)｡見せる件数が
-/// 無ければアクション単独｡
+/// 無くても [`theme::COUNT_WIDTH`] の枠は空けておく — 件数を持つ post と
+/// 持たない post で action の縦の並びが揃うように｡
 ///
 /// 件数をアクション自身の要素の一部ではなく兄弟にしてあるのは､数字を
 /// クリックしても何も起きないようにするためだ: アクションはリクエストを
@@ -413,8 +414,13 @@ pub(in crate::ui) fn with_count(
     count: Option<&str>,
     color: u32,
 ) -> AnyElement {
-    let Some(count) = count else {
-        return action;
+    let slot = div().min_w(theme::COUNT_WIDTH).text_color(rgb(color));
+    let slot = match count {
+        Some(count) => slot
+            .addressable(format!("{name}-count"))
+            .child(count.to_string())
+            .into_any_element(),
+        None => slot.into_any_element(),
     };
 
     div()
@@ -422,19 +428,16 @@ pub(in crate::ui) fn with_count(
         .items_center()
         .gap_1()
         .child(action)
-        .child(
-            div()
-                .addressable(format!("{name}-count"))
-                .text_color(rgb(color))
-                .child(count.to_string()),
-        )
+        .child(slot)
         .into_any_element()
 }
 
 /// X 自身の UI と同じやり方で件数を略記する — `12345` は `12.3K` になる —
 /// 人気の post が七桁の幅でタイムスタンプと byline を押しのけられない
 /// ように｡末尾の `.0` は落とす (`1000` は `1.0K` ではなく `1K`); 1000 未満
-/// はそのままの数字を見せる｡
+/// はそのままの数字を見せる｡単位の前が 3 桁に達したら小数も落とす
+/// (`123456` は `123K`) ので､結果は必ず 5 文字以内 —
+/// [`theme::COUNT_WIDTH`] の枠はその幅で切ってある｡
 fn compact_count(count: u64) -> String {
     #[expect(
         clippy::cast_precision_loss,
@@ -445,7 +448,7 @@ fn compact_count(count: u64) -> String {
         // 小数一桁を､丸めずに切り捨てる｡ラベルが post の実際より多くの
         // エンゲージメントを主張しないようにするためだ｡
         let tenths = (value * 10.0).floor() / 10.0;
-        if (tenths.fract()).abs() < f64::EPSILON {
+        if tenths >= 100.0 || (tenths.fract()).abs() < f64::EPSILON {
             format!("{}{suffix}", tenths.trunc())
         } else {
             format!("{tenths:.1}{suffix}")

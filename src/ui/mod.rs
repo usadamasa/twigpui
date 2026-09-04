@@ -613,6 +613,21 @@ mod tests {
         assert_eq!(counts.likes.as_deref(), Some("2.4M"));
     }
 
+    /// 3 桁に達した単位は小数を落として 5 文字で頭打ちにする (X の UI と
+    /// 同じ)｡`theme::COUNT_WIDTH` は 5 文字ぶんしか無いので､ここが 6 文字
+    /// を返すとその行だけ列が押されて崩れる｡
+    #[test]
+    fn a_count_never_exceeds_five_characters() {
+        let counts = row_counts(Some(&PostMetrics {
+            replies: 123_456,
+            reposts: 999_999,
+            likes: 123_000_000,
+        }));
+        assert_eq!(counts.replies.as_deref(), Some("123K"));
+        assert_eq!(counts.reposts.as_deref(), Some("999K"));
+        assert_eq!(counts.likes.as_deref(), Some("123M"));
+    }
+
     // --- #64: アバター ---
 
     #[test]
@@ -4092,14 +4107,14 @@ mod tests {
             .debug_bounds("delete-1")
             .expect("one's own post always offers Delete");
         let gap = f32::from(delete.left()) - f32::from(open.right());
-        // 通常の隣接 gap (`gap_4`) は 16px｡`justify_between` がこの
+        // 通常の隣接 gap (`gap_3`) は 12px｡`justify_between` がこの
         // テスト窓の右端まで開くと 1000px を超える｡50px はその両方から
         // 十分離れているので､この assert は `justify_between` が実際に
         // 効いているときだけ通る｡
         assert!(
             gap > 50.0,
             "delete must sit apart at the row's end, not right beside open \
-             with just the ordinary gap_4: open ends at {:?}, delete starts \
+             with just the ordinary gap_3: open ends at {:?}, delete starts \
              at {:?} (gap {gap})",
             open.right(),
             delete.left()
@@ -4107,8 +4122,8 @@ mod tests {
     }
 
     /// #156: 自分の post の行 (repost 無し､末尾に `justify_between` で
-    /// 開かれる delete) でも like の件数とその右の quote は `gap_4`
-    /// (16px) 以上離れているべきで､右端寄せの実装のせいで隣の gap が
+    /// 開かれる delete) でも like の件数とその右の quote は `gap_3`
+    /// (12px) 以上離れているべきで､右端寄せの実装のせいで隣の gap が
     /// つぶれてはいけない｡
     #[gpui::test]
     fn a_count_keeps_its_gap_next_to_the_following_action_on_ones_own_post(
@@ -4145,11 +4160,32 @@ mod tests {
             .expect("one's own post always offers Quote");
         let gap = f32::from(quote.left()) - f32::from(count.right());
         assert!(
-            gap >= 16.0,
-            "the like count must keep the row's gap_4 before quote: \
+            gap >= 12.0,
+            "the like count must keep the row's gap_3 before quote: \
              count ends at {:?}, quote starts at {:?} (gap {gap})",
             count.right(),
             quote.left()
+        );
+    }
+
+    /// 件数の有無で action の縦の並びが動かない｡件数を持つ post と持たない
+    /// post で open の左端が一致する｡`with_count` が件数の無いときに
+    /// action だけ返すと､下の行の open が左へ寄って落ちる｡
+    #[gpui::test]
+    fn actions_line_up_across_posts_with_and_without_counts(cx: &mut gpui::TestAppContext) {
+        let mut fixture = fixture_with_metrics("1");
+        fixture.items.push(item_with("2", "someone", None));
+        let (mut visual, _timeline) = drawn(cx, fixture);
+        let with = visual
+            .debug_bounds("open-1")
+            .expect("a shown post always offers Open in X");
+        let without = visual
+            .debug_bounds("open-2")
+            .expect("a shown post always offers Open in X");
+        assert_eq!(
+            with.left(),
+            without.left(),
+            "open must sit at the same x whether or not the post shows counts"
         );
     }
 
