@@ -33,7 +33,9 @@ impl TimelineView {
     /// 一つの post の delete の affordance (#72, #156): 記号の入口､あるいは
     /// クリックされたあとの確認の二つ組｡直近の試みが失敗していれば､その
     /// 理由も添える｡確認の 2 つは文字のまま — 破壊的操作は言葉で読ませる
-    /// (ux-spec §1.5)｡
+    /// (ux-spec §1.5)｡行の右端へ寄せるのは [`Self::action_row`] 側 — ここでは
+    /// 寄せない (taffy 0.9.0 は同じ flex line に `margin: auto` の子が 1 つでも
+    /// あると他の兄弟の `gap` を消してしまうので､`ml_auto` はここには置けない)｡
     fn delete_row(&self, item: &TimelineItem, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = self.theme;
         let asking = self.pending_delete.as_deref() == Some(item.id.as_str());
@@ -43,10 +45,6 @@ impl TimelineView {
             div()
                 .flex()
                 .gap_3()
-                // #156, D5: delete だけ他の 5 つから離して行の右端へ寄せる
-                // (ux-spec §1.1 の図と mock.html の双方)。確認へ展開した
-                // ときの 2 つ組も同じく右端。
-                .ml_auto()
                 .child(
                     div()
                         .addressable(format!("delete-confirm-{}", item.id))
@@ -77,7 +75,7 @@ impl TimelineView {
                 )
         } else {
             let ask_id = item.id.clone();
-            div().ml_auto().child(
+            div().child(
                 icon_button(
                     format!("delete-{}", item.id),
                     assets::DELETE_ICON,
@@ -93,14 +91,10 @@ impl TimelineView {
         };
 
         match self.delete_failures.get(&item.id) {
-            // `controls` は既に `ml_auto` を持つが、ここでは他の子の兄弟に
-            // なるのはこの外側の div のほうなので、こちらにも要る —
-            // でないと失敗メッセージ付きの行だけ右端に寄らない。
             Some(message) => div()
                 .flex()
                 .flex_col()
                 .gap_1()
-                .ml_auto()
                 .child(div().text_color(rgb(theme.danger)).child(message.clone()))
                 .child(controls)
                 .into_any_element(),
@@ -147,6 +141,15 @@ impl TimelineView {
     /// 失敗した like/repost は今もそのメッセージを描き､その行についてはこの
     /// 帯が下へ伸びる; それは `like_row`/`repost_row` 自身の仕業で､ここでは
     /// そのままにしてある｡
+    ///
+    /// delete は reply〜open の内側のクラスタとは別の flex line に分け､
+    /// 外側を `justify_between()` で開く (#156)｡`ml_auto` は使わない —
+    /// taffy 0.9.0 は同じ flex line に `margin: auto` の子が 1 つでもあると
+    /// その他の兄弟の `gap` を無かったことにしてしまう
+    /// (`distribute_remaining_free_space` が auto margin を検出すると
+    /// `offset_main` へ `gap` を足す通常経路を素通りする)。内側のクラスタを
+    /// 独立した flex container にすれば auto margin を一切使わずに済み､
+    /// この bug を踏まない。
     pub(super) fn action_row(
         &self,
         item: &TimelineItem,
@@ -155,7 +158,7 @@ impl TimelineView {
     ) -> AnyElement {
         let theme = self.theme;
 
-        div()
+        let actions = div()
             .flex()
             .flex_wrap()
             .items_center()
@@ -226,8 +229,17 @@ impl TimelineView {
                 row.child(quote_row(item, theme, cx))
             })
             // #70: post そのものを x.com で開く｡
-            .child(open_post_link(item, theme, cx))
-            // #72: delete — 自分の post のみ､そして決して一クリックでは行わない｡
+            .child(open_post_link(item, theme, cx));
+
+        // #72: delete — 自分の post のみ､そして決して一クリックでは行わない｡
+        // `justify_between()` で reply〜open のクラスタから離す (D5 の
+        // 「delete だけ右端へ」)。
+        div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .justify_between()
+            .child(actions)
             .when(
                 offers_delete(
                     self.signed_in_with_oauth,

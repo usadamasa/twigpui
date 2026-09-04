@@ -4088,6 +4088,52 @@ mod tests {
         );
     }
 
+    /// #156: 自分の post の行 (repost 無し、末尾に `ml_auto` 付き delete)
+    /// でも like の件数とその右の quote は `gap_4` (16px) 以上離れている
+    /// べきで、`ml_auto` のせいで隣の gap がつぶれてはいけない。
+    #[gpui::test]
+    fn a_count_keeps_its_gap_next_to_the_following_action_on_ones_own_post(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let fixture = Fixture {
+            items: vec![TimelineItem {
+                id: "1".to_string(),
+                text: String::new(),
+                created_at: None,
+                author_name: String::new(),
+                author_username: "usadamasa".to_string(),
+                reposted_by: None,
+                quoted: None,
+                replied_to: None,
+                metrics: Some(PostMetrics {
+                    replies: 0,
+                    reposts: 0,
+                    likes: 1,
+                }),
+                links: Vec::new(),
+                author_avatar_url: None,
+                original_post_id: None,
+                media: Vec::new(),
+            }],
+            ..fixture_with(&[], &[])
+        };
+        let (mut visual, _timeline) = drawn(cx, fixture);
+        let count = visual
+            .debug_bounds("like-1-count")
+            .expect("a like count of 1 must be shown and named");
+        let quote = visual
+            .debug_bounds("quote-1")
+            .expect("one's own post always offers Quote");
+        let gap = f32::from(quote.left()) - f32::from(count.right());
+        assert!(
+            gap >= 16.0,
+            "the like count must keep the row's gap_4 before quote: \
+             count ends at {:?}, quote starts at {:?} (gap {gap})",
+            count.right(),
+            quote.left()
+        );
+    }
+
     /// auto-refresh のループが最初の起床で写すもの (#214)｡`smoke_config` は
     /// auto-refresh を切っていて fixture のウィンドウは client を持たない
     /// ので､ループは決して始まらず､テストはこれを直接置く｡
