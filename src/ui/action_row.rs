@@ -43,6 +43,10 @@ impl TimelineView {
             div()
                 .flex()
                 .gap_3()
+                // #156, D5: delete だけ他の 5 つから離して行の右端へ寄せる
+                // (ux-spec §1.1 の図と mock.html の双方)。確認へ展開した
+                // ときの 2 つ組も同じく右端。
+                .ml_auto()
                 .child(
                     div()
                         .addressable(format!("delete-confirm-{}", item.id))
@@ -73,7 +77,7 @@ impl TimelineView {
                 )
         } else {
             let ask_id = item.id.clone();
-            div().child(
+            div().ml_auto().child(
                 icon_button(
                     format!("delete-{}", item.id),
                     assets::DELETE_ICON,
@@ -89,10 +93,14 @@ impl TimelineView {
         };
 
         match self.delete_failures.get(&item.id) {
+            // `controls` は既に `ml_auto` を持つが、ここでは他の子の兄弟に
+            // なるのはこの外側の div のほうなので、こちらにも要る —
+            // でないと失敗メッセージ付きの行だけ右端に寄らない。
             Some(message) => div()
                 .flex()
                 .flex_col()
                 .gap_1()
+                .ml_auto()
                 .child(div().text_color(rgb(theme.danger)).child(message.clone()))
                 .child(controls)
                 .into_any_element(),
