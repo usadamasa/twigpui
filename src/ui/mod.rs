@@ -4153,6 +4153,27 @@ mod tests {
         );
     }
 
+    /// 件数の有無で action の縦の並びが動かない｡件数を持つ post と持たない
+    /// post で open の左端が一致する｡`with_count` が件数の無いときに
+    /// action だけ返すと､下の行の open が左へ寄って落ちる｡
+    #[gpui::test]
+    fn actions_line_up_across_posts_with_and_without_counts(cx: &mut gpui::TestAppContext) {
+        let mut fixture = fixture_with_metrics("1");
+        fixture.items.push(item_with("2", "someone", None));
+        let (mut visual, _timeline) = drawn(cx, fixture);
+        let with = visual
+            .debug_bounds("open-1")
+            .expect("a shown post always offers Open in X");
+        let without = visual
+            .debug_bounds("open-2")
+            .expect("a shown post always offers Open in X");
+        assert_eq!(
+            with.left(),
+            without.left(),
+            "open must sit at the same x whether or not the post shows counts"
+        );
+    }
+
     /// auto-refresh のループが最初の起床で写すもの (#214)｡`smoke_config` は
     /// auto-refresh を切っていて fixture のウィンドウは client を持たない
     /// ので､ループは決して始まらず､テストはこれを直接置く｡
