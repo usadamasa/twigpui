@@ -4,8 +4,8 @@ use std::time::Duration;
 
 use gpui::{
     AnyElement, Context, Div, Entity, FocusHandle, Focusable as _, FontWeight, ObjectFit,
-    ScrollHandle, SharedString, Subscription, Task, Window, div, img, prelude::*, px, rgb, rgba,
-    svg,
+    ScrollHandle, SharedString, Stateful, Subscription, Task, Window, div, img, prelude::*, px,
+    rgb, rgba, svg,
 };
 use gpui_component::input::{Input, InputEvent, InputState};
 
@@ -20,6 +20,7 @@ use crate::fixture::Fixture;
 use crate::image_cache;
 use crate::like;
 use crate::log;
+mod action_row;
 mod auto_refresh;
 mod chrome;
 mod composer;
@@ -35,6 +36,7 @@ mod reload_policy;
 mod render;
 mod scroll;
 pub(crate) mod source_picker;
+mod source_picker_menu;
 mod startup;
 mod state;
 mod sync_row;
@@ -58,13 +60,13 @@ use reload_policy::{
 use render::Addressable as _;
 use render::{
     AVATAR_SIZE, MAX_RENDERED_MEDIA, MEDIA_GAP, MediaArrangement, author_link, avatar_placeholder,
-    byline, compose_error_message, format_timestamp, header_title_element, like_row, link_row,
-    media_arrangement, media_aspect, media_badge, media_column_sizes, media_row_sizes, notice,
-    offers_delete, offers_like, offers_quote, offers_reauthorize, offers_reply, offers_repost,
-    open_post_link, quote_card, quote_row, reload_notice_banner, render_thread_chain,
-    reply_banner_label, reply_row, reply_target_label, repost_banner_label, repost_row,
-    session_notice_banner, sign_in_pill, thread_action_label, thread_toggle_row, usage_color,
-    usage_label, with_count,
+    byline, compose_error_message, format_timestamp, header_title_element, icon_button, like_row,
+    link_row, media_arrangement, media_aspect, media_badge, media_column_sizes, media_row_sizes,
+    notice, offers_delete, offers_like, offers_quote, offers_reauthorize, offers_reply,
+    offers_repost, open_post_link, quote_card, quote_row, reload_notice_banner,
+    render_thread_chain, reply_banner_label, reply_row, reply_target_label, repost_banner_label,
+    repost_row, session_notice_banner, sign_in_pill, thread_action_label, thread_toggle_row,
+    toggle_count_color, usage_color, usage_label, with_count,
 };
 use render::{RowCounts, row_counts};
 pub(crate) use startup::Startup;
@@ -505,6 +507,8 @@ pub(crate) struct TimelineView {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+
+    use crate::theme;
 
     use super::auto_refresh::{Poll, Situation};
     use super::countdown;
@@ -2079,7 +2083,7 @@ mod tests {
             target_username: "XDevelopers".to_string(),
             max_results: 20,
             min_fetch_interval_seconds: 60,
-            theme: crate::theme::ThemeMode::Light,
+            theme: theme::ThemeMode::Light,
             log_level: crate::log::Level::default(),
             request_price: None,
             daily_request_budget: None,
@@ -2290,7 +2294,72 @@ mod tests {
             sources: Vec::new(),
             list_items: std::collections::BTreeMap::new(),
             picker_open: false,
+            liked: Vec::new(),
+            reposted: Vec::new(),
         }
+    }
+
+    /// [`fixture_with`] の 1 行版で､件数を持つ (#156)｡`with_count` が件数の
+    /// 要素を描くかどうかの分岐 (`Option<&str>`) をテストが越えるには要る —
+    /// `item_with` は `metrics: None` で固定なので使えない｡著者は
+    /// `fixture_with` と同じ `"someone"`｡
+    fn fixture_with_metrics(id: &str) -> Fixture {
+        let mut fixture = fixture_with(&[], &[]);
+        fixture.items = vec![TimelineItem {
+            id: id.to_string(),
+            text: String::new(),
+            created_at: None,
+            author_name: String::new(),
+            author_username: "someone".to_string(),
+            reposted_by: None,
+            quoted: None,
+            replied_to: None,
+            metrics: Some(PostMetrics {
+                replies: 1,
+                reposts: 2,
+                likes: 3,
+            }),
+            links: Vec::new(),
+            author_avatar_url: None,
+            original_post_id: None,
+            media: Vec::new(),
+        }];
+        fixture
+    }
+
+    /// #156: fixture が直接 `liked` を言えば `like_state_for` が on を返す —
+    /// `toggle::load_all` の永続ファイルに触らずに済む｡`Fixture` は
+    /// `deny_unknown_fields` を使っていないので､JSON ではなく構造体
+    /// リテラルで書く｡
+    #[gpui::test]
+    fn a_fixture_can_say_a_post_is_already_liked(cx: &mut gpui::TestAppContext) {
+        let fixture = Fixture {
+            liked: vec!["1".to_string()],
+            ..fixture_with(&["1"], &[])
+        };
+        let (_window, timeline) = fixture_window(cx, fixture);
+        cx.update(|cx| {
+            assert!(
+                timeline.read(cx).like_state_for("1").is_on(),
+                "a fixture-declared liked post must show as on"
+            );
+        });
+    }
+
+    /// [`a_fixture_can_say_a_post_is_already_liked`] の repost 版｡
+    #[gpui::test]
+    fn a_fixture_can_say_a_post_is_already_reposted(cx: &mut gpui::TestAppContext) {
+        let fixture = Fixture {
+            reposted: vec!["1".to_string()],
+            ..fixture_with(&["1"], &[])
+        };
+        let (_window, timeline) = fixture_window(cx, fixture);
+        cx.update(|cx| {
+            assert!(
+                timeline.read(cx).repost_state_for("1").is_on(),
+                "a fixture-declared reposted post must show as on"
+            );
+        });
     }
 
     /// list sync が何かを負っている [`fixture_with`] (#205)｡sync の行が出て
@@ -3943,6 +4012,147 @@ mod tests {
         (visual, timeline)
     }
 
+    /// #156: post の操作は文字ラベルではなく記号 — その矩形は正方形で､
+    /// 記号 (`theme::ICON_SIZE`) より小さくならない｡文字ラベルのままなら
+    /// 横長になり落ちる｡
+    #[gpui::test]
+    fn an_action_is_a_square_button_around_its_icon(cx: &mut gpui::TestAppContext) {
+        let (mut visual, _timeline) = drawn(cx, fixture_with_metrics("1"));
+        let like = visual
+            .debug_bounds("like-1")
+            .expect("a shown post always offers Like");
+        assert_eq!(
+            like.size.width, like.size.height,
+            "the like button must be a square around its icon, not a text label: {like:?}"
+        );
+        assert!(
+            like.size.width >= theme::ICON_SIZE,
+            "the button must be at least as big as the icon it holds: {:?} < {:?}",
+            like.size.width,
+            theme::ICON_SIZE
+        );
+    }
+
+    /// #156: 件数は記号の矩形の外に座る — 重ならず､右に 4px 前後空く｡
+    /// `with_count` に名前を渡していない今は `like-1-count` が存在しない
+    /// ので落ちる｡
+    #[gpui::test]
+    fn a_count_sits_beside_its_action_without_overlapping(cx: &mut gpui::TestAppContext) {
+        let (mut visual, _timeline) = drawn(cx, fixture_with_metrics("1"));
+        let like = visual
+            .debug_bounds("like-1")
+            .expect("a shown post always offers Like");
+        let count = visual
+            .debug_bounds("like-1-count")
+            .expect("a post with a like count must name that count");
+        assert!(
+            count.left() >= like.right(),
+            "the count overlaps the button: count starts at {:?}, button ends at {:?}",
+            count.left(),
+            like.right()
+        );
+        let gap = f32::from(count.left()) - f32::from(like.right());
+        assert!(
+            (0.0..10.0).contains(&gap),
+            "the gap between the button and its count should be about 4px, got {gap}"
+        );
+    }
+
+    /// #156: hover の塗りは padding の内側に収まり､要素の bounds を変えない｡
+    /// 色そのものはテストから見えないので､寸法だけ押さえる｡
+    #[gpui::test]
+    fn hovering_an_action_does_not_move_it(cx: &mut gpui::TestAppContext) {
+        let (mut visual, _timeline) = drawn(cx, fixture_with_metrics("1"));
+        let before = visual
+            .debug_bounds("like-1")
+            .expect("a shown post always offers Like");
+        visual.simulate_mouse_move(before.center(), None, gpui::Modifiers::none());
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let after = visual
+            .debug_bounds("like-1")
+            .expect("the button is still shown after hovering it");
+        assert_eq!(before, after, "hovering the button must not move it");
+    }
+
+    /// #156: Delete は他の 5 つから離して行の右端に置く｡`justify_between`
+    /// が外れれば delete は open のすぐ右へ戻り､この余白が消える｡
+    #[gpui::test]
+    fn delete_sits_apart_at_the_row_end(cx: &mut gpui::TestAppContext) {
+        let fixture = Fixture {
+            items: vec![item_with("1", "usadamasa", None)],
+            ..fixture_with(&[], &[])
+        };
+        let (mut visual, _timeline) = drawn(cx, fixture);
+        let open = visual
+            .debug_bounds("open-1")
+            .expect("a shown post always offers Open in X");
+        let delete = visual
+            .debug_bounds("delete-1")
+            .expect("one's own post always offers Delete");
+        let gap = f32::from(delete.left()) - f32::from(open.right());
+        // 通常の隣接 gap (`gap_4`) は 16px｡`justify_between` がこの
+        // テスト窓の右端まで開くと 1000px を超える｡50px はその両方から
+        // 十分離れているので､この assert は `justify_between` が実際に
+        // 効いているときだけ通る｡
+        assert!(
+            gap > 50.0,
+            "delete must sit apart at the row's end, not right beside open \
+             with just the ordinary gap_4: open ends at {:?}, delete starts \
+             at {:?} (gap {gap})",
+            open.right(),
+            delete.left()
+        );
+    }
+
+    /// #156: 自分の post の行 (repost 無し､末尾に `justify_between` で
+    /// 開かれる delete) でも like の件数とその右の quote は `gap_4`
+    /// (16px) 以上離れているべきで､右端寄せの実装のせいで隣の gap が
+    /// つぶれてはいけない｡
+    #[gpui::test]
+    fn a_count_keeps_its_gap_next_to_the_following_action_on_ones_own_post(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let fixture = Fixture {
+            items: vec![TimelineItem {
+                id: "1".to_string(),
+                text: String::new(),
+                created_at: None,
+                author_name: String::new(),
+                author_username: "usadamasa".to_string(),
+                reposted_by: None,
+                quoted: None,
+                replied_to: None,
+                metrics: Some(PostMetrics {
+                    replies: 0,
+                    reposts: 0,
+                    likes: 1,
+                }),
+                links: Vec::new(),
+                author_avatar_url: None,
+                original_post_id: None,
+                media: Vec::new(),
+            }],
+            ..fixture_with(&[], &[])
+        };
+        let (mut visual, _timeline) = drawn(cx, fixture);
+        let count = visual
+            .debug_bounds("like-1-count")
+            .expect("a like count of 1 must be shown and named");
+        let quote = visual
+            .debug_bounds("quote-1")
+            .expect("one's own post always offers Quote");
+        let gap = f32::from(quote.left()) - f32::from(count.right());
+        assert!(
+            gap >= 16.0,
+            "the like count must keep the row's gap_4 before quote: \
+             count ends at {:?}, quote starts at {:?} (gap {gap})",
+            count.right(),
+            quote.left()
+        );
+    }
+
     /// auto-refresh のループが最初の起床で写すもの (#214)｡`smoke_config` は
     /// auto-refresh を切っていて fixture のウィンドウは client を持たない
     /// ので､ループは決して始まらず､テストはこれを直接置く｡
@@ -4986,7 +5196,7 @@ mod tests {
             target_username: "XDevelopers".to_string(),
             max_results: 20,
             min_fetch_interval_seconds: 60,
-            theme: crate::theme::ThemeMode::Light,
+            theme: theme::ThemeMode::Light,
             log_level: crate::log::Level::default(),
             request_price: None,
             daily_request_budget: None,

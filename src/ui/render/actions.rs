@@ -2,16 +2,78 @@
 //! リンクの chip｡どれもクリックのために `cx` を取る｡どれを描くかは
 //! [`super::offers`] が決める｡
 
+use gpui_component::tooltip::Tooltip;
+
 use super::post::{post_permalink, profile_url};
 use crate::ui::*;
 
-/// 一つの post の repost/un-repost の toggle (#15): repost していなければ
-/// "Repost"､していれば "Reposted" — どちらもクリックできる (repost は
-/// 取り消せるので､ボタンは自身の undo も兼ねる)｡体裁は
-/// [`thread_toggle_row`] と同じ｡リクエストが飛んでいる間は無効になる —
-/// click handler がまったく無く､#14 の二重送信の守りに合わせてある; 失敗
-/// した試みは (依然クリックできる) toggle の上にメッセージを出し､再試行を
-/// 差し出す｡
+/// 記号 1 つのボタン (#156)｡ツールバーのリロードと post の操作の双方が使う
+/// — 5 個コピーしない｡
+///
+/// 塗りは padding の内側に収まり､要素の bounds は hover でも押下でも
+/// 変わらない — `hover` / `active` が触るのは背景だけで､大きさではない｡
+///
+/// click handler は引数に取らない: `Option<impl Fn>` は型が書けず､呼び出し
+/// ごとにクロージャの型が違うので単相化できない｡呼び出し側が
+/// `.when(state.can_toggle(), |b| b.on_click(cx.listener(..)))` を続ける｡
+pub(in crate::ui) fn icon_button(
+    name: impl Into<SharedString>,
+    icon: &'static str,
+    color: u32,
+    tooltip: impl Into<SharedString>,
+    interactive: bool,
+    theme: Theme,
+) -> Stateful<Div> {
+    let tooltip = tooltip.into();
+    div()
+        .addressable(name)
+        .p_1()
+        .rounded(theme::RADIUS_CONTROL)
+        .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+        .child(
+            svg()
+                .path(icon)
+                .size(theme::ICON_SIZE)
+                .text_color(rgb(color)),
+        )
+        .when(interactive, |button| {
+            button
+                .cursor_pointer()
+                .hover(|style| style.bg(rgba(theme.control_hover_overlay)))
+                .active(|style| style.bg(rgba(theme.control_pressed_overlay)))
+        })
+}
+
+/// like/repost の記号の色 (#156): on は `on_color` (`theme.like` /
+/// `theme.repost`)､pending は `text_tertiary`､それ以外 (idle/failed) は
+/// `text_muted`｡
+fn toggle_icon_color(state: &ToggleState, on_color: u32, theme: Theme) -> u32 {
+    if state.is_on() {
+        on_color
+    } else if matches!(state.status(), ToggleStatus::Pending) {
+        theme.text_tertiary
+    } else {
+        theme.text_muted
+    }
+}
+
+/// like/repost の件数の色 (#156): on だけ `on_color`､pending と idle は
+/// `text_muted` — [`toggle_icon_color`] とは pending だけ意図してずれる
+/// (記号は `text_tertiary` に沈むが件数は `text_muted` のまま)｡
+pub(in crate::ui) fn toggle_count_color(state: &ToggleState, on_color: u32, theme: Theme) -> u32 {
+    if state.is_on() {
+        on_color
+    } else {
+        theme.text_muted
+    }
+}
+
+/// 一つの post の repost/un-repost の toggle (#15, #156): repost している
+/// かどうかは記号の色で示す — repost に塗り潰しの形が無いのは SF Symbols も
+/// 同じ｡どちらもクリックできる (repost は取り消せるので､ボタンは自身の
+/// undo も兼ねる)｡リクエストが飛んでいる間は無効になる — click handler が
+/// まったく無く､#14 の二重送信の守りに合わせてある; 失敗した試みは (依然
+/// クリックできる) toggle の上にメッセージを出し､再試行を差し出す｡
 pub(in crate::ui) fn repost_row(
     row_id: &str,
     post_id: &str,
@@ -19,24 +81,23 @@ pub(in crate::ui) fn repost_row(
     theme: Theme,
     cx: &mut Context<'_, TimelineView>,
 ) -> AnyElement {
-    let label = repost_action_label(state);
-    // #95｡`like_row` と同じ｡
-    let color = if state.is_on() {
-        theme.repost
-    } else {
-        theme.text_muted
-    };
+    let color = toggle_icon_color(state, theme.repost, theme);
+    let tooltip = repost_action_label(state);
 
-    let toggle = div()
-        .addressable(format!("repost-{row_id}"))
-        .text_color(rgb(color))
-        .child(label)
-        .when(state.can_toggle(), |element| {
-            let id = post_id.to_string();
-            element.on_click(cx.listener(move |this, _event, _window, cx| {
-                this.toggle_repost(id.clone(), cx);
-            }))
-        });
+    let toggle = icon_button(
+        format!("repost-{row_id}"),
+        assets::REPOST_ICON,
+        color,
+        tooltip,
+        state.can_toggle(),
+        theme,
+    )
+    .when(state.can_toggle(), |element| {
+        let id = post_id.to_string();
+        element.on_click(cx.listener(move |this, _event, _window, cx| {
+            this.toggle_repost(id.clone(), cx);
+        }))
+    });
 
     if let ToggleStatus::Failed(message) = state.status() {
         div()
@@ -67,10 +128,11 @@ pub(in crate::ui) fn repost_action_label(state: &ToggleState) -> &'static str {
     }
 }
 
-/// 一つの post の like/unlike の toggle (#68): like していなければ "Like"､
-/// していれば "Liked" — どちらもクリックできる｡体裁は [`repost_row`] と
-/// 同じで､pending 中は無効という規則も､依然クリックできる toggle の上に
-/// 失敗のメッセージを描くところまで写している｡
+/// 一つの post の like/unlike の toggle (#68, #156): on/off は記号を差し替える
+/// (`heart` / `heart.fill`) — repost と違い like は塗り潰しの形を持つので､
+/// 色だけでなく形でも示す｡体裁は [`repost_row`] と同じで､pending 中は無効と
+/// いう規則も､依然クリックできる toggle の上に失敗のメッセージを描くところ
+/// まで写している｡
 pub(in crate::ui) fn like_row(
     row_id: &str,
     post_id: &str,
@@ -78,25 +140,28 @@ pub(in crate::ui) fn like_row(
     theme: Theme,
     cx: &mut Context<'_, TimelineView>,
 ) -> AnyElement {
-    let label = like_action_label(state);
-    // #95: "on" の操作は､行のクリックできるものがすでに着ているリンク色
-    // ではなく､その意味に応じて色を付ける｡
-    let color = if state.is_on() {
-        theme.like
+    let icon = if state.is_on() {
+        assets::LIKE_ON_ICON
     } else {
-        theme.text_muted
+        assets::LIKE_ICON
     };
+    let color = toggle_icon_color(state, theme.like, theme);
+    let tooltip = like_action_label(state);
 
-    let toggle = div()
-        .addressable(format!("like-{row_id}"))
-        .text_color(rgb(color))
-        .child(label)
-        .when(state.can_toggle(), |element| {
-            let id = post_id.to_string();
-            element.on_click(cx.listener(move |this, _event, _window, cx| {
-                this.toggle_like(id.clone(), cx);
-            }))
-        });
+    let toggle = icon_button(
+        format!("like-{row_id}"),
+        icon,
+        color,
+        tooltip,
+        state.can_toggle(),
+        theme,
+    )
+    .when(state.can_toggle(), |element| {
+        let id = post_id.to_string();
+        element.on_click(cx.listener(move |this, _event, _window, cx| {
+            this.toggle_like(id.clone(), cx);
+        }))
+    });
 
     if let ToggleStatus::Failed(message) = state.status() {
         div()
@@ -142,6 +207,7 @@ pub(in crate::ui) fn author_link(
         Some(url) => name
             .addressable(format!("profile-{}", item.id))
             .text_color(rgb(theme.accent))
+            .cursor_pointer()
             .on_click(cx.listener(move |this, _event, _window, cx| {
                 this.open_in_browser(url.clone(), cx);
             }))
@@ -150,7 +216,7 @@ pub(in crate::ui) fn author_link(
     }
 }
 
-/// 一つの post の byline 行にある "Open in X" の導線 (#70) — 著者が
+/// 一つの post の byline 行にある "Open in X" の導線 (#70, #156) — 著者が
 /// expand されなかった post 用に [`post_permalink`] が id だけの fallback
 /// を持つので､常に差し出す｡
 pub(in crate::ui) fn open_post_link(
@@ -161,13 +227,17 @@ pub(in crate::ui) fn open_post_link(
     // #52: repost 行の permalink は元の post のものだ — 行が表示している
     // のもそれだし､どのみち x.com はそこへ redirect するだけだ｡
     let url = post_permalink(&item.author_username, action_post_id(item));
-    div()
-        .addressable(format!("open-{}", item.id))
-        .text_color(rgb(theme.text_muted))
-        .child("Open in X")
-        .on_click(cx.listener(move |this, _event, _window, cx| {
-            this.open_in_browser(url.clone(), cx);
-        }))
+    icon_button(
+        format!("open-{}", item.id),
+        assets::OPEN_ICON,
+        theme.text_muted,
+        "Open in X",
+        true,
+        theme,
+    )
+    .on_click(cx.listener(move |this, _event, _window, cx| {
+        this.open_in_browser(url.clone(), cx);
+    }))
 }
 
 /// 一つの post のテキストに含まれるリンクを､本文の下のクリックできる chip
@@ -193,6 +263,10 @@ pub(in crate::ui) fn link_row(
             div()
                 .addressable(format!("link-{url}"))
                 .text_color(rgb(theme.accent))
+                // #156: hover の塗りは無し (負マージンで bounds を
+                // 保てるが pill に見えてしまうため見送った) — だが
+                // cursor_pointer だけは例外にしていない｡
+                .cursor_pointer()
                 .child(link.label.clone())
                 .on_click(cx.listener(move |this, _event, _window, cx| {
                     this.open_in_browser(url.clone(), cx);
@@ -223,18 +297,22 @@ pub(in crate::ui) fn reply_row(
         media: Vec::new(),
     };
 
-    div()
-        .addressable(format!("reply-{}", item.id))
-        .text_color(rgb(theme.text_muted))
-        .child("Reply")
-        .on_click(cx.listener(move |this, _event, _window, cx| {
-            this.compose.set_reply(compose::ReplyTarget {
-                post_id: post_id.clone(),
-                replying_to: replying_to.clone(),
-            });
-            cx.notify();
-        }))
-        .into_any_element()
+    icon_button(
+        format!("reply-{}", item.id),
+        assets::REPLY_ICON,
+        theme.text_muted,
+        "Reply",
+        true,
+        theme,
+    )
+    .on_click(cx.listener(move |this, _event, _window, cx| {
+        this.compose.set_reply(compose::ReplyTarget {
+            post_id: post_id.clone(),
+            replying_to: replying_to.clone(),
+        });
+        cx.notify();
+    }))
+    .into_any_element()
 }
 
 /// composer が reply 対象の上に出す見出し (#71) — "Replying to @someone"､
@@ -270,16 +348,20 @@ pub(in crate::ui) fn quote_row(
         media: Vec::new(),
     };
 
-    div()
-        .addressable(format!("quote-{}", item.id))
-        .text_color(rgb(theme.text_muted))
-        .child("Quote")
-        .on_click(cx.listener(move |this, _event, _window, cx| {
-            this.compose.set_quote(compose::QuoteTarget {
-                post_id: post_id.clone(),
-                quoted: quoted.clone(),
-            });
-            cx.notify();
-        }))
-        .into_any_element()
+    icon_button(
+        format!("quote-{}", item.id),
+        assets::QUOTE_ICON,
+        theme.text_muted,
+        "Quote",
+        true,
+        theme,
+    )
+    .on_click(cx.listener(move |this, _event, _window, cx| {
+        this.compose.set_quote(compose::QuoteTarget {
+            post_id: post_id.clone(),
+            quoted: quoted.clone(),
+        });
+        cx.notify();
+    }))
+    .into_any_element()
 }

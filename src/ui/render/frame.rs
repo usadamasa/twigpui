@@ -23,6 +23,11 @@ pub(in crate::ui) fn sign_in_pill(
         .border_1()
         .border_color(rgb(theme.accent))
         .text_color(rgb(theme.accent))
+        .cursor_pointer()
+        // #156: 下地が無い輪郭 pill なので `rgba` をそのまま塗る —
+        // accent の主ボタンと違って合成の計算は要らない｡
+        .hover(|style| style.bg(rgba(theme.control_hover_overlay)))
+        .active(|style| style.bg(rgba(theme.control_pressed_overlay)))
         .child(label)
         .on_click(cx.listener(|this, _event, _window, cx| this.sign_in(cx)))
 }

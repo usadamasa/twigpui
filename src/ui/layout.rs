@@ -128,6 +128,7 @@ fn load_older_row(theme: Theme, cx: &mut Context<'_, TimelineView>) -> impl Into
         .px_4()
         .py_3()
         .text_color(rgb(theme.accent))
+        .cursor_pointer()
         .child("Load older")
         .on_click(cx.listener(|this, _event, _window, cx| this.load_older(cx)))
 }

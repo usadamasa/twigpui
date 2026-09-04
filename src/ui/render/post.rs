@@ -110,6 +110,7 @@ pub(in crate::ui) fn thread_toggle_row(
     div()
         .addressable(format!("show-thread-{reply_post_id}"))
         .text_color(rgb(theme.accent))
+        .cursor_pointer()
         .child(label.to_string())
         .on_click(cx.listener(move |this, _event, _window, cx| {
             this.show_thread(reply_post_id.clone(), first_parent_id.clone(), cx);
@@ -395,17 +396,22 @@ fn non_zero_count(count: u64) -> Option<String> {
     (count > 0).then(|| compact_count(count))
 }
 
-/// アクション一つと､その傍らのエンゲージメント件数 (#95)｡見せる件数が
+/// アクション一つと､その傍らのエンゲージメント件数 (#95, #156)｡見せる件数が
 /// 無ければアクション単独｡
 ///
 /// 件数をアクション自身の要素の一部ではなく兄弟にしてあるのは､数字を
 /// クリックしても何も起きないようにするためだ: アクションはリクエストを
 /// 費やすトグルであり､ボタンの一部に見える件数は､読み手がただ読むだけの
 /// つもりだったアクションの的を広げてしまう｡
+///
+/// `name` は件数の要素に `{name}-count` の名前を付ける (bounds テストが
+/// 引くため)｡`color` は on のとき記号と同じ色にし (idle/pending は
+/// `text_muted`)､呼び出し側が `icon_button` へ渡したのと同じ値を渡す｡
 pub(in crate::ui) fn with_count(
+    name: &str,
     action: AnyElement,
     count: Option<&str>,
-    theme: Theme,
+    color: u32,
 ) -> AnyElement {
     let Some(count) = count else {
         return action;
@@ -418,7 +424,8 @@ pub(in crate::ui) fn with_count(
         .child(action)
         .child(
             div()
-                .text_color(rgb(theme.text_muted))
+                .addressable(format!("{name}-count"))
+                .text_color(rgb(color))
                 .child(count.to_string()),
         )
         .into_any_element()

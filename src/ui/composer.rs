@@ -50,6 +50,7 @@ impl TimelineView {
                 div()
                     .addressable("compose-remove-quote")
                     .text_color(rgb(theme.accent))
+                    .cursor_pointer()
                     .child("Remove quote")
                     .on_click(cx.listener(|this, _event, _window, cx| {
                         this.compose.clear_quote();
@@ -85,6 +86,7 @@ impl TimelineView {
                 div()
                     .addressable("compose-remove-reply")
                     .text_color(rgb(theme.accent))
+                    .cursor_pointer()
                     .child("Remove reply")
                     .on_click(cx.listener(|this, _event, _window, cx| {
                         this.compose.clear_reply();
@@ -195,9 +197,21 @@ impl TimelineView {
                                 // 代わりに塗りを
                                 // 抜く｡
                                 .when(can_submit, |button| {
+                                    // #156: 主ボタンと同じ blend —
+                                    // `can_submit` は `is_submitting` を
+                                    // 含むので "Posting…" のときは塗らない｡
                                     button
                                         .bg(rgb(theme.accent))
                                         .text_color(rgb(theme.button_label))
+                                        .cursor_pointer()
+                                        .hover(|style| {
+                                            style.bg(rgb(theme.accent)
+                                                .blend(rgba(theme.control_hover_overlay)))
+                                        })
+                                        .active(|style| {
+                                            style.bg(rgb(theme.accent)
+                                                .blend(rgba(theme.control_pressed_overlay)))
+                                        })
                                 })
                                 .when(!can_submit, |button| {
                                     button
