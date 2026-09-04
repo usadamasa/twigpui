@@ -151,6 +151,7 @@ impl TimelineView {
             // 段が列に入りきらないとき枠が縮めるようにしておく｡
             .min_w_0()
             .gap_1()
+            .cursor_pointer()
             .child(inner)
             .on_click(
                 cx.listener(move |this, _event, _window, cx| match viewer.clone() {

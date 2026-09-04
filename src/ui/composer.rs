@@ -50,6 +50,7 @@ impl TimelineView {
                 div()
                     .addressable("compose-remove-quote")
                     .text_color(rgb(theme.accent))
+                    .cursor_pointer()
                     .child("Remove quote")
                     .on_click(cx.listener(|this, _event, _window, cx| {
                         this.compose.clear_quote();
@@ -85,6 +86,7 @@ impl TimelineView {
                 div()
                     .addressable("compose-remove-reply")
                     .text_color(rgb(theme.accent))
+                    .cursor_pointer()
                     .child("Remove reply")
                     .on_click(cx.listener(|this, _event, _window, cx| {
                         this.compose.clear_reply();

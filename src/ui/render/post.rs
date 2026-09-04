@@ -110,6 +110,7 @@ pub(in crate::ui) fn thread_toggle_row(
     div()
         .addressable(format!("show-thread-{reply_post_id}"))
         .text_color(rgb(theme.accent))
+        .cursor_pointer()
         .child(label.to_string())
         .on_click(cx.listener(move |this, _event, _window, cx| {
             this.show_thread(reply_post_id.clone(), first_parent_id.clone(), cx);

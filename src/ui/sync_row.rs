@@ -262,6 +262,7 @@ impl TimelineView {
                         div()
                             .addressable("sync-cancel")
                             .text_color(rgb(theme.text_muted))
+                            .cursor_pointer()
                             .child("Cancel")
                             .on_click(
                                 cx.listener(|this, _event, _window, cx| this.cancel_sync(cx)),
@@ -275,6 +276,7 @@ impl TimelineView {
                             div()
                                 .addressable("sync-confirm")
                                 .text_color(rgb(theme.danger))
+                                .cursor_pointer()
                                 .child("Sync")
                                 .on_click(cx.listener(|this, _event, _window, cx| {
                                     this.confirm_sync(cx);

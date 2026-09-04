@@ -207,6 +207,7 @@ pub(in crate::ui) fn author_link(
         Some(url) => name
             .addressable(format!("profile-{}", item.id))
             .text_color(rgb(theme.accent))
+            .cursor_pointer()
             .on_click(cx.listener(move |this, _event, _window, cx| {
                 this.open_in_browser(url.clone(), cx);
             }))
@@ -262,6 +263,10 @@ pub(in crate::ui) fn link_row(
             div()
                 .addressable(format!("link-{url}"))
                 .text_color(rgb(theme.accent))
+                // #156, D10: hover の塗りは無し (負マージンで bounds を
+                // 保てるが pill に見えてしまうため見送った) — だが
+                // cursor_pointer だけは ux-spec §6 が例外を作っていない｡
+                .cursor_pointer()
                 .child(link.label.clone())
                 .on_click(cx.listener(move |this, _event, _window, cx| {
                     this.open_in_browser(url.clone(), cx);
