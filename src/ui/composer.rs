@@ -197,7 +197,7 @@ impl TimelineView {
                                 // 代わりに塗りを
                                 // 抜く｡
                                 .when(can_submit, |button| {
-                                    // #156: 主ボタンと同じ blend (D2, D10) —
+                                    // #156: 主ボタンと同じ blend —
                                     // `can_submit` は `is_submitting` を
                                     // 含むので "Posting…" のときは塗らない｡
                                     button

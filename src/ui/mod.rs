@@ -2329,8 +2329,8 @@ mod tests {
 
     /// #156: fixture が直接 `liked` を言えば `like_state_for` が on を返す —
     /// `toggle::load_all` の永続ファイルに触らずに済む｡`Fixture` は
-    /// `deny_unknown_fields` を使っていないので (D8)、JSON ではなく構造体
-    /// リテラルで書く。
+    /// `deny_unknown_fields` を使っていないので､JSON ではなく構造体
+    /// リテラルで書く｡
     #[gpui::test]
     fn a_fixture_can_say_a_post_is_already_liked(cx: &mut gpui::TestAppContext) {
         let fixture = Fixture {
@@ -4033,7 +4033,7 @@ mod tests {
         );
     }
 
-    /// #156: 件数は記号の矩形の外に座る (D7) — 重ならず､右に 4px 前後空く｡
+    /// #156: 件数は記号の矩形の外に座る — 重ならず､右に 4px 前後空く｡
     /// `with_count` に名前を渡していない今は `like-1-count` が存在しない
     /// ので落ちる｡
     #[gpui::test]
@@ -4058,8 +4058,8 @@ mod tests {
         );
     }
 
-    /// #156: hover の塗りは padding の内側に収まり、要素の bounds を変えない
-    /// (ux-spec §1.4)｡色そのものはテストから見えないので、寸法だけ押さえる｡
+    /// #156: hover の塗りは padding の内側に収まり､要素の bounds を変えない｡
+    /// 色そのものはテストから見えないので､寸法だけ押さえる｡
     #[gpui::test]
     fn hovering_an_action_does_not_move_it(cx: &mut gpui::TestAppContext) {
         let (mut visual, _timeline) = drawn(cx, fixture_with_metrics("1"));
@@ -4076,8 +4076,8 @@ mod tests {
         assert_eq!(before, after, "hovering the button must not move it");
     }
 
-    /// #156: Delete は他の 5 つから離して行の右端に置く (D5)｡`justify_between`
-    /// が外れれば delete は open のすぐ右へ戻り、この余白が消える。
+    /// #156: Delete は他の 5 つから離して行の右端に置く｡`justify_between`
+    /// が外れれば delete は open のすぐ右へ戻り､この余白が消える｡
     #[gpui::test]
     fn delete_sits_apart_at_the_row_end(cx: &mut gpui::TestAppContext) {
         let fixture = Fixture {
@@ -4092,10 +4092,10 @@ mod tests {
             .debug_bounds("delete-1")
             .expect("one's own post always offers Delete");
         let gap = f32::from(delete.left()) - f32::from(open.right());
-        // `gap_4` (the row's normal inter-button gap) alone measures 16px;
-        // `ml_auto` pushing to the window's edge measures over 1000px in
-        // this test window. 50px sits well clear of both, so the assert
-        // only passes when `ml_auto` is actually doing its job.
+        // 通常の隣接 gap (`gap_4`) は 16px｡`justify_between` がこの
+        // テスト窓の右端まで開くと 1000px を超える｡50px はその両方から
+        // 十分離れているので､この assert は `justify_between` が実際に
+        // 効いているときだけ通る｡
         assert!(
             gap > 50.0,
             "delete must sit apart at the row's end, not right beside open \
@@ -4106,9 +4106,10 @@ mod tests {
         );
     }
 
-    /// #156: 自分の post の行 (repost 無し、末尾に `ml_auto` 付き delete)
-    /// でも like の件数とその右の quote は `gap_4` (16px) 以上離れている
-    /// べきで、`ml_auto` のせいで隣の gap がつぶれてはいけない。
+    /// #156: 自分の post の行 (repost 無し､末尾に `justify_between` で
+    /// 開かれる delete) でも like の件数とその右の quote は `gap_4`
+    /// (16px) 以上離れているべきで､右端寄せの実装のせいで隣の gap が
+    /// つぶれてはいけない｡
     #[gpui::test]
     fn a_count_keeps_its_gap_next_to_the_following_action_on_ones_own_post(
         cx: &mut gpui::TestAppContext,

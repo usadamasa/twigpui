@@ -59,7 +59,7 @@ fn toggle_icon_color(state: &ToggleState, on_color: u32, theme: Theme) -> u32 {
 
 /// like/repost の件数の色 (#156): on だけ `on_color`､pending と idle は
 /// `text_muted` — [`toggle_icon_color`] とは pending だけ意図してずれる
-/// (ux-spec §1.3: 記号は `text_tertiary` に沈むが件数は `text_muted` のまま)｡
+/// (記号は `text_tertiary` に沈むが件数は `text_muted` のまま)｡
 pub(in crate::ui) fn toggle_count_color(state: &ToggleState, on_color: u32, theme: Theme) -> u32 {
     if state.is_on() {
         on_color
@@ -263,9 +263,9 @@ pub(in crate::ui) fn link_row(
             div()
                 .addressable(format!("link-{url}"))
                 .text_color(rgb(theme.accent))
-                // #156, D10: hover の塗りは無し (負マージンで bounds を
+                // #156: hover の塗りは無し (負マージンで bounds を
                 // 保てるが pill に見えてしまうため見送った) — だが
-                // cursor_pointer だけは ux-spec §6 が例外を作っていない｡
+                // cursor_pointer だけは例外にしていない｡
                 .cursor_pointer()
                 .child(link.label.clone())
                 .on_click(cx.listener(move |this, _event, _window, cx| {

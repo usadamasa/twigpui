@@ -32,9 +32,9 @@ impl TimelineView {
 
     /// 一つの post の delete の affordance (#72, #156): 記号の入口､あるいは
     /// クリックされたあとの確認の二つ組｡直近の試みが失敗していれば､その
-    /// 理由も添える｡確認の 2 つは文字のまま — 破壊的操作は言葉で読ませる
-    /// (ux-spec §1.5)｡行の右端へ寄せるのは [`Self::action_row`] 側 — ここでは
-    /// 寄せない (taffy 0.9.0 は同じ flex line に `margin: auto` の子が 1 つでも
+    /// 理由も添える｡確認の 2 つは文字のまま — 破壊的操作は言葉で読ませる｡
+    /// 行の右端へ寄せるのは [`Self::action_row`] 側 — ここでは寄せない
+    /// (taffy 0.9.0 は同じ flex line に `margin: auto` の子が 1 つでも
     /// あると他の兄弟の `gap` を消してしまうので､`ml_auto` はここには置けない)｡
     fn delete_row(&self, item: &TimelineItem, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = self.theme;
@@ -147,9 +147,9 @@ impl TimelineView {
     /// taffy 0.9.0 は同じ flex line に `margin: auto` の子が 1 つでもあると
     /// その他の兄弟の `gap` を無かったことにしてしまう
     /// (`distribute_remaining_free_space` が auto margin を検出すると
-    /// `offset_main` へ `gap` を足す通常経路を素通りする)。内側のクラスタを
+    /// `offset_main` へ `gap` を足す通常経路を素通りする)｡内側のクラスタを
     /// 独立した flex container にすれば auto margin を一切使わずに済み､
-    /// この bug を踏まない。
+    /// この bug を踏まない｡
     pub(super) fn action_row(
         &self,
         item: &TimelineItem,
@@ -185,7 +185,7 @@ impl TimelineView {
                     item,
                 ),
                 |row| {
-                    // #156, D7: 件数の色は記号 (`repost_button`) と同じ値を
+                    // #156: 件数の色は記号 (`repost_button`) と同じ値を
                     // 渡す — ただし pending だけは記号 (`text_tertiary`) と
                     // ずれて `text_muted` に留まる｡そのために
                     // `toggle_count_color` を別に呼ぶ｡
@@ -229,8 +229,8 @@ impl TimelineView {
             .child(open_post_link(item, theme, cx));
 
         // #72: delete — 自分の post のみ､そして決して一クリックでは行わない｡
-        // `justify_between()` で reply〜open のクラスタから離す (D5 の
-        // 「delete だけ右端へ」)。
+        // `justify_between()` で reply〜open のクラスタから離し､行の
+        // 右端に置く｡
         div()
             .flex()
             .flex_wrap()
@@ -238,7 +238,7 @@ impl TimelineView {
             .justify_between()
             // #156: delete は actions の子ではなく兄弟なので､ここに無いと
             // root の TEXT_BODY (13px) を継いで "Delete permanently" /
-            // "Cancel" と失敗メッセージだけ行の他より太って描かれる。
+            // "Cancel" と失敗メッセージだけ行の他より太って描かれる｡
             .text_size(theme::TEXT_META)
             .child(actions)
             .when(

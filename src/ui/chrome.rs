@@ -106,7 +106,7 @@ impl TimelineView {
                         row.child(
                             div()
                                 .addressable("auto-refresh-countdown")
-                                // #156, D10: HIG の "Keep actions with text
+                                // #156: HIG の "Keep actions with text
                                 // labels separate" — 記号 (reload) との間隔を
                                 // クラスタ全体の gap_2 (8px) より広げる｡
                                 // クラスタを gap_3 へ上げると 3 箇所すべてが
@@ -201,7 +201,7 @@ impl TimelineView {
                 })
                 .when(!busy, |button| {
                     // #156: accent の上に control_hover/control_pressed を
-                    // 重ねる｡`hover()` は下地を置き換えるので (D2)､合成後の
+                    // 重ねる｡`hover()` は下地を置き換えるので､合成後の
                     // 色をその場で `blend` して渡す — パレットに専用の
                     // hover 色は増やさない｡
                     button

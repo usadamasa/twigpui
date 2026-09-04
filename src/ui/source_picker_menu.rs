@@ -1,7 +1,7 @@
 //! source picker のツールバー側の見た目 (#156): 閉じたトリガーと開いた
 //! ドロップダウン本体｡`source_picker.rs` から切り出した — あちらが
-//! サイズの天井に達したので、状態の読み書き (`toggle_source` 等) とは
-//! 別に、ここは描画だけを持つ。純粋な移動で振る舞いは変えていない。
+//! サイズの天井に達したので､状態の読み書き (`toggle_source` 等) とは
+//! 別に､ここは描画だけを持つ｡純粋な移動で振る舞いは変えていない｡
 
 use gpui::{Context, InteractiveElement as _, IntoElement as _, ParentElement as _, Styled as _};
 use gpui::{StatefulInteractiveElement as _, anchored, deferred, point, px, rgb, rgba};
@@ -24,7 +24,7 @@ impl TimelineView {
             .max_w(px(160.0))
             .truncate()
             .cursor_pointer()
-            // #156, D10: `tab_segment(.., selected: true, ..)` の `bg(theme.bg)`
+            // #156: `tab_segment(.., selected: true, ..)` の `bg(theme.bg)`
             // は不透明なので､`hover()` の置き換えではなく `blend` で合成後の
             // 色をその場で作る — `tab_segment` 自身はメニュー項目とも
             // 共有するのでここでは付けない｡
@@ -64,7 +64,7 @@ impl TimelineView {
             .border_1()
             .border_color(rgb(theme.border))
             .rounded(theme::RADIUS_MENU)
-            // #156, D10: 項目は全幅なので､hover の塗りが角の 8px の外へ
+            // #156: 項目は全幅なので､hover の塗りが角の 8px の外へ
             // はみ出さないよう切る｡`shadow_md` は外側なので消えない｡
             .overflow_hidden()
             .shadow_md()
@@ -86,7 +86,7 @@ impl TimelineView {
                     .gap_2()
                     .text_size(theme::TEXT_BODY)
                     .cursor_pointer()
-                    // #156, D10: macOS のメニューは hover した項目を accent
+                    // #156: macOS のメニューは hover した項目を accent
                     // で塗り文字を白くする｡下地は menu 自身の `bg_header`
                     // で不透明だが､accent で完全に置き換わればよいだけなので
                     // `blend` は要らない｡
@@ -143,7 +143,7 @@ impl TimelineView {
                 .px_1()
                 .rounded(theme::RADIUS_CONTROL)
                 .cursor_pointer()
-                // #156, D10: メニュー項目 (`segment.name`) と同じ hover —
+                // #156: メニュー項目 (`segment.name`) と同じ hover —
                 // 取得中は addressable ですらないテキストになるので､
                 // クリックできるこの枝にだけ付ける｡
                 .hover(|style| {

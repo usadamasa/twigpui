@@ -93,11 +93,11 @@ pub(crate) struct Fixture {
     #[serde(default)]
     pub picker_open: bool,
     /// いいね済みとして描く post id (#156)｡`toggle::load_all` の永続ファイルを
-    /// 読む代わりに、fixture が直接そう言う。撮る画面は毎回同じでなければ
-    /// ならないので、手元の状態ファイルに依存させられない。
+    /// 読む代わりに､fixture が直接そう言う｡撮る画面は毎回同じでなければ
+    /// ならないので､手元の状態ファイルに依存させられない｡
     #[serde(default)]
     pub liked: Vec<String>,
-    /// repost 済みとして描く post id (#156)｡[`Fixture::liked`] と同じ。
+    /// repost 済みとして描く post id (#156)｡[`Fixture::liked`] と同じ｡
     #[serde(default)]
     pub reposted: Vec<String>,
 }
@@ -342,11 +342,11 @@ mod tests {
     }
 
     /// #156: `metrics` の JSON キーは `PostMetrics` の `rename` (API の
-    /// `reply_count`/`retweet_count`/`like_count`) であって、この構造体
-    /// 自身のフィールド名 (`replies`/`reposts`/`likes`) ではない。
-    /// `deny_unknown_fields` が無いので、書き間違えたキーはエラーになら
+    /// `reply_count`/`retweet_count`/`like_count`) であって､この構造体
+    /// 自身のフィールド名 (`replies`/`reposts`/`likes`) ではない｡
+    /// `deny_unknown_fields` が無いので､書き間違えたキーはエラーになら
     /// ず静かに 0 になる — この assert が無いと action row の件数が
-    /// 1 つも出ない状態のまま気づけない (実際に一度そうなった)。
+    /// 1 つも出ない状態のまま気づけない (実際に一度そうなった)｡
     #[test]
     fn the_bundled_fixture_has_a_non_zero_engagement_count() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/timeline.json");
