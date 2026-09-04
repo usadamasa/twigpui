@@ -41,10 +41,11 @@ pub(in crate::ui) fn offers_reauthorize(
 ///
 /// sign in 済みの OAuth セッションと､解決済みの自分の id (`/me` 経由の
 /// `home_user_id` — #11) を要求する: repost の endpoint は *この* アカ
-/// ウントとして振る舞い､それが無ければ呼ぶ先が無い｡自分の post には出さ
-/// ない｡API 自身の拒否に合わせたものだ (#15) — [`is_own_post`] を見よ｡
-/// repost 行では *元の* 著者と比べる｡行が表示しているのも repost される
-/// のもその人の post だからだ｡
+/// ウントとして振る舞い､それが無ければ呼ぶ先が無い｡他には何も要らない｡
+///
+/// 自分の post には長く出していなかった｡API がそれを拒むという #15 の
+/// 前提に沿ったものだったが､#266 が実測して否定した — `POST` も `DELETE`
+/// も自分の post に 200 を返す｡X 本家も自分の post を repost できる｡
 ///
 /// repost 行にも以前は出していなかった｡`item.id` が元の内容ではなく
 /// retweet という活動の id だからだ｡#52 がそれを閉じた: 元の id はいま
@@ -52,22 +53,18 @@ pub(in crate::ui) fn offers_reauthorize(
 pub(in crate::ui) fn offers_repost(
     signed_in_with_oauth: bool,
     home_user_id: Option<&str>,
-    home_username: Option<&str>,
-    item: &TimelineItem,
+    _item: &TimelineItem,
 ) -> bool {
-    signed_in_with_oauth
-        && home_user_id.is_some()
-        && !is_own_post(home_username, &item.author_username)
+    signed_in_with_oauth && home_user_id.is_some()
 }
 
-/// `author_username` が sign in 済みアカウント自身のものか (#15) — API は
-/// 自分の post の repost を拒むので､ここで確認すれば確実に失敗するリク
-/// エストを節約できる｡#14 のクライアント側の文字数確認を写したものだ｡
-/// `home_username: None` (まだ未解決) はボタンを引っ込めない: sign in した
-/// 身元が判る前にすべての post でボタンを隠すより､同一アカウントの repost
-/// がたまに API 自身の拒否まで通る方が安全だ｡`home_username` (`/me` 由来)
-/// と `author_username` (timeline の expansion 由来) は独立に解決されるの
-/// で大文字小文字は区別しない｡
+/// `author_username` が sign in 済みアカウント自身のものか — [`offers_delete`]
+/// が「この post を消せるか」に答えるために使う (#72)｡X は他人の post の
+/// 削除を拒むので､ここで確認すれば確実に失敗するリクエストを節約できる｡
+/// `home_username: None` (まだ未解決) は `false` を返す: sign in した身元が
+/// 判るまで削除を差し出さない方が､取り返しのつかない操作としては安全だ｡
+/// `home_username` (`/me` 由来) と `author_username` (timeline の expansion
+/// 由来) は独立に解決されるので大文字小文字は区別しない｡
 pub(in crate::ui) fn is_own_post(home_username: Option<&str>, author_username: &str) -> bool {
     home_username.is_some_and(|home| home.eq_ignore_ascii_case(author_username))
 }
@@ -76,13 +73,9 @@ pub(in crate::ui) fn is_own_post(home_username: Option<&str>, author_username: &
 ///
 /// [`offers_repost`] と同じ理由で､sign in 済みの OAuth セッションと解決
 /// 済みの自分の id (`/me` 経由の `home_user_id` — #11) を要求する:
-/// likes の endpoint は *この* アカウントとして振る舞うからだ｡
-///
-/// [`offers_repost`] からの唯一の逸脱: [`is_own_post`] の確認が無い｡X は
-/// 自分の post の repost は拒むが like は受け入れるので､#68 は #15 の
-/// 守りを持ち越さないよう明示的に指示している｡#52 以降 repost 行にも他と
-/// 同じくボタンを出す — like は `x_api::action_post_id` を通して元の post
-/// に着く｡
+/// likes の endpoint は *この* アカウントとして振る舞うからだ｡#52 以降
+/// repost 行にも他と同じくボタンを出す — like は `x_api::action_post_id`
+/// を通して元の post に着く｡
 pub(in crate::ui) fn offers_like(
     signed_in_with_oauth: bool,
     home_user_id: Option<&str>,
@@ -93,10 +86,9 @@ pub(in crate::ui) fn offers_like(
 
 /// post `item` が削除の導線を差し出すべきか (#72)｡
 ///
-/// 自分の post だけだ — X は他人のものの削除を拒むし､[`is_own_post`] が
-/// #15 のためにすでにその問いへ答えている｡他の write 操作と同じ理由で
-/// 解決済みの `home_user_id` を要求する: `/me` が無ければアプリはこれらが
-/// 誰の post なのかをまだ知らない｡
+/// 自分の post だけだ — X は他人のものの削除を拒むので､[`is_own_post`] に
+/// 問う｡他の write 操作と同じ理由で解決済みの `home_user_id` を要求する:
+/// `/me` が無ければアプリはこれらが誰の post なのかをまだ知らない｡
 ///
 /// #52 以降の他のすべての操作と違い､**repost 行では出さない**｡repost 行は
 /// 誰かの元の post を表示する; `is_own_post` はその元の著者と比べるので､
@@ -132,9 +124,8 @@ pub(in crate::ui) fn offers_reply(signed_in_with_oauth: bool, _item: &TimelineIt
 /// で､`Render::render` 自身の `self.composer` に対する条件を写している
 /// — それが無ければ quote の行き先が無いからだ｡#52 以降 repost 行にも他と
 /// 同じく出す — `x_api::action_post_id` が元の post へ解決し､それが quote
-/// カードの運ぶテキストと著者でもある｡[`offers_repost`] と違い､自分の post
-/// を quote するのは許されている (#16 の設計上の判断 — API は自分を repost
-/// するときのようには拒まない) ので､ここに `is_own_post` の確認は無い｡
+/// カードの運ぶテキストと著者でもある｡自分の post を quote するのも
+/// 許されている (#16 の設計上の判断)｡
 pub(in crate::ui) fn offers_quote(signed_in_with_oauth: bool, _item: &TimelineItem) -> bool {
     signed_in_with_oauth
 }

@@ -36,7 +36,7 @@ use crate::x_api::{ListSummary, TimelineItem};
 /// フィクスチャがサインインしていると言っている人物｡
 ///
 /// アプリが自分の id を知るまで差し出されない操作がいくつかあるので必要だ
-/// — repost ボタンは自分の post には出ないし (#15)､削除は自分の post に
+/// — repost と like には解決済みの id が要るし (#15､#68)､削除は自分の post に
 /// しか出ない (#72)｡これが無いとフィクスチャは誰も見ていない timeline を
 /// 描くことになり､まさに閲覧者ごとに変わる行こそが欠ける｡
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]

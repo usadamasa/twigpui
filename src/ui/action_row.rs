@@ -181,7 +181,6 @@ impl TimelineView {
                 offers_repost(
                     self.signed_in_with_oauth,
                     self.home_user_id.as_deref(),
-                    self.home_username.as_deref(),
                     item,
                 ),
                 |row| {
@@ -201,7 +200,7 @@ impl TimelineView {
                 },
             )
             // #68: like/unlike — どの post に付くかは `offers_like` の doc を
-            // 見よ｡repost と違い､これは自分自身の post にも提示される｡
+            // 見よ｡
             .when(
                 offers_like(
                     self.signed_in_with_oauth,
@@ -220,8 +219,7 @@ impl TimelineView {
                 },
             )
             // #16: "Quote" — どの post に付くかは `offers_quote` の doc を
-            // きっちり見よ (repost の行が控えられるのは､`offers_repost` が
-            // 自分のボタンを控えるのと同じ理由による)｡
+            // きっちり見よ｡
             .when(offers_quote(self.signed_in_with_oauth, item), |row| {
                 row.child(quote_row(item, theme, cx))
             })
