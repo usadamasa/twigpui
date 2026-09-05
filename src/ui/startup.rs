@@ -378,6 +378,10 @@ impl TimelineView {
         // 入れた値は誰にも上書きされない｡永続ファイルにも触らない｡
         self.liked_ids = fixture.liked.into_iter().collect();
         self.reposted_ids = fixture.reposted.into_iter().collect();
+        // #148: 選択行の印｡`liked`/`reposted` と同じく､fixture が言ったものが
+        // そのまま残る｡一覧に無い id なら `selected_index` が `None` を返し､
+        // 本物の選択と同じ「選択なし」になる｡
+        self.selected = fixture.selected;
         // アプリが要求するすべての scope｡scope が足りないせいで affordance
         // が引っ込むことのないようにする｡fixture は決して fetch しないが
         // `list.read` (#161) はここに要る: `offers_reauthorize` が読むのは

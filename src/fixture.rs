@@ -100,6 +100,14 @@ pub(crate) struct Fixture {
     /// repost 済みとして描く post id (#156)｡[`Fixture::liked`] と同じ｡
     #[serde(default)]
     pub reposted: Vec<String>,
+    /// `j` / `k` で選ばれているものとして描く post id (#148)｡
+    /// [`Fixture::liked`] と同じ理由でここに要る — `--fixture` の窓は打鍵を
+    /// 合成する手段が無いので､選択行の印を撮るにはこう宣言するしかない｡
+    ///
+    /// 一覧に無い id を書いても落ちない｡本物の選択と同じく「選択なし」に
+    /// なるだけだ｡
+    #[serde(default)]
+    pub selected: Option<String>,
     /// 起動直後から背景を透かすか (#267)｡[`Fixture::picker_open`] と同じ
     /// 例外で､fixture の窓は window state ファイルを読まないので､透過の
     /// 見た目を撮るにはここで宣言する以外に道が無い｡
