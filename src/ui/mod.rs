@@ -4083,6 +4083,37 @@ mod tests {
         });
     }
 
+    /// #267: Window メニューの Float on Top も同じ形 — 反転させ､言い､覚える｡
+    /// window の level そのものは gpui の fork の patch が触るので､テスト
+    /// プラットフォームでは no-op｡ここで見えるのは view 側の配線だけだ｡
+    #[gpui::test]
+    fn toggling_float_on_top_flips_the_switch_and_reports_itself(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext as _;
+
+        let (window, timeline) = fixture_window(cx, fixture_with(&["2", "1"], &[]));
+
+        cx.update_window(window.into(), |_, window, cx| {
+            let _ = window.draw(cx);
+            window.dispatch_action(Box::new(crate::menu::ToggleFloatOnTop), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+
+        cx.update(|cx| {
+            timeline.update(cx, |view, _cx| {
+                assert!(
+                    view.window_state.float_on_top,
+                    "a window starts among the others, so one toggle floats it"
+                );
+                assert!(
+                    matches!(view.reload_notice, Some(ReloadNotice::Outcome(_))),
+                    "the flip must say which way it went, got {:?}",
+                    view.reload_notice
+                );
+            });
+        });
+    }
+
     /// #182 に遡って: ステータスバーの 2 つの区画は接触しない｡
     ///
     /// これは #182 が無いままマージされたテストだ｡`Total: 11 req` と

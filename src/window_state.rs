@@ -312,6 +312,7 @@ mod tests {
         let state = WindowState {
             bounds: Some(saved(120.0, 80.0, 560.0, 820.0)),
             translucent: true,
+            float_on_top: true,
         };
         save(&path, &state).unwrap();
         assert_eq!(load(&path), state);
@@ -330,5 +331,6 @@ mod tests {
         let state = load(&path);
         assert_eq!(state.bounds, Some(saved(1.0, 2.0, 560.0, 820.0)));
         assert!(!state.translucent);
+        assert!(!state.float_on_top);
     }
 }

@@ -529,7 +529,7 @@ mod tests {
     }
 
     #[test]
-    fn the_window_menu_can_go_translucent() {
+    fn the_window_menu_can_float_and_go_translucent() {
         // #267: Stickies が Window メニューに置いている対 (Floating Window /
         // Translucent) に倣う｡常駐させるウィンドウの居場所と見え方は､どちらも
         // ウィンドウの属性なので View ではなく Window に入る｡
@@ -545,10 +545,12 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert!(
-            names.iter().any(|name| name == "Translucent"),
-            "Translucent is missing from the Window menu: {names:?}"
-        );
+        for expected in ["Float on Top", "Translucent"] {
+            assert!(
+                names.iter().any(|name| name == expected),
+                "{expected} is missing from the Window menu: {names:?}"
+            );
+        }
     }
 
     #[test]
