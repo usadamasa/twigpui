@@ -35,6 +35,7 @@ mod post_row;
 mod reload_policy;
 mod render;
 mod scroll;
+mod selection;
 pub(crate) mod source_picker;
 mod source_picker_menu;
 mod startup;
@@ -542,7 +543,11 @@ mod tests {
         thread_action_label, usage, usage_color, usage_label,
     };
 
-    fn item_with(id: &str, author_username: &str, reposted_by: Option<&str>) -> TimelineItem {
+    pub(super) fn item_with(
+        id: &str,
+        author_username: &str,
+        reposted_by: Option<&str>,
+    ) -> TimelineItem {
         TimelineItem {
             id: id.to_string(),
             text: String::new(),
@@ -776,7 +781,11 @@ mod tests {
     /// #13 の join が組むとおりのリポスト行｡本文は元投稿のもの､`id` は
     /// リツイートのアクティビティのもの､そして書き込み系のエンドポイントが
     /// 対象にすべきなのは #52 の `original_post_id` だ｡
-    fn repost_row_item(row_id: &str, original_id: &str, original_author: &str) -> TimelineItem {
+    pub(super) fn repost_row_item(
+        row_id: &str,
+        original_id: &str,
+        original_author: &str,
+    ) -> TimelineItem {
         let mut item = item_with(row_id, original_author, Some("bob"));
         item.original_post_id = Some(original_id.to_string());
         item
