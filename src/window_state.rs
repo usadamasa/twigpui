@@ -84,6 +84,11 @@ pub(crate) struct WindowState {
     /// 最後に観測したウィンドウの矩形｡一度も観測していなければ `None`｡
     #[serde(default)]
     pub bounds: Option<SavedBounds>,
+    /// Window メニューの Translucent が入っているか (#267)｡入っていると､
+    /// ウィンドウが手元に無い間だけ背景が透ける — `theme::bg_alpha` を見よ｡
+    /// #267 より前のファイルにはキーが無く､切っていたと読む｡
+    #[serde(default)]
+    pub translucent: bool,
 }
 
 /// 覚えたウィンドウの状態を `path` から読み戻す｡
@@ -96,6 +101,11 @@ pub(crate) fn load(path: &Path) -> WindowState {
         return WindowState::default();
     };
     serde_json::from_str(&contents).unwrap_or_default()
+}
+
+/// `path` があればそこから読み､無ければ (fixture のウィンドウ) 既定値 (#267)｡
+pub(crate) fn load_or_default(path: Option<&Path>) -> WindowState {
+    path.map(load).unwrap_or_default()
 }
 
 /// ウィンドウの状態を `path` へ書く｡

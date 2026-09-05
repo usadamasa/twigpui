@@ -10,6 +10,7 @@ impl TimelineView {
     pub(super) fn header(
         &self,
         density: countdown::Density,
+        bg_alpha: u8,
         cx: &mut Context<'_, Self>,
     ) -> impl IntoElement {
         // #57: `state` の match に畳み込まず､その手前で判定する — post が
@@ -54,7 +55,8 @@ impl TimelineView {
             // macOS の toolbar と同じ寸法にしてある｡
             .h(theme::TOOLBAR_HEIGHT)
             .px(theme::ROW_PAD_X)
-            .bg(rgb(theme.bg_header))
+            // #267: 本体と同じ不透明度で — 帯だけ不透明に残さない｡
+            .bg(rgba(theme::with_alpha(theme.bg_header, bg_alpha)))
             .border_b_1()
             .border_color(rgb(theme.border))
             // #95 の枠に #192/#43 の pull-down trigger: 幅は最大 160px の
@@ -235,7 +237,7 @@ impl TimelineView {
     /// 保持している post の数は timeline が読み込まれてからしか出さない｡
     /// サインイン中や取得中には出せる数が無いし､"0 / 200" は答えの無い
     /// 問いではなく空の cache のように読めてしまう｡
-    pub(super) fn status_bar(&self, density: countdown::Density) -> impl IntoElement {
+    pub(super) fn status_bar(&self, density: countdown::Density, bg_alpha: u8) -> impl IntoElement {
         let theme = self.theme;
 
         // #162: Posts の resource 数を常に出す; 見積り金額 (USD､常に
@@ -266,7 +268,7 @@ impl TimelineView {
             .gap_3()
             .h(theme::STATUS_BAR_HEIGHT)
             .px(theme::ROW_PAD_X)
-            .bg(rgb(theme.bg_header))
+            .bg(rgba(theme::with_alpha(theme.bg_header, bg_alpha)))
             .border_t_1()
             .border_color(rgb(theme.border))
             .text_size(theme::TEXT_META)

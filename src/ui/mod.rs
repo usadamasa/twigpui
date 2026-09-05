@@ -78,7 +78,7 @@ use toast::Toast;
 
 use crate::menu::{
     BlurComposer, CloseWindow, FocusComposer, KEY_CONTEXT, Minimize, Reload, ScrollToTop,
-    ShowAbout, ShowNewPosts, SyncList, ToggleFollowNewPosts,
+    ShowAbout, ShowNewPosts, SyncList, ToggleFollowNewPosts, ToggleTranslucent,
 };
 use crate::oauth;
 use crate::paths::Paths;
@@ -173,10 +173,16 @@ pub(crate) struct TimelineView {
     /// 読み取り側 ([`crate::window_state::initial_bounds`]) も同じように
     /// 塞いである｡
     window_state_file: Option<PathBuf>,
+    /// そのファイルに書く中身の写し (#211, #267)｡矩形とメニューのトグルが
+    /// 同じファイルに居るので､どちらを書くときも全部を書く — 矩形だけを
+    /// 組んで書けば､ウィンドウを動かすたびにトグルが切れる｡
+    window_state: window_state::WindowState,
     /// ウィンドウの矩形が変わったことを知らせる購読 (#211)｡resize でも
     /// 移動でも発火する｡drop すると通知が止まるので､view と同じだけ生きる
     /// 必要がある｡名前の `_` は読まれずに保持されるものの印｡
     _window_bounds_subscription: Subscription,
+    /// フォーカスの出入りを知らせる購読 (#267)｡透過が入っていれば描き直す｡
+    _window_activation_subscription: Subscription,
     /// 矩形を書くまでの間を空けるタイマー (#211)｡ドラッグの最中は通知が
     /// 連続で来るので､新しい task を入れて前のものを落とし､手が止まって
     /// から 1 度だけ書く｡

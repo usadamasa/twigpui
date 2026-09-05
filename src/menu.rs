@@ -48,6 +48,10 @@ gpui::actions!(
         /// 手で同期を始めるのはまれで､そのために footer の幅を使い続ける
         /// 理由が無い｡鍵は持たない — 確認の先で API リクエストを費やす｡
         SyncList,
+        /// ウィンドウが手元に無い間､背景を透かすかどうかを切り替える (#267)｡
+        /// `cmd-alt-t` に割り当て — Stickies の Translucent と同じ鍵｡
+        /// 見え方だけの話で､何も費やさない｡
+        ToggleTranslucent,
     ]
 );
 
@@ -197,6 +201,20 @@ const TOGGLE_FOLLOW_NEW_POSTS: Shortcut = Shortcut {
     menu_label: Some("Follow New Posts"),
 };
 
+/// ウィンドウが手元に無い間の透過を切り替える (#267)｡
+///
+/// 鍵は Stickies の Translucent (⌥⌘T) から借りた｡macOS で「ウィンドウを
+/// 透かす」に既に割り当てられている鍵がそれで､同じ所作に同じ鍵を置く｡
+/// [`TOGGLE_FOLLOW_NEW_POSTS`] と同じくラベルは状態ではなく言明で､どちらへ
+/// 倒れたかはバナーが言う｡
+const TOGGLE_TRANSLUCENT: Shortcut = Shortcut {
+    keystroke: "cmd-alt-t",
+    context: Some(KEY_CONTEXT),
+    bind: |keystroke, context| gpui::KeyBinding::new(keystroke, ToggleTranslucent, context),
+    item: |label| gpui::MenuItem::action(label, ToggleTranslucent),
+    menu_label: Some("Translucent"),
+};
+
 /// すべてのバインドを､[`init`] が登録する順で並べたもの (#99)｡
 ///
 /// [`init`] はまさにこの一覧を登録し､[`shortcuts`] はヘッダが宣伝するものへ
@@ -214,7 +232,7 @@ const TOGGLE_FOLLOW_NEW_POSTS: Shortcut = Shortcut {
 /// `SCROLL_TO_TOP` をこの一覧以外のあらゆる場所へ足した後､三つがここで bind
 /// されないまま座っていたのはそのためだ｡今それを捕まえるテストが
 /// `every_menu_item_has_a_binding` である｡
-const ALL_SHORTCUTS: [&Shortcut; 9] = [
+const ALL_SHORTCUTS: [&Shortcut; 10] = [
     &RELOAD,
     &FOCUS_COMPOSER,
     &BLUR_COMPOSER,
@@ -224,6 +242,7 @@ const ALL_SHORTCUTS: [&Shortcut; 9] = [
     &SCROLL_TO_TOP,
     &SHOW_NEW_POSTS,
     &TOGGLE_FOLLOW_NEW_POSTS,
+    &TOGGLE_TRANSLUCENT,
 ];
 
 /// #58 のキーバインドを登録する｡起動時に一度､`gpui_component::init` (こちら
@@ -304,10 +323,17 @@ pub(crate) fn menus() -> Vec<gpui::Menu> {
         // して扱うものではなくなる｡
         gpui::Menu {
             name: "Window".into(),
-            items: [MINIMIZE.menu_item(), CLOSE_WINDOW.menu_item()]
-                .into_iter()
-                .flatten()
-                .collect(),
+            items: [
+                MINIMIZE.menu_item(),
+                CLOSE_WINDOW.menu_item(),
+                // #267: 常駐させるウィンドウの見え方｡Stickies が同じメニューに
+                // 同じ対を置いているので､探す場所もそこになる｡
+                Some(gpui::MenuItem::separator()),
+                TOGGLE_TRANSLUCENT.menu_item(),
+            ]
+            .into_iter()
+            .flatten()
+            .collect(),
         },
     ]
 }

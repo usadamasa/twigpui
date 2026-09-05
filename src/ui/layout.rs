@@ -142,6 +142,8 @@ impl Render for TimelineView {
         // #214: 枠の文言はウィンドウの幅で選ぶ｡toolbar と footer が別々の
         // 段にならないよう､ここで 1 回決めて両方へ渡す｡
         let density = countdown::density(window.viewport_size().width);
+        // #267: 背景の不透明度も 1 回決めて､本体と両方の帯へ渡す｡
+        let bg_alpha = self.bg_alpha(window);
 
         div()
             // #58: どのバインディングもグローバルに登録するのではなく､この
@@ -225,6 +227,10 @@ impl Render for TimelineView {
                 // #22: 完全にローカル — 理由は `jump_to_top` の doc に｡
                 this.jump_to_top(cx);
             }))
+            .on_action(cx.listener(|this, _: &ToggleTranslucent, window, cx| {
+                // #267: 見え方だけ｡何も費やさない｡
+                this.toggle_translucent(window, cx);
+            }))
             .on_action(cx.listener(|_this, _: &Minimize, window, _cx| {
                 window.minimize_window();
             }))
@@ -246,10 +252,12 @@ impl Render for TimelineView {
             // #205: 手動 sync のダイアログの覆いが `absolute` で寄る先｡無いと
             // ウィンドウではなく最も近い配置済みの祖先が基準になる｡
             .relative()
-            .bg(rgb(theme.bg))
+            // #267: 透過が入っていて手元に無い間だけ薄くなる｡文字と画像は
+            // この上に不透明のまま乗るので､薄くなるのは地だけだ｡
+            .bg(rgba(theme::with_alpha(theme.bg, bg_alpha)))
             .text_color(rgb(theme.text))
             .text_size(theme::TEXT_BODY)
-            .child(self.header(density, cx))
+            .child(self.header(density, bg_alpha, cx))
             // #54: `state` に関わらず出す — これが直す不具合はまさに､何も
             // 起きなかったかのように描かれる timeline なので､このバナーは下の
             // `body` が今何を出していようと独立して生き残らねばならない｡
@@ -295,7 +303,7 @@ impl Render for TimelineView {
             .when_some(self.sync_row(), ParentElement::child)
             // #95: ステータスバー｡ヘッダーがツールバーになった今､累計の
             // リクエスト数が住んでいるのはここだ｡
-            .child(self.status_bar(density))
+            .child(self.status_bar(density, bg_alpha))
             // #205: 手動 sync の確認｡`absolute` なので列の中で場所を取らず
             // ウィンドウ全体を覆う｡最後の子なのは重なり順のため｡
             .when_some(self.sync_dialog(cx), ParentElement::child)
