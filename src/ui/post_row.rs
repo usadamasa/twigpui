@@ -207,7 +207,12 @@ impl TimelineView {
         )
     }
 
-    pub(super) fn post_row(&self, item: &TimelineItem, cx: &mut Context<'_, Self>) -> AnyElement {
+    pub(super) fn post_row(
+        &self,
+        item: &TimelineItem,
+        bg_alpha: u8,
+        cx: &mut Context<'_, Self>,
+    ) -> AnyElement {
         let theme = self.theme;
         let byline = byline(&item.author_username);
 
@@ -311,6 +316,7 @@ impl TimelineView {
                     quoted,
                     theme,
                     self.media_grid_for(&quoted.media, cx),
+                    bg_alpha,
                 ))
             })
             // #95: すべての action を横一行に並べ､それぞれが自分の件数を
@@ -322,7 +328,7 @@ impl TimelineView {
             // にしていない: 読み込まれた thread は post の連なり全体へ広がる
             // ので､一行の帯の中には収まらない｡
             .when_some(item.replied_to.as_ref(), |column, replied_to| {
-                column.child(self.thread_section(&item.id, replied_to, cx))
+                column.child(self.thread_section(&item.id, replied_to, bg_alpha, cx))
             });
 
         div()
@@ -360,6 +366,7 @@ impl TimelineView {
         &self,
         reply_post_id: &str,
         replied_to: &RepliedTo,
+        bg_alpha: u8,
         cx: &mut Context<'_, Self>,
     ) -> AnyElement {
         let theme = self.theme;
@@ -367,7 +374,7 @@ impl TimelineView {
         let state = self.threads.get(reply_post_id);
 
         if let Some(ThreadFetchState::Loaded(chain)) = state {
-            return render_thread_chain(chain, theme);
+            return render_thread_chain(chain, theme, bg_alpha);
         }
         if matches!(state, Some(ThreadFetchState::Loading)) {
             return div()

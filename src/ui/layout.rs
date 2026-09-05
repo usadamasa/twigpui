@@ -7,7 +7,7 @@
 use super::*;
 
 impl TimelineView {
-    fn body(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
+    fn body(&self, bg_alpha: u8, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let theme = self.theme;
 
         // `overflow_y_scroll` は StatefulInteractiveElement 側にあるので､
@@ -73,7 +73,7 @@ impl TimelineView {
                 // 逃がせない｡
                 let mut rows: Vec<AnyElement> = Vec::with_capacity(items.len());
                 for item in items {
-                    rows.push(self.post_row(item, cx));
+                    rows.push(self.post_row(item, bg_alpha, cx));
                 }
                 content
                     .children(rows)
@@ -142,7 +142,10 @@ impl Render for TimelineView {
         // #214: 枠の文言はウィンドウの幅で選ぶ｡toolbar と footer が別々の
         // 段にならないよう､ここで 1 回決めて両方へ渡す｡
         let density = countdown::density(window.viewport_size().width);
-        // #267: 背景の不透明度も 1 回決めて､本体と両方の帯へ渡す｡
+        // #267: 背景の不透明度も 1 回決めて､本体と両方の帯へ渡す｡行の中に
+        // 埋め込まれた post の面 (引用カード､スレッドの行､composer の
+        // カード) にも同じものが要る — 枠だけに渡すと､透けた timeline の
+        // 上にそれらが不透明の板として残る｡
         let bg_alpha = self.bg_alpha(window);
 
         div()
@@ -299,9 +302,9 @@ impl Render for TimelineView {
             // (直し方はヘッダーの "Re-authorize" ボタン)｡composer ごと隠して
             // なぜ消えたのかを知る手立てを残さない､という形は取らない｡
             .when(self.signed_in_with_oauth, |column| {
-                column.child(self.composer(window, cx))
+                column.child(self.composer(window, bg_alpha, cx))
             })
-            .child(self.body(cx))
+            .child(self.body(bg_alpha, cx))
             // #205: sync が今していることは footer の 1 段上｡`when_some` なので
             // 無いときは行そのものが無い｡高さ 0 の要素を置き続けるのではない｡
             .when_some(self.sync_row(), ParentElement::child)

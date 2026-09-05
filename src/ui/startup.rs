@@ -53,6 +53,23 @@ impl Startup {
     }
 }
 
+/// この起動が持って立ち上がる window state (#267)｡
+///
+/// fixture は state ファイルを読まない (`window_state_file` が `None`) ので､
+/// 透過は fixture 自身の宣言で決まる｡`TimelineView::new` はこの直後に
+/// `apply_translucency` で platform の window へ効かせるし､`show_fixture` は
+/// `window` を受け取らないので､あちらで立てても届かない｡
+fn startup_window_state(
+    startup: &Startup,
+    file: Option<&std::path::Path>,
+) -> window_state::WindowState {
+    let mut state = window_state::load_or_default(file);
+    if let Startup::Fixture(fixture) = startup {
+        state.translucent = fixture.translucent;
+    }
+    state
+}
+
 impl TimelineView {
     pub(crate) fn new(
         config: Config,
@@ -112,7 +129,7 @@ impl TimelineView {
             selection_file,
             // #267: 矩形は `main` が `initial_bounds` で読んで開く位置に
             // 使った｡トグルはここで読み､下で `apply_translucency` が効かせる｡
-            window_state: window_state::load_or_default(window_state_file.as_deref()),
+            window_state: startup_window_state(&startup, window_state_file.as_deref()),
             window_state_file,
             _window_bounds_subscription: window_bounds_subscription,
             _window_activation_subscription: window_activation_subscription,
@@ -325,8 +342,9 @@ impl TimelineView {
     }
 
     /// 今この瞬間の背景の不透明度 (#267)｡本体も toolbar も status bar も
-    /// これで塗る — 帯だけが不透明に残ると､透けた一覧の上に板が浮く｡
-    /// render が 1 回読んで枠へ渡す｡
+    /// これで塗る — 帯だけが不透明に残ると､透けた一覧の上に板が浮く｡行の中に
+    /// 埋め込まれた post の面 (引用カード､スレッドの行､composer のカード) も
+    /// 同じもので塗る｡render が 1 回読んで枠と行へ渡す｡
     pub(super) fn bg_alpha(&self, window: &Window) -> u8 {
         theme::bg_alpha(self.window_state.translucent, window.is_window_active())
     }
