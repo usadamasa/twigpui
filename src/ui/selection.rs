@@ -11,6 +11,126 @@
 //! 読み手の知らないうちに別の post を指す｡id なら､消えた post は
 //! 「選択なし」として扱えばよい｡
 
+// [`super::scroll`] と同じく書き下す: ここが `ui` から借りるものは
+// clippy の `wildcard_imports` が列挙できる程度に少ない｡
+use super::{
+    Context, TimelineItem, TimelineState, TimelineView, action_post_id, offers_like, offers_repost,
+};
+
+impl TimelineView {
+    /// 選択中の post が今の一覧の何番目か (#148)｡
+    ///
+    /// 選択が無いとき､まだ post が出ていないとき､そして選択していた id が
+    /// 一覧から消えたときは `None`｡最後のものが id で持つ理由そのもので､
+    /// 呼び出し側はどれも「選択なし」と同じに扱う｡
+    fn selected_index(&self) -> Option<usize> {
+        let TimelineState::Loaded(items) = &self.state else {
+            return None;
+        };
+        let selected = self.selected.as_deref()?;
+        items.iter().position(|item| item.id == selected)
+    }
+
+    /// 選択中の行 (#148)｡[`Self::selected_index`] と同じ条件で `None`｡
+    fn selected_item(&self) -> Option<&TimelineItem> {
+        let TimelineState::Loaded(items) = &self.state else {
+            return None;
+        };
+        items.get(self.selected_index()?)
+    }
+
+    /// 選択を `delta` だけ動かし､その行を画面へ入れる (#148)｡`j` が `1`､
+    /// `k` が `-1`｡
+    ///
+    /// 選択が無い (あるいは一覧から消えた) ときの起点は viewport の最上部の
+    /// 行だ｡0 番目ではない — 下まで読んだところで `j` を押した人が期待する
+    /// のは目の前の行であって､一覧の先頭へ跳ぶことではない｡だから最初の
+    /// `j` は「1 つ進む」ではなく「今そこにある行を選ぶ」になる｡
+    ///
+    /// 両端では止まる｡巻き戻しはしない — 一覧の末尾で `j` を押し続けた人が
+    /// 最新の post へ戻されるのは事故にしかならない｡
+    ///
+    /// スクロールの順は [`Self::jump_to_top`] と同じだ: 読み手のホイールの
+    /// spring と glide を先に手放してから offset を動かす｡握ったままにすると
+    /// 次のフレームで取り合いになる｡
+    ///
+    /// [`Self::note_scroll_position`] は呼ばない｡`logical_scroll_top` が
+    /// 数えるのは直近の prepaint の bounds なので､ここで読むと 1 フレーム
+    /// 古い位置を答える｡#206 の countdown は次のホイールか glide まで遅れる｡
+    pub(super) fn select_step(&mut self, delta: isize, cx: &mut Context<'_, Self>) {
+        // #205: 手動 sync の確認ダイアログは focus を持たないので
+        // `!Input` では黙らない｡覆いの下で一覧が動くのを止めるのはここだけだ｡
+        if self.pending_sync {
+            return;
+        }
+        let TimelineState::Loaded(items) = &self.state else {
+            return;
+        };
+        let Some(last) = items.len().checked_sub(1) else {
+            return;
+        };
+        let index = match self.selected_index() {
+            Some(current) => current.saturating_add_signed(delta).min(last),
+            None => self.list_scroll.top_item().min(last),
+        };
+        let Some(id) = items.get(index).map(|item| item.id.clone()) else {
+            return;
+        };
+
+        self.selected = Some(id);
+        self.glide = None;
+        self.release_scroll();
+        self.list_scroll.scroll_to_item(index);
+        cx.notify();
+    }
+
+    /// 選択中の post を like / unlike する (#148)｡
+    ///
+    /// 行の like ボタンとまったく同じ門 ([`offers_like`]) を通してから同じ
+    /// [`Self::toggle_like`] を呼ぶ｡ボタンが出ない行では鍵も効かない — 鍵が
+    /// 画面に無いアフォーダンスへの抜け道になってはいけない｡
+    ///
+    /// リクエストの対象は行の id ではなく [`action_post_id`] (#52)｡repost の
+    /// 行で `l` を押した人が like するのは元の post だ｡
+    pub(super) fn like_selected(&mut self, cx: &mut Context<'_, Self>) {
+        if self.pending_sync {
+            return;
+        }
+        let Some(item) = self.selected_item() else {
+            return;
+        };
+        if !offers_like(
+            self.signed_in_with_oauth,
+            self.home_user_id.as_deref(),
+            item,
+        ) {
+            return;
+        }
+        let target = action_post_id(item).to_string();
+        self.toggle_like(target, cx);
+    }
+
+    /// 選択中の post を repost / undo repost する (#148)｡
+    /// [`Self::like_selected`] と同じ形｡
+    pub(super) fn repost_selected(&mut self, cx: &mut Context<'_, Self>) {
+        if self.pending_sync {
+            return;
+        }
+        let Some(item) = self.selected_item() else {
+            return;
+        };
+        if !offers_repost(
+            self.signed_in_with_oauth,
+            self.home_user_id.as_deref(),
+            item,
+        ) {
+            return;
+        }
+        let target = action_post_id(item).to_string();
+        self.toggle_repost(target, cx);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::fixture::Fixture;
@@ -295,7 +415,9 @@ mod tests {
             "the fixture has to be taller than the window: {before:?} in {viewport:?}"
         );
 
-        for _ in 0..15 {
+        // 最初の 1 打は「進む」ではなく「今そこにある行を選ぶ」ので､
+        // 16 行目に着くには 16 打｡
+        for _ in 0..16 {
             press(&mut visual, cx, "j");
         }
         assert_eq!(selected_id(&timeline, cx).as_deref(), Some("16"));

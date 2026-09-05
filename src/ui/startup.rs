@@ -188,6 +188,7 @@ impl TimelineView {
             open_task: None,
             open_failure: None,
             list_scroll: ScrollHandle::new(),
+            selected: None,
             focus_handle: cx.focus_handle(),
         };
         // #118: 何よりも先に｡最初のフレームから focus の経路に空のものでは

@@ -78,8 +78,9 @@ use state::{
 use toast::Toast;
 
 use crate::menu::{
-    BlurComposer, CloseWindow, FocusComposer, KEY_CONTEXT, Minimize, Reload, ScrollToTop,
-    ShowAbout, ShowNewPosts, SyncList, ToggleFloatOnTop, ToggleFollowNewPosts, ToggleTranslucent,
+    BlurComposer, CloseWindow, FocusComposer, KEY_CONTEXT, LikeSelected, Minimize, Reload,
+    RepostSelected, ScrollToTop, SelectNext, SelectPrevious, ShowAbout, ShowNewPosts, SyncList,
+    ToggleFloatOnTop, ToggleFollowNewPosts, ToggleTranslucent,
 };
 use crate::oauth;
 use crate::paths::Paths;
@@ -500,6 +501,17 @@ pub(crate) struct TimelineView {
     /// 使う: そうしないと､スクロール済みの一覧へ post を差し込んだときに
     /// すべてが読み手の下へずり下がる｡
     list_scroll: ScrollHandle,
+    /// `j` / `k` で読み進めている行の post id (#148)｡まだ誰も選んで
+    /// いなければ `None`｡
+    ///
+    /// index ではなく id で持つ｡timeline は reload・source の切り替え・
+    /// follow の流し込みで並びごと入れ替わるので､index を覚えると読み手の
+    /// 知らないうちに別の post を指す｡id なら､一覧から消えた post は
+    /// 「選択なし」に落ちるだけで済む — [`Self::selected_index`] を見よ｡
+    ///
+    /// だから timeline を置き換える経路はどれもこれに触らない｡`pending` や
+    /// `unseen` のように 0 へ戻す必要が無い｡
+    selected: Option<String>,
     /// timeline 自身の root 要素の focus (#118)｡
     ///
     /// gpui は focus されている要素の祖先を辿って action を解決するので､

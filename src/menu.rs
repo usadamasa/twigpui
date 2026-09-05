@@ -510,7 +510,7 @@ mod tests {
         let input = gpui::KeyContext::parse("Input").expect("the composer's context");
 
         assert_eq!(
-            predicate.depth_of(&[timeline.clone()]),
+            predicate.depth_of(std::slice::from_ref(&timeline)),
             Some(1),
             "a bare key fires while the timeline itself holds focus"
         );
