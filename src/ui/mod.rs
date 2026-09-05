@@ -3311,11 +3311,88 @@ mod tests {
         });
     }
 
-    /// #206: follow の途中で toast を押すと最上部へ飛ぶ｡pill と同じく無料 —
-    /// リクエストも取得も無い｡
+    /// トーストのクリックがバッファを最上部へ跳ばすのではなく follow と
+    /// 同じ glide を始めることを確かめる｡バッファの適用先が最上部ではなく
+    /// 読み手が下へスクロールした位置なのが core: `start_glide` の settle
+    /// ループが待つ条件が `settle_from` 無しのままだと、スクロール済みの
+    /// offset をそれだけで「anchor が着地した」と誤読して 1 フレーム目で
+    /// 抜けてしまい、その後 anchor が実際に着地した瞬間を読み手がホイールを
+    /// 握ったと誤認して glide を諦める｡この誤読が直っているかどうかを、
+    /// anchor が着地するはずのフレームの直後で `glide.is_some()` を見て
+    /// 押さえる｡
     #[gpui::test]
-    fn clicking_the_toast_while_following_jumps_to_the_top_for_free(cx: &mut gpui::TestAppContext) {
-        let (mut visual, timeline, _body) = scrollable_window(cx);
+    fn clicking_the_toast_resumes_the_glide_from_a_scrolled_down_position(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let ids: Vec<String> = (1..=40).map(|n| n.to_string()).collect();
+        let shown: Vec<&str> = ids.iter().map(String::as_str).collect();
+        let (mut visual, timeline) = drawn(cx, fixture_with(&shown, &["99"]));
+
+        let body = visual
+            .debug_bounds("timeline")
+            .expect("the timeline has to be laid out before a wheel can reach it");
+        visual.simulate_event(wheel_event(body.center(), -10.));
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(2));
+        cx.run_until_parked();
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            offset_y(cx, &timeline) < -10.,
+            "the reader must be scrolled down before clicking the toast"
+        );
+
+        let toast = visual
+            .debug_bounds("new-posts")
+            .expect("a post is waiting, so the toast is laid out");
+        visual.simulate_click(toast.center(), gpui::Modifiers::none());
+
+        // ここが 1 フレーム目: follow の `scroll_to_top_of_item` が置いた
+        // anchor がまさにこのフレームで着地する｡
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs_f32(super::scroll::FRAME_S));
+        cx.run_until_parked();
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        cx.update(|cx| {
+            assert!(
+                timeline.read(cx).glide.is_some(),
+                "the anchor landing on a scrolled-down offset must not read as the \
+                 reader grabbing the scrollbar"
+            );
+        });
+
+        for _ in 0..600 {
+            cx.executor()
+                .advance_clock(std::time::Duration::from_secs_f32(super::scroll::FRAME_S));
+            cx.run_until_parked();
+            visual.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            if cx.update(|cx| timeline.read(cx).unseen) == 0 {
+                break;
+            }
+        }
+
+        cx.update(|cx| {
+            let view = timeline.read(cx);
+            assert_eq!(view.unseen, 0, "the glide must finish rather than hang");
+            assert!(
+                f32::from(view.list_scroll.offset().y).abs() < f32::EPSILON,
+                "the glide ends at the top: {:?}",
+                view.list_scroll.offset()
+            );
+        });
+    }
+
+    /// #206: follow が流し込んでいる途中でホイールに触れると glide は止まる
+    /// (#175)｡そこで toast を押すと、最上部へ跳ぶのではなく同じ glide を
+    /// 続きから再開する — リストを置き換え直すことはない｡
+    #[gpui::test]
+    fn clicking_the_toast_resumes_a_glide_the_wheel_had_stopped(cx: &mut gpui::TestAppContext) {
+        let (mut visual, timeline, body) = scrollable_window(cx);
 
         cx.update(|cx| {
             timeline.update(cx, |view, cx| {
@@ -3346,6 +3423,17 @@ mod tests {
             assert!(view.glide.is_some(), "and the glide is still walking");
         });
 
+        visual.simulate_event(wheel_event(body.center(), -1.));
+        let unseen_when_stopped = cx.update(|cx| {
+            let view = timeline.read(cx);
+            assert!(view.glide.is_none(), "the reader's hand stopped the glide");
+            view.unseen
+        });
+        assert!(
+            unseen_when_stopped > 0,
+            "rows are still above the viewport while stopped"
+        );
+
         let toast = visual
             .debug_bounds("new-posts")
             .expect("rows are above the viewport, so the toast is laid out");
@@ -3354,15 +3442,79 @@ mod tests {
 
         cx.update(|cx| {
             let view = timeline.read(cx);
-            assert_eq!(view.unseen, 0, "the jump reveals every row at once");
-            assert!(view.glide.is_none(), "the jump replaces the glide");
+            assert!(
+                view.glide.is_some(),
+                "the click resumes the glide instead of jumping"
+            );
+            assert_eq!(
+                view.unseen, unseen_when_stopped,
+                "resuming does not itself reveal any rows"
+            );
+            assert_eq!(
+                shown_ids(view).len(),
+                43,
+                "the list is not replaced, only the glide restarts"
+            );
+        });
+
+        for _ in 0..600 {
+            cx.executor()
+                .advance_clock(std::time::Duration::from_secs_f32(super::scroll::FRAME_S));
+            cx.run_until_parked();
+            visual.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            if cx.update(|cx| timeline.read(cx).unseen) == 0 {
+                break;
+            }
+        }
+
+        cx.update(|cx| {
+            let view = timeline.read(cx);
+            assert_eq!(view.unseen, 0, "the resumed glide eventually finishes");
             assert!(view.pending.is_none());
             assert!(view.client.is_none());
             assert!(
                 view.last_reload_at.is_none(),
-                "jumping to the top must not count as a fetch"
+                "resuming a glide must not count as a fetch"
             );
         });
+    }
+
+    /// #22: `ScrollToTop` はトーストのクリックと違って glide を挟まず、
+    /// 1 フレームで先頭へ着く｡
+    #[gpui::test]
+    fn scroll_to_top_still_jumps_instantly(cx: &mut gpui::TestAppContext) {
+        let (mut visual, timeline, body) = scrollable_window(cx);
+
+        visual.simulate_event(wheel_event(body.center(), -10.));
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(2));
+        cx.run_until_parked();
+        assert!(
+            offset_y(cx, &timeline) < -10.,
+            "the reader must be scrolled down before the jump"
+        );
+
+        visual.update(|window, cx| {
+            window.dispatch_action(Box::new(crate::menu::ScrollToTop), cx);
+        });
+        cx.run_until_parked();
+        cx.update(|cx| {
+            let view = timeline.read(cx);
+            assert!(view.glide.is_none(), "ScrollToTop must not start a glide");
+            assert_eq!(view.unseen, 0);
+        });
+
+        // anchor の着地に要るのは 1 フレームだけ — glide のような数十フレーム
+        // の advance_clock は要らない｡
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            offset_y(cx, &timeline).abs() < 1.,
+            "one frame is enough to land at the top, with no glide in between"
+        );
     }
 
     /// fixture の window はロック中でも描き続け､live の window は upstream
