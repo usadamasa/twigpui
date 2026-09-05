@@ -627,13 +627,11 @@ impl TimelineView {
     /// が目で追える速さで視界へ滑り降りてくる｡それが #177 の "always
     /// flowing" の印象で､ポーリングがすでに支払った post でできている｡
     fn follow(&mut self, pending: Pending, cx: &mut Context<'_, Self>) {
-        // ここから先で `list_scroll` を動かすのは読み手のホイールではない
-        // — spring loop を握ったままにしない｡
+        // ここから先の `list_scroll` を動かすのは読み手ではない｡
         self.release_scroll();
         let count = pending.count;
-        // `scroll_to_top_of_item` で動く前の offset｡読み手が最上部にいれば
-        // ほぼ 0 だが､トースト経由では下にスクロールした値のこともある —
-        // `start_glide` がその anchor の着地を読み違えないための基準点｡
+        // 下の `scroll_to_top_of_item` で動く前の offset｡トースト経由では
+        // 0 とは限らず､`start_glide` が anchor の着地を測る基準点になる｡
         let before = f32::from(self.list_scroll.offset().y);
         // 前のポーリングが駐めたバッファはこれより古く､しかも今まさに
         // 置き換えられる timeline を基準に測られている｡
@@ -694,8 +692,7 @@ impl TimelineView {
         /// `GLIDE_DONE_PX` の判定と同じ意味になる｡
         const GRAB_PX: f32 = 1.0;
 
-        // glide はこの先ずっと offset を持つので､呼び出し側がホイールを
-        // 手放し済みだと信じない｡
+        // この先の offset は glide のもの｡呼び出し側の手放しを当てにしない｡
         self.release_scroll();
         self.glide = Some(cx.spawn(async move |this, cx| {
             let frame = Duration::from_secs_f32(scroll::FRAME_S);
