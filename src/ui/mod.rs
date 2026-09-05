@@ -2300,6 +2300,7 @@ mod tests {
             picker_open: false,
             liked: Vec::new(),
             reposted: Vec::new(),
+            translucent: false,
         }
     }
 
@@ -4080,6 +4081,24 @@ mod tests {
                     view.reload_notice
                 );
             });
+        });
+    }
+
+    /// #267: fixture が `translucent` と言えば､窓は透過の状態で立ち上がる｡
+    /// fixture の窓は window state ファイルを読まないので､透過の見た目を
+    /// 撮るにはこれしか道が無い — `Fixture::picker_open` と同じ例外だ｡
+    #[gpui::test]
+    fn a_fixture_can_ask_for_a_translucent_window(cx: &mut gpui::TestAppContext) {
+        let fixture = Fixture {
+            translucent: true,
+            ..fixture_with(&["1"], &[])
+        };
+        let (_window, timeline) = fixture_window(cx, fixture);
+        cx.update(|cx| {
+            assert!(
+                timeline.read(cx).window_state.translucent,
+                "a fixture-declared translucent window must start translucent"
+            );
         });
     }
 

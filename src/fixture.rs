@@ -100,6 +100,11 @@ pub(crate) struct Fixture {
     /// repost 済みとして描く post id (#156)｡[`Fixture::liked`] と同じ｡
     #[serde(default)]
     pub reposted: Vec<String>,
+    /// 起動直後から背景を透かすか (#267)｡[`Fixture::picker_open`] と同じ
+    /// 例外で､fixture の窓は window state ファイルを読まないので､透過の
+    /// 見た目を撮るにはここで宣言する以外に道が無い｡
+    #[serde(default)]
+    pub translucent: bool,
 }
 
 /// フィクスチャが言う list sync の状態 (#205)｡
@@ -260,6 +265,13 @@ mod tests {
                 .iter()
                 .any(|item| item.reposted_by.is_some() && !item.media.is_empty()),
             "a repost carrying the original's image (#104)"
+        );
+        assert!(
+            fixture
+                .items
+                .iter()
+                .any(|item| item.reposted_by.is_some() && item.quoted.is_some()),
+            "a repost of a quote (#13), the row with the most embedded surfaces"
         );
         let lone = |item: &TimelineItem| item.media.len() == 1;
         assert!(

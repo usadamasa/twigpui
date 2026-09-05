@@ -35,6 +35,11 @@ pub(in crate::ui) fn repost_banner_label(reposted_by: &str) -> String {
 /// は `theme.bg` の上に直に載るので､自前のパレット項目を持たずとも明確に
 /// 別のブロックとして読める｡
 ///
+/// `bg_alpha` は root と同じものを受け取る (#267)｡枠だけに渡して行の中の
+/// 面を置き去りにすると､透けた timeline の上でカードだけが不透明の板として
+/// 残る｡透けた地が 2 枚重なる場所は 1 枚 70% でも合成後は約 91% になり､
+/// カードが周りより濃く見えるが､それは重なりの結果であって不具合ではない｡
+///
 /// `media` は quote された post のサムネイルの格子 (#123)｡カードが読む
 /// 対象ではなく小さな preview である場所では `None` になる: composer の
 /// "replying to" と "quoting" の帯はどちらも､画像がすでに画面にある行の
@@ -43,6 +48,7 @@ pub(in crate::ui) fn quote_card(
     quoted: &QuotedPost,
     theme: Theme,
     media: Option<AnyElement>,
+    bg_alpha: u8,
 ) -> impl IntoElement {
     let byline = byline(&quoted.author_username);
 
@@ -55,7 +61,7 @@ pub(in crate::ui) fn quote_card(
         .rounded(theme::RADIUS_CONTROL)
         .border_1()
         .border_color(rgb(theme.border))
-        .bg(rgb(theme.bg_header))
+        .bg(rgba(theme::with_alpha(theme.bg_header, bg_alpha)))
         .child(
             div()
                 .flex()
@@ -123,7 +129,11 @@ pub(in crate::ui) fn thread_toggle_row(
 /// 最初の親の fetch が何も見つけなかったとき (削除済み､保護済み､その他
 /// 不在) にだけ起きる — #12 の「まともに描けねばならない」要件だ — ので､
 /// その場合は黙って何も出さず専用のメッセージを出す｡
-pub(in crate::ui) fn render_thread_chain(chain: &ThreadChain, theme: Theme) -> AnyElement {
+pub(in crate::ui) fn render_thread_chain(
+    chain: &ThreadChain,
+    theme: Theme,
+    bg_alpha: u8,
+) -> AnyElement {
     if chain.items.is_empty() && !chain.capped {
         return div()
             .text_color(rgb(theme.text_muted))
@@ -139,7 +149,7 @@ pub(in crate::ui) fn render_thread_chain(chain: &ThreadChain, theme: Theme) -> A
             chain
                 .items
                 .iter()
-                .map(|thread_item| thread_row(thread_item, theme)),
+                .map(|thread_item| thread_row(thread_item, theme, bg_alpha)),
         )
         .when(chain.capped, |column| {
             column.child(div().text_color(rgb(theme.text_muted)).child(format!(
@@ -151,7 +161,7 @@ pub(in crate::ui) fn render_thread_chain(chain: &ThreadChain, theme: Theme) -> A
         .into_any_element()
 }
 
-fn thread_row(thread_item: &thread::ThreadItem, theme: Theme) -> impl IntoElement {
+fn thread_row(thread_item: &thread::ThreadItem, theme: Theme, bg_alpha: u8) -> impl IntoElement {
     let byline = byline(&thread_item.author_username);
 
     div()
@@ -162,7 +172,7 @@ fn thread_row(thread_item: &thread::ThreadItem, theme: Theme) -> impl IntoElemen
         .rounded_md()
         .border_1()
         .border_color(rgb(theme.border))
-        .bg(rgb(theme.bg_header))
+        .bg(rgba(theme::with_alpha(theme.bg_header, bg_alpha)))
         .child(
             div()
                 .flex()

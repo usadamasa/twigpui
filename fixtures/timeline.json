@@ -61,6 +61,20 @@
       }
     },
     {
+      "id": "9000000000000000011",
+      "text": "A repost of a quote: the reposted line and the quote card share one row (#13), the row with the most embedded surfaces.",
+      "created_at": "2026-08-22T09:22:00.000Z",
+      "author_name": "Quoter",
+      "author_username": "quoter",
+      "reposted_by": "reposter2",
+      "original_post_id": "9000000000000000111",
+      "quoted": {
+        "author_name": "Developers",
+        "author_username": "XDevelopers",
+        "text": "The post the quote was built on, embedded inside a row that is itself a repost."
+      }
+    },
+    {
       "id": "9000000000000000005",
       "text": "The original's text, shown in place of a truncated RT (#13), with the original's image carried onto the row (#104).",
       "created_at": "2026-08-22T09:20:00.000Z",

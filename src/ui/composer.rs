@@ -38,6 +38,7 @@ impl TimelineView {
     fn composer_quote_card(
         &self,
         target: &compose::QuoteTarget,
+        bg_alpha: u8,
         cx: &mut Context<'_, Self>,
     ) -> impl IntoElement {
         let theme = self.theme;
@@ -45,7 +46,7 @@ impl TimelineView {
             .flex()
             .flex_col()
             .gap_1()
-            .child(quote_card(&target.quoted, theme, None))
+            .child(quote_card(&target.quoted, theme, None, bg_alpha))
             .child(
                 div()
                     .addressable("compose-remove-quote")
@@ -69,6 +70,7 @@ impl TimelineView {
     fn composer_reply_card(
         &self,
         target: &compose::ReplyTarget,
+        bg_alpha: u8,
         cx: &mut Context<'_, Self>,
     ) -> impl IntoElement {
         let theme = self.theme;
@@ -81,7 +83,7 @@ impl TimelineView {
                     .text_color(rgb(theme.text_muted))
                     .child(reply_target_label(&target.replying_to.author_username)),
             )
-            .child(quote_card(&target.replying_to, theme, None))
+            .child(quote_card(&target.replying_to, theme, None, bg_alpha))
             .child(
                 div()
                     .addressable("compose-remove-reply")
@@ -103,6 +105,7 @@ impl TimelineView {
     pub(super) fn composer(
         &self,
         window: &mut Window,
+        bg_alpha: u8,
         cx: &mut Context<'_, Self>,
     ) -> impl IntoElement {
         let theme = self.theme;
@@ -157,12 +160,12 @@ impl TimelineView {
             // #16: "Quote" が設定していれば quote の対象 —
             // `composer_quote_card` の doc を見よ｡
             .when_some(self.compose.quote(), |column, target| {
-                column.child(self.composer_quote_card(target, cx))
+                column.child(self.composer_quote_card(target, bg_alpha, cx))
             })
             // #71: "Reply" が設定していれば reply の対象｡両方になることは
             // 決してない — `ComposeState::set_reply` を見よ｡
             .when_some(self.compose.reply(), |column, target| {
-                column.child(self.composer_reply_card(target, cx))
+                column.child(self.composer_reply_card(target, bg_alpha, cx))
             })
             .when_some(
                 compose_error_message(self.compose.status()),
