@@ -179,6 +179,7 @@ impl TimelineView {
         // #267: 前回のトグルを platform の window へ効かせる｡`main` は
         // `WindowOptions` に書かず､live も fixture もここを通る｡
         this.apply_translucency(window);
+        this.apply_floating(window);
         match startup {
             Startup::Live => this.start(cx),
             Startup::Fixture(fixture) => this.show_fixture(*fixture, cx),
@@ -277,6 +278,31 @@ impl TimelineView {
         self.reload_notice = Some(ReloadNotice::Outcome(outcome.into()));
         self.persist_window_state(cx);
         cx.notify();
+    }
+
+    /// Window メニューの Float on Top (#267)｡[`Self::toggle_translucent`] と
+    /// 同じ形: 反転させ､効かせ､言い､覚える｡
+    pub(super) fn toggle_float_on_top(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        self.window_state.float_on_top = !self.window_state.float_on_top;
+        self.apply_floating(window);
+        let outcome = if self.window_state.float_on_top {
+            "Floating on top of other windows."
+        } else {
+            "Back among the other windows."
+        };
+        self.reload_notice = Some(ReloadNotice::Outcome(outcome.into()));
+        self.persist_window_state(cx);
+        cx.notify();
+    }
+
+    /// `window_state.float_on_top` を platform の window に伝える (#267)｡
+    ///
+    /// `Window::set_floating` は gpui の fork の patch (Cargo.toml の
+    /// `[patch.crates-io]`) にしか無い｡upstream 0.2.2 の `WindowKind` は
+    /// 開くときに決めるもので､macOS では `Floating` も `Normal` と同じ
+    /// level に置かれる — 開いた後に切り替える口はこれだけだ｡
+    fn apply_floating(&self, window: &Window) {
+        window.set_floating(self.window_state.float_on_top);
     }
 
     /// `window_state.translucent` を platform の window に伝える (#267)｡

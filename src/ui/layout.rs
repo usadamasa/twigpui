@@ -231,6 +231,10 @@ impl Render for TimelineView {
                 // #267: 見え方だけ｡何も費やさない｡
                 this.toggle_translucent(window, cx);
             }))
+            .on_action(cx.listener(|this, _: &ToggleFloatOnTop, window, cx| {
+                // #267: 居場所だけ｡何も費やさない｡
+                this.toggle_float_on_top(window, cx);
+            }))
             .on_action(cx.listener(|_this, _: &Minimize, window, _cx| {
                 window.minimize_window();
             }))

@@ -89,6 +89,10 @@ pub(crate) struct WindowState {
     /// #267 より前のファイルにはキーが無く､切っていたと読む｡
     #[serde(default)]
     pub translucent: bool,
+    /// Window メニューの Float on Top が入っているか (#267)｡入っていると､
+    /// 他のアプリの窓より上に留まる (macOS の floating level)｡
+    #[serde(default)]
+    pub float_on_top: bool,
 }
 
 /// 覚えたウィンドウの状態を `path` から読み戻す｡

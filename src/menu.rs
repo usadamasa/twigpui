@@ -52,6 +52,10 @@ gpui::actions!(
         /// `cmd-alt-t` に割り当て — Stickies の Translucent と同じ鍵｡
         /// 見え方だけの話で､何も費やさない｡
         ToggleTranslucent,
+        /// ウィンドウを他のアプリの窓より上に留めるかどうかを切り替える
+        /// (#267)｡`cmd-alt-f` に割り当て — Stickies の Floating Window と
+        /// 同じ鍵｡何も費やさない｡
+        ToggleFloatOnTop,
     ]
 );
 
@@ -215,6 +219,20 @@ const TOGGLE_TRANSLUCENT: Shortcut = Shortcut {
     menu_label: Some("Translucent"),
 };
 
+/// ウィンドウを最前面に留める (#267)｡
+///
+/// 鍵は Stickies の Floating Window (⌥⌘F) から借りた — [`TOGGLE_TRANSLUCENT`]
+/// と対で､同じメニューに同じ順で並ぶ｡`cmd-shift-f` (follow) とは
+/// 修飾キーが違う｡level を動かすのは gpui の fork の patch
+/// (`Window::set_floating`) で､upstream の 0.2.2 には無い｡
+const TOGGLE_FLOAT_ON_TOP: Shortcut = Shortcut {
+    keystroke: "cmd-alt-f",
+    context: Some(KEY_CONTEXT),
+    bind: |keystroke, context| gpui::KeyBinding::new(keystroke, ToggleFloatOnTop, context),
+    item: |label| gpui::MenuItem::action(label, ToggleFloatOnTop),
+    menu_label: Some("Float on Top"),
+};
+
 /// すべてのバインドを､[`init`] が登録する順で並べたもの (#99)｡
 ///
 /// [`init`] はまさにこの一覧を登録し､[`shortcuts`] はヘッダが宣伝するものへ
@@ -232,7 +250,7 @@ const TOGGLE_TRANSLUCENT: Shortcut = Shortcut {
 /// `SCROLL_TO_TOP` をこの一覧以外のあらゆる場所へ足した後､三つがここで bind
 /// されないまま座っていたのはそのためだ｡今それを捕まえるテストが
 /// `every_menu_item_has_a_binding` である｡
-const ALL_SHORTCUTS: [&Shortcut; 10] = [
+const ALL_SHORTCUTS: [&Shortcut; 11] = [
     &RELOAD,
     &FOCUS_COMPOSER,
     &BLUR_COMPOSER,
@@ -243,6 +261,7 @@ const ALL_SHORTCUTS: [&Shortcut; 10] = [
     &SHOW_NEW_POSTS,
     &TOGGLE_FOLLOW_NEW_POSTS,
     &TOGGLE_TRANSLUCENT,
+    &TOGGLE_FLOAT_ON_TOP,
 ];
 
 /// #58 のキーバインドを登録する｡起動時に一度､`gpui_component::init` (こちら
@@ -326,9 +345,10 @@ pub(crate) fn menus() -> Vec<gpui::Menu> {
             items: [
                 MINIMIZE.menu_item(),
                 CLOSE_WINDOW.menu_item(),
-                // #267: 常駐させるウィンドウの見え方｡Stickies が同じメニューに
-                // 同じ対を置いているので､探す場所もそこになる｡
+                // #267: 常駐させるウィンドウの居場所と見え方｡Stickies が同じ
+                // メニューに同じ対を置いているので､探す場所もそこになる｡
                 Some(gpui::MenuItem::separator()),
+                TOGGLE_FLOAT_ON_TOP.menu_item(),
                 TOGGLE_TRANSLUCENT.menu_item(),
             ]
             .into_iter()
