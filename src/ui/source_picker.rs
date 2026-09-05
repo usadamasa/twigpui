@@ -850,6 +850,7 @@ mod tests {
             picker_open: false,
             liked: Vec::new(),
             reposted: Vec::new(),
+            translucent: false,
         };
         assert_eq!(
             saved_selection_for(&Startup::Fixture(Box::new(fixture)), &paths),
