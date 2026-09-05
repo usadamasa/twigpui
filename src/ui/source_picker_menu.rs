@@ -50,7 +50,11 @@ impl TimelineView {
     /// 複数付け外しする操作なので､1 回ごとに閉じると #43 の「任意の
     /// タイミングでオン・オフ」が面倒になる｡macOS のメニューは選択で
     /// 閉じるのが標準だが､ここは意図的に逸脱する｡
-    pub(super) fn source_picker_menu(&self, cx: &mut Context<'_, Self>) -> Option<AnyElement> {
+    pub(super) fn source_picker_menu(
+        &self,
+        bg_alpha: u8,
+        cx: &mut Context<'_, Self>,
+    ) -> Option<AnyElement> {
         if !self.source_picker_open.is_open() {
             return None;
         }
@@ -60,7 +64,8 @@ impl TimelineView {
             .w(px(220.0))
             .flex()
             .flex_col()
-            .bg(rgb(theme.bg_header))
+            // #267: 本体と同じ不透明度で — 帯だけ不透明に残さない｡
+            .bg(rgba(theme::with_alpha(theme.bg_header, bg_alpha)))
             .border_1()
             .border_color(rgb(theme.border))
             .rounded(theme::RADIUS_MENU)

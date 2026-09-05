@@ -71,7 +71,7 @@ impl TimelineView {
                     .items_center()
                     .gap_3()
                     .child(self.source_picker_trigger(cx))
-                    .children(self.source_picker_menu(cx))
+                    .children(self.source_picker_menu(bg_alpha, cx))
                     .child(
                         div()
                             .min_w(px(0.))

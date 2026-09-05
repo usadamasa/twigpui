@@ -3863,6 +3863,51 @@ mod tests {
         );
     }
 
+    /// バナーの縦の並びは session → auto-refresh → reload → 開けなかった
+    /// リンクの順で固定だ｡`notice_banners` が 4 本を 1 つの `Vec` に積む
+    /// ようになったので､並べ替えても型は通り､どのバナーも消えない — 順番を
+    /// 見ているのはこの assert だけになる｡
+    #[gpui::test]
+    fn the_banners_keep_their_order(cx: &mut gpui::TestAppContext) {
+        let (mut visual, timeline) = drawn(cx, fixture_with(&["2", "1"], &[]));
+
+        visual.update(|_window, cx| {
+            timeline.update(cx, |view, _cx| {
+                view.session_notice = Some(gpui::SharedString::from("the session expired."));
+                view.auto_refresh_notice =
+                    Some(gpui::SharedString::from("auto-refresh has stopped."));
+                view.reload_notice = Some(ReloadNotice::Failed("the reload failed.".into()));
+                view.open_failure = Some("the link would not open.".to_string());
+            });
+        });
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let order = [
+            "banner-session",
+            "banner-auto-refresh",
+            "banner-reload",
+            "banner-open-failure",
+        ];
+        let tops: Vec<(&str, gpui::Pixels)> = order
+            .iter()
+            .map(|&name| {
+                let bounds = visual
+                    .debug_bounds(name)
+                    .unwrap_or_else(|| panic!("{name} must be on the screen"));
+                (name, bounds.origin.y)
+            })
+            .collect();
+        for pair in tops.windows(2) {
+            let ((upper, upper_y), (lower, lower_y)) = (pair[0], pair[1]);
+            assert!(
+                upper_y < lower_y,
+                "{upper} has to sit above {lower}, got {upper_y} and {lower_y}"
+            );
+        }
+    }
+
     /// #239 の裏側: 一時的な失敗ではループを止めない｡止めてしまうと､夜中の
     /// 瞬断ひとつで朝まで取得が死ぬ｡
     #[gpui::test]

@@ -51,12 +51,14 @@ pub(in crate::ui) fn session_notice_banner(
     name: &'static str,
     message: SharedString,
     theme: Theme,
+    bg_alpha: u8,
 ) -> impl IntoElement {
     div()
         .addressable(name)
         .px_4()
         .py_2()
-        .bg(rgb(theme.bg_header))
+        // #267: 本体と同じ不透明度で — 帯だけ不透明に残さない｡
+        .bg(rgba(theme::with_alpha(theme.bg_header, bg_alpha)))
         .border_b_1()
         .border_color(rgb(theme.border))
         .text_color(rgb(theme.danger))
@@ -72,6 +74,7 @@ pub(in crate::ui) fn reload_notice_banner(
     notice: &ReloadNotice,
     theme: Theme,
     now: i64,
+    bg_alpha: u8,
 ) -> impl IntoElement {
     // #141: 言葉より先に色がこの行の種類を告げる｡成功を報じる variant は
     // `Outcome` だけで､他の二つと並べて `danger` で塗ると､終わった reload
@@ -84,9 +87,13 @@ pub(in crate::ui) fn reload_notice_banner(
         ReloadNotice::Outcome(ref message) => (message.to_string(), theme.text_muted),
     };
     div()
+        // #184 の呼び名｡`session_notice_banner` が名前を持つのと同じ理由で､
+        // 並んだバナーはテストからは名前でしか見分けられない｡
+        .addressable("banner-reload")
         .px_4()
         .py_2()
-        .bg(rgb(theme.bg_header))
+        // #267: 本体と同じ不透明度で — 帯だけ不透明に残さない｡
+        .bg(rgba(theme::with_alpha(theme.bg_header, bg_alpha)))
         .border_b_1()
         .border_color(rgb(theme.border))
         .text_color(rgb(color))

@@ -133,6 +133,55 @@ fn load_older_row(theme: Theme, cx: &mut Context<'_, TimelineView>) -> impl Into
         .on_click(cx.listener(|this, _event, _window, cx| this.load_older(cx)))
 }
 
+impl TimelineView {
+    /// ヘッダと composer の間に積むバナーの列｡出るものだけが並ぶ｡
+    ///
+    /// どれも `body` からは独立に生き残らねばならない — timeline がまったく
+    /// 正常に読み込まれた post を描いている間でも出しつづける必要があるからだ｡
+    /// それぞれの理由:
+    ///
+    /// - #54 セッションが切れた｡bearer token へ fallback した状態がまさに
+    ///   これで､`body` は何も起きなかったかのように描かれる｡
+    /// - #239 止まった auto-refresh｡timeline は起動時に読んだ post を出した
+    ///   ままでいられるので､取得がもう走っていないと言えるのはここしかない｡
+    /// - #57 cooldown と失敗した reload｡この時点の `body` は前の post を
+    ///   出したままである可能性が十分にある｡
+    /// - #70 開けなかったリンク｡何も起きていないように見えるクリックこそ
+    ///   潰す価値のある結末で､下の timeline はそれについて何も言えない｡
+    ///
+    /// #21 の "N new posts" はここに座っていた｡#206 で `body` の下端に重なる
+    /// toast へ移った — 報告ではなく申し出なので､バナーの列ではなく timeline
+    /// の上に住む｡
+    fn notice_banners(&self, bg_alpha: u8) -> Vec<AnyElement> {
+        let theme = self.theme;
+        // 並びは 4 本を 1 つの `Vec` に積んでも変えない｡見ているのは
+        // `the_banners_keep_their_order` だけだ｡
+        let session = |name, message: SharedString| {
+            session_notice_banner(name, message, theme, bg_alpha).into_any_element()
+        };
+        let mut banners: Vec<AnyElement> = Vec::new();
+        banners.extend(
+            self.session_notice
+                .clone()
+                .map(|message| session("banner-session", message)),
+        );
+        banners.extend(
+            self.auto_refresh_notice
+                .clone()
+                .map(|message| session("banner-auto-refresh", message)),
+        );
+        banners.extend(self.reload_notice.clone().map(|notice| {
+            reload_notice_banner(&notice, theme, oauth::unix_now(), bg_alpha).into_any_element()
+        }));
+        banners.extend(
+            self.open_failure
+                .clone()
+                .map(|message| session("banner-open-failure", message.into())),
+        );
+        banners
+    }
+}
+
 impl Render for TimelineView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let theme = self.theme;
@@ -265,38 +314,7 @@ impl Render for TimelineView {
             .text_color(rgb(theme.text))
             .text_size(theme::TEXT_BODY)
             .child(self.header(density, bg_alpha, cx))
-            // #54: `state` に関わらず出す — これが直す不具合はまさに､何も
-            // 起きなかったかのように描かれる timeline なので､このバナーは下の
-            // `body` が今何を出していようと独立して生き残らねばならない｡
-            .when_some(self.session_notice.clone(), |column, message| {
-                column.child(session_notice_banner("banner-session", message, theme))
-            })
-            // #239: 止まった auto-refresh｡上の `session_notice` とまったく
-            // 同じ理屈で出す — timeline は起動時に読んだ post を出したまま
-            // でいられるので､取得がもう走っていないことを言えるのはここ
-            // しかない｡
-            .when_some(self.auto_refresh_notice.clone(), |column, message| {
-                column.child(session_notice_banner("banner-auto-refresh", message, theme))
-            })
-            // #57: 上の `session_notice` と同じ理屈 — クールダウンや失敗した
-            // リロードは `body` とは独立に生き残らねばならない｡この時点の
-            // `body` は前の post を出したままである可能性が十分にある｡
-            .when_some(self.reload_notice.clone(), |column, notice| {
-                column.child(reload_notice_banner(&notice, theme, oauth::unix_now()))
-            })
-            // #21 の "N new posts" はここに座っていた｡#206 で `body` の
-            // 下端に重なる toast へ移った — 報告ではなく申し出なので､
-            // バナーの列ではなく timeline の上に住む｡
-            // #70: 開けなかったリンク｡上の 2 つと同じバナーの扱いで､理由も
-            // 同じだ｡何も起きていないように見えるクリックこそ潰す価値のある
-            // 結末で､下の timeline はそれについて何も言えない｡
-            .when_some(self.open_failure.clone(), |column, message| {
-                column.child(session_notice_banner(
-                    "banner-open-failure",
-                    SharedString::from(message),
-                    theme,
-                ))
-            })
+            .children(self.notice_banners(bg_alpha))
             // #14: 投稿は scope に関わらず OAuth を要求する — `tweet.write`
             // scope が欠けている場合は `submit_post` 自身の中で捕まえる
             // (直し方はヘッダーの "Re-authorize" ボタン)｡composer ごと隠して
@@ -307,7 +325,7 @@ impl Render for TimelineView {
             .child(self.body(bg_alpha, cx))
             // #205: sync が今していることは footer の 1 段上｡`when_some` なので
             // 無いときは行そのものが無い｡高さ 0 の要素を置き続けるのではない｡
-            .when_some(self.sync_row(), ParentElement::child)
+            .when_some(self.sync_row(bg_alpha), ParentElement::child)
             // #95: ステータスバー｡ヘッダーがツールバーになった今､累計の
             // リクエスト数が住んでいるのはここだ｡
             .child(self.status_bar(density, bg_alpha))

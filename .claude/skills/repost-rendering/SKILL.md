@@ -60,7 +60,9 @@ RT に関わる描画は 1 か所に無い。触るときは下の全部を通�
 3. `quote_card` の composer 側の 2 呼び出し。
 4. `frame.rs` のバナー (`session_notice_banner`、`reload_notice_banner`)、
    `sync_row.rs`、`source_picker_menu.rs`。`bg_header` を塗る面はここにもある。
-   RT の話ではないが、同じ変更が同じ理由で取り残す。
+   RT の話ではないが、同じ変更が同じ理由で取り残す。透過はここまで及んでいる
+   (#274 の続き)。残る不透明は `sync_dialog` だけで、覆いの上のモーダルなので
+   読みやすさを取ってそのままにしてある。
 
 値の渡し方は `layout.rs` の `render` に倣う。`render` が `window` から 1 回
 読み、引数で下へ渡す。`self` に一時的なフィールドを置いて render の途中で
