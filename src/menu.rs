@@ -373,12 +373,12 @@ impl Shortcut {
 
 #[cfg(test)]
 mod tests {
-    use super::{ALL_SHORTCUTS, menus};
+    use super::{ALL_SHORTCUTS, BROWSE_CONTEXT, KEY_CONTEXT, menus};
 
     // --- #58: キーボードショートカット ---
 
     #[test]
-    fn no_shortcut_is_a_bare_letter() {
+    fn no_shortcut_is_a_bare_letter_outside_the_browse_context() {
         // この issue の中心的な危うさ: 利用者が post を打っている最中に裸の
         // `j`/`k`/`n` が発火すること｡`keystroke` を比べるのは､それが `init`
         // の `KeyBinding::new` へ渡すものだからで､誰かが打っている間に gpui
@@ -386,13 +386,45 @@ mod tests {
         //
         // `"escape"` は修飾キー無しでも許す: 名前付きの特殊キーであって､
         // 普通の打鍵が生む文字ではない｡
+        //
+        // #148 で裸の文字が入った｡許すのは [`BROWSE_CONTEXT`] へ閉じたもの
+        // だけで､そこは input が focus を持つ間は当たらない — すぐ下の
+        // `a_focused_input_takes_the_browse_context_away` が確かめる｡
         for shortcut in ALL_SHORTCUTS {
             let keystroke = shortcut.keystroke;
+            if shortcut.context == Some(BROWSE_CONTEXT) {
+                continue;
+            }
             assert!(
                 keystroke.starts_with("cmd-") || keystroke == "escape",
                 "{keystroke} would fire while typing"
             );
         }
+    }
+
+    #[test]
+    fn a_focused_input_takes_the_browse_context_away() {
+        // #148 の設計全体がここに乗っている｡裸の文字を許せるのは､gpui の
+        // `!` が focus 経路の *全部* の context を見るからだ — composer
+        // (`gpui_component` の `Input`) が focus を持てば､述語はどの深さでも
+        // 一致しなくなり､打鍵は bind ではなく文字として input へ流れる｡
+        //
+        // gpui を上げて `Not` の意味が変わればここが落ちる｡
+        let predicate = gpui::KeyBindingContextPredicate::parse(BROWSE_CONTEXT)
+            .expect("the browse context has to parse");
+        let timeline = gpui::KeyContext::parse(KEY_CONTEXT).expect("the timeline context");
+        let input = gpui::KeyContext::parse("Input").expect("the composer's context");
+
+        assert_eq!(
+            predicate.depth_of(&[timeline.clone()]),
+            Some(1),
+            "a bare key fires while the timeline itself holds focus"
+        );
+        assert_eq!(
+            predicate.depth_of(&[timeline, input]),
+            None,
+            "a bare key never fires while an input holds focus"
+        );
     }
 
     #[test]
