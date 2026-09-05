@@ -326,6 +326,35 @@ mod tests {
         });
     }
 
+    #[gpui::test]
+    fn the_bare_keys_wait_while_the_sync_dialog_is_open(cx: &mut gpui::TestAppContext) {
+        // #205 のダイアログは focus を持たないので `!Input` では黙らない｡
+        // 覆いの下で一覧が動き､`r` がリクエストを費やすのを止めるのは
+        // handler の先頭の `pending_sync` だけだ｡
+        let (window, timeline) = fixture_window(cx, fixture_with(&["1", "2"], &[]));
+        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.update(|cx| {
+            timeline.update(cx, |view, _cx| {
+                view.client = Some(crate::x_api::XClient::new("token".to_string()));
+                view.oauth_scope = None;
+                view.selected = Some("1".to_string());
+                view.pending_sync = true;
+            });
+        });
+        draw_until_parked(&mut visual, cx);
+
+        press(&mut visual, cx, "j");
+        press(&mut visual, cx, "l");
+        press(&mut visual, cx, "r");
+
+        cx.update(|cx| {
+            let view = timeline.read(cx);
+            assert_eq!(view.selected.as_deref(), Some("1"), "j waits");
+            assert!(view.like_overrides.is_empty(), "l waits");
+            assert!(view.repost_overrides.is_empty(), "r waits");
+        });
+    }
+
     // --- #148: 文字を打っている間は発火しない ---
 
     #[gpui::test]
