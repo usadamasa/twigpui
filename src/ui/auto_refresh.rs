@@ -616,9 +616,10 @@ impl TimelineView {
         }
     }
 
-    /// 読み手が最上部にいる画面へ､ポーリングの新着 post を流し込む
-    /// (#22) — バッファが空になる 3 つ目の経路であり､バッファを丸ごと
-    /// 飛ばす唯一の経路｡
+    /// ポーリングの新着 post をバッファから画面へ合流させる (#22) —
+    /// 読み手が最上部にいる場合は [`Self::present_poll`] から直接､それ以外は
+    /// トーストの押下 ([`Self::apply_pending`]) から呼ばれる｡バッファが
+    /// 空になる経路のうち､丸ごと流し込む唯一の経路｡
     ///
     /// 置き換えそのものは何も動かさない: viewport の上端の下にあった行は
     /// 新しいリストでは index `count` にあり､それを最上部へ戻して駐める
@@ -626,7 +627,12 @@ impl TimelineView {
     /// が目で追える速さで視界へ滑り降りてくる｡それが #177 の "always
     /// flowing" の印象で､ポーリングがすでに支払った post でできている｡
     fn follow(&mut self, pending: Pending, cx: &mut Context<'_, Self>) {
+        // ここから先の `list_scroll` を動かすのは読み手ではない｡
+        self.release_scroll();
         let count = pending.count;
+        // 下の `scroll_to_top_of_item` で動く前の offset｡トースト経由では
+        // 0 とは限らず､`start_glide` が anchor の着地を測る基準点になる｡
+        let before = f32::from(self.list_scroll.offset().y);
         // 前のポーリングが駐めたバッファはこれより古く､しかも今まさに
         // 置き換えられる timeline を基準に測られている｡
         self.clear_pending();
@@ -647,7 +653,7 @@ impl TimelineView {
             // #206: 新しい行は全部 viewport の上に駐まっている｡glide が
             // 1 行降ろすたびに `note_scroll_position` が減らす｡
             self.unseen = count;
-            self.start_glide(cx);
+            self.start_glide(cx, Some(before));
         }
         self.refresh_images(cx);
         cx.notify();
@@ -655,12 +661,17 @@ impl TimelineView {
 
     /// scroll offset を 1 フレームずつ最上部まで歩いて戻す (#22)｡
     ///
-    /// 歩く距離は､これが呼ばれた時点ではまだそこに無い:
-    /// [`Self::follow`] の `scroll_to_top_of_item` は次の prepaint で
-    /// 着地する｡だからループは最初の数フレームを､offset がゼロから
-    /// 動くのを待つのに使う｡回数には上限があり､決して着地しない補正
-    /// (空のリスト､描画をやめたウィンドウ) は､ハングではなく pill が
-    /// やるのと同じ吸着に落ちる｡
+    /// `settle_from` が `Some(before)` なら､歩く距離はこれが呼ばれた時点では
+    /// まだそこに無い: [`Self::follow`] の `scroll_to_top_of_item` は次の
+    /// prepaint で着地する｡だからループは最初の数フレームを､offset が
+    /// `before` から動くのを待つのに使う｡回数には上限があり､決して着地
+    /// しない補正 (空のリスト､描画をやめたウィンドウ) は､ハングではなく
+    /// pill がやるのと同じ吸着に落ちる｡
+    ///
+    /// `None` なら待たない: すでに動いていた glide をトーストの押下で
+    /// 再開する経路 ([`TimelineView::reveal_new_posts`]) はリストを
+    /// 置き換えず新しい anchor も置かないので､offset は呼ばれた時点で
+    /// すでに歩き出す場所にある｡
     ///
     /// どのステップも､offset が今どこにあるかを前のステップが置いた
     /// ところと比べる｡差があれば読み手がホイールを回しているということで､
@@ -673,26 +684,31 @@ impl TimelineView {
     /// 数える (#208)｡テストの executor は timer の時計だけを進めるので､
     /// `Instant` で測ると 1 フレームが数マイクロ秒になり glide が永遠に
     /// 終わらない｡
-    fn start_glide(&mut self, cx: &mut Context<'_, Self>) {
+    pub(super) fn start_glide(&mut self, cx: &mut Context<'_, Self>, settle_from: Option<f32>) {
         /// 補正が決して着地しないと結論づけるまでに､何フレーム待つか｡
         const SETTLE_FRAMES: u8 = 10;
         /// glide が置いたところから offset がどれだけ離れていたら読み手の
-        /// scroll と読むか､単位は pixel｡
+        /// scroll と読むか､単位は pixel｡`before` が 0 に近ければ今までの
+        /// `GLIDE_DONE_PX` の判定と同じ意味になる｡
         const GRAB_PX: f32 = 1.0;
 
+        // この先の offset は glide のもの｡呼び出し側の手放しを当てにしない｡
+        self.release_scroll();
         self.glide = Some(cx.spawn(async move |this, cx| {
             let frame = Duration::from_secs_f32(scroll::FRAME_S);
-            for _ in 0..SETTLE_FRAMES {
-                cx.background_executor().timer(frame).await;
-                // `Err` はウィンドウが消えたということ — ここも以下も
-                // `start_auto_refresh` の約束｡
-                let Ok(settled) = this.update(cx, |this, _| {
-                    f32::from(this.list_scroll.offset().y).abs() > GLIDE_DONE_PX
-                }) else {
-                    return;
-                };
-                if settled {
-                    break;
+            if let Some(before) = settle_from {
+                for _ in 0..SETTLE_FRAMES {
+                    cx.background_executor().timer(frame).await;
+                    // `Err` はウィンドウが消えたということ — ここも以下も
+                    // `start_auto_refresh` の約束｡
+                    let Ok(settled) = this.update(cx, |this, _| {
+                        (f32::from(this.list_scroll.offset().y) - before).abs() > GRAB_PX
+                    }) else {
+                        return;
+                    };
+                    if settled {
+                        break;
+                    }
                 }
             }
             let Ok(start) = this.update(cx, |this, _| f32::from(this.list_scroll.offset().y))
@@ -735,17 +751,16 @@ impl TimelineView {
         }));
     }
 
-    /// 最後のポーリングが取ってきたものを見せる (#21)｡
+    /// 最後のポーリングが取ってきたものを届ける (#21)｡
     ///
-    /// pill がする唯一のこと､そしてそのすべて: timeline をバッファ済みの
-    /// リストで置き換え､読み手をその最上部に置く｡いま見せろと言われた
-    /// post があるのはそこだ｡
+    /// バッファがあれば [`Self::follow`] を呼ぶだけ｡読み手が最上部にいる
+    /// ときに poll がそのまま流れ込むのと同じ経路で､同じ glide に合流する
+    /// — 見せろと言われた post を最上部へ跳ばすのではなく､追いついて
+    /// くる見た目にする｡
     ///
-    /// reload に対して [`Self::keep_the_reader_in_place`] がやるような
-    /// 補正ではなく最上部へ scroll するのは､2 つが正反対の要求に答えて
-    /// いるからだ｡reload は「ここを読んでいる､これを更新しろ」であり､
-    /// 新着件数を数える pill を押すのは「それを見せろ」だ｡読み手を元の
-    /// ところにそのまま置いたら､見た目には何もしないボタンになる｡
+    /// バッファが空なら早期 return する｡2 回押しても何も起きない (#21)
+    /// のはこの return のためで､`state` を無条件に置き換える形に書き直す
+    /// と 2 回目の押下で画面が空になってしまう｡
     ///
     /// `ReloadNotice::Outcome` は上げない: pill がすでに何件あったかを
     /// 言っているし､pill が消えた瞬間にその件数を繰り返すバナーは､同じ
@@ -754,15 +769,7 @@ impl TimelineView {
         let Some(pending) = self.pending.take() else {
             return;
         };
-        // まだ歩いている glide は､これが置き換えるリストを基準に測った
-        // offset を狙っている (#22)｡上に残っていた行もこれで視界に入る
-        // (#206)｡
-        self.glide = None;
-        self.unseen = 0;
-        self.state = TimelineState::Loaded(pending.items);
-        self.list_scroll.scroll_to_top_of_item(0);
-        self.refresh_images(cx);
-        cx.notify();
+        self.follow(pending, cx);
     }
 
     /// ポーリングが待たせていたものを捨てる (#21)｡

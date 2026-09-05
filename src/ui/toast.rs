@@ -8,9 +8,11 @@
 //! scroll がその数をどう減らすか､濃さとラベルがどう進むか — 続いて
 //! `impl TimelineView` が､それを画面に置きタイマーで進める｡
 //!
-//! 何を差し出すかはここでは決めない｡pending のバッファは
-//! [`super::auto_refresh`] のもので､押したときに起きることも
-//! ([`TimelineView::apply_pending`]) あちらのまま｡ここは見せ方だけ｡
+//! 何を差し出すかはここでは決めない｡pending のバッファも glide も
+//! [`super::auto_refresh`] のもので､押したときに起きること
+//! ([`TimelineView::reveal_new_posts`]) はどちらの経路でもあちらの
+//! [`TimelineView::start_glide`] を呼ぶだけ｡ここは見せ方と､2 つの経路
+//! のうちどちらを呼ぶかの分岐を持つ｡
 
 use super::auto_refresh::pending_label;
 use super::fade::{FADE_STEP_MILLIS, Fade, fade_occupies, fade_opacity, fade_settled, next_fade};
@@ -236,21 +238,26 @@ impl TimelineView {
         }));
     }
 
-    /// toast のクリック (#206)｡差し出しているものを見せる｡
+    /// toast のクリック (#206)｡差し出しているものを follow と同じ
+    /// glide で画面へ合流させる｡
     ///
     /// バッファがあれば [`Self::apply_pending`] — バーのクリックと `⌘⇧R` が
     /// 通ってきた経路そのもので､リクエストは飛ばない｡無ければ follow が
-    /// 流し込んだ行がまだ上にあるということなので､最上部へ跳ぶ
-    /// (`ScrollToTop` と同じ)｡どちらも glide の続きを待たずに全部を見せる｡
+    /// すでに流し込んだ行がまだ上にあるということなので､同じ glide を
+    /// [`Self::start_glide`] で続きから再開する｡どちらも最上部へ跳ぶ
+    /// のではなく､読める速さで降りてくる — 跳ぶのは `ScrollToTop` のみ｡
     pub(super) fn reveal_new_posts(&mut self, cx: &mut Context<'_, Self>) {
         if self.pending.is_some() {
             self.apply_pending(cx);
-        } else {
-            self.jump_to_top(cx);
+        } else if self.unseen > 0 {
+            // バッファは無いので置き換えるリストも新しい anchor も無い｡
+            // offset はすでに歩き出す場所にあるので待たない｡
+            self.start_glide(cx, None);
         }
     }
 
-    /// 最上部へ跳ぶ (#22)｡`ScrollToTop` と toast の両方から｡
+    /// 最上部へ跳ぶ (#22)｡`ScrollToTop` から — トーストの押下は
+    /// [`Self::reveal_new_posts`] を経由し､跳ばずに glide へ合流する｡
     ///
     /// 完全にローカル — リクエストもゲートも無いし､報告することも無い｡
     /// ピクセルのオフセットではなく `scroll_to_top_of_item(0)` にしてある
@@ -260,8 +267,7 @@ impl TimelineView {
     /// 新着も全部視界に入るので､countdown は 0 (#206)｡
     pub(super) fn jump_to_top(&mut self, cx: &mut Context<'_, Self>) {
         self.glide = None;
-        self.scroll_motion = None;
-        self.scroller.release();
+        self.release_scroll();
         self.list_scroll.scroll_to_top_of_item(0);
         self.unseen = 0;
         cx.notify();

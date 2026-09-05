@@ -554,6 +554,14 @@ impl TimelineView {
             let _ = this.update(cx, |this, _| this.scroll_motion = None);
         }));
     }
+
+    /// 読み手のホイール以外が `list_scroll` を動かす前に必ず通す (#175,
+    /// #206)｡ホイールの spring loop を握ったままにしておくと､次にその
+    /// offset を動かすもの — glide や `scroll_to_top_of_item` — と取り合う｡
+    pub(super) fn release_scroll(&mut self) {
+        self.scroll_motion = None;
+        self.scroller.release();
+    }
 }
 
 #[cfg(test)]
