@@ -131,6 +131,38 @@ pub(crate) const SYNC_DIALOG_WIDTH: Pixels = px(360.0);
 /// という合図で､明るいテーマで白く覆うと伝わらない｡
 pub(crate) const SCRIM: u32 = 0x0000_0099;
 
+/// 透過を入れたウィンドウが手元に無い (inactive な) 間の背景の不透明度
+/// (#267)｡`rgba` の下 8 bit｡
+///
+/// 70%｡後ろの窓の文字の並びが分かり､こちらの文字もまんだ読める境目｡
+/// これより薄いと timeline が後ろの窓に溶け､濃いと透けている意味が無い｡
+// ponytail: 定数｡好みが割れたら config.toml の knob にする｡
+pub(crate) const INACTIVE_BG_ALPHA: u8 = 0xb3;
+const _: () = assert!(
+    INACTIVE_BG_ALPHA < 0xff,
+    "at 0xff nothing shows through, so the toggle would do nothing"
+);
+
+/// `rgb` のスロットに不透明度を付けて `rgba` の値にする (#267)｡
+/// [`SCRIM`] と同じ読み方で､下 8 bit が不透明度｡
+pub(crate) fn with_alpha(rgb: u32, alpha: u8) -> u32 {
+    (rgb & 0x00ff_ffff).wrapping_shl(8) | u32::from(alpha)
+}
+
+/// ウィンドウの背景 (本体・toolbar・status bar) を今どの不透明度で塗るか
+/// (#267)｡
+///
+/// 透けるのは透過を入れていて､かつウィンドウが手元に無いときだけ｡読んで
+/// いる・打っている間は後ろが透けてはいけない｡Helium と同じ倒し方で､
+/// Stickies (常に透ける) とは違う: あちらはメモで､こちらは読み物だから｡
+pub(crate) fn bg_alpha(translucent: bool, active: bool) -> u8 {
+    if translucent && !active {
+        INACTIVE_BG_ALPHA
+    } else {
+        0xff
+    }
+}
+
 /// アバターを描くときの角丸の半径 (#98)｡
 ///
 /// `ui.rs` ではなくここに置いたのは､アバターを描く 2 か所 — ダウンロードした
@@ -367,7 +399,11 @@ pub(crate) fn sync_gpui_component_theme(theme: Theme, window: &mut Window, cx: &
     ComponentTheme::change(mode, Some(window), cx);
 
     let colors = ComponentTheme::global_mut(cx);
-    colors.background = gpui::rgb(theme.bg).into();
+    // #267: `Root` はこのスロットで window 全体を不透明に塗る｡塗らせると
+    // 透過を入れても後ろが見えない｡ここを透明にして､背景は timeline の
+    // root が [`bg_alpha`] で塗る｡`Input` の欄も同じスロットを読むが､欄の
+    // 後ろにあるのはその root の `bg` なので見た目は変わらない｡
+    colors.background = gpui::transparent_black();
     colors.foreground = gpui::rgb(theme.text).into();
     colors.muted_foreground = gpui::rgb(theme.text_muted).into();
     colors.muted = gpui::rgb(theme.bg_header).into();
@@ -417,6 +453,29 @@ mod tests {
         assert_ne!(light.danger, dark.danger);
         assert_ne!(light.is_dark, dark.is_dark);
         assert_ne!(light.warning, dark.warning);
+    }
+
+    #[test]
+    fn the_background_is_opaque_unless_translucent_and_in_the_background() {
+        // #267: 透過はウィンドウが手元に無いときだけ｡読んでいる・打っている
+        // 間は後ろが透けてはいけない｡
+        use super::{INACTIVE_BG_ALPHA, bg_alpha};
+        assert_eq!(bg_alpha(false, true), 0xff);
+        assert_eq!(bg_alpha(false, false), 0xff, "off is off, active or not");
+        assert_eq!(
+            bg_alpha(true, true),
+            0xff,
+            "the active window stays readable"
+        );
+        assert_eq!(bg_alpha(true, false), INACTIVE_BG_ALPHA);
+    }
+
+    #[test]
+    fn with_alpha_puts_the_opacity_in_the_low_byte() {
+        // `rgba` の読み方は [`super::SCRIM`] と同じ: 下 8 bit が不透明度｡
+        use super::with_alpha;
+        assert_eq!(with_alpha(0xff_ff_ff, 0xff), 0xffff_ffff);
+        assert_eq!(with_alpha(0x15_20_2b, 0x00), 0x1520_2b00);
     }
 
     #[test]

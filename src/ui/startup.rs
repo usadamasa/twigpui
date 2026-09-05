@@ -4,6 +4,8 @@
 //!
 //! `ui/mod.rs` にあったものをそのまま移した｡
 
+use gpui::WindowBackgroundAppearance;
+
 use super::lane;
 use super::*;
 
@@ -71,12 +73,7 @@ impl TimelineView {
         // (その色はまったく別の global に居る)｡
         theme::sync_gpui_component_theme(theme, window, cx);
 
-        let compose_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .auto_grow(2, 8)
-                .placeholder("What's happening?")
-        });
-        let compose_input_subscription = cx.subscribe(&compose_input, Self::on_compose_input_event);
+        let (compose_input, compose_input_subscription) = Self::compose_input(window, cx);
 
         // #161/#164/#43: 下で `config` が move される前に取っておく｡
         let sources = source_picker::initial_sources(
@@ -89,8 +86,8 @@ impl TimelineView {
         // 塞ぐ｡fixture を撮るために広げたウィンドウが､次の live 起動の
         // 大きさを決めてはならない｡
         let window_state_file = matches!(startup, Startup::Live).then(|| paths.window_state_file());
-        let window_bounds_subscription =
-            cx.observe_window_bounds(window, |this, window, cx| this.remember_bounds(window, cx));
+        let (window_bounds_subscription, window_activation_subscription) =
+            Self::watch_window(window, cx);
         // #22: `source` と同じく､下で `config` が move される前に取る｡
         let follow = FollowMode::from_config(config.follow_new_posts);
 
@@ -113,8 +110,12 @@ impl TimelineView {
             owned_lists,
             lists_fetch: None,
             selection_file,
+            // #267: 矩形は `main` が `initial_bounds` で読んで開く位置に
+            // 使った｡トグルはここで読み､下で `apply_translucency` が効かせる｡
+            window_state: window_state::load_or_default(window_state_file.as_deref()),
             window_state_file,
             _window_bounds_subscription: window_bounds_subscription,
+            _window_activation_subscription: window_activation_subscription,
             window_state_save: None,
             next_page_token: None,
             threads: HashMap::new(),
@@ -175,12 +176,48 @@ impl TimelineView {
         // #118: 何よりも先に｡最初のフレームから focus の経路に空のものでは
         // なく timeline が乗るようにするため｡
         window.focus(&this.focus_handle);
+        // #267: 前回のトグルを platform の window へ効かせる｡`main` は
+        // `WindowOptions` に書かず､live も fixture もここを通る｡
+        this.apply_translucency(window);
+        this.apply_floating(window);
         match startup {
             Startup::Live => this.start(cx),
             Startup::Fixture(fixture) => this.show_fixture(*fixture, cx),
         }
         this.refresh_usage(cx);
         this
+    }
+
+    /// composer の本物のテキスト入力 (#38) と､打鍵を `compose` へ写す購読｡
+    fn compose_input(
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) -> (Entity<InputState>, Subscription) {
+        let input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .auto_grow(2, 8)
+                .placeholder("What's happening?")
+        });
+        let subscription = cx.subscribe(&input, Self::on_compose_input_event);
+        (input, subscription)
+    }
+
+    /// ウィンドウの矩形 (#211) とフォーカスの出入り (#267) の購読｡
+    ///
+    /// 矩形は動くたびに覚える｡フォーカスは透過が入っている間だけ描き直す
+    /// — 切れていれば見た目が変わらないので､描き直す理由が無い｡
+    fn watch_window(
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) -> (Subscription, Subscription) {
+        let bounds =
+            cx.observe_window_bounds(window, |this, window, cx| this.remember_bounds(window, cx));
+        let activation = cx.observe_window_activation(window, |this, _window, cx| {
+            if this.window_state.translucent {
+                cx.notify();
+            }
+        });
+        (bounds, activation)
     }
 
     /// ウィンドウが止まったと見なすまでの間 (#211)｡
@@ -199,10 +236,21 @@ impl TimelineView {
     /// 保存するのは矩形だけで､最大化やフルスクリーンであったことは覚え
     /// ない — [`crate::window_state`] のモジュール doc を見よ｡
     fn remember_bounds(&mut self, window: &Window, cx: &mut Context<'_, Self>) {
+        self.window_state.bounds = Some(window_state::SavedBounds::from(window.window_bounds()));
+        self.persist_window_state(cx);
+    }
+
+    /// `window_state` の今の中身をファイルへ書く (#211, #267)｡fixture の
+    /// ウィンドウには書く先が無いので何もしない｡
+    ///
+    /// 矩形の変更もトグルもここを通る｡トグルは 1 回きりの操作だが､debounce
+    /// を挟んでも代償は 400ms 遅れて書かれることだけで､経路が 2 本になる
+    /// より安い｡
+    fn persist_window_state(&mut self, cx: &mut Context<'_, Self>) {
         let Some(path) = self.window_state_file.clone() else {
             return;
         };
-        let bounds = window_state::SavedBounds::from(window.window_bounds());
+        let state = self.window_state;
         // 前の task を落とすことが debounce になる｡gpui の `Task` は
         // drop で取り消されるので､連続する通知のうち最後の 1 つだけが
         // 時間を待ち切る｡
@@ -211,13 +259,76 @@ impl TimelineView {
             cx.background_executor()
                 .timer(Self::WINDOW_STATE_DEBOUNCE)
                 .await;
-            let state = window_state::WindowState {
-                bounds: Some(bounds),
-            };
             if let Err(error) = window_state::save(&path, &state) {
-                log::warn(&format!("could not remember the window bounds: {error:#}"));
+                log::warn(&format!("could not remember the window state: {error:#}"));
             }
         }));
+    }
+
+    /// Window メニューの Translucent (#267)｡反転させ､platform の window へ
+    /// 効かせ､どちらへ倒れたかをバナーで言い､覚える｡
+    pub(super) fn toggle_translucent(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        self.window_state.translucent = !self.window_state.translucent;
+        self.apply_translucency(window);
+        let outcome = if self.window_state.translucent {
+            "Translucent while another window is in front."
+        } else {
+            "Opaque."
+        };
+        self.reload_notice = Some(ReloadNotice::Outcome(outcome.into()));
+        self.persist_window_state(cx);
+        cx.notify();
+    }
+
+    /// Window メニューの Float on Top (#267)｡[`Self::toggle_translucent`] と
+    /// 同じ形: 反転させ､効かせ､言い､覚える｡
+    pub(super) fn toggle_float_on_top(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        self.window_state.float_on_top = !self.window_state.float_on_top;
+        self.apply_floating(window);
+        let outcome = if self.window_state.float_on_top {
+            "Floating on top of other windows."
+        } else {
+            "Back among the other windows."
+        };
+        self.reload_notice = Some(ReloadNotice::Outcome(outcome.into()));
+        self.persist_window_state(cx);
+        cx.notify();
+    }
+
+    /// `window_state.float_on_top` を platform の window に伝える (#267)｡
+    ///
+    /// `Window::set_floating` は gpui の fork の patch (Cargo.toml の
+    /// `[patch.crates-io]`) にしか無い｡upstream 0.2.2 の `WindowKind` は
+    /// 開くときに決めるもので､macOS では `Floating` も `Normal` と同じ
+    /// level に置かれる — 開いた後に切り替える口はこれだけだ｡
+    fn apply_floating(&self, window: &Window) {
+        window.set_floating(self.window_state.float_on_top);
+    }
+
+    /// `window_state.translucent` を platform の window に伝える (#267)｡
+    ///
+    /// 不透明のときは `Opaque` へ戻す: gpui は透過の window で renderer の
+    /// 経路を変える (`update_transparency`) ので､不透明の間は元の経路に
+    /// 居させる｡透けるときの背景の色そのものは `theme::bg_alpha` が決め､
+    /// render が塗る — これは「後ろを見せてよいか」の許可だけだ｡
+    ///
+    /// `Blurred` ではなく `Transparent`｡両方を fixture で撮って比べた: blur
+    /// は timeline は読みやすいが後ろの窓は色の染みにしかならず､「後ろの
+    /// 窓を隠さない」という #267 の目的が果たせない｡透過なら後ろの文字が
+    /// 読め､手前の文字も 70% の地の上で読める｡
+    fn apply_translucency(&self, window: &Window) {
+        window.set_background_appearance(if self.window_state.translucent {
+            WindowBackgroundAppearance::Transparent
+        } else {
+            WindowBackgroundAppearance::Opaque
+        });
+    }
+
+    /// 今この瞬間の背景の不透明度 (#267)｡本体も toolbar も status bar も
+    /// これで塗る — 帯だけが不透明に残ると､透けた一覧の上に板が浮く｡
+    /// render が 1 回読んで枠へ渡す｡
+    pub(super) fn bg_alpha(&self, window: &Window) -> u8 {
+        theme::bg_alpha(self.window_state.translucent, window.is_window_active())
     }
 
     /// fixture が未読の post を抑えておく時間｡それを運んできたはずの poll

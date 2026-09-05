@@ -110,16 +110,21 @@ gpui = { version = "0.2.2", default-features = false, features = [
 ] }
 
 # gpui は crates.io の 0.2.2 ではなく､同じ commit (69e2130､0.2.2 を publish
-# した元) に 1 commit だけ足した fork を使う｡差分は
-# `gpui::set_draw_while_occluded` の 1 機能: on にした window は画面が
-# ロックされていても (occluded でも) 描き続ける｡upstream は occluded な
-# window の display link を止め､ロック中は OS が CVDisplayLink の生成を
-# 拒む (-6661) ので､ロック中に開いた window は 1 フレームも描かず､window
-# capture が真っ黒になる｡`--fixture` だけがこのスイッチを入れる
-# (`ui::Startup::draws_while_occluded`)｡off が既定で､そのときの挙動は
-# upstream と同一なので本番の消費電力は変わらない｡
+# した元) に 2 commit 足した fork を使う｡差分は 2 機能:
 #
-# upstream への報告: https://github.com/zed-industries/zed/issues/63217
+# - `gpui::set_draw_while_occluded`: on にした window は画面が
+#   ロックされていても (occluded でも) 描き続ける｡upstream は occluded な
+#   window の display link を止め､ロック中は OS が CVDisplayLink の生成を
+#   拒む (-6661) ので､ロック中に開いた window は 1 フレームも描かず､window
+#   capture が真っ黒になる｡`--fixture` だけがこのスイッチを入れる
+#   (`ui::Startup::draws_while_occluded`)｡off が既定で､そのときの挙動は
+#   upstream と同一なので本番の消費電力は変わらない｡
+#   upstream への報告: https://github.com/zed-industries/zed/issues/63217
+# - `Window::set_floating` (#267): 開いた後に window を macOS の floating
+#   level へ出し入れする｡upstream の `WindowKind` は開くときに決めるもので､
+#   しかも macOS では `Floating` が `Normal` と同じ level に置かれるので､
+#   Window メニューの Float on Top を作る口が無い｡
+#
 # fork の branch: https://github.com/usadamasa/zed/tree/gpui-0.2.2-draw-while-occluded
 #
 # `rev` で固定する｡branch 名だと fork を動かした瞬間にビルドが変わる｡
@@ -127,4 +132,4 @@ gpui = { version = "0.2.2", default-features = false, features = [
 # 載せ直して rev を差し替える (crates.io の `.cargo_vcs_info.json` が元の
 # commit を持っている)｡
 [patch.crates-io]
-gpui = { git = "https://github.com/usadamasa/zed.git", rev = "6ff2ca5d1b4990b8c9d6b4851b756b29e5d20975" }
+gpui = { git = "https://github.com/usadamasa/zed.git", rev = "21f6531555aec2a464278835427bada94faa1d8a" }

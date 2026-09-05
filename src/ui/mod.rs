@@ -78,7 +78,7 @@ use toast::Toast;
 
 use crate::menu::{
     BlurComposer, CloseWindow, FocusComposer, KEY_CONTEXT, Minimize, Reload, ScrollToTop,
-    ShowAbout, ShowNewPosts, SyncList, ToggleFollowNewPosts,
+    ShowAbout, ShowNewPosts, SyncList, ToggleFloatOnTop, ToggleFollowNewPosts, ToggleTranslucent,
 };
 use crate::oauth;
 use crate::paths::Paths;
@@ -173,10 +173,16 @@ pub(crate) struct TimelineView {
     /// 読み取り側 ([`crate::window_state::initial_bounds`]) も同じように
     /// 塞いである｡
     window_state_file: Option<PathBuf>,
+    /// そのファイルに書く中身の写し (#211, #267)｡矩形とメニューのトグルが
+    /// 同じファイルに居るので､どちらを書くときも全部を書く — 矩形だけを
+    /// 組んで書けば､ウィンドウを動かすたびにトグルが切れる｡
+    window_state: window_state::WindowState,
     /// ウィンドウの矩形が変わったことを知らせる購読 (#211)｡resize でも
     /// 移動でも発火する｡drop すると通知が止まるので､view と同じだけ生きる
     /// 必要がある｡名前の `_` は読まれずに保持されるものの印｡
     _window_bounds_subscription: Subscription,
+    /// フォーカスの出入りを知らせる購読 (#267)｡透過が入っていれば描き直す｡
+    _window_activation_subscription: Subscription,
     /// 矩形を書くまでの間を空けるタイマー (#211)｡ドラッグの最中は通知が
     /// 連続で来るので､新しい task を入れて前のものを落とし､手が止まって
     /// から 1 度だけ書く｡
@@ -4036,6 +4042,68 @@ mod tests {
                 assert!(
                     view.follow.is_following(),
                     "the test config starts with follow off, so one toggle turns it on"
+                );
+                assert!(
+                    matches!(view.reload_notice, Some(ReloadNotice::Outcome(_))),
+                    "the flip must say which way it went, got {:?}",
+                    view.reload_notice
+                );
+            });
+        });
+    }
+
+    /// #267: Window メニューの Translucent は透過を反転させ､今どちら向きかを
+    /// 言う — follow のトグルと同じ理由で､新しい状態が見えるのはバナーだけだ｡
+    /// fixture のウィンドウには覚える先が無いが､切り替えそのものは効く｡
+    #[gpui::test]
+    fn toggling_translucent_flips_the_switch_and_reports_itself(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext as _;
+
+        let (window, timeline) = fixture_window(cx, fixture_with(&["2", "1"], &[]));
+
+        cx.update_window(window.into(), |_, window, cx| {
+            let _ = window.draw(cx);
+            window.dispatch_action(Box::new(crate::menu::ToggleTranslucent), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+
+        cx.update(|cx| {
+            timeline.update(cx, |view, _cx| {
+                assert!(
+                    view.window_state.translucent,
+                    "a window starts opaque, so one toggle makes it translucent"
+                );
+                assert!(
+                    matches!(view.reload_notice, Some(ReloadNotice::Outcome(_))),
+                    "the flip must say which way it went, got {:?}",
+                    view.reload_notice
+                );
+            });
+        });
+    }
+
+    /// #267: Window メニューの Float on Top も同じ形 — 反転させ､言い､覚える｡
+    /// window の level そのものは gpui の fork の patch が触るので､テスト
+    /// プラットフォームでは no-op｡ここで見えるのは view 側の配線だけだ｡
+    #[gpui::test]
+    fn toggling_float_on_top_flips_the_switch_and_reports_itself(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext as _;
+
+        let (window, timeline) = fixture_window(cx, fixture_with(&["2", "1"], &[]));
+
+        cx.update_window(window.into(), |_, window, cx| {
+            let _ = window.draw(cx);
+            window.dispatch_action(Box::new(crate::menu::ToggleFloatOnTop), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+
+        cx.update(|cx| {
+            timeline.update(cx, |view, _cx| {
+                assert!(
+                    view.window_state.float_on_top,
+                    "a window starts among the others, so one toggle floats it"
                 );
                 assert!(
                     matches!(view.reload_notice, Some(ReloadNotice::Outcome(_))),

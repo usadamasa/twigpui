@@ -115,9 +115,12 @@ cargo test
   `~/.config/twigpui-dev/config.toml` に置く。
 - **gpui は fork の patch 版**: Cargo.toml の `[patch.crates-io]` が
   `usadamasa/zed` の branch `gpui-0.2.2-draw-while-occluded` (0.2.2 を publish した
-  commit + 1 commit) を `rev` で指す。差分は `gpui::set_draw_while_occluded` の 1 機能で、
+  commit + 2 commit) を `rev` で指す。差分は 2 機能。`gpui::set_draw_while_occluded` は
   `--fixture` の window を画面ロック中でも描き続けさせる (upstream はロック中に開いた
   window を 1 フレームも描かず、window capture が真っ黒になる。upstream への報告は
-  zed-industries/zed#63217)。off が既定で本番は upstream と同一挙動。gpui を上げるときは
+  zed-industries/zed#63217)。off が既定で本番は upstream と同一挙動。
+  `Window::set_floating` は開いた後に window を floating level へ出し入れする
+  (Window メニューの Float on Top、#267。upstream の `WindowKind` は開くときに決めるもので、
+  macOS では `Floating` も `Normal` と同じ level に置かれる)。gpui を上げるときは
   その版を publish した commit の上に同じ patch を載せ直して `rev` を差し替える。
   git 依存なので初回ビルドは zed の repo を丸ごと clone する (時間がかかる)。

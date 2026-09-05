@@ -479,6 +479,14 @@ OS の外観に従い､gpui の `Window::appearance()` で起動時に一度だ
 | `⌘Q` | 終了する |
 | `⌘W` | ウィンドウを閉じる |
 | `⌘M` | 最小化する |
+| `⌥⌘F` | 他のアプリの窓より上に留める (Float on Top) |
+| `⌥⌘T` | ウィンドウが手元に無い間だけ背景を透かす (Translucent) |
+
+最後の 2 つは常駐させたときのためのもので (#267)､Stickies が Window メニューに置いて
+いる同じ対から鍵を借りた｡Float on Top は macOS の floating level に window を置く｡
+Translucent は文字と画像を薄くせず､地だけを 70% にする — それもウィンドウが
+フォーカスを失っている間だけで､読んでいる・打っている間は不透明のまま｡
+どちらも切り替えを覚え､次の起動で効く｡
 
 どれもメニューバーにある (#99)｡macOS のユーザーがキー操作を探す場所だから
 である｡#58 は､誰も開かないヘルプ画面は何も説明しないという理由で､最初の 4 つを
@@ -531,8 +539,8 @@ OS の外観に従い､gpui の `Window::appearance()` で起動時に一度だ
 | --- | --- |
 | twigpui | About twigpui, Quit twigpui |
 | File | New Post |
-| View | Reload, Back to Top |
-| Window | Minimize, Close Window |
+| View | Reload, Sync List…, Show New Posts, Follow New Posts, Back to Top |
+| Window | Minimize, Close Window, Float on Top, Translucent |
 
 どの項目もキー操作と同じアクションを発行し､macOS はキーマップからキー等価表示を
 その横に描く｡1 つの `menu::Shortcut` 定数がキー操作､2 通りの文言､**そして

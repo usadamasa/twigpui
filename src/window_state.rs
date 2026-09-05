@@ -84,6 +84,15 @@ pub(crate) struct WindowState {
     /// 最後に観測したウィンドウの矩形｡一度も観測していなければ `None`｡
     #[serde(default)]
     pub bounds: Option<SavedBounds>,
+    /// Window メニューの Translucent が入っているか (#267)｡入っていると､
+    /// ウィンドウが手元に無い間だけ背景が透ける — `theme::bg_alpha` を見よ｡
+    /// #267 より前のファイルにはキーが無く､切っていたと読む｡
+    #[serde(default)]
+    pub translucent: bool,
+    /// Window メニューの Float on Top が入っているか (#267)｡入っていると､
+    /// 他のアプリの窓より上に留まる (macOS の floating level)｡
+    #[serde(default)]
+    pub float_on_top: bool,
 }
 
 /// 覚えたウィンドウの状態を `path` から読み戻す｡
@@ -96,6 +105,11 @@ pub(crate) fn load(path: &Path) -> WindowState {
         return WindowState::default();
     };
     serde_json::from_str(&contents).unwrap_or_default()
+}
+
+/// `path` があればそこから読み､無ければ (fixture のウィンドウ) 既定値 (#267)｡
+pub(crate) fn load_or_default(path: Option<&Path>) -> WindowState {
+    path.map(load).unwrap_or_default()
 }
 
 /// ウィンドウの状態を `path` へ書く｡
@@ -301,8 +315,26 @@ mod tests {
         let path = scratch_file("roundtrip");
         let state = WindowState {
             bounds: Some(saved(120.0, 80.0, 560.0, 820.0)),
+            translucent: true,
+            float_on_top: true,
         };
         save(&path, &state).unwrap();
         assert_eq!(load(&path), state);
+    }
+
+    #[test]
+    fn a_file_from_before_the_toggles_reads_them_as_off() {
+        // #267 より前の起動が書いたファイルには矩形しか無い｡そのファイルを
+        // 読めなくなってはならないし､無いキーは「切っていた」と読む｡
+        let path = scratch_file("old");
+        std::fs::write(
+            &path,
+            r#"{ "bounds": { "x": 1.0, "y": 2.0, "width": 560.0, "height": 820.0 } }"#,
+        )
+        .unwrap();
+        let state = load(&path);
+        assert_eq!(state.bounds, Some(saved(1.0, 2.0, 560.0, 820.0)));
+        assert!(!state.translucent);
+        assert!(!state.float_on_top);
     }
 }
