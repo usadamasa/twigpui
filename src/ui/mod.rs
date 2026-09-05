@@ -3181,9 +3181,11 @@ mod tests {
         });
     }
 
-    /// #206: 見せたら薄くなって外れる｡薄くなる間も件数は言い続ける｡
+    /// #206: 押した瞬間には消えない — バッファは glide へ合流するので､
+    /// トーストは `unseen` が視界の上に残っている間は点いたままで数え続け､
+    /// glide が終わってから初めて薄くなって外れる｡
     #[gpui::test]
-    fn the_toast_fades_out_and_leaves_once_the_posts_are_shown(cx: &mut gpui::TestAppContext) {
+    fn the_toast_fades_out_once_the_glide_it_started_finishes(cx: &mut gpui::TestAppContext) {
         let (mut visual, timeline) = drawn(cx, fixture_with(&["2", "1"], &["4", "3"]));
         cx.executor()
             .advance_clock(std::time::Duration::from_secs(1));
@@ -3199,24 +3201,29 @@ mod tests {
 
         assert!(
             visual.debug_bounds("new-posts").is_some(),
-            "the toast fades rather than vanishing in the same frame"
+            "the toast keeps counting rather than vanishing in the same frame"
         );
         cx.update(|cx| {
             let view = timeline.read(cx);
-            assert!(view.pending.is_none(), "the click showed the posts");
             assert!(
-                matches!(view.toast.fade, Fade::Falling(_)),
-                "the toast is on its way out: {:?}",
-                view.toast.fade
+                view.pending.is_none(),
+                "the click moved the buffer onto the glide"
+            );
+            assert!(
+                view.glide.is_some(),
+                "the click starts the same glide follow uses"
             );
             assert_eq!(
-                view.toast.count, 2,
-                "while falling the label keeps saying what it said"
+                view.toast.fade,
+                Fade::Shown,
+                "rows are still above the viewport, so the toast has not started falling yet"
             );
         });
 
+        // 2 行分の glide (`GLIDE_MIN_S` = 0.6 秒前後) と､それに続くフェード
+        // の 180ms (`FADE_STEPS` × `FADE_STEP_MILLIS`) を両方まかなう長さ｡
         cx.executor()
-            .advance_clock(std::time::Duration::from_secs(1));
+            .advance_clock(std::time::Duration::from_secs(2));
         cx.run_until_parked();
         visual.update(|window, cx| {
             let _ = window.draw(cx);
@@ -3227,6 +3234,7 @@ mod tests {
         // 要素を組む側に尋ねる｡
         cx.update(|cx| {
             timeline.update(cx, |view, cx| {
+                assert_eq!(view.unseen, 0, "the glide has finished");
                 assert_eq!(view.toast.fade, Fade::Hidden);
                 assert!(view.toast_fade_task.is_none());
                 assert!(
@@ -3312,14 +3320,13 @@ mod tests {
     }
 
     /// トーストのクリックがバッファを最上部へ跳ばすのではなく follow と
-    /// 同じ glide を始めることを確かめる｡バッファの適用先が最上部ではなく
-    /// 読み手が下へスクロールした位置なのが core: `start_glide` の settle
-    /// ループが待つ条件が `settle_from` 無しのままだと、スクロール済みの
-    /// offset をそれだけで「anchor が着地した」と誤読して 1 フレーム目で
-    /// 抜けてしまい、その後 anchor が実際に着地した瞬間を読み手がホイールを
-    /// 握ったと誤認して glide を諦める｡この誤読が直っているかどうかを、
-    /// anchor が着地するはずのフレームの直後で `glide.is_some()` を見て
-    /// 押さえる｡
+    /// 同じ glide を始めることを確かめる｡読み手が下へスクロールした位置
+    /// から適用するのが要: `settle_from` が無いままだと､`start_glide` の
+    /// settle ループがスクロール済みの offset をそれだけで「anchor が
+    /// 着地した」と誤読して 1 フレーム目で抜けてしまい､その後 anchor が
+    /// 実際に着地した瞬間を読み手がホイールを握ったと誤認して glide を
+    /// 諦める｡この誤読が直っているかどうかを､anchor が着地するはずの
+    /// フレームの直後で `glide.is_some()` を見て押さえる｡
     #[gpui::test]
     fn clicking_the_toast_resumes_the_glide_from_a_scrolled_down_position(
         cx: &mut gpui::TestAppContext,
@@ -3364,23 +3371,22 @@ mod tests {
             );
         });
 
-        for _ in 0..600 {
-            cx.executor()
-                .advance_clock(std::time::Duration::from_secs_f32(super::scroll::FRAME_S));
-            cx.run_until_parked();
-            visual.update(|window, cx| {
-                let _ = window.draw(cx);
-            });
-            if cx.update(|cx| timeline.read(cx).unseen) == 0 {
-                break;
-            }
-        }
+        // #208 の glide は長くても `GLIDE_MAX_S` (5 秒) で終わる｡`unseen` は
+        // 境界を跨ぐたびに減るので途中で 0 になりうる — それだけで抜けると
+        // offset がまだ着いていないうちに読んでしまうので､ここは一気に
+        // 2 秒進めて glide 自体を終わらせてから読む｡
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(2));
+        cx.run_until_parked();
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
 
         cx.update(|cx| {
             let view = timeline.read(cx);
             assert_eq!(view.unseen, 0, "the glide must finish rather than hang");
             assert!(
-                f32::from(view.list_scroll.offset().y).abs() < f32::EPSILON,
+                f32::from(view.list_scroll.offset().y).abs() < 1.,
                 "the glide ends at the top: {:?}",
                 view.list_scroll.offset()
             );
@@ -3388,7 +3394,7 @@ mod tests {
     }
 
     /// #206: follow が流し込んでいる途中でホイールに触れると glide は止まる
-    /// (#175)｡そこで toast を押すと、最上部へ跳ぶのではなく同じ glide を
+    /// (#175)｡そこで toast を押すと､最上部へ跳ぶのではなく同じ glide を
     /// 続きから再開する — リストを置き換え直すことはない｡
     #[gpui::test]
     fn clicking_the_toast_resumes_a_glide_the_wheel_had_stopped(cx: &mut gpui::TestAppContext) {
@@ -3481,7 +3487,7 @@ mod tests {
         });
     }
 
-    /// #22: `ScrollToTop` はトーストのクリックと違って glide を挟まず、
+    /// #22: `ScrollToTop` はトーストのクリックと違って glide を挟まず､
     /// 1 フレームで先頭へ着く｡
     #[gpui::test]
     fn scroll_to_top_still_jumps_instantly(cx: &mut gpui::TestAppContext) {
