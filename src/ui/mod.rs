@@ -3463,17 +3463,12 @@ mod tests {
             );
         });
 
-        for _ in 0..600 {
-            cx.executor()
-                .advance_clock(std::time::Duration::from_secs_f32(super::scroll::FRAME_S));
-            cx.run_until_parked();
-            visual.update(|window, cx| {
-                let _ = window.draw(cx);
-            });
-            if cx.update(|cx| timeline.read(cx).unseen) == 0 {
-                break;
-            }
-        }
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(2));
+        cx.run_until_parked();
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
 
         cx.update(|cx| {
             let view = timeline.read(cx);
@@ -3521,6 +3516,62 @@ mod tests {
             offset_y(cx, &timeline).abs() < 1.,
             "one frame is enough to land at the top, with no glide in between"
         );
+    }
+
+    /// `apply_pending` は `reveal_new_posts` を経由せず `⌘⇧R` / View → Show
+    /// New Posts から直接呼ばれる (`layout.rs`)｡ホイールの spring loop が
+    /// まだ動いているところへその経路で `follow` が glide を始めても､
+    /// 手放しが `follow` 自身にあるので取り合いにならないことを確かめる｡
+    #[gpui::test]
+    fn showing_new_posts_releases_a_wheel_still_settling(cx: &mut gpui::TestAppContext) {
+        let ids: Vec<String> = (1..=40).map(|n| n.to_string()).collect();
+        let shown: Vec<&str> = ids.iter().map(String::as_str).collect();
+        let (window, timeline) = fixture_window(cx, fixture_with(&shown, &["99"]));
+        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let body = visual
+            .debug_bounds("timeline")
+            .expect("the timeline has to be laid out before a wheel can reach it");
+
+        visual.simulate_event(wheel_event(body.center(), -3.));
+        cx.update(|cx| {
+            assert!(
+                timeline.read(cx).scroll_motion.is_some(),
+                "the wheel's spring loop must still be settling"
+            );
+        });
+
+        visual.update(|window, cx| {
+            window.dispatch_action(Box::new(crate::menu::ShowNewPosts), cx);
+        });
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert!(
+                timeline.read(cx).scroll_motion.is_none(),
+                "follow must release the wheel's spring before the glide owns the offset"
+            );
+        });
+
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(2));
+        cx.run_until_parked();
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        cx.update(|cx| {
+            let view = timeline.read(cx);
+            assert_eq!(
+                view.unseen, 0,
+                "the glide reaches the top despite the wheel"
+            );
+            assert!(
+                f32::from(view.list_scroll.offset().y).abs() < 1.,
+                "ends at the top: {:?}",
+                view.list_scroll.offset()
+            );
+        });
     }
 
     /// fixture の window はロック中でも描き続け､live の window は upstream

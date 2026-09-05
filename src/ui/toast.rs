@@ -246,14 +246,7 @@ impl TimelineView {
     /// すでに流し込んだ行がまだ上にあるということなので､同じ glide を
     /// [`Self::start_glide`] で続きから再開する｡どちらも最上部へ跳ぶ
     /// のではなく､読める速さで降りてくる — 跳ぶのは `ScrollToTop` のみ｡
-    ///
-    /// 先頭で glide と scroll のモーションを手放すのは､読み手がホイールで
-    /// 止めていた場合に備えるため｡それを残したまま新しい glide を始めると､
-    /// 両方が同じ `list_scroll` の offset を取り合う｡
     pub(super) fn reveal_new_posts(&mut self, cx: &mut Context<'_, Self>) {
-        self.glide = None;
-        self.scroll_motion = None;
-        self.scroller.release();
         if self.pending.is_some() {
             self.apply_pending(cx);
         } else if self.unseen > 0 {
@@ -274,8 +267,7 @@ impl TimelineView {
     /// 新着も全部視界に入るので､countdown は 0 (#206)｡
     pub(super) fn jump_to_top(&mut self, cx: &mut Context<'_, Self>) {
         self.glide = None;
-        self.scroll_motion = None;
-        self.scroller.release();
+        self.release_scroll();
         self.list_scroll.scroll_to_top_of_item(0);
         self.unseen = 0;
         cx.notify();
