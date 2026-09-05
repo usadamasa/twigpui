@@ -850,6 +850,7 @@ mod tests {
             picker_open: false,
             liked: Vec::new(),
             reposted: Vec::new(),
+            selected: None,
             translucent: false,
         };
         assert_eq!(

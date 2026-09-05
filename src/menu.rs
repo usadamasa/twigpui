@@ -56,14 +56,46 @@ gpui::actions!(
         /// (#267)｡`cmd-alt-f` に割り当て — Stickies の Floating Window と
         /// 同じ鍵｡何も費やさない｡
         ToggleFloatOnTop,
+        /// 選択を次の (1 つ古い) post へ移す (#148)｡裸の `j` に割り当て｡
+        /// 選択先が画面の外なら見える位置まで一覧を送る｡完全にローカルで
+        /// 何も費やさない｡
+        SelectNext,
+        /// 選択を前の (1 つ新しい) post へ移す (#148)｡裸の `k` に割り当て｡
+        /// [`SelectNext`] の対｡
+        SelectPrevious,
+        /// 選択中の post を like / unlike する (#148)｡裸の `l` に割り当て｡
+        /// 行の like ボタンとまったく同じ経路を通るので､門も optimistic な
+        /// トグルも共有する｡
+        LikeSelected,
+        /// 選択中の post を repost / undo repost する (#148)｡裸の `r` に
+        /// 割り当て｡[`LikeSelected`] と同じく行のボタンの経路を通る｡
+        RepostSelected,
     ]
 );
 
 /// timeline の root 要素が担うキーコンテキスト (#58) — 下のバインドは
 /// [`QUIT`] (#99) を除きすべて､グローバルに登録するのではなくこれへスコープ
-/// してある｡将来の単一キーのバインドが､別の view がフォーカスを持つ間に
-/// 発火しないようにするためだ｡
+/// してある｡単一キーのバインドが､別の view がフォーカスを持つ間に発火し
+/// ないようにするためだ｡
+///
+/// 裸の 1 文字はこれではなく [`BROWSE_CONTEXT`] へ閉じる (#148)｡root 要素が
+/// 名乗るのは今もこの名前ひとつで､述語のほうが input を除く｡
 pub(crate) const KEY_CONTEXT: &str = "Timeline";
+
+/// 裸の 1 文字が効いてよい範囲 (#148) — timeline を読んでいて､どの
+/// text input も focus を持っていないとき｡
+///
+/// [`KEY_CONTEXT`] の doc が予告していた 2 つ目のコンテキストがこれだ｡
+/// gpui の `!` は focus 経路の *全部* の context を見る
+/// (`keymap/context.rs` の `eval_inner` の `Not`) ので､composer
+/// (`gpui_component` の `Input`) が focus を持つ間は述語がどの深さでも
+/// 一致しない — 打鍵は bind に当たらず､`dispatch_keystroke` が文字として
+/// input handler へ流す｡動的にコンテキストを組み替える必要は無い｡
+///
+/// `"Input"` という名前は gpui-component 側の定数なので､綴りを保証するのは
+/// このファイルのテストではなく､本物の composer を focus して打つ
+/// `ui::selection` のテストのほうだ｡
+pub(crate) const BROWSE_CONTEXT: &str = "Timeline && !Input";
 
 /// 一つのバインドを､一度だけ定義する (#99)｡
 ///
@@ -233,6 +265,61 @@ const TOGGLE_FLOAT_ON_TOP: Shortcut = Shortcut {
     menu_label: Some("Float on Top"),
 };
 
+/// 選択を 1 つ古い post へ (#148)｡X の web アプリと同じ `j`｡
+const SELECT_NEXT: Shortcut = Shortcut {
+    keystroke: "j",
+    context: Some(BROWSE_CONTEXT),
+    bind: |keystroke, context| gpui::KeyBinding::new(keystroke, SelectNext, context),
+    item: |label| gpui::MenuItem::action(label, SelectNext),
+    // メニューバーには出さない｡[`BLUR_COMPOSER`] と同じ理由で､一覧を読み
+    // 進める所作はメニューに探しに行くコマンドではない｡
+    menu_label: None,
+};
+
+/// 選択を 1 つ新しい post へ (#148)｡[`SELECT_NEXT`] の対｡
+const SELECT_PREVIOUS: Shortcut = Shortcut {
+    keystroke: "k",
+    context: Some(BROWSE_CONTEXT),
+    bind: |keystroke, context| gpui::KeyBinding::new(keystroke, SelectPrevious, context),
+    item: |label| gpui::MenuItem::action(label, SelectPrevious),
+    menu_label: None,
+};
+
+/// 選択中の post を like / unlike する (#148)｡
+///
+/// 押せばリクエストを費やすのに裸の鍵を持つ唯一のもので､`load_older_has_no_shortcut`
+/// が拒む形にいちばん近い｡違いは取り返しが付くことだ: もう一度 `l` を押せば
+/// 元に戻るし､行のボタンと同じ optimistic なトグルを通るので､連打しても
+/// 未完了の 1 本より先へは進まない｡
+const LIKE_SELECTED: Shortcut = Shortcut {
+    keystroke: "l",
+    context: Some(BROWSE_CONTEXT),
+    bind: |keystroke, context| gpui::KeyBinding::new(keystroke, LikeSelected, context),
+    item: |label| gpui::MenuItem::action(label, LikeSelected),
+    menu_label: None,
+};
+
+/// 選択中の post を repost / undo repost する (#148)｡[`LIKE_SELECTED`] と同じ｡
+const REPOST_SELECTED: Shortcut = Shortcut {
+    keystroke: "r",
+    context: Some(BROWSE_CONTEXT),
+    bind: |keystroke, context| gpui::KeyBinding::new(keystroke, RepostSelected, context),
+    item: |label| gpui::MenuItem::action(label, RepostSelected),
+    menu_label: None,
+};
+
+/// composer へ移る裸の `n` (#148)｡[`FOCUS_COMPOSER`] と同じアクションで､
+/// 鍵とコンテキストだけが違う — メニュー項目は `cmd-n` のほう 1 つだけで
+/// よく (macOS が key equivalent に描けるのはどちらか一方だ)､だから
+/// `menu_label` は `None`｡
+const FOCUS_COMPOSER_BARE: Shortcut = Shortcut {
+    keystroke: "n",
+    context: Some(BROWSE_CONTEXT),
+    bind: |keystroke, context| gpui::KeyBinding::new(keystroke, FocusComposer, context),
+    item: |label| gpui::MenuItem::action(label, FocusComposer),
+    menu_label: None,
+};
+
 /// すべてのバインドを､[`init`] が登録する順で並べたもの (#99)｡
 ///
 /// [`init`] はまさにこの一覧を登録し､[`shortcuts`] はヘッダが宣伝するものへ
@@ -250,7 +337,7 @@ const TOGGLE_FLOAT_ON_TOP: Shortcut = Shortcut {
 /// `SCROLL_TO_TOP` をこの一覧以外のあらゆる場所へ足した後､三つがここで bind
 /// されないまま座っていたのはそのためだ｡今それを捕まえるテストが
 /// `every_menu_item_has_a_binding` である｡
-const ALL_SHORTCUTS: [&Shortcut; 11] = [
+const ALL_SHORTCUTS: [&Shortcut; 16] = [
     &RELOAD,
     &FOCUS_COMPOSER,
     &BLUR_COMPOSER,
@@ -262,17 +349,24 @@ const ALL_SHORTCUTS: [&Shortcut; 11] = [
     &TOGGLE_FOLLOW_NEW_POSTS,
     &TOGGLE_TRANSLUCENT,
     &TOGGLE_FLOAT_ON_TOP,
+    &SELECT_NEXT,
+    &SELECT_PREVIOUS,
+    &LIKE_SELECTED,
+    &REPOST_SELECTED,
+    &FOCUS_COMPOSER_BARE,
 ];
 
 /// #58 のキーバインドを登録する｡起動時に一度､`gpui_component::init` (こちら
 /// は自身のものを登録する) の隣で呼ばれる｡
 ///
-/// **ここのどのバインドも裸の印字可能キーではない｡** この issue の中心的な
-/// 危うさは､利用者が post を打っている最中に裸の `j`/`k`/`n` が発火すること
-/// だ｡ここで bind されたものにそれはできない｡どのバインドも `cmd` を伴うか､
-/// 何も打たない名前付きキー (`escape`) だからだ｡post の選択が入り裸の文字が
-/// 持つに値するようになったら､composer のフォーカスが外すような二つ目のキー
-/// コンテキストが要る — その起点が [`KEY_CONTEXT`] である｡
+/// **裸の印字可能キーは [`BROWSE_CONTEXT`] へ閉じたものだけだ (#148)｡**
+/// #58 の中心的な危うさは､利用者が post を打っている最中に裸の
+/// `j`/`k`/`l`/`r`/`n` が発火することだった｡#148 まではここに裸の鍵が一つも
+/// 無いことでそれを避けていた｡今は述語が避ける: どの text input が
+/// フォーカスを持つ間も､この 5 つはバインドとして当たらず文字として入る｡
+/// [`KEY_CONTEXT`] が予告していた二つ目のコンテキストがそれである｡
+/// 残りのバインドは今までどおり `cmd` を伴うか､何も打たない名前付きキー
+/// (`escape`) だ｡
 ///
 /// バインドを並べ直すのではなく [`ALL_SHORTCUTS`] を歩く (#119): 各項目は
 /// [`Shortcut::bind`] を通して既に自身のアクションを名指しているので､
@@ -373,12 +467,12 @@ impl Shortcut {
 
 #[cfg(test)]
 mod tests {
-    use super::{ALL_SHORTCUTS, menus};
+    use super::{ALL_SHORTCUTS, BROWSE_CONTEXT, KEY_CONTEXT, menus};
 
     // --- #58: キーボードショートカット ---
 
     #[test]
-    fn no_shortcut_is_a_bare_letter() {
+    fn no_shortcut_is_a_bare_letter_outside_the_browse_context() {
         // この issue の中心的な危うさ: 利用者が post を打っている最中に裸の
         // `j`/`k`/`n` が発火すること｡`keystroke` を比べるのは､それが `init`
         // の `KeyBinding::new` へ渡すものだからで､誰かが打っている間に gpui
@@ -386,13 +480,45 @@ mod tests {
         //
         // `"escape"` は修飾キー無しでも許す: 名前付きの特殊キーであって､
         // 普通の打鍵が生む文字ではない｡
+        //
+        // #148 で裸の文字が入った｡許すのは [`BROWSE_CONTEXT`] へ閉じたもの
+        // だけで､そこは input が focus を持つ間は当たらない — すぐ下の
+        // `a_focused_input_takes_the_browse_context_away` が確かめる｡
         for shortcut in ALL_SHORTCUTS {
             let keystroke = shortcut.keystroke;
+            if shortcut.context == Some(BROWSE_CONTEXT) {
+                continue;
+            }
             assert!(
                 keystroke.starts_with("cmd-") || keystroke == "escape",
                 "{keystroke} would fire while typing"
             );
         }
+    }
+
+    #[test]
+    fn a_focused_input_takes_the_browse_context_away() {
+        // #148 の設計全体がここに乗っている｡裸の文字を許せるのは､gpui の
+        // `!` が focus 経路の *全部* の context を見るからだ — composer
+        // (`gpui_component` の `Input`) が focus を持てば､述語はどの深さでも
+        // 一致しなくなり､打鍵は bind ではなく文字として input へ流れる｡
+        //
+        // gpui を上げて `Not` の意味が変わればここが落ちる｡
+        let predicate = gpui::KeyBindingContextPredicate::parse(BROWSE_CONTEXT)
+            .expect("the browse context has to parse");
+        let timeline = gpui::KeyContext::parse(KEY_CONTEXT).expect("the timeline context");
+        let input = gpui::KeyContext::parse("Input").expect("the composer's context");
+
+        assert_eq!(
+            predicate.depth_of(std::slice::from_ref(&timeline)),
+            Some(1),
+            "a bare key fires while the timeline itself holds focus"
+        );
+        assert_eq!(
+            predicate.depth_of(&[timeline, input]),
+            None,
+            "a bare key never fires while an input holds focus"
+        );
     }
 
     #[test]

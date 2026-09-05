@@ -10,6 +10,12 @@ use gpui::{Pixels, Size};
 use super::lane;
 use super::*;
 
+/// 選択中の行に付ける左の縁の幅 (#148)｡
+///
+/// 選ばれていない行も同じ幅を取り､色だけが透明になる｡幅を出し入れすると
+/// 本文列の幅が変わり､`j` / `k` のたびに折り返しが動いて行の高さが跳ねる｡
+const SELECTION_MARK_WIDTH: Pixels = px(3.0);
+
 /// サムネイルをクリックしたときの行き先 (#188)｡
 #[derive(Debug, PartialEq, Eq)]
 pub(in crate::ui) enum MediaClickTarget {
@@ -331,10 +337,22 @@ impl TimelineView {
                 column.child(self.thread_section(&item.id, replied_to, bg_alpha, cx))
             });
 
+        // #148: 選択中の行の印｡縁は選ばれていなくても常に場所を取り､色だけが
+        // 透明になる — 幅を出し入れすると `j` / `k` のたびに一覧が組み直され
+        // (本文の折り返しが変わり) 行の高さが跳ねる｡`bg_alpha` (#267) とは
+        // 独立で､透けたウィンドウでも印は不透明のままだ｡
+        let mark = if self.selected.as_deref() == Some(item.id.as_str()) {
+            rgb(theme.accent)
+        } else {
+            rgba(0x00_00_00_00)
+        };
+
         div()
             .addressable(format!("post-row-{}", item.id))
             .flex()
             .flex_col()
+            .border_l(SELECTION_MARK_WIDTH)
+            .border_color(mark)
             .child(
                 div()
                     .flex()

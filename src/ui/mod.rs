@@ -35,6 +35,7 @@ mod post_row;
 mod reload_policy;
 mod render;
 mod scroll;
+mod selection;
 pub(crate) mod source_picker;
 mod source_picker_menu;
 mod startup;
@@ -77,8 +78,9 @@ use state::{
 use toast::Toast;
 
 use crate::menu::{
-    BlurComposer, CloseWindow, FocusComposer, KEY_CONTEXT, Minimize, Reload, ScrollToTop,
-    ShowAbout, ShowNewPosts, SyncList, ToggleFloatOnTop, ToggleFollowNewPosts, ToggleTranslucent,
+    BlurComposer, CloseWindow, FocusComposer, KEY_CONTEXT, LikeSelected, Minimize, Reload,
+    RepostSelected, ScrollToTop, SelectNext, SelectPrevious, ShowAbout, ShowNewPosts, SyncList,
+    ToggleFloatOnTop, ToggleFollowNewPosts, ToggleTranslucent,
 };
 use crate::oauth;
 use crate::paths::Paths;
@@ -499,6 +501,17 @@ pub(crate) struct TimelineView {
     /// 使う: そうしないと､スクロール済みの一覧へ post を差し込んだときに
     /// すべてが読み手の下へずり下がる｡
     list_scroll: ScrollHandle,
+    /// `j` / `k` で読み進めている行の post id (#148)｡まだ誰も選んで
+    /// いなければ `None`｡
+    ///
+    /// index ではなく id で持つ｡timeline は reload・source の切り替え・
+    /// follow の流し込みで並びごと入れ替わるので､index を覚えると読み手の
+    /// 知らないうちに別の post を指す｡id なら､一覧から消えた post は
+    /// 「選択なし」に落ちるだけで済む — [`Self::selected_index`] を見よ｡
+    ///
+    /// だから timeline を置き換える経路はどれもこれに触らない｡`pending` や
+    /// `unseen` のように 0 へ戻す必要が無い｡
+    selected: Option<String>,
     /// timeline 自身の root 要素の focus (#118)｡
     ///
     /// gpui は focus されている要素の祖先を辿って action を解決するので､
@@ -542,7 +555,11 @@ mod tests {
         thread_action_label, usage, usage_color, usage_label,
     };
 
-    fn item_with(id: &str, author_username: &str, reposted_by: Option<&str>) -> TimelineItem {
+    pub(super) fn item_with(
+        id: &str,
+        author_username: &str,
+        reposted_by: Option<&str>,
+    ) -> TimelineItem {
         TimelineItem {
             id: id.to_string(),
             text: String::new(),
@@ -776,7 +793,11 @@ mod tests {
     /// #13 の join が組むとおりのリポスト行｡本文は元投稿のもの､`id` は
     /// リツイートのアクティビティのもの､そして書き込み系のエンドポイントが
     /// 対象にすべきなのは #52 の `original_post_id` だ｡
-    fn repost_row_item(row_id: &str, original_id: &str, original_author: &str) -> TimelineItem {
+    pub(super) fn repost_row_item(
+        row_id: &str,
+        original_id: &str,
+        original_author: &str,
+    ) -> TimelineItem {
         let mut item = item_with(row_id, original_author, Some("bob"));
         item.original_post_id = Some(original_id.to_string());
         item
@@ -2300,6 +2321,7 @@ mod tests {
             picker_open: false,
             liked: Vec::new(),
             reposted: Vec::new(),
+            selected: None,
             translucent: false,
         }
     }

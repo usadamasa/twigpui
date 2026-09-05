@@ -275,6 +275,24 @@ impl Render for TimelineView {
                 this.reload_notice = Some(ReloadNotice::Outcome(outcome.into()));
                 cx.notify();
             }))
+            // #148: 裸の `j` / `k` / `l` / `r`｡どれも `BROWSE_CONTEXT` へ
+            // 閉じてあるので､どの text input が focus を持つ間も届かない —
+            // `menu::BROWSE_CONTEXT` を見る｡門と早期 return は
+            // `selection.rs` 側に置いてある: `l` / `r` は行のボタンと同じ
+            // `offers_*` を通り､4 つとも sync の確認ダイアログの下では
+            // 何もしない｡
+            .on_action(cx.listener(|this, _: &SelectNext, _window, cx| {
+                this.select_step(1, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SelectPrevious, _window, cx| {
+                this.select_step(-1, cx);
+            }))
+            .on_action(cx.listener(|this, _: &LikeSelected, _window, cx| {
+                this.like_selected(cx);
+            }))
+            .on_action(cx.listener(|this, _: &RepostSelected, _window, cx| {
+                this.repost_selected(cx);
+            }))
             .on_action(cx.listener(|this, _: &ScrollToTop, _window, cx| {
                 // #22: 完全にローカル — 理由は `jump_to_top` の doc に｡
                 this.jump_to_top(cx);
