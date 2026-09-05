@@ -161,6 +161,25 @@ mod tests {
         cx.update(|cx| timeline.read(cx).selected.clone())
     }
 
+    // --- #148: fixture が選択を宣言する ---
+
+    #[gpui::test]
+    fn a_fixture_can_say_which_post_is_selected(cx: &mut gpui::TestAppContext) {
+        // #156 の `liked` / `reposted` と同じ｡`--fixture` の窓は打鍵を
+        // 合成する手段が無いので､選択行の色を撮るにはここで宣言するしか
+        // 道が無い｡
+        let fixture = Fixture {
+            selected: Some("2".to_string()),
+            ..fixture_with(&["1", "2", "3"], &[])
+        };
+        let (_window, timeline) = fixture_window(cx, fixture);
+        assert_eq!(
+            selected_id(&timeline, cx).as_deref(),
+            Some("2"),
+            "a fixture-declared selection has to reach the view"
+        );
+    }
+
     // --- #148: j / k で読み進める ---
 
     #[gpui::test]
