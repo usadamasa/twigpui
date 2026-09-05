@@ -343,8 +343,11 @@ impl TimelineView {
 
     /// 今この瞬間の背景の不透明度 (#267)｡本体も toolbar も status bar も
     /// これで塗る — 帯だけが不透明に残ると､透けた一覧の上に板が浮く｡行の中に
-    /// 埋め込まれた post の面 (引用カード､スレッドの行､composer のカード) も
-    /// 同じもので塗る｡render が 1 回読んで枠と行へ渡す｡
+    /// 埋め込まれた post の面 (引用カード､スレッドの行､composer のカード)､
+    /// バナー､sync の行､source picker のメニューも同じもので塗る｡`bg_header`
+    /// を塗る面で残るのは sync のダイアログだけで､あれは覆いの上のモーダル
+    /// なので読みやすさを取って不透明のままにしてある｡render が 1 回読んで
+    /// 枠と行へ渡す｡
     pub(super) fn bg_alpha(&self, window: &Window) -> u8 {
         theme::bg_alpha(self.window_state.translucent, window.is_window_active())
     }

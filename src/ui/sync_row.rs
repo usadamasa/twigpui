@@ -119,7 +119,7 @@ impl TimelineView {
     /// 高さが固定な理由は [`fade_occupies`] を参照｡薄れていく間もラベルは
     /// 最後の状態を出したままにする｡道中で口をつぐむと何が終わったのか
     /// 読む間が無い｡
-    pub(super) fn sync_row(&self) -> Option<AnyElement> {
+    pub(super) fn sync_row(&self, bg_alpha: u8) -> Option<AnyElement> {
         if !fade_occupies(self.sync_fade) {
             return None;
         }
@@ -131,7 +131,8 @@ impl TimelineView {
                 .items_center()
                 .h(theme::SYNC_ROW_HEIGHT)
                 .px(theme::ROW_PAD_X)
-                .bg(rgb(theme.bg_header))
+                // #267: 本体と同じ不透明度で — 帯だけ不透明に残さない｡
+                .bg(rgba(theme::with_alpha(theme.bg_header, bg_alpha)))
                 .border_t_1()
                 .border_color(rgb(theme.border))
                 .text_size(theme::TEXT_META)
