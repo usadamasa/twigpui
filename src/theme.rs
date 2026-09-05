@@ -420,6 +420,26 @@ mod tests {
     }
 
     #[test]
+    fn the_background_is_opaque_unless_translucent_and_in_the_background() {
+        // #267: 透過はウィンドウが手元に無いときだけ｡読んでいる・打っている
+        // 間は後ろが透けてはいけない｡
+        use super::{INACTIVE_BG_ALPHA, bg_alpha};
+        assert_eq!(bg_alpha(false, true), 0xff);
+        assert_eq!(bg_alpha(false, false), 0xff, "off is off, active or not");
+        assert_eq!(bg_alpha(true, true), 0xff, "the active window stays readable");
+        assert_eq!(bg_alpha(true, false), INACTIVE_BG_ALPHA);
+        assert!(INACTIVE_BG_ALPHA < 0xff, "otherwise nothing shows through");
+    }
+
+    #[test]
+    fn with_alpha_puts_the_opacity_in_the_low_byte() {
+        // `rgba` の読み方は [`super::SCRIM`] と同じ: 下 8 bit が不透明度｡
+        use super::with_alpha;
+        assert_eq!(with_alpha(0xff_ff_ff, 0xff), 0xffff_ffff);
+        assert_eq!(with_alpha(0x15_20_2b, 0x00), 0x1520_2b00);
+    }
+
+    #[test]
     fn warning_is_distinct_from_danger_in_both_palettes() {
         // #18: `usage_color` は「予算に近い」を `warning` へ､「予算を超えた」を
         // `danger` へ対応させる — 2 つの色が同じなら､ヘッダーは 2 つの

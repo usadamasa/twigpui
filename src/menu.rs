@@ -503,6 +503,29 @@ mod tests {
     }
 
     #[test]
+    fn the_window_menu_can_go_translucent() {
+        // #267: Stickies が Window メニューに置いている対 (Floating Window /
+        // Translucent) に倣う｡常駐させるウィンドウの居場所と見え方は､どちらも
+        // ウィンドウの属性なので View ではなく Window に入る｡
+        let window = menus()
+            .into_iter()
+            .find(|menu| menu.name.as_ref() == "Window")
+            .expect("a Window menu");
+        let names: Vec<String> = window
+            .items
+            .into_iter()
+            .filter_map(|item| match item {
+                gpui::MenuItem::Action { name, .. } => Some(name.to_string()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            names.iter().any(|name| name == "Translucent"),
+            "Translucent is missing from the Window menu: {names:?}"
+        );
+    }
+
+    #[test]
     fn no_menu_carries_a_keystroke_in_its_label() {
         // macOS は key equivalent を keymap から描く｡ラベルに "⌘R" と書け
         // ば画面に二度出るうえ､キーストロークが同期を保つべき二つ目のもの

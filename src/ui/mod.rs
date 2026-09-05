@@ -4046,6 +4046,37 @@ mod tests {
         });
     }
 
+    /// #267: Window メニューの Translucent は透過を反転させ､今どちら向きかを
+    /// 言う — follow のトグルと同じ理由で､新しい状態が見えるのはバナーだけだ｡
+    /// fixture のウィンドウには覚える先が無いが､切り替えそのものは効く｡
+    #[gpui::test]
+    fn toggling_translucent_flips_the_switch_and_reports_itself(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext as _;
+
+        let (window, timeline) = fixture_window(cx, fixture_with(&["2", "1"], &[]));
+
+        cx.update_window(window.into(), |_, window, cx| {
+            let _ = window.draw(cx);
+            window.dispatch_action(Box::new(crate::menu::ToggleTranslucent), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+
+        cx.update(|cx| {
+            timeline.update(cx, |view, _cx| {
+                assert!(
+                    view.window_state.translucent,
+                    "a window starts opaque, so one toggle makes it translucent"
+                );
+                assert!(
+                    matches!(view.reload_notice, Some(ReloadNotice::Outcome(_))),
+                    "the flip must say which way it went, got {:?}",
+                    view.reload_notice
+                );
+            });
+        });
+    }
+
     /// #182 に遡って: ステータスバーの 2 つの区画は接触しない｡
     ///
     /// これは #182 が無いままマージされたテストだ｡`Total: 11 req` と

@@ -301,8 +301,24 @@ mod tests {
         let path = scratch_file("roundtrip");
         let state = WindowState {
             bounds: Some(saved(120.0, 80.0, 560.0, 820.0)),
+            translucent: true,
         };
         save(&path, &state).unwrap();
         assert_eq!(load(&path), state);
+    }
+
+    #[test]
+    fn a_file_from_before_the_toggles_reads_them_as_off() {
+        // #267 より前の起動が書いたファイルには矩形しか無い｡そのファイルを
+        // 読めなくなってはならないし､無いキーは「切っていた」と読む｡
+        let path = scratch_file("old");
+        std::fs::write(
+            &path,
+            r#"{ "bounds": { "x": 1.0, "y": 2.0, "width": 560.0, "height": 820.0 } }"#,
+        )
+        .unwrap();
+        let state = load(&path);
+        assert_eq!(state.bounds, Some(saved(1.0, 2.0, 560.0, 820.0)));
+        assert!(!state.translucent);
     }
 }
