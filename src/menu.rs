@@ -112,9 +112,11 @@ pub(crate) const KEY_CONTEXT: &str = "Timeline";
 /// 一致しない — 打鍵は bind に当たらず､`dispatch_keystroke` が文字として
 /// input handler へ流す｡動的にコンテキストを組み替える必要は無い｡
 ///
-/// `"Input"` という名前は gpui-component 側の定数なので､綴りを保証するのは
-/// このファイルのテストではなく､本物の composer を focus して打つ
-/// `ui::selection` のテストのほうだ｡
+/// `"Input"` という名前は gpui-component 側の定数なので､綴りを保証する
+/// テストはこのファイルには無い｡composer が #282 で別ウィンドウへ移った
+/// 今、timeline のウィンドウには focus できる text input がそもそも無く、
+/// この述語は事実上いつも真になる — 将来また何か `Input` を足したときに
+/// 同じ罠 (#148) を踏まないための門として残してある｡
 pub(crate) const BROWSE_CONTEXT: &str = "Timeline && !Input";
 
 /// 一つのバインドを､一度だけ定義する (#99)｡

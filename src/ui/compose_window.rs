@@ -271,6 +271,49 @@ mod tests {
         );
     }
 
+    /// #282: `rebind_compose_input` が作り直した `InputState` は本物の
+    /// `compose_input` として動く — 既存の下書きを写した状態で開き､打鍵は
+    /// `on_compose_input_event` を経て `compose.text()` まで届く｡timeline
+    /// のウィンドウで打つことを見ていた `the_bare_keys_type_into_a_focused_composer`
+    /// (#282 で撤去) の後継で、compose window 側でも同じ経路が生きている
+    /// ことを確かめる｡コンパイルが通ることは動作の証拠にならない｡
+    #[gpui::test]
+    fn typing_reaches_the_draft(cx: &mut gpui::TestAppContext) {
+        let (_window, timeline) = fixture_window(cx, fixture_with(&["1"], &[]));
+        cx.update(|cx| {
+            timeline.update(cx, |view, _cx| {
+                view.compose.set_text("existing".to_string());
+            });
+            super::open(&timeline, cx);
+        });
+        cx.run_until_parked();
+
+        let handle = cx
+            .update(|cx| timeline.read(cx).compose_window)
+            .expect("the composer window opened");
+        let mut composer = gpui::VisualTestContext::from_window(handle.into(), cx);
+        draw_until_parked(&mut composer, cx);
+
+        cx.update(|cx| {
+            assert_eq!(
+                timeline.read(cx).compose_input.read(cx).value().to_string(),
+                "existing",
+                "the rebuilt InputState has to be seeded from the existing draft"
+            );
+        });
+
+        composer.simulate_keystrokes("a b c");
+        cx.run_until_parked();
+
+        cx.update(|cx| {
+            let text = timeline.read(cx).compose.text().to_string();
+            assert!(
+                text.contains("abc") && text.contains("existing"),
+                "keystrokes in the reopened composer have to reach the draft: {text:?}"
+            );
+        });
+    }
+
     /// #282: compose window の title は profile を名乗る (`image_viewer` の
     /// 同種テストと同じ理由)｡
     #[test]

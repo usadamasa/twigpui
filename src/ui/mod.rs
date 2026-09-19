@@ -2056,6 +2056,26 @@ mod tests {
         });
     }
 
+    /// #282: fixture の `composer_open` が立っていれば起動の終わりに compose
+    /// window も開く｡`show_fixture` は `TimelineView::new` の *途中*
+    /// (`cx.entity()` で自分自身の `Entity` を取る) からこれを呼ぶので､
+    /// コンパイルが通ることは「動く」ことの証拠にならない — 実際にもう
+    /// 1 枚ウィンドウが増えることをここで確かめる｡
+    #[gpui::test]
+    fn a_fixture_with_composer_open_opens_the_composer_window(cx: &mut gpui::TestAppContext) {
+        let fixture = Fixture {
+            composer_open: true,
+            ..fixture_with(&["1"], &[])
+        };
+        let (_window, _timeline) = fixture_window(cx, fixture);
+
+        assert_eq!(
+            cx.update(|cx| cx.windows().len()),
+            2,
+            "composer_open must open a second window during startup"
+        );
+    }
+
     /// ウィンドウの smoke テストが対象にする `Config`｡
     fn smoke_config() -> crate::config::Config {
         crate::config::Config {
