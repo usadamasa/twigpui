@@ -126,7 +126,7 @@ export し直すのを覚えていなくても効くようにしたいなら､`
 | `X_MIN_FETCH_INTERVAL_SECONDS` | いいえ | `60` | 取得を実行できる間隔の下限 (秒) (#10) |
 | `X_THEME` | いいえ | `light` | カラーテーマ: `light`, `dark`, `system` (OS の外観に従う) — `config.toml` では `theme` (#19) |
 | `X_POST_RESOURCE_PRICE` | いいえ | `0.005` (USD、X 公開の Posts 単価) | Posts の resource 1 件あたりの価格 (USD 固定) — `config.toml` では `post_resource_price` (#162, [Usage tracking](.claude/skills/x-api-budget/reference/app-behavior.md#usage-tracking) を参照) |
-| `X_DAILY_POST_BUDGET` | いいえ | `1000` | 1 日の Posts resource 数の予算｡近づくとヘッダーの使用量の行が色付く — `config.toml` では `daily_post_budget` (#162) |
+| `X_DAILY_POST_BUDGET` | いいえ | `1000` | 1 日の Posts resource 数の予算｡近づくと footer の使用量の行が色付く — `config.toml` では `daily_post_budget` (#162) |
 | `X_AUTO_SYNC_LIST` | いいえ | `true` | アプリの実行中､`X_LIST_ID` のメンバーをフォローに追従させつづける — `config.toml` では `auto_sync_list`｡**タイマーで課金する**; 後述 |
 | `X_SYNC_INTERVAL_SECONDS` | いいえ | `21600` (6 時間) | バックグラウンド同期が diff の間に待つ時間｡`900` 未満の値は拒否する — `config.toml` では `sync_interval_seconds` |
 | `X_SYNC_PRUNE_LIMIT_PERCENT` | いいえ | `10` | バックグラウンド同期が 1 回の diff で削除できるメンバーの上限 (パーセント)｡超えた分の削除は保留し､`--sync-list --apply --prune` での確認に回す; `100` で上限を外す — `config.toml` では `sync_prune_limit_percent` (#176) |
@@ -188,7 +188,7 @@ no list configured" と "List sync: re-authorize to enable" は､止まって�
 同期が何に阻まれているかを示す｡これが入るまでこの機能はウィンドウから見えず､
 あと数時間かかる追いつき処理は､何も起きていない状態とまったく同じに見えた｡
 
-**次がいつかも示す** (#214)｡footer のリクエスト数の隣に "Next sync in 5h 12m"､toolbar の
+**次がいつかも示す** (#214)｡footer のリクエスト数の隣に "Next sync in 5h 12m"､同じ footer の
 reload アイコンの隣にタイムラインの "Auto-refresh in 4m"｡どちらも 1 分を切る
 までは分単位で､ループが動いていないとき (auto-refresh を切った､サインイン前､
 X に拒まれて止まった) は出ない｡画面ロック中は "Auto-refresh paused" になる｡
@@ -324,8 +324,8 @@ offline.access` を要求する: 投稿の読み取り､user context の解決�
 書き込みを 403 で拒否し､アプリ側にそれを自力で直す手立ては無い｡twigpui は
 セッションごとに付与されたスコープを記録し (記録が始まる前のセッションは
 "unknown" として扱い､「たぶん大丈夫」とは決して見なさない)､現在のセッションに
-アプリが必要とする書き込みスコープが欠けているときは､通常のリロード/サインイン
-の操作の隣にヘッダーが **"Re-authorize"** ボタンを出す｡クリックすると上の
+アプリが必要とする書き込みスコープが欠けているときは､timeline の上にバナーで
+**"Re-authorize"** ボタンを出す｡クリックすると上の
 サインインフローを最初から最後までもう一度走らせる — 新しいブラウザの同意画面､
 新しいトークン､すべてのスコープを一度に — そしてそれ以外にアプリで変わるものは
 無い｡
@@ -542,10 +542,10 @@ Translucent は文字と画像を薄くせず､地だけを 70% にする — �
 スクロールするので､読んでいた行はその場に留まる｡いちばん上にいるときは何も
 動かず､新しい投稿がただ現れる (#22)｡
 
-**リロードは何をしたかを伝える｡** ヘッダーの下の控えめな行が､届いた投稿の数を
-報告する — 0 件のときも含む｡それは前後で画面がまったく同じになり､押しても何も
-起きなかったように見えるケースだからである｡数えるのはスクロールが打ち消すのと
-同じ投稿なので､数字と動きは常に一致する (#141)｡
+**リロードは何をしたかを伝える｡** timeline の下端に重なる寿命つきの toast が､
+届いた投稿の数を報告する — 0 件のときも含む｡それは前後で画面がまったく同じに
+なり､押しても何も起きなかったように見えるケースだからである｡数えるのは
+スクロールが打ち消すのと同じ投稿なので､数字と動きは常に一致する (#141)｡
 
 **"Load older" にショートカットは無い｡** 押すたびに課金されるリクエスト 1 回で
 過去へ遡るので､誤打で金を使うキーは便利さではない｡`⌘R` もリクエストを使うが､
