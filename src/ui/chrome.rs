@@ -1,93 +1,43 @@
-//! ウィンドウの枠 (#95, #241): 上端の toolbar (`header`) と下端の帯
-//! (`status_bar`)｡timeline そのものは `layout.rs`､1 行の post は
-//! `post_row.rs`｡
+//! ウィンドウ下端の帯 (#95, #241): `status_bar`｡timeline そのものは
+//! `layout.rs`､1 行の post は `post_row.rs`｡
+//!
+//! header (上端の toolbar) は #282 で撤去した｡そこに居た要素はそれぞれ
+//! 行き先を持つ: source picker はメニューバーの `Sources` メニューへ､
+//! auto-refresh のカウントダウンと reload のアイコンはこの `status_bar` へ､
+//! Re-authorize は `layout.rs` の `notice_banners` へ､サインインは body の
+//! `sign-in-body` pill へ｡
 //!
 //! `ui/mod.rs` にあったものをそのまま移した｡
 
 use super::*;
 
 impl TimelineView {
-    /// header と footer が共通で見る primary action の状態 (#57, #282)｡
-    /// session が無いあいだは header がサインインの pill を描き､それ以外は
-    /// footer が reload のアイコンを描く — どちらを描くかは呼び出し側が
-    /// `action` を見て `when` で選ぶので､ここでは二重に計算しない｡
-    fn primary_action_state(&self) -> (String, bool, PrimaryAction) {
+    /// footer の reload アイコンが今どう見えるべきか (#57, #282)｡`None` は
+    /// アイコンをまったく出さない — session がまだ無い
+    /// (`NotAuthenticated`) かサインイン中で､それを進める手段は body の
+    /// pill だけだからだ (#282 の前は同じ状態を header のサインインボタンが
+    /// 描いていた)｡
+    fn primary_action_state(&self) -> Option<(String, bool)> {
         // #57: `state` の match に畳み込まず､その手前で判定する — post が
         // すでに出ている間の進行中の reload は `state` を `Loaded` のままに
         // する (`reload_start_state` を見よ) ので､その場合に fetch が走って
         // いることを示す信号はこれだけである｡
         if self.reloading {
-            return ("Loading…".to_string(), true, PrimaryAction::Reload);
+            return Some(("Loading…".to_string(), true));
         }
         match self.state {
-            TimelineState::Loading => ("Loading…".to_string(), true, PrimaryAction::Reload),
-            TimelineState::SigningIn => ("Signing in…".to_string(), true, PrimaryAction::SignIn),
-            TimelineState::NotAuthenticated => {
-                ("Sign in with X".to_string(), false, PrimaryAction::SignIn)
+            TimelineState::Loading => Some(("Loading…".to_string(), true)),
+            TimelineState::SigningIn | TimelineState::NotAuthenticated => None,
+            // クリックし直しても (ネットワーク不要の) rate-limit 判定が
+            // 走り直るだけだ — #10 が禁じるのは window を寝て過ごすことで､
+            // 安い判定の再実行ではない｡
+            TimelineState::RateLimited { reset_at, cooldown } => {
+                Some((cooldown_label(cooldown, reset_at, oauth::unix_now()), true))
             }
-            // 今も `PrimaryAction::Reload` に繋ぐ: クリックし直しても
-            // (ネットワーク不要の) rate-limit 判定が走り直るだけだ — #10 が
-            // 禁じるのは window を寝て過ごすことで､安い判定の再実行ではない｡
-            TimelineState::RateLimited { reset_at, cooldown } => (
-                cooldown_label(cooldown, reset_at, oauth::unix_now()),
-                true,
-                PrimaryAction::Reload,
-            ),
             TimelineState::Loaded(_) | TimelineState::Failed(_) => {
-                ("Reload".to_string(), false, PrimaryAction::Reload)
+                Some(("Reload".to_string(), false))
             }
         }
-    }
-
-    pub(super) fn header(&self, bg_alpha: u8, cx: &mut Context<'_, Self>) -> impl IntoElement {
-        let (label, busy, action) = self.primary_action_state();
-        let theme = self.theme;
-
-        div()
-            .flex()
-            .items_center()
-            .gap_3()
-            // #95: 二行の masthead ではなく toolbar である｡タイトルの下に
-            // 居たリクエスト数は `status_bar` へ移り､残るのは一行 — なので
-            // この帯は､二行を積んだときに要る高さへ詰め物をするのではなく､
-            // macOS の toolbar と同じ寸法にしてある｡
-            .h(theme::TOOLBAR_HEIGHT)
-            .px(theme::ROW_PAD_X)
-            // #267: 本体と同じ不透明度で — 帯だけ不透明に残さない｡
-            .bg(rgba(theme::with_alpha(theme.bg_header, bg_alpha)))
-            .border_b_1()
-            .border_color(rgb(theme.border))
-            // #282: source picker のトリガーとドロップダウンはメニューバーの
-            // `Sources` メニューへ移った｡この帯の左側はここでは空になる
-            // (`header` 自体の撤去は次のステップ)｡
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .ml_auto()
-                    // #14: #14 より前からサインイン済みの session は
-                    // `tweet.write` scope を持たない — 主ボタンが今何と
-                    // 言っていようとこれが届くところに残らないかぎり､#31 の
-                    // 教訓がそのまま繰り返される (すでに有効な session が
-                    // 自分の格上げ経路を隠してしまう)｡
-                    .when(
-                        offers_reauthorize(
-                            self.signed_in_with_oauth,
-                            self.oauth_scope.as_deref(),
-                            self.sources
-                                .iter()
-                                .any(|source| matches!(source, cache::TimelineSource::List(_))),
-                        ),
-                        |row| row.child(sign_in_pill("reauthorize", "Re-authorize", theme, cx)),
-                    )
-                    // #282: reload のアイコンと auto-refresh のカウントダウンは
-                    // footer へ移った (`status_bar` を見よ)｡ここに残る action は
-                    // session がまだ無いときのサインインだけだ｡
-                    .when(matches!(action, PrimaryAction::SignIn), |row| {
-                        row.child(self.primary_action_control(&label, busy, action, cx))
-                    }),
-            )
     }
 
     /// #43: 選択中の source が複数のとき reload の値段を出す (`×N`) —
@@ -108,86 +58,37 @@ impl TimelineView {
         )
     }
 
-    /// primary action の描画: reload はアイコンで footer に (#282)､まだ
-    /// session が無いときのサインインは header に (#95)｡どちらを描くかは
-    /// 呼び出し側が [`primary_action_state`](Self::primary_action_state) の
-    /// `action` を見て選ぶ — ここは variant ごとの見た目を持つだけだ｡
-    ///
-    /// 二つがまったく似ていないのは意図的だ｡reload はアイコンである —
-    /// この操作は不変で頻繁で､どのアプリも共有する記号で名指されるので､
-    /// 枠付きのボタンに書き下すと毎フレームの隅が timeline より騒がしく
-    /// なった｡言うことのある状態 ("Loading…"､rate limit のカウントダウン)
-    /// のために `label` は今も在るが､それらはすでに `body` と #57 のバナー
-    /// 経由で読み手に届くので､ここではアイコンを暗くする
-    /// だけである｡
-    ///
-    /// サインインは言葉と塗りを保つ: session が無ければウィンドウで他に
-    /// できることは無いし､ラベルの無い字形は､アプリが自分を説明せねば
-    /// ならないまさにその瞬間に謎かけになる｡
+    /// footer の reload アイコン (#282)｡この操作は不変で頻繁で､どのアプリも
+    /// 共有する記号で名指されるので､枠付きのボタンに書き下すと毎フレームの
+    /// 隅が timeline より騒がしくなった｡言うことのある状態 ("Loading…"､
+    /// rate limit のカウントダウン) のために `label` は今も在るが､それらは
+    /// すでに `body` と #57 のバナー経由で読み手に届くので､ここではアイコンを
+    /// 暗くするだけである｡
     fn primary_action_control(
         &self,
         label: &str,
         busy: bool,
-        action: PrimaryAction,
         cx: &mut Context<'_, Self>,
     ) -> AnyElement {
         let theme = self.theme;
-        let on_click = cx.listener(move |this, _event, _window, cx| match action {
-            PrimaryAction::Reload => this.reload(ReloadTrigger::Polling, cx),
-            PrimaryAction::SignIn => this.sign_in(cx),
-        });
-
-        match action {
-            PrimaryAction::Reload => icon_button(
-                "primary-action",
-                assets::RELOAD_ICON,
-                if busy {
-                    theme.text_tertiary
-                } else {
-                    theme.text_muted
-                },
-                if busy {
-                    label.to_string()
-                } else {
-                    "Reload".to_string()
-                },
-                !busy,
-                theme,
-            )
-            .on_click(on_click)
-            .into_any_element(),
-            PrimaryAction::SignIn => div()
-                .addressable("primary-action")
-                .px_2()
-                .py_1()
-                .rounded(theme::RADIUS_CONTROL)
-                .text_size(theme::TEXT_META)
-                .when(busy, |button| {
-                    button
-                        .border_1()
-                        .border_color(rgb(theme.border))
-                        .text_color(rgb(theme.text_tertiary))
-                })
-                .when(!busy, |button| {
-                    // #156: accent の上に control_hover/control_pressed を
-                    // 重ねる｡`hover()` は下地を置き換えるので､合成後の
-                    // 色をその場で `blend` して渡す — パレットに専用の
-                    // hover 色は増やさない｡
-                    button
-                        .bg(rgb(theme.accent))
-                        .text_color(rgb(theme.button_label))
-                        .cursor_pointer()
-                        .hover(|style| {
-                            style.bg(rgb(theme.accent).blend(rgba(theme.control_hover_overlay)))
-                        })
-                        .active(|style| {
-                            style.bg(rgb(theme.accent).blend(rgba(theme.control_pressed_overlay)))
-                        })
-                })
-                .child(label.to_string())
-                .on_click(on_click)
-                .into_any_element(),
-        }
+        icon_button(
+            "primary-action",
+            assets::RELOAD_ICON,
+            if busy {
+                theme.text_tertiary
+            } else {
+                theme.text_muted
+            },
+            if busy {
+                label.to_string()
+            } else {
+                "Reload".to_string()
+            },
+            !busy,
+            theme,
+        )
+        .on_click(cx.listener(|this, _event, _window, cx| this.reload(ReloadTrigger::Polling, cx)))
+        .into_any_element()
     }
 
     /// ウィンドウの下端に沿う帯 (#95)｡
@@ -215,7 +116,7 @@ impl TimelineView {
         cx: &mut Context<'_, Self>,
     ) -> impl IntoElement {
         let theme = self.theme;
-        let (label, busy, action) = self.primary_action_state();
+        let primary_action = self.primary_action_state();
 
         // #162: Posts の resource 数を常に出す; 見積り金額 (USD､常に
         // 設定されている単価から) を隣に添える (`usage_label` の doc を
@@ -325,10 +226,11 @@ impl TimelineView {
             })
             .children(self.reload_cost_control())
             // #282: NotAuthenticated / SigningIn のあいだ session を進める
-            // action は header のサインインだけだ｡ここで reload のアイコンを
-            // 出すと､押しても何も起きないボタンが並んでしまう｡
-            .when(matches!(action, PrimaryAction::Reload), |bar| {
-                bar.child(self.primary_action_control(&label, busy, action, cx))
+            // 手段は body の `sign-in-body` pill だけだ｡ここで reload の
+            // アイコンを出すと､押しても何も起きないボタンが並んでしまう —
+            // `primary_action_state` がその間 `None` を返す理由｡
+            .when_some(primary_action, |bar, (label, busy)| {
+                bar.child(self.primary_action_control(&label, busy, cx))
             })
     }
 }

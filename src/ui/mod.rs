@@ -64,17 +64,14 @@ use render::{
     byline, compose_error_message, format_timestamp, icon_button, like_row, link_row,
     media_arrangement, media_aspect, media_badge, media_column_sizes, media_row_sizes, notice,
     offers_delete, offers_like, offers_quote, offers_reauthorize, offers_reply, offers_repost,
-    open_post_link, quote_card, quote_row, reload_notice_banner, render_thread_chain,
-    reply_banner_label, reply_row, reply_target_label, repost_banner_label, repost_row,
-    session_notice_banner, sign_in_pill, thread_action_label, thread_toggle_row,
+    open_post_link, quote_card, quote_row, reauthorize_banner, reload_notice_banner,
+    render_thread_chain, reply_banner_label, reply_row, reply_target_label, repost_banner_label,
+    repost_row, session_notice_banner, sign_in_pill, thread_action_label, thread_toggle_row,
     toggle_count_color, usage_color, usage_label, with_count,
 };
 use render::{RowCounts, row_counts};
 pub(crate) use startup::Startup;
-use state::{
-    Cooldown, PrimaryAction, ReloadNotice, ReloadTrigger, StartOutcome, ThreadFetchState,
-    TimelineState,
-};
+use state::{Cooldown, ReloadNotice, ReloadTrigger, StartOutcome, ThreadFetchState, TimelineState};
 use toast::Toast;
 
 use crate::menu::{

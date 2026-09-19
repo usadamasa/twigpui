@@ -134,12 +134,15 @@ fn load_older_row(theme: Theme, cx: &mut Context<'_, TimelineView>) -> impl Into
 }
 
 impl TimelineView {
-    /// ヘッダと composer の間に積むバナーの列｡出るものだけが並ぶ｡
+    /// 枠の一番上、composer の前に積むバナーの列｡出るものだけが並ぶ｡
     ///
     /// どれも `body` からは独立に生き残らねばならない — timeline がまったく
     /// 正常に読み込まれた post を描いている間でも出しつづける必要があるからだ｡
     /// それぞれの理由:
     ///
+    /// - #14, #282 scope が足りない｡投稿・いいねを差し出す前に直す道が要る —
+    ///   header に居た頃と条件は変えていない｡先頭に置くのは書き込みの
+    ///   回復こそこの列でいちばん行動を促す用件だからだ｡
     /// - #54 セッションが切れた｡bearer token へ fallback した状態がまさに
     ///   これで､`body` は何も起きなかったかのように描かれる｡
     /// - #239 止まった auto-refresh｡timeline は起動時に読んだ post を出した
@@ -154,14 +157,27 @@ impl TimelineView {
     /// の上に住む｡`reload_notice` の `Outcome` variant (成功した reload の
     /// 報告) も #282 で同じ toast へ移り､ここには `Cooldown` と `Failed`
     /// だけが残る｡
-    fn notice_banners(&self, bg_alpha: u8) -> Vec<AnyElement> {
+    fn notice_banners(&self, bg_alpha: u8, cx: &mut Context<'_, Self>) -> Vec<AnyElement> {
         let theme = self.theme;
-        // 並びは 4 本を 1 つの `Vec` に積んでも変えない｡見ているのは
-        // `the_banners_keep_their_order` だけだ｡
+        // 並びは 5 本を 1 つの `Vec` に積んでも変えない｡見ているのは
+        // `the_banners_keep_their_order` だけだ (reauthorize は条件が
+        // 立たないのでこのテストには映らない)｡
         let session = |name, message: SharedString| {
             session_notice_banner(name, message, theme, bg_alpha).into_any_element()
         };
         let mut banners: Vec<AnyElement> = Vec::new();
+        // #14, #282: header に居た頃と同じ条件｡すでに有効な session が
+        // 自分の格上げ経路を隠してしまわないよう (#31 の教訓)､届くところに
+        // 置いておく｡
+        if offers_reauthorize(
+            self.signed_in_with_oauth,
+            self.oauth_scope.as_deref(),
+            self.sources
+                .iter()
+                .any(|source| matches!(source, cache::TimelineSource::List(_))),
+        ) {
+            banners.push(reauthorize_banner(theme, bg_alpha, cx).into_any_element());
+        }
         banners.extend(
             self.session_notice
                 .clone()
@@ -217,8 +233,7 @@ impl Render for TimelineView {
         // #282: 報告カプセルの寿命も同じ理由で描画の頭に置く —
         // `expire_outcome` の doc を見る｡
         self.expire_outcome(cx);
-        // #214: 枠の文言はウィンドウの幅で選ぶ｡toolbar と footer が別々の
-        // 段にならないよう､ここで 1 回決めて両方へ渡す｡
+        // #214: footer の文言はウィンドウの幅で選ぶ｡`status_bar` へ渡す｡
         let density = countdown::density(window.viewport_size().width);
         // #267: 背景の不透明度も 1 回決めて､本体と両方の帯へ渡す｡行の中に
         // 埋め込まれた post の面 (引用カード､スレッドの行､composer の
@@ -244,7 +259,7 @@ impl Render for TimelineView {
         );
         container
             .on_action(cx.listener(|this, _: &Reload, _window, cx| {
-                // ヘッダーのボタンが通るのと同じ経路｡#10 の間隔と #57 の
+                // footer のボタンが通るのと同じ経路｡#10 の間隔と #57 の
                 // クールダウン報告も含む｡ショートカットが､このアプリが
                 // ループで金を使うのを止めるためにあるスロットルの抜け道に
                 // なってはいけない｡
@@ -362,11 +377,10 @@ impl Render for TimelineView {
             .bg(rgba(theme::with_alpha(theme.bg, bg_alpha)))
             .text_color(rgb(theme.text))
             .text_size(theme::TEXT_BODY)
-            .child(self.header(bg_alpha, cx))
-            .children(self.notice_banners(bg_alpha))
+            .children(self.notice_banners(bg_alpha, cx))
             // #14: 投稿は scope に関わらず OAuth を要求する — `tweet.write`
             // scope が欠けている場合は `submit_post` 自身の中で捕まえる
-            // (直し方はヘッダーの "Re-authorize" ボタン)｡composer ごと隠して
+            // (直し方はバナーの "Re-authorize" ボタン)｡composer ごと隠して
             // なぜ消えたのかを知る手立てを残さない､という形は取らない｡
             .when(self.signed_in_with_oauth, |column| {
                 column.child(self.composer(window, bg_alpha, cx))
@@ -375,8 +389,9 @@ impl Render for TimelineView {
             // #205: sync が今していることは footer の 1 段上｡`when_some` なので
             // 無いときは行そのものが無い｡高さ 0 の要素を置き続けるのではない｡
             .when_some(self.sync_row(bg_alpha), ParentElement::child)
-            // #95: ステータスバー｡ヘッダーがツールバーになった今､累計の
-            // リクエスト数が住んでいるのはここだ｡
+            // #95, #282: ステータスバー｡header は撤去され､累計の
+            // リクエスト数も reload も auto-refresh のカウントダウンも
+            // 住んでいるのはここだけだ｡
             .child(self.status_bar(density, bg_alpha, cx))
             // #205: 手動 sync の確認｡`absolute` なので列の中で場所を取らず
             // ウィンドウ全体を覆う｡最後の子なのは重なり順のため｡

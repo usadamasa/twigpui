@@ -41,8 +41,8 @@ pub(super) use actions::{
     reply_target_label, repost_row, toggle_count_color,
 };
 pub(super) use frame::{
-    compose_error_message, notice, reload_notice_banner, session_notice_banner, sign_in_pill,
-    usage_color, usage_label,
+    compose_error_message, notice, reauthorize_banner, reload_notice_banner, session_notice_banner,
+    sign_in_pill, usage_color, usage_label,
 };
 pub(super) use offers::{
     offers_delete, offers_like, offers_quote, offers_reauthorize, offers_reply, offers_repost,

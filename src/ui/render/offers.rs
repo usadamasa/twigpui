@@ -4,10 +4,11 @@
 use crate::oauth;
 use crate::x_api::TimelineItem;
 
-/// ヘッダが再認可を差し出すべきかどうか (#14): セッションは在るが､記録
-/// された scope に書き込みが要るものが含まれていない､という状態だ｡
+/// バナーの列 (#282) が再認可を差し出すべきかどうか (#14): セッションは
+/// 在るが､記録された scope に書き込みが要るものが含まれていない､という
+/// 状態だ｡
 ///
-/// 主ボタンの "Sign in with X" とは構造上べつものだ — こちらはセッション
+/// body の "Sign in with X" pill とは構造上べつものだ — こちらはセッション
 /// を要求し､あちらはセッションが無いときにだけ現れる — し､読み方も違う
 /// ("Sign in" と "Re-authorize")｡#31 の本当の教訓は「導線を隠すな」で
 /// あって「ボタンは一つでなければならない」ではない｡
@@ -23,7 +24,7 @@ use crate::x_api::TimelineItem;
 /// #167 より前に認可されたセッションは `GET /2/lists/:id/tweets` から
 /// 403 を受け取り､他に手掛かりは無い｡無条件に要求せず `reads_a_list` を
 /// 条件にすれば､list を一度も設定せずその 403 に当たりようのない人の
-/// toolbar からはボタンを外しておける｡
+/// 画面からはボタンを外しておける｡
 pub(in crate::ui) fn offers_reauthorize(
     signed_in_with_oauth: bool,
     oauth_scope: Option<&str>,

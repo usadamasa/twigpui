@@ -93,9 +93,6 @@ pub(crate) const ROW_PAD_Y: Pixels = px(8.0);
 /// [`AVATAR_SIZE`] + [`ROW_PAD_X`] + 行の gap (#95)｡
 pub(crate) const SEPARATOR_INSET: Pixels = px(52.0);
 
-/// ウィンドウ上端のツールバーの帯 (#95)｡
-pub(crate) const TOOLBAR_HEIGHT: Pixels = px(44.0);
-
 /// ウィンドウ下端のステータスバー (#95)｡
 pub(crate) const STATUS_BAR_HEIGHT: Pixels = px(24.0);
 

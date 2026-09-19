@@ -1,9 +1,11 @@
-//! 窓の枠の部品 (#241): バナー､notice､toolbar の segment､usage の行､
+//! 窓の枠の部品 (#241): バナー､notice､footer の segment､usage の行､
 //! composer のエラー行｡
 
 use crate::ui::*;
 
-/// sign-in flow を始める､ヘッダの輪郭だけの pill｡
+/// sign-in flow を始める輪郭だけの pill｡呼び出し側は 2 つ (#282 で
+/// [`reauthorize_banner`] の `reauthorize` が加わった): body の
+/// `sign-in-body` (session がまだ無い) と `reauthorize` (scope が足りない)｡
 ///
 /// #31 (app-only の bearer token からの脱却) と #14 (セッションが
 /// `tweet.write` より前のもの) は同じ場所へ至る別々の理由なので､二つの
@@ -41,9 +43,10 @@ pub(in crate::ui) fn notice(message: impl Into<SharedString>, color: u32) -> imp
 }
 
 /// 常設の「セッションが切れた」バナー (#54): [`TimelineView::body`] の
-/// `state` を鍵にした match へ畳み込むのではなく､ヘッダと他のすべての
-/// 間にある独立した行だ — 眼目は､`body` がまったく正常に読み込まれた
-/// timeline を描いている間 (bearer token への fallback 時) でも出しつづけ
+/// `state` を鍵にした match へ畳み込むのではなく､`body` とは独立した
+/// バナーの列 (`notice_banners`) に住む行だ — 眼目は､`body` がまったく
+/// 正常に読み込まれた timeline を描いている間 (bearer token への fallback
+/// 時) でも出しつづけ
 /// ねばならない点で､それこそ #54 が起票された状態そのものだ｡
 /// `name` は #184 の呼び名だ｡3 人の呼び出し側が同じ姿のバナーを描くので､
 /// テストは「どれが出ているか」を名前でしか見分けられない｡
@@ -100,7 +103,36 @@ pub(in crate::ui) fn reload_notice_banner(
         .child(message)
 }
 
-/// ヘッダの簡潔な usage 要約 (#162､#18 の後継): 数えるのは Posts の
+/// Re-authorize の誘導 (#14, #282) — [`session_notice_banner`] と同じ体裁
+/// のバナーに､短い説明と既存の [`sign_in_pill`] を並べる｡footer は 429px
+/// で余地が無く (#214)､輪郭付きの pill は 24px の帯に入らない｡出す条件は
+/// [`offers_reauthorize`](super::offers_reauthorize) — header に居た頃と
+/// 変えていない｡
+pub(in crate::ui) fn reauthorize_banner(
+    theme: Theme,
+    bg_alpha: u8,
+    cx: &mut Context<'_, TimelineView>,
+) -> impl IntoElement {
+    div()
+        .addressable("banner-reauthorize")
+        .flex()
+        .items_center()
+        .gap_3()
+        .px_4()
+        .py_2()
+        // #267: 本体と同じ不透明度で — 帯だけ不透明に残さない｡
+        .bg(rgba(theme::with_alpha(theme.bg_header, bg_alpha)))
+        .border_b_1()
+        .border_color(rgb(theme.border))
+        .child(
+            div()
+                .text_color(rgb(theme.text_muted))
+                .child("This session is missing a scope twigpui needs — re-authorize to grant it."),
+        )
+        .child(sign_in_pill("reauthorize", "Re-authorize", theme, cx))
+}
+
+/// footer の簡潔な usage 要約 (#162､#18 の後継): 数えるのは Posts の
 /// resource 数で､リクエスト本数ではない — `usage::posts_totals` が既に
 /// Posts kind だけへ絞っているので､ここは受け取った数をそのまま出す｡
 /// 見積り金額 (USD) は常に添える: `post_resource_price` はもう既定値

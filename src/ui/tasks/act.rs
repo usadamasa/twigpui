@@ -356,7 +356,7 @@ impl TimelineView {
     /// あの型は下書きの *テキスト* しか知らず､セッションの OAuth scope は
     /// 知らない｡だから `tweet.write` の欠落は — 403 が確定しているリク
     /// エストを使う前に — `can_submit` ではなく `ComposeState::refuse` で
-    /// ここで断る｡実際の解決策はヘッダの "Re-authorize" ボタンだ
+    /// ここで断る｡実際の解決策はバナーの "Re-authorize" ボタンだ
     /// (`offers_reauthorize` を見よ)｡
     ///
     /// このファイルの他のアクションの多くと違い `window` を取るのは､#38
