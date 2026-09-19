@@ -107,6 +107,12 @@ pub(crate) struct Fixture {
     /// 見た目を撮るにはここで宣言する以外に道が無い｡
     #[serde(default)]
     pub translucent: bool,
+    /// 起動の終わりに compose window も開くか (#282)｡打鍵を合成できない
+    /// `--fixture` の窓では `⌘N` を押せないので､「別ウィンドウで
+    /// `compose_input` を描いても panic しない」ことを確かめる手段はこれ
+    /// しかない｡
+    #[serde(default)]
+    pub composer_open: bool,
 }
 
 /// フィクスチャが言う list sync の状態 (#205)｡
@@ -353,6 +359,22 @@ mod tests {
                 pending.id
             );
         }
+    }
+
+    #[test]
+    fn the_compose_fixture_declares_composer_open() {
+        // #282: `cargo run -- --fixture fixtures/compose.json` が compose
+        // window も開くことを確かめる元になっているフラグ｡`timeline.json`
+        // にはこのフィールドが無く (`#[serde(default)]` で `false`) 読める
+        // ことは別のテストが押さえている — こちらは "compose.json 自身が
+        // 本当に `true` と書いているか" を見る｡
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/compose.json");
+        let fixture = load(&path).expect("fixtures/compose.json must load");
+
+        assert!(
+            fixture.composer_open,
+            "compose.json exists to open the composer window"
+        );
     }
 
     /// #156: `metrics` の JSON キーは `PostMetrics` の `rename` (API の

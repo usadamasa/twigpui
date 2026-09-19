@@ -17,10 +17,8 @@ gpui::actions!(
         /// に割り当ててある — どのアプリも共有するリロードの所作であり､誰かが
         /// 誤って叩く鍵ではない｡
         Reload,
-        /// composer へフォーカスを移す (#58)｡
-        FocusComposer,
-        /// composer からフォーカスを外す (#58)｡下書きには触れない｡
-        BlurComposer,
+        /// compose window を開く (#58, #282)｡既に開いていれば前面へ出す｡
+        OpenComposer,
         /// アプリケーションを終了する (#99)｡gpui は独自の quit アクションを
         /// 持たず､それが無いとアプリメニューには `cmd-q` を吊るす先が無い —
         /// twigpui が Dock からしか終了できなくなっていたのはそのためだ｡
@@ -140,8 +138,8 @@ struct Shortcut {
     /// `const` は `impl Action` を持てないが､何も捕捉しないクロージャは関数
     /// ポインタへ coerce する — 使うたびにではなくここでアクションを名指す
     /// にはそれで足りる｡以前は `init` と [`menus`] がショートカットと
-    /// アクションを手で対にしており､`menu_item(&RELOAD, FocusComposer)` は
-    /// Reload というラベルの下で `cmd-n` が composer にフォーカスするメニュー
+    /// アクションを手で対にしており､`menu_item(&RELOAD, OpenComposer)` は
+    /// Reload というラベルの下で `cmd-n` が compose window を開くメニュー
     /// 項目として型検査を通ってしまった｡
     bind: fn(&'static str, Option<&'static str>) -> gpui::KeyBinding,
     /// このショートカットのメニュー項目を､[`Shortcut::bind`] と同じアクション
@@ -164,23 +162,13 @@ const RELOAD: Shortcut = Shortcut {
     menu_label: Some("Reload"),
 };
 
-/// composer へフォーカスを移す｡
-const FOCUS_COMPOSER: Shortcut = Shortcut {
+/// compose window を開く (#282)｡既に開いていれば前面へ出す｡
+const OPEN_COMPOSER: Shortcut = Shortcut {
     keystroke: "cmd-n",
     context: Some(KEY_CONTEXT),
-    bind: |keystroke, context| gpui::KeyBinding::new(keystroke, FocusComposer, context),
-    item: |label| gpui::MenuItem::action(label, FocusComposer),
+    bind: |keystroke, context| gpui::KeyBinding::new(keystroke, OpenComposer, context),
+    item: |label| gpui::MenuItem::action(label, OpenComposer),
     menu_label: Some("New Post"),
-};
-
-/// composer から出る｡メニューバーには無い: 「フォーカスを戻す」は所作で
-/// あって､誰かがメニューに探しに行くコマンドではない｡
-const BLUR_COMPOSER: Shortcut = Shortcut {
-    keystroke: "escape",
-    context: Some(KEY_CONTEXT),
-    bind: |keystroke, context| gpui::KeyBinding::new(keystroke, BlurComposer, context),
-    item: |label| gpui::MenuItem::action(label, BlurComposer),
-    menu_label: None,
 };
 
 /// 終了する (#99)｡キーコンテキスト無しで登録される唯一のバインドで､ヘッダが
@@ -293,8 +281,8 @@ const SELECT_NEXT: Shortcut = Shortcut {
     context: Some(BROWSE_CONTEXT),
     bind: |keystroke, context| gpui::KeyBinding::new(keystroke, SelectNext, context),
     item: |label| gpui::MenuItem::action(label, SelectNext),
-    // メニューバーには出さない｡[`BLUR_COMPOSER`] と同じ理由で､一覧を読み
-    // 進める所作はメニューに探しに行くコマンドではない｡
+    // メニューバーには出さない: 一覧を読み進める所作はメニューに探しに
+    // 行くコマンドではない｡
     menu_label: None,
 };
 
@@ -330,15 +318,15 @@ const REPOST_SELECTED: Shortcut = Shortcut {
     menu_label: None,
 };
 
-/// composer へ移る裸の `n` (#148)｡[`FOCUS_COMPOSER`] と同じアクションで､
-/// 鍵とコンテキストだけが違う — メニュー項目は `cmd-n` のほう 1 つだけで
-/// よく (macOS が key equivalent に描けるのはどちらか一方だ)､だから
-/// `menu_label` は `None`｡
-const FOCUS_COMPOSER_BARE: Shortcut = Shortcut {
+/// compose window を開く裸の `n` (#148, #282)｡[`OPEN_COMPOSER`] と同じ
+/// アクションで､鍵とコンテキストだけが違う — メニュー項目は `cmd-n` の
+/// ほう 1 つだけでよく (macOS が key equivalent に描けるのはどちらか一方だ)､
+/// だから `menu_label` は `None`｡
+const OPEN_COMPOSER_BARE: Shortcut = Shortcut {
     keystroke: "n",
     context: Some(BROWSE_CONTEXT),
-    bind: |keystroke, context| gpui::KeyBinding::new(keystroke, FocusComposer, context),
-    item: |label| gpui::MenuItem::action(label, FocusComposer),
+    bind: |keystroke, context| gpui::KeyBinding::new(keystroke, OpenComposer, context),
+    item: |label| gpui::MenuItem::action(label, OpenComposer),
     menu_label: None,
 };
 
@@ -359,10 +347,9 @@ const FOCUS_COMPOSER_BARE: Shortcut = Shortcut {
 /// `SCROLL_TO_TOP` をこの一覧以外のあらゆる場所へ足した後､三つがここで bind
 /// されないまま座っていたのはそのためだ｡今それを捕まえるテストが
 /// `every_menu_item_has_a_binding` である｡
-const ALL_SHORTCUTS: [&Shortcut; 16] = [
+const ALL_SHORTCUTS: [&Shortcut; 15] = [
     &RELOAD,
-    &FOCUS_COMPOSER,
-    &BLUR_COMPOSER,
+    &OPEN_COMPOSER,
     &QUIT,
     &MINIMIZE,
     &CLOSE_WINDOW,
@@ -375,7 +362,7 @@ const ALL_SHORTCUTS: [&Shortcut; 16] = [
     &SELECT_PREVIOUS,
     &LIKE_SELECTED,
     &REPOST_SELECTED,
-    &FOCUS_COMPOSER_BARE,
+    &OPEN_COMPOSER_BARE,
 ];
 
 /// #58 のキーバインドを登録する｡起動時に一度､`gpui_component::init` (こちら
@@ -439,7 +426,7 @@ pub(crate) fn menus(sources: Vec<gpui::MenuItem>) -> Vec<gpui::Menu> {
         },
         gpui::Menu {
             name: "File".into(),
-            items: FOCUS_COMPOSER.menu_item().into_iter().collect(),
+            items: OPEN_COMPOSER.menu_item().into_iter().collect(),
         },
         // #282: どの timeline を表示するかのトップレベルのメニュー — サブ
         // メニューにしなかった理由は `PLAN.md`/設計メモを見よ (主たる
@@ -557,6 +544,17 @@ mod tests {
             None,
             "a bare key never fires while an input holds focus"
         );
+    }
+
+    #[test]
+    fn new_post_opens_a_window() {
+        // #282: フォーカスを移すのではなくウィンドウを開くよう意味は
+        // 変わったが、メニュー項目のラベルと `cmd-n` の鍵はそのまま｡
+        let shortcut = ALL_SHORTCUTS
+            .iter()
+            .find(|shortcut| shortcut.keystroke == "cmd-n")
+            .expect("cmd-n has to stay bound");
+        assert_eq!(shortcut.menu_label, Some("New Post"));
     }
 
     #[test]

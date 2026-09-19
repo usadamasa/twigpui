@@ -3,9 +3,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use gpui::{
-    AnyElement, Context, Div, Entity, FocusHandle, Focusable as _, FontWeight, ObjectFit,
-    ScrollHandle, SharedString, Stateful, Subscription, Task, Window, div, img, prelude::*, px,
-    rgb, rgba, svg,
+    AnyElement, Context, Div, Entity, FocusHandle, FontWeight, ObjectFit, ScrollHandle,
+    SharedString, Stateful, Subscription, Task, Window, div, img, prelude::*, px, rgb, rgba, svg,
 };
 use gpui_component::input::{Input, InputEvent, InputState};
 
@@ -23,6 +22,8 @@ use crate::log;
 mod action_row;
 mod auto_refresh;
 mod chrome;
+// #282: `main` がキーバインドを登録するので､ここだけ crate へ開く｡
+pub(crate) mod compose_window;
 mod composer;
 mod countdown;
 mod fade;
@@ -75,9 +76,9 @@ use state::{Cooldown, ReloadNotice, ReloadTrigger, StartOutcome, ThreadFetchStat
 use toast::Toast;
 
 use crate::menu::{
-    BlurComposer, CloseWindow, FocusComposer, KEY_CONTEXT, LikeSelected, LoadOwnedLists, Minimize,
-    Reload, RepostSelected, ScrollToTop, SelectNext, SelectPrevious, ShowAbout, ShowNewPosts,
-    SyncList, ToggleFloatOnTop, ToggleFollowNewPosts, ToggleSource, ToggleTranslucent,
+    CloseWindow, KEY_CONTEXT, LikeSelected, LoadOwnedLists, Minimize, OpenComposer, Reload,
+    RepostSelected, ScrollToTop, SelectNext, SelectPrevious, ShowAbout, ShowNewPosts, SyncList,
+    ToggleFloatOnTop, ToggleFollowNewPosts, ToggleSource, ToggleTranslucent,
 };
 use crate::oauth;
 use crate::paths::Paths;
@@ -219,13 +220,20 @@ pub(crate) struct TimelineView {
     /// `text.clear()` しても､ウィジェットは古い下書きを表示したままに
     /// なるからである｡
     compose_input: Entity<InputState>,
+    /// 開いている compose window があればその handle (#282)｡`⌘N` は新しく
+    /// 開く代わりにこれを前面へ出す｡窓を閉じても `None` へは戻さない —
+    /// 次に開こうとしたとき `WindowHandle::update` が失敗することが
+    /// 「もう無い」の合図になる ([`compose_window::open`] を見よ)｡
+    compose_window: Option<gpui::WindowHandle<gpui_component::Root>>,
     /// `compose_input` の change subscription を生かしておく — drop すると
     /// 上の `compose` が二度と写されなくなるのに､何も言わない｡`fetch` や
     /// この struct の他の `Task` 保持フィールドと同じ取り消し/生存維持の
-    /// 慣習で､対象が `Subscription` に変わっただけである; 先頭の
-    /// アンダースコア (決して読まず､保持するだけ) は gpui-component が自身の
-    /// search-input subscription でこの同じパターンに付けている名前に倣う｡
-    _compose_input_subscription: Subscription,
+    /// 慣習で､対象が `Subscription` に変わっただけである｡先頭にアンダー
+    /// スコアを付けない (#282): `compose_input` を compose window ごとに
+    /// 作り直す ([`Self::rebind_compose_input`]) たびにこれも差し替える
+    /// ので、`clippy::used_underscore_binding` が二度目の代入を「一度
+    /// 名指したら二度と触れないはず」の破りとして弾く｡
+    compose_input_subscription: Subscription,
     /// これを保持している間は進行中の `POST /2/tweets` が生きつづける｡
     /// `fetch` の drop で取り消す契約に倣っている｡実際には submit の
     /// サイクル一回につき一度しか代入されない: 一つ未完了の間ずっと
@@ -2009,76 +2017,43 @@ mod tests {
         .unwrap();
     }
 
-    /// #118: コンポーザーから抜けるときは､フォーカスを落とすのではなく
-    /// 返さなければならない｡
-    ///
-    /// `window.blur()` はウィンドウのフォーカス経路を空のまま残し､何かが
-    /// クリックされるまでショートカットとメニューバーの半分を無効にして
-    /// いた — 起動時のものと同じ失敗に､`esc` を押して辿り着く｡
+    /// #14, #282: compose window を閉じても下書きは残る｡composer が別
+    /// ウィンドウへ移った後もこの約束が保たれることの門｡`compose_window`
+    /// 自身のテスト (`cmd_w_closes_the_composer` 等) は「窓が閉じるか」を
+    /// 見ているが、こちらは「閉じた *後* に下書きが本当に生きているか」を
+    /// `TimelineView` 側から見る｡
     #[gpui::test]
-    fn leaving_the_composer_returns_focus_to_the_timeline(cx: &mut gpui::TestAppContext) {
-        use gpui::AppContext as _;
+    fn closing_the_composer_keeps_the_draft(cx: &mut gpui::TestAppContext) {
+        cx.update(super::compose_window::init);
+        let (_window, timeline) = fixture_window(cx, fixture_with(&["1"], &[]));
 
-        cx.update(gpui_component::init);
-        cx.update(crate::menu::init);
-
-        let timeline_slot = std::rc::Rc::new(std::cell::RefCell::new(None));
-        let window = {
-            let slot = timeline_slot.clone();
-            cx.add_window(move |window, cx| {
-                let timeline = cx.new(|cx| {
-                    let mut view = super::TimelineView::new(
-                        smoke_config(),
-                        smoke_paths(),
-                        Startup::Live,
-                        window,
-                        cx,
-                    );
-                    view.signed_in_with_oauth = true;
-                    view
-                });
-                *slot.borrow_mut() = Some(timeline.clone());
-                gpui_component::Root::new(timeline, window, cx)
-            })
-        };
-        let timeline = timeline_slot.borrow().clone().unwrap();
+        cx.update(|cx| {
+            timeline.update(cx, |view, _cx| view.compose.set_text("a draft".to_string()));
+            super::compose_window::open(&timeline, cx);
+        });
         cx.run_until_parked();
 
-        cx.update_window(window.into(), |_, window, cx| {
-            timeline.update(cx, |view, cx| {
-                view.compose_input
-                    .update(cx, |input, cx| input.focus(window, cx));
-            });
-        })
-        .unwrap();
+        let compose_window = cx
+            .update(|cx| timeline.read(cx).compose_window)
+            .expect("the composer window opened");
+        let mut composer = gpui::VisualTestContext::from_window(compose_window.into(), cx);
+        draw_until_parked(&mut composer, cx);
+
+        composer.simulate_keystrokes("escape");
         cx.run_until_parked();
 
-        cx.update_window(window.into(), |_, window, cx| {
-            let _ = window.draw(cx);
-            timeline.update(cx, |view, _cx| {
-                assert!(
-                    !view.focus_handle.is_focused(window),
-                    "the composer should hold focus once focused"
-                );
-            });
-            // `window.focus(..)` を直接ではなくアクション自体を使う: 検査して
-            // いるのはハンドラのほうで､その中身をテストの中で再現したら
-            // ハンドラが何をしようと通ってしまう｡
-            window.dispatch_action(Box::new(crate::menu::BlurComposer), cx);
-        })
-        .unwrap();
-        cx.run_until_parked();
-
-        cx.update_window(window.into(), |_, window, cx| {
-            let _ = window.draw(cx);
-            timeline.update(cx, |view, _cx| {
-                assert!(
-                    view.focus_handle.is_focused(window),
-                    "focus must return to the timeline, not be dropped"
-                );
-            });
-        })
-        .unwrap();
+        assert_eq!(
+            cx.update(|cx| cx.windows().len()),
+            1,
+            "escape has to close the composer window, leaving only the timeline"
+        );
+        cx.update(|cx| {
+            assert_eq!(
+                timeline.read(cx).compose.text(),
+                "a draft",
+                "closing the composer must never touch the draft (#14)"
+            );
+        });
     }
 
     /// ウィンドウの smoke テストが対象にする `Config`｡
@@ -2302,6 +2277,7 @@ mod tests {
             reposted: Vec::new(),
             selected: None,
             translucent: false,
+            composer_open: false,
         }
     }
 
@@ -2412,92 +2388,6 @@ mod tests {
             TimelineState::Loaded(items) => items.iter().map(|item| item.id.clone()).collect(),
             other => panic!("expected a loaded timeline, got {other:?}"),
         }
-    }
-
-    /// #153: composer は使われるまで 1 行に畳まれている｡
-    ///
-    /// 空でフォーカスも無いときだけ畳む｡クリック (フォーカス) すれば広がり､
-    /// 下書きがあればフォーカスを外しても広がったまま — #14 の「下書きを
-    /// 失わない」は､下書きが目に入りつづけることも含む｡空に戻して
-    /// フォーカスを外せば､また畳まれる｡
-    ///
-    /// 「1 行」の絶対値は入力ウィジェット (`gpui-component`) の行の高さと
-    /// 余白で決まるので直値では書かず､avatar の 32px より低いことだけを
-    /// 要求する｡広がった状態はそれより確実に高い (2 行 + 余白)｡
-    #[gpui::test]
-    fn the_composer_folds_to_one_line_until_it_is_used(cx: &mut gpui::TestAppContext) {
-        let (window, timeline) = fixture_window(cx, fixture_with(&["1"], &[]));
-        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
-
-        let height_after_draw = |visual: &mut gpui::VisualTestContext| {
-            visual.update(|window, cx| {
-                let _ = window.draw(cx);
-            });
-            visual
-                .debug_bounds("compose-input")
-                .expect("the composer has to be laid out")
-                .size
-                .height
-        };
-
-        // `Pixels` の四則は `arithmetic_side_effects` に弾かれるので f32 で
-        // 比べる (`rust-lint-gauntlet`)｡
-        let folded = f32::from(height_after_draw(&mut visual));
-        assert!(
-            folded < 40.0,
-            "empty and unfocused, the composer is one line: {folded}px"
-        );
-
-        // クリックの代わりにフォーカスを当てる: 広がる条件はフォーカスで､
-        // クリックはそれを起こす手段の一つにすぎない｡
-        visual.update(|window, cx| {
-            timeline.update(cx, |view, cx| {
-                view.compose_input
-                    .update(cx, |input, cx| input.focus(window, cx));
-            });
-        });
-        let focused = f32::from(height_after_draw(&mut visual));
-        assert!(
-            focused > folded + 12.0,
-            "focused, the composer opens up: {focused}px vs {folded}px"
-        );
-
-        // 下書きを残してフォーカスを外す｡
-        visual.update(|window, cx| {
-            timeline.update(cx, |view, cx| {
-                view.compose_input
-                    .update(cx, |input, cx| input.set_value("a draft", window, cx));
-            });
-            window.dispatch_action(Box::new(crate::menu::BlurComposer), cx);
-        });
-        let drafted = f32::from(height_after_draw(&mut visual));
-        assert!(
-            drafted > folded + 12.0,
-            "a draft keeps the composer open even unfocused: {drafted}px vs {folded}px"
-        );
-        cx.update(|cx| {
-            timeline.update(cx, |view, _cx| {
-                assert_eq!(
-                    view.compose.text(),
-                    "a draft",
-                    "folding never touches the draft"
-                );
-            });
-        });
-
-        // 空に戻してフォーカスを外せば畳まれる｡
-        visual.update(|window, cx| {
-            timeline.update(cx, |view, cx| {
-                view.compose_input
-                    .update(cx, |input, cx| input.set_value("", window, cx));
-            });
-            window.dispatch_action(Box::new(crate::menu::BlurComposer), cx);
-        });
-        let refolded = f32::from(height_after_draw(&mut visual));
-        assert!(
-            (refolded - folded).abs() < 1.0,
-            "emptied and unfocused, it folds again: {refolded}px vs {folded}px"
-        );
     }
 
     /// `name` の要素が置かれた bounds｡置かれていなければ panic — 「無い」を
@@ -5038,9 +4928,10 @@ mod tests {
 
     /// #282: header 撤去の最終形｡バナーも composer も無いとき､timeline の
     /// 上端はウィンドウの上端に触れる — toolbar が高さぶん押し下げていた
-    /// 分がもう無い｡composer は `signed_in_with_oauth` を直接落として消す
-    /// (この PR ではまだインラインに居るので､`Startup::Fixture` 経由では
-    /// 必ず true になる — `show_fixture` の doc を見よ)｡
+    /// 分がもう無い｡composer は別ウィンドウへ移ったので (`compose_window`)
+    /// もう timeline の列には残っておらず､`signed_in_with_oauth` を落とす
+    /// 必要は無い — それを確かめるのは下の
+    /// [`the_timeline_window_no_longer_carries_the_composer`]｡
     #[gpui::test]
     fn the_window_has_no_toolbar(cx: &mut gpui::TestAppContext) {
         let (mut visual, timeline) = drawn(cx, fixture_with(&["1"], &[]));
@@ -5061,6 +4952,41 @@ mod tests {
             f32::from(timeline_bounds.top()) < 1.0,
             "the timeline should start at the window's top edge, not below a toolbar: {:?}",
             timeline_bounds.top()
+        );
+    }
+
+    /// #282: composer が別ウィンドウへ移った後の門｡`signed_in_with_oauth`
+    /// を立てたまま (fixture は常にそうする — `show_fixture` を見よ) でも
+    /// timeline の列に composer が居残っていない: 上端がウィンドウの上端に
+    /// 触れる｡以前はここに `.when(self.signed_in_with_oauth, ...)` で
+    /// composer が挟まり､`the_window_has_no_toolbar` が oauth を偽で落とす
+    /// ことでしか同じ形を作れなかった｡
+    #[gpui::test]
+    fn the_timeline_window_no_longer_carries_the_composer(cx: &mut gpui::TestAppContext) {
+        let (mut visual, timeline) = drawn(cx, fixture_with(&["1"], &[]));
+        visual.update(|_window, cx| {
+            timeline.update(cx, |view, _cx| {
+                assert!(
+                    view.signed_in_with_oauth,
+                    "the fixture signs in, so this is the case that used to show the composer"
+                );
+            });
+        });
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let timeline_bounds = visual
+            .debug_bounds("timeline")
+            .expect("the timeline is always laid out");
+        assert!(
+            f32::from(timeline_bounds.top()) < 1.0,
+            "the composer must not sit inline above the timeline any more: {:?}",
+            timeline_bounds.top()
+        );
+        assert!(
+            visual.debug_bounds("compose-input").is_none(),
+            "the composer input must not be laid out in the timeline window"
         );
     }
 

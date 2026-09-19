@@ -1,6 +1,7 @@
 //! ウィンドウの組み立て (#241): timeline の本体 (`body`) と､枠・バナー・
-//! composer・本体・sync の行・status bar を縦に積む [`Render`] の impl｡
-//! 枠そのものは `chrome.rs`､1 行の post は `post_row.rs`｡
+//! 本体・sync の行・status bar を縦に積む [`Render`] の impl｡composer は
+//! #282 で別ウィンドウへ移り､ここには残らない｡枠そのものは `chrome.rs`､
+//! 1 行の post は `post_row.rs`｡
 //!
 //! `ui/mod.rs` にあったものをそのまま移した｡
 
@@ -270,20 +271,12 @@ impl Render for TimelineView {
                 // 始められない状態ではその理由を出す (`ask_to_sync`)｡
                 this.ask_to_sync(cx);
             }))
-            .on_action(cx.listener(|this, _: &FocusComposer, window, cx| {
-                this.compose_input
-                    .update(cx, |input, cx| input.focus(window, cx));
-            }))
-            .on_action(cx.listener(|this, _: &BlurComposer, window, _cx| {
-                // フォーカスだけ｡下書きは打ったとおりに残す｡誤爆した `esc` で
-                // 失うと取り返しがつかないし､#14 はすでに下書きを絶対に
-                // 失わないことを composer の主たる約束としている｡
-                //
-                // `window.blur()` で落とすのではなく timeline へ戻す (#118)｡
-                // フォーカスパスが空になると `Timeline` コンテキストへ手が
-                // 届かなくなり､次のクリックまで `esc` がショートカットと
-                // メニューバーの半分を無効にしていた｡
-                window.focus(&this.focus_handle);
+            .on_action(cx.listener(|_this, _: &OpenComposer, _window, cx| {
+                // #282: 開くのは別ウィンドウ｡`TimelineView` は既に lease に
+                // 出ているので `compose_window::open` の `cx.defer` に任せる
+                // (`compose_window::open` の doc を見よ)｡
+                let timeline = cx.entity();
+                compose_window::open(&timeline, cx);
             }))
             .on_action(cx.listener(|_this, _: &ShowAbout, window, cx| {
                 // レシーバは待たずに落とす｡ボタンは 1 つしかないので､どれが
@@ -378,13 +371,6 @@ impl Render for TimelineView {
             .text_color(rgb(theme.text))
             .text_size(theme::TEXT_BODY)
             .children(self.notice_banners(bg_alpha, cx))
-            // #14: 投稿は scope に関わらず OAuth を要求する — `tweet.write`
-            // scope が欠けている場合は `submit_post` 自身の中で捕まえる
-            // (直し方はバナーの "Re-authorize" ボタン)｡composer ごと隠して
-            // なぜ消えたのかを知る手立てを残さない､という形は取らない｡
-            .when(self.signed_in_with_oauth, |column| {
-                column.child(self.composer(window, bg_alpha, cx))
-            })
             .child(self.body(bg_alpha, cx))
             // #205: sync が今していることは footer の 1 段上｡`when_some` なので
             // 無いときは行そのものが無い｡高さ 0 の要素を置き続けるのではない｡

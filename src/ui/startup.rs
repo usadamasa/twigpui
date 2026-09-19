@@ -138,7 +138,8 @@ impl TimelineView {
             thread_fetches: HashMap::new(),
             compose: ComposeState::new(),
             compose_input,
-            _compose_input_subscription: compose_input_subscription,
+            compose_window: None,
+            compose_input_subscription,
             submit_task: None,
             oauth_scope: None,
             session_notice: None,
@@ -233,6 +234,21 @@ impl TimelineView {
         });
         let subscription = cx.subscribe(&input, Self::on_compose_input_event);
         (input, subscription)
+    }
+
+    /// compose window を開く直前に呼ぶ (#282)｡`InputState::new` はカーソル
+    /// の点滅と blur の購読を渡された window へ束ねる (gpui-component の
+    /// 実装を見よ) ので､timeline の window で作った `compose_input` を
+    /// 別の window で描いても点滅も blur も届かない｡だから開くたびに
+    /// 新しい window へ束ね直す — 下書きの本文は `compose.text()` が正本
+    /// なので (`compose_input` フィールドの doc を見よ)､作り直しても失う
+    /// ものは無い｡
+    pub(super) fn rebind_compose_input(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        let (input, subscription) = Self::compose_input(window, cx);
+        let text = self.compose.text().to_string();
+        input.update(cx, |state, cx| state.set_value(text, window, cx));
+        self.compose_input = input;
+        self.compose_input_subscription = subscription;
     }
 
     /// ウィンドウの矩形 (#211) とフォーカスの出入り (#267) の購読｡
@@ -509,6 +525,14 @@ impl TimelineView {
         // fetch せずそのまま返す｡ネットワークへ出ないので､オフラインでも
         // 起動のたびに同じ画面になり､WARN も出ない｡
         self.refresh_images(cx);
+        // #282: `--fixture` の窓は打鍵を合成できないので、compose window が
+        // 別ウィンドウでも panic せず描けることを撮って確かめる手段が
+        // これしかない｡`compose_window::open` 自身が `cx.defer` するので、
+        // まだ構築の途中のここから呼んでも安全 (`open` の doc を見よ)｡
+        if fixture.composer_open {
+            let this = cx.entity();
+            compose_window::open(&this, cx);
+        }
         cx.notify();
     }
 }

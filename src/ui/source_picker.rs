@@ -794,6 +794,7 @@ mod tests {
             reposted: Vec::new(),
             selected: None,
             translucent: false,
+            composer_open: false,
         };
         assert_eq!(
             saved_selection_for(&Startup::Fixture(Box::new(fixture)), &paths),

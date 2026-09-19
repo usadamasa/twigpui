@@ -230,19 +230,20 @@ fn main() {
         });
 }
 
-/// ウィンドウが一枚も存在しないうちに登録するキーバインド (#38, #58, #188)｡
+/// ウィンドウが一枚も存在しないうちに登録するキーバインド (#38, #58, #188, #282)｡
 ///
 /// #38: gpui-component のグローバルなキーバインド､テーマ､その他 App 単位の
 /// 状態を登録する (それ自身の `init` の doc を見よ) — そのウィジェット
 /// (composer のテキスト入力) を構築できるようになる前に､一度だけ必要である｡
 ///
-/// #58 と #188 は同じ理由でその隣に並ぶ: twigpui 自身のキーバインドも､
-/// 写真の viewer のキーバインドも､それらへ dispatch するウィンドウが存在
-/// する前に一度だけ登録する｡
+/// #58/#188/#282 は同じ理由でその隣に並ぶ: twigpui 自身のキーバインドも､
+/// 写真の viewer や compose window のキーバインドも､それらへ dispatch する
+/// ウィンドウが存在する前に一度だけ登録する｡
 fn register_key_bindings(cx: &mut gpui::App) {
     gpui_component::init(cx);
     menu::init(cx);
     ui::image_viewer::init(cx);
+    ui::compose_window::init(cx);
 }
 
 /// ログの 1 行目 (#231)｡`starting twigpui 0.1.0 (abc1234)`｡
