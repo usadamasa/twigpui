@@ -16,7 +16,7 @@
 //! 子は `pub(in crate::ui)` で書き､ここで再輸出するので､`ui` からの
 //! 見え方は `render::xxx` のまま変わらない｡
 //!
-//! - [`frame`]: 窓の枠 — バナー､notice､toolbar の segment､usage の行､
+//! - [`frame`]: 窓の枠 — バナー､notice､footer の segment､usage の行､
 //!   composer のエラー行｡
 //! - [`offers`]: どの操作を差し出すかの述語 — `offers_*` と `is_own_post`｡
 //!   純粋関数で､テストはすべてここの対象｡

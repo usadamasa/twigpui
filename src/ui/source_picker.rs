@@ -262,9 +262,9 @@ pub(super) fn segment_label(list: &ListSummary) -> String {
     }
 }
 
-/// ツールバーが list を取得するボタンを出すかどうか: 金を使うための
-/// client と､問い合わせる id の両方があるときだけだ｡fixture の
-/// ウィンドウはどちらも持たない｡それが fixture を無課金に保っている｡
+/// メニューバーの `Sources` が list を取得する項目を出すかどうか: 金を
+/// 使うための client と､問い合わせる id の両方があるときだけだ｡fixture
+/// のウィンドウはどちらも持たない｡それが fixture を無課金に保っている｡
 pub(super) fn offers_list_fetch(has_client: bool, user_known: bool) -> bool {
     has_client && user_known
 }

@@ -52,7 +52,7 @@ use super::list_sync::SyncStatus;
 use super::{Context, Duration, TimelineView, oauth};
 use crate::activity::Activity;
 
-/// 枠 (toolbar と footer) の文言をどれだけ詰めるか (#214)｡
+/// footer の文言をどれだけ詰めるか (#214)｡
 ///
 /// ウィンドウの幅から [`density`] が決め､描画のたびに読み直すので､
 /// ウィンドウを引き伸ばせば文言も戻る｡2 段しか無いのは､3 段目に
@@ -104,7 +104,7 @@ pub(super) fn countdown(remaining: i64) -> String {
     }
 }
 
-/// toolbar の auto-refresh の segment が言うこと｡ループが無ければ `None`｡
+/// footer の auto-refresh の segment が言うこと｡ループが無ければ `None`｡
 ///
 /// `situation` はループが直近の起床で写したもので､`last_reload_at` だけ
 /// は view の今の値で上書きしてから期限を出す｡手動の reload は次の
@@ -166,7 +166,7 @@ pub(super) fn sync_deadline(status: &SyncStatus) -> Option<i64> {
 /// footer の sync の segment が言うこと｡#248 までは "Sync list…" の入口の
 /// すぐ隣に座っていたので主語を省けた ("Sync list… next in 5h 12m")｡入口が
 /// メニューへ移って単独になったので､何のカウントダウンかは自分で言う｡
-/// `Compact` では "Next" を落とす — toolbar の "Auto-refresh in 4m" が
+/// `Compact` では "Next" を落とす — 同じ footer の "Auto-refresh in 4m" が
 /// "in 4m" になるのと同じ段｡
 pub(super) fn sync_next_label(until: i64, now: i64, density: Density) -> String {
     let remaining = countdown(until.saturating_sub(now));
@@ -186,8 +186,8 @@ pub(super) fn kept_label(kept: usize, cap: usize, density: Density) -> String {
 }
 
 impl TimelineView {
-    /// ウィンドウが今出す 2 つの文言 (#214): toolbar の auto-refresh と
-    /// footer の list sync｡出すものが無ければそれぞれ `None`｡
+    /// footer が今出す 2 つの文言 (#214): auto-refresh と list sync｡
+    /// 出すものが無ければそれぞれ `None`｡
     pub(super) fn countdown_labels(
         &self,
         now: i64,
