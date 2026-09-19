@@ -19,7 +19,7 @@
 
 use gpui::{
     App, Bounds, Context, Entity, FocusHandle, Subscription, TitlebarOptions, WeakEntity, Window,
-    WindowBounds, WindowOptions, div, prelude::*, px, size,
+    WindowBounds, WindowOptions, div, prelude::*, px, rgb, size,
 };
 
 use super::TimelineView;
@@ -35,7 +35,7 @@ const KEY_CONTEXT: &str = "Composer";
 /// 開く大きさ｡本文 280 字とカウンタ､Post ボタンが収まればよいので
 /// `image_viewer` のような画面依存の計算はしない｡
 const WIDTH: f32 = 420.0;
-const HEIGHT: f32 = 280.0;
+const HEIGHT: f32 = 200.0;
 
 /// compose window のキーバインドを登録する (#282)｡`main` が `menu::init` /
 /// `image_viewer::init` の隣で一度だけ呼ぶ｡
@@ -165,6 +165,7 @@ impl Render for ComposeWindow {
             // 後で窓を閉じるので､それまでの空の 1 フレームでしかない｡
             return div().into_any_element();
         };
+        let theme = timeline.read(cx).theme;
         div()
             .key_context(KEY_CONTEXT)
             .track_focus(&self.focus_handle)
@@ -172,6 +173,10 @@ impl Render for ComposeWindow {
                 window.remove_window();
             }))
             .size_full()
+            // timeline の窓と同じ下地｡塗らないと窓が真っ黒になる｡
+            .bg(rgb(theme.bg))
+            .text_color(rgb(theme.text))
+            .text_size(crate::theme::TEXT_BODY)
             // 255: compose window は常に不透明 (#267 の透過は timeline の
             // ウィンドウだけの話)｡`into_any_element` で外へ持ち出せる形に
             // 変える — `composer()` の戻り値は `view`/`cx` の借用を
