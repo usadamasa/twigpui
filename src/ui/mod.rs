@@ -1822,7 +1822,7 @@ mod tests {
     #[test]
     fn usage_label_shows_posts_counts_with_an_estimated_amount() {
         assert_eq!(
-            usage_label(4, 40, 2.5),
+            usage_label(4, 40, 2.5, countdown::Density::Wide),
             "Posts today: 4 (~$10.00) · total: 40"
         );
     }
@@ -1830,8 +1830,19 @@ mod tests {
     #[test]
     fn usage_label_shows_zero_counts_plainly() {
         assert_eq!(
-            usage_label(0, 0, 0.005),
+            usage_label(0, 0, 0.005, countdown::Density::Wide),
             "Posts today: 0 (~$0.00) · total: 0"
+        );
+    }
+
+    /// #268: 429px で footer が reload のカウントダウンとアイコンも抱える
+    /// ようになり､usage の行が最初に譲る区画になった｡`Compact` では
+    /// 主語を落とす — 数字と色 (`usage_color`) だけで予算の意味は運べる｡
+    #[test]
+    fn the_usage_line_drops_its_subjects_when_the_window_is_narrow() {
+        assert_eq!(
+            usage_label(4, 40, 2.5, countdown::Density::Compact),
+            "4 (~$10.00) · 40"
         );
     }
 
@@ -4614,7 +4625,7 @@ mod tests {
 
         let countdown = visual
             .debug_bounds("auto-refresh-countdown")
-            .expect("a counting loop has to reach the toolbar");
+            .expect("a counting loop has to reach the footer");
         let reload = visual
             .debug_bounds("primary-action")
             .expect("the reload icon is always shown");
@@ -4626,16 +4637,21 @@ mod tests {
         );
     }
 
+    /// [`footer_bounds_at`] の戻り値: 帯､usage､次の sync､post の数､
+    /// auto-refresh のカウントダウン (無ければ `None`)､primary action ＝
+    /// reload のアイコン (無ければ `None`)｡
+    type FooterSegments = (
+        gpui::Bounds<gpui::Pixels>,
+        gpui::Bounds<gpui::Pixels>,
+        gpui::Bounds<gpui::Pixels>,
+        gpui::Bounds<gpui::Pixels>,
+        Option<gpui::Bounds<gpui::Pixels>>,
+        Option<gpui::Bounds<gpui::Pixels>>,
+    );
+
     /// footer の主要な区画の bounds を､ウィンドウを `width` にしてから読む
-    /// (#214)｡順に: 帯､次の sync､post の数｡
-    fn footer_bounds_at(
-        visual: &mut gpui::VisualTestContext,
-        width: f32,
-    ) -> (
-        gpui::Bounds<gpui::Pixels>,
-        gpui::Bounds<gpui::Pixels>,
-        gpui::Bounds<gpui::Pixels>,
-    ) {
+    /// (#214, #268)｡
+    fn footer_bounds_at(visual: &mut gpui::VisualTestContext, width: f32) -> FooterSegments {
         visual.simulate_resize(gpui::size(gpui::px(width), gpui::px(700.)));
         visual.update(|window, cx| {
             let _ = window.draw(cx);
@@ -4645,11 +4661,16 @@ mod tests {
                 .debug_bounds("status-bar")
                 .expect("the footer is always shown"),
             visual
+                .debug_bounds("status-usage")
+                .expect("the request count is always shown"),
+            visual
                 .debug_bounds("status-sync-next")
                 .expect("an idle sync has a next time to show"),
             visual
                 .debug_bounds("status-kept")
                 .expect("a loaded timeline always says how many posts it keeps"),
+            visual.debug_bounds("auto-refresh-countdown"),
+            visual.debug_bounds("primary-action"),
         )
     }
 
@@ -4675,8 +4696,8 @@ mod tests {
         // 詰めた文言の本来の幅は､詰める側でいちばん広い幅で読む｡それより
         // 狭い幅で同じ寸法なら､そこでも丸ごと入っている｡
         let roomy = f32::from(countdown::COMPACT_BELOW) - 1.;
-        let (_, unsqueezed, _) = footer_bounds_at(&mut visual, roomy);
-        let (bar, next, kept) = footer_bounds_at(&mut visual, roomy - 20.);
+        let (_, _, unsqueezed, _, _, _) = footer_bounds_at(&mut visual, roomy);
+        let (bar, _, next, kept, _, _) = footer_bounds_at(&mut visual, roomy - 20.);
         assert_eq!(
             next.size.width, unsqueezed.size.width,
             "a little under the threshold the shortened wording has to fit whole"
@@ -4688,7 +4709,7 @@ mod tests {
             bar.right()
         );
 
-        let (bar, _, kept) = footer_bounds_at(&mut visual, 429.);
+        let (bar, _, _, kept, _, _) = footer_bounds_at(&mut visual, 429.);
         assert!(
             kept.right() <= bar.right(),
             "at 429px the post count falls off the window: count ends at {:?}, window ends at {:?}",
@@ -4700,7 +4721,7 @@ mod tests {
         // 切り､さらに文言の半分ぶん狭める｡
         let slack = f32::from(bar.right()) - f32::from(kept.right());
         let cramped = 429. - slack - f32::from(unsqueezed.size.width) / 2.;
-        let (bar, next, kept) = footer_bounds_at(&mut visual, cramped);
+        let (bar, _, next, kept, _, _) = footer_bounds_at(&mut visual, cramped);
         assert!(
             kept.right() <= bar.right(),
             "cramped, the post count falls off the window: count ends at {:?}, window ends at {:?}",
@@ -4719,10 +4740,10 @@ mod tests {
         );
     }
 
-    /// #214: toolbar のカウントダウンは 429px でも reload のアイコンを
+    /// #214, #268: footer のカウントダウンは 429px でも reload のアイコンを
     /// ウィンドウの外へ押し出さない｡
     #[gpui::test]
-    fn the_toolbar_countdown_keeps_the_reload_icon_in_the_window(cx: &mut gpui::TestAppContext) {
+    fn the_footer_countdown_keeps_the_reload_icon_in_the_window(cx: &mut gpui::TestAppContext) {
         let (mut visual, timeline) = drawn(cx, fixture_with(&["2", "1"], &[]));
         visual.update(|_window, cx| {
             timeline.update(cx, |view, _cx| {
@@ -4740,7 +4761,7 @@ mod tests {
             .expect("the reload icon is always shown");
         let countdown = visual
             .debug_bounds("auto-refresh-countdown")
-            .expect("a counting loop has to reach the toolbar");
+            .expect("a counting loop has to reach the footer");
         assert!(
             reload.right() <= viewport.width,
             "the reload icon falls off the window: icon ends at {:?}, window ends at {:?}",
@@ -4750,6 +4771,83 @@ mod tests {
         assert!(
             countdown.right() < reload.left(),
             "the countdown runs into the reload icon"
+        );
+    }
+
+    /// #214, #268: header が撤去された後の最終形 — footer は 429px でも
+    /// 全部の区画を窓の中に収める｡左から usage → 次の sync → post の数
+    /// (`ml_auto`) → auto-refresh の期限 → reload のアイコンの順で並び､
+    /// どの隣同士も重ならない｡
+    #[gpui::test]
+    fn the_footer_keeps_every_segment_in_the_window_at_429px(cx: &mut gpui::TestAppContext) {
+        let (mut visual, timeline) = drawn(cx, fixture_with_sync(&["2", "1"], 0));
+        visual.update(|_window, cx| {
+            timeline.update(cx, |view, _cx| {
+                view.refresh_situation = Some(counting_situation());
+            });
+        });
+
+        let (bar, usage, next, kept, countdown, primary_action) =
+            footer_bounds_at(&mut visual, 429.);
+        let countdown = countdown.expect("a counting loop has to reach the footer");
+        let primary_action = primary_action.expect("the reload icon is always shown");
+
+        assert!(
+            usage.right() <= next.left(),
+            "usage runs into the next sync time: usage ends at {:?}, next starts at {:?}",
+            usage.right(),
+            next.left()
+        );
+        assert!(
+            next.right() <= kept.left(),
+            "the next sync time runs into the post count: time ends at {:?}, count starts at {:?}",
+            next.right(),
+            kept.left()
+        );
+        assert!(
+            kept.right() <= countdown.left(),
+            "the post count runs into the countdown: count ends at {:?}, countdown starts at {:?}",
+            kept.right(),
+            countdown.left()
+        );
+        assert!(
+            countdown.right() < primary_action.left(),
+            "the countdown runs into the reload icon: countdown ends at {:?}, icon starts at {:?}",
+            countdown.right(),
+            primary_action.left()
+        );
+        assert!(
+            primary_action.right() <= bar.right(),
+            "the reload icon falls off the window: icon ends at {:?}, window ends at {:?}",
+            primary_action.right(),
+            bar.right()
+        );
+    }
+
+    /// #268: footer に移った reload のアイコンは帯の高さに収まり､縦方向は
+    /// 帯の中央に来る — header に居たときと違い､footer の他の区画は
+    /// テキストの一行なので､アイコンだけが縦にずれると目立つ｡
+    #[gpui::test]
+    fn the_reload_icon_fits_the_status_bar_height(cx: &mut gpui::TestAppContext) {
+        let (mut visual, _timeline) = drawn(cx, fixture_with(&["2", "1"], &[]));
+        let bar = visual
+            .debug_bounds("status-bar")
+            .expect("the footer is always shown");
+        let primary_action = visual
+            .debug_bounds("primary-action")
+            .expect("the reload icon is always shown");
+        assert!(
+            primary_action.size.height <= bar.size.height,
+            "the reload icon must fit inside the status bar: icon height {:?}, bar height {:?}",
+            primary_action.size.height,
+            bar.size.height
+        );
+        let bar_center_y = bar.center().y;
+        let icon_center_y = primary_action.center().y;
+        assert!(
+            (f32::from(bar_center_y) - f32::from(icon_center_y)).abs() < 2.0,
+            "the reload icon must sit vertically centered in the status bar: \
+             bar center {bar_center_y:?}, icon center {icon_center_y:?}"
         );
     }
 
