@@ -16,8 +16,8 @@
 //! 子は `pub(in crate::ui)` で書き､ここで再輸出するので､`ui` からの
 //! 見え方は `render::xxx` のまま変わらない｡
 //!
-//! - [`frame`]: 窓の枠 — バナー､notice､toolbar の表題と segment､usage の
-//!   行､composer のエラー行｡
+//! - [`frame`]: 窓の枠 — バナー､notice､footer の segment､usage の行､
+//!   composer のエラー行｡
 //! - [`offers`]: どの操作を差し出すかの述語 — `offers_*` と `is_own_post`｡
 //!   純粋関数で､テストはすべてここの対象｡
 //! - [`actions`]: 操作の行そのもの — like / repost / reply / quote / open と
@@ -41,8 +41,8 @@ pub(super) use actions::{
     reply_target_label, repost_row, toggle_count_color,
 };
 pub(super) use frame::{
-    compose_error_message, header_title_element, notice, reload_notice_banner,
-    session_notice_banner, sign_in_pill, tab_segment, usage_color, usage_label,
+    compose_error_message, notice, reauthorize_banner, reload_notice_banner, session_notice_banner,
+    sign_in_pill, usage_color, usage_label,
 };
 pub(super) use offers::{
     offers_delete, offers_like, offers_quote, offers_reauthorize, offers_reply, offers_repost,

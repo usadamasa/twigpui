@@ -4,6 +4,11 @@
 //! timeline の下端に重なる capsule へ移し､出入りをフェードにし､follow が
 //! 新着を流し込む間は「まだ視界の上にある数」を数え下げる｡
 //!
+//! #282 で直近の reload / トグルが何をしたかの報告 (`ReloadNotice::Outcome`)
+//! もここへ来た｡差し出し (`new-posts`) と報告 (`outcome-toast`) は最大 2 枚
+//! まで縦に積む｡報告は申し出と違って押せず､寿命 (`OUTCOME_DWELL_SECONDS`)
+//! が尽きるか消えるかで消える｡
+//!
 //! 形は [`super::sync_row`] と同じ｡先に純粋な関数とその test — 何件を言うか､
 //! scroll がその数をどう減らすか､濃さとラベルがどう進むか — 続いて
 //! `impl TimelineView` が､それを画面に置きタイマーで進める｡
@@ -19,8 +24,8 @@ use super::fade::{FADE_STEP_MILLIS, Fade, fade_occupies, fade_opacity, fade_sett
 use super::render::Addressable as _;
 use super::{
     AnyElement, Context, Duration, FontWeight, InteractiveElement as _, IntoElement as _,
-    ParentElement as _, StatefulInteractiveElement as _, Styled as _, TimelineView, div, px, rgb,
-    rgba, theme,
+    ParentElement as _, ReloadNotice, SharedString, StatefulInteractiveElement as _, Styled as _,
+    TimelineView, div, px, rgb, rgba, theme,
 };
 
 /// 読み手にまだ届いていない新着の数 (#206)｡toast が言う件数｡
@@ -113,6 +118,24 @@ impl Toast {
     }
 }
 
+/// 報告カプセル (`outcome-toast`) が出続ける長さ (#282)､秒｡
+///
+/// 読み終わるには足りるが､次の reload まで居座るほどは長くない｡
+pub(super) const OUTCOME_DWELL_SECONDS: u64 = 6;
+
+/// 新しい `Outcome` の文言に対してタイマーを張り直すべきか (#282)｡
+///
+/// `current` は今 [`TimelineView::outcome_expiry`] が持っている文言｡同じ
+/// 文言ならタイマーはもう走っているので張り直さない — 張り直すと
+/// 6 秒ごとに現れる同じ文言 (follow のトグルの連打など) が寿命を
+/// 迎えられなくなる｡
+pub(super) fn should_restart_outcome_timer(
+    current: Option<&SharedString>,
+    message: &SharedString,
+) -> bool {
+    current != Some(message)
+}
+
 /// capsule の縁 (#206)｡`rgba` なので下 8 bit が不透明度｡
 ///
 /// accent の塗りの上に白を薄く引く｡明暗どちらのテーマでも accent は
@@ -129,7 +152,7 @@ impl TimelineView {
         )
     }
 
-    /// timeline の下端に重ねる toast (#206)｡出さないなら `None`｡
+    /// timeline の下端に重ねる toast の列 (#206､#282)｡出さないなら `None`｡
     ///
     /// 呼ぶのは `body` の wrapper｡scroll する一覧の外､band でずれない
     /// wrapper に `absolute` で寄せるので､一覧がどこへ scroll しても toast は
@@ -137,9 +160,34 @@ impl TimelineView {
     /// hit test は listener の無い要素に hitbox を置かないので､capsule の
     /// 横のクリックは下の行へ届く｡
     ///
-    /// 上向きの矢印は､押したらどの方向へ行くかを告げる (#21)｡濃さと
-    /// 持ち上がりは同じ [`Fade`] から引く ([`toast_drop_px`])｡
-    pub(super) fn toast(&self, cx: &mut Context<'_, Self>) -> Option<AnyElement> {
+    /// 上から [`Self::outcome_toast`] (報告)､[`Self::offer_toast`] (申し出)
+    /// の順に縦積みする｡押せるカプセルは常に高々 1 つ (申し出だけ) だ｡
+    pub(super) fn toast(&self, bg_alpha: u8, cx: &mut Context<'_, Self>) -> Option<AnyElement> {
+        let outcome = self.outcome_toast(bg_alpha);
+        let offer = self.offer_toast(cx);
+        if outcome.is_none() && offer.is_none() {
+            return None;
+        }
+        Some(
+            div()
+                .absolute()
+                .left_0()
+                .right_0()
+                .bottom(px(TOAST_INSET_PX))
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap_2()
+                .children(outcome)
+                .children(offer)
+                .into_any_element(),
+        )
+    }
+
+    /// 新着を差し出すカプセル (#206)｡濃さと持ち上がりは同じ [`Fade`] から
+    /// 引く ([`toast_drop_px`])｡上向きの矢印は押したらどの方向へ行くかを
+    /// 告げる (#21)｡出さないなら `None`｡
+    fn offer_toast(&self, cx: &mut Context<'_, Self>) -> Option<AnyElement> {
         if !fade_occupies(self.toast.fade) {
             return None;
         }
@@ -147,37 +195,59 @@ impl TimelineView {
         let fade = self.toast.fade;
         Some(
             div()
-                .absolute()
-                .left_0()
-                .right_0()
-                .bottom(px(TOAST_INSET_PX - toast_drop_px(fade)))
+                // #175 の `scroller.shift()` と同じく､relative の `top` で
+                // 通常の位置から動かす｡fade が濃くなるほど 0 に近づき､
+                // 下から持ち上がって見える｡
+                .relative()
+                .top(px(toast_drop_px(fade)))
+                .addressable("new-posts")
                 .flex()
-                .justify_center()
-                .child(
-                    div()
-                        .addressable("new-posts")
-                        .flex()
-                        .items_center()
-                        .gap_1p5()
-                        .px_3()
-                        .py_1p5()
-                        .rounded_full()
-                        .bg(rgb(theme.accent))
-                        .border_1()
-                        .border_color(rgba(TOAST_EDGE))
-                        .shadow_md()
-                        .text_color(rgb(theme.button_label))
-                        .text_size(theme::TEXT_META)
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .opacity(fade_opacity(fade))
-                        .cursor_pointer()
-                        .hover(gpui::Styled::shadow_lg)
-                        .child("↑")
-                        .child(pending_label(self.toast.count))
-                        .on_click(
-                            cx.listener(|this, _event, _window, cx| this.reveal_new_posts(cx)),
-                        ),
-                )
+                .items_center()
+                .gap_1p5()
+                .px_3()
+                .py_1p5()
+                .rounded_full()
+                .bg(rgb(theme.accent))
+                .border_1()
+                .border_color(rgba(TOAST_EDGE))
+                .shadow_md()
+                .text_color(rgb(theme.button_label))
+                .text_size(theme::TEXT_META)
+                .font_weight(FontWeight::SEMIBOLD)
+                .opacity(fade_opacity(fade))
+                .cursor_pointer()
+                .hover(gpui::Styled::shadow_lg)
+                .child("↑")
+                .child(pending_label(self.toast.count))
+                .on_click(cx.listener(|this, _event, _window, cx| this.reveal_new_posts(cx)))
+                .into_any_element(),
+        )
+    }
+
+    /// 直近の reload / トグルが何をしたかの報告カプセル (#282)｡
+    /// [`ReloadNotice::Outcome`] のあいだだけ出し､押せない｡寿命は
+    /// [`Self::expire_outcome`] が持つ｡`Cooldown` と `Failed` はここには
+    /// 来ない — `layout::notice_banners` がバナーのまま描く｡
+    fn outcome_toast(&self, bg_alpha: u8) -> Option<AnyElement> {
+        let Some(ReloadNotice::Outcome(message)) = self.reload_notice.clone() else {
+            return None;
+        };
+        let theme = self.theme;
+        Some(
+            div()
+                .addressable("outcome-toast")
+                .flex()
+                .items_center()
+                .px_3()
+                .py_1p5()
+                .rounded_full()
+                .bg(rgba(theme::with_alpha(theme.bg_header, bg_alpha)))
+                .border_1()
+                .border_color(rgb(theme.border))
+                .shadow_md()
+                .text_color(rgb(theme.text_muted))
+                .text_size(theme::TEXT_META)
+                .child(message)
                 .into_any_element(),
         )
     }
@@ -236,6 +306,42 @@ impl TimelineView {
                 }
             }
         }));
+    }
+
+    /// 報告カプセルの寿命を見直す (#282)｡`render` の頭で毎フレーム呼ぶ —
+    /// `Outcome` を代入する場所は 5 か所あり､各所にタイマーを置くと 1 つ
+    /// 忘れた瞬間に居座る (`fade_toast` の doc と同じ理由)｡
+    ///
+    /// `Outcome` でなくなっていればタイマーを手放すだけ｡同じ文言のタイマーが
+    /// もう走っていれば [`should_restart_outcome_timer`] が張り直しを止める｡
+    /// 代入し直すと前の `Task` は drop で取り消されるので､新しい `Outcome`
+    /// が古いタイマーに消されることはない｡
+    pub(super) fn expire_outcome(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(ReloadNotice::Outcome(message)) = self.reload_notice.clone() else {
+            self.outcome_expiry = None;
+            return;
+        };
+        let current = self.outcome_expiry.as_ref().map(|(shown, _)| shown);
+        if !should_restart_outcome_timer(current, &message) {
+            return;
+        }
+        self.outcome_expiry = Some((
+            message.clone(),
+            cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(Duration::from_secs(OUTCOME_DWELL_SECONDS))
+                    .await;
+                // `Err` はウィンドウが消えたということ｡
+                let _ = this.update(cx, |this, cx| {
+                    if matches!(&this.reload_notice, Some(ReloadNotice::Outcome(shown)) if *shown == message)
+                    {
+                        this.reload_notice = None;
+                    }
+                    this.outcome_expiry = None;
+                    cx.notify();
+                });
+            }),
+        ));
     }
 
     /// toast のクリック (#206)｡差し出しているものを follow と同じ
@@ -311,6 +417,22 @@ mod tests {
         // 読み手が下へ戻っても､見た行は新着に戻らない｡
         assert_eq!(unseen_after_scroll(2, 10), 2);
         assert_eq!(unseen_after_scroll(0, 10), 0);
+    }
+
+    // --- 報告の寿命 ---
+
+    #[test]
+    fn a_repeated_outcome_message_does_not_restart_its_timer() {
+        let shown: SharedString = "3 new posts.".into();
+        assert!(!should_restart_outcome_timer(Some(&shown), &shown));
+    }
+
+    #[test]
+    fn a_new_or_different_outcome_message_restarts_its_timer() {
+        let shown: SharedString = "3 new posts.".into();
+        let next: SharedString = "Following new posts.".into();
+        assert!(should_restart_outcome_timer(None, &next));
+        assert!(should_restart_outcome_timer(Some(&shown), &next));
     }
 
     // --- 濃さとラベル ---

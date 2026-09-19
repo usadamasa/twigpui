@@ -7,9 +7,9 @@
 //! 出るのは何かを負っているときだけで､定常状態の "up to date" は次が
 //! いつかを言わない｡
 //!
-//! ここは 2 つの期限を同じ形で出す — toolbar の reload アイコンの隣に
-//! "Auto-refresh in 4m"､footer のリクエスト数の隣に "Next sync in 5h 12m"｡
-//! 期限そのものはここで決めない｡auto-refresh の期限は [`poll_due_at`] が
+//! ここは 2 つの期限を同じ形で出す — どちらも footer の reload アイコンの
+//! 隣に集まっている (`chrome::status_bar` を見よ)｡期限そのものはここで
+//! 決めない｡auto-refresh の期限は [`poll_due_at`] が
 //! ([`super::auto_refresh::next_tick`] と同じ規則で) 出し､sync の期限は
 //! [`SyncStatus::Idle`] が tick から運んできた `until` をそのまま読む｡
 //! ここが持つのは残り秒数を言葉にする [`countdown`] と､幅に合わせて
@@ -17,18 +17,22 @@
 //!
 //! # 置き場所と幅
 //!
-//! 最初は両方を footer に置いた｡550px の fixture ですら "posts kept" が
-//! 右端から落ちた｡footer にはリクエスト数と sync の入口と post の数が
-//! すでに並んでいて､本番で実際に使われている 429px では､それだけで
-//! 幅の 9 割が埋まっていた (入口は #248 でメニューへ移った)｡
+//! #214 の当初は auto-refresh を toolbar (header) の reload アイコンの隣に
+//! 置き､sync だけを footer に残した｡550px の fixture ですら両方を footer に
+//! 置くと "posts kept" が右端から落ちたからだ｡#282 で所有者の指示により
+//! header ごと撤去するので､auto-refresh も footer へ合流する — 入口が
+//! #248 でメニューへ移り､footer の幅には戻る余地がある｡
 //!
-//! だから auto-refresh の期限は toolbar へ — それが次に押すことになる
-//! reload のアイコンの隣は､どのみち読みやすい場所だ — sync の期限は
-//! footer に残し､文言を幅で選ぶ ([`density`])｡広ければ "Next sync in 5h 12m"､
-//! 狭ければ "Sync in 5h 12m"｡post の数も同じ段で "posts kept" から "posts" へ
-//! 縮む｡それでも入らないときは､右端の post の数を落とすのではなく
-//! sync の期限を "…" で切る (`chrome::status_bar` の `truncate`)｡
-//! 数字が読めないより､どこが読めていないか分かるほうがよい｡
+//! footer の並びは左から usage → sync の期限 → (`ml_auto` で右へ寄せた
+//! クラスタ) auto-refresh の期限 → reload の値段 (`×N`) → reload アイコン｡
+//! reload のアイコンの隣に auto-refresh の期限を置くのは変わらない —
+//! それが次に押すことになるボタンだからだ｡保持数の区画 ("N / 500 posts
+//! kept") は所有者の判断で #282 に footer から消えた｡
+//!
+//! 文言は幅で選ぶ ([`density`])｡広ければ "Next sync in 5h 12m"､狭ければ
+//! "Sync in 5h 12m"｡それでも入らないときは､右端の reload アイコンを
+//! 落とすのではなく sync の期限を "…" で切る (`chrome::status_bar` の
+//! `truncate`)｡数字が読めないより､どこが読めていないか分かるほうがよい｡
 //!
 //! # なぜ分単位なのか
 //!
@@ -48,16 +52,16 @@ use super::list_sync::SyncStatus;
 use super::{Context, Duration, TimelineView, oauth};
 use crate::activity::Activity;
 
-/// 枠 (toolbar と footer) の文言をどれだけ詰めるか (#214)｡
+/// footer の文言をどれだけ詰めるか (#214)｡
 ///
 /// ウィンドウの幅から [`density`] が決め､描画のたびに読み直すので､
 /// ウィンドウを引き伸ばせば文言も戻る｡2 段しか無いのは､3 段目に
 /// 縮める先が無いからだ — "5h 12m" より短い残り時間の書き方は無い｡
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Density {
-    /// 全部書く: "Auto-refresh in 4m"､"Next sync in 5h 12m"､"posts kept"｡
+    /// 全部書く: "Auto-refresh in 4m"､"Next sync in 5h 12m"｡
     Wide,
-    /// 主語を落とす: "in 4m"､"Sync in 5h 12m"､"posts"｡
+    /// 主語を落とす: "in 4m"､"Sync in 5h 12m"｡
     Compact,
 }
 
@@ -67,9 +71,11 @@ pub(super) enum Density {
 /// (usage 140､入口 54､"next in 5h 59m" 82､"N / 500 posts kept" 118､
 /// 余白 84)｡#248 で入口 (54 と margin 12) が抜け､代わりに文言が
 /// "Next sync in 5h 59m" へ伸びた — こちらの幅は本番のフォントでは
-/// 測っていない｡520 は `Wide` に余裕を残す — フォントや桁数の揺れで
-/// "…" が出たり消えたりする境目を､使う幅から離しておく｡
-/// 既定のウィンドウ (560px) は `Wide`､本番の 429px は `Compact`｡
+/// 測っていない｡#282 で保持数の区画 (118) も footer から消えたので､この
+/// 内訳はさらに古い — 現在の合計を本番のフォントで測り直してはいない｡
+/// 520 は `Wide` に余裕を残す — フォントや桁数の揺れで "…" が出たり
+/// 消えたりする境目を､使う幅から離しておく｡既定のウィンドウ (560px) は
+/// `Wide`､本番の 429px は `Compact`｡
 pub(super) const COMPACT_BELOW: Pixels = px(520.);
 
 /// ウィンドウの幅から [`Density`] を選ぶ｡
@@ -100,7 +106,7 @@ pub(super) fn countdown(remaining: i64) -> String {
     }
 }
 
-/// toolbar の auto-refresh の segment が言うこと｡ループが無ければ `None`｡
+/// footer の auto-refresh の segment が言うこと｡ループが無ければ `None`｡
 ///
 /// `situation` はループが直近の起床で写したもので､`last_reload_at` だけ
 /// は view の今の値で上書きしてから期限を出す｡手動の reload は次の
@@ -162,7 +168,7 @@ pub(super) fn sync_deadline(status: &SyncStatus) -> Option<i64> {
 /// footer の sync の segment が言うこと｡#248 までは "Sync list…" の入口の
 /// すぐ隣に座っていたので主語を省けた ("Sync list… next in 5h 12m")｡入口が
 /// メニューへ移って単独になったので､何のカウントダウンかは自分で言う｡
-/// `Compact` では "Next" を落とす — toolbar の "Auto-refresh in 4m" が
+/// `Compact` では "Next" を落とす — 同じ footer の "Auto-refresh in 4m" が
 /// "in 4m" になるのと同じ段｡
 pub(super) fn sync_next_label(until: i64, now: i64, density: Density) -> String {
     let remaining = countdown(until.saturating_sub(now));
@@ -172,18 +178,9 @@ pub(super) fn sync_next_label(until: i64, now: i64, density: Density) -> String 
     }
 }
 
-/// footer の右端､保持している post の数 (#95)｡`Compact` では "kept" を
-/// 落とす｡"N / 500 posts" だけで上限に対する数だと読める｡
-pub(super) fn kept_label(kept: usize, cap: usize, density: Density) -> String {
-    match density {
-        Density::Wide => format!("{kept} / {cap} posts kept"),
-        Density::Compact => format!("{kept} / {cap} posts"),
-    }
-}
-
 impl TimelineView {
-    /// ウィンドウが今出す 2 つの文言 (#214): toolbar の auto-refresh と
-    /// footer の list sync｡出すものが無ければそれぞれ `None`｡
+    /// footer が今出す 2 つの文言 (#214): auto-refresh と list sync｡
+    /// 出すものが無ければそれぞれ `None`｡
     pub(super) fn countdown_labels(
         &self,
         now: i64,
@@ -414,13 +411,5 @@ mod tests {
             sync_next_label(19_720, 1_000, Density::Compact),
             "Sync in 5h 12m"
         );
-    }
-
-    // --- kept_label ---
-
-    #[test]
-    fn the_post_count_drops_kept_when_the_window_is_narrow() {
-        assert_eq!(kept_label(10, 500, Density::Wide), "10 / 500 posts kept");
-        assert_eq!(kept_label(10, 500, Density::Compact), "10 / 500 posts");
     }
 }

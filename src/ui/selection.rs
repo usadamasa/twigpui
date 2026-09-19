@@ -136,7 +136,7 @@ mod tests {
     use crate::fixture::Fixture;
     use crate::ui::TimelineView;
     use crate::ui::tests::{
-        draw_until_parked, fixture_window, fixture_with, item_with, laid_out, repost_row_item,
+        draw_until_parked, fixture_window, fixture_with, laid_out, repost_row_item,
     };
 
     /// `keys` を打って 1 フレーム描く｡
@@ -355,85 +355,35 @@ mod tests {
         });
     }
 
-    // --- #148: 文字を打っている間は発火しない ---
+    // --- #148, #282: `n` は別ウィンドウを開く ---
+    //
+    // 以前ここにあった `the_bare_keys_type_into_a_focused_composer` は
+    // `compose_input` を timeline のウィンドウの中で focus して
+    // `Timeline && !Input` が効くことを見ていたが、composer が別ウィンドウに
+    // 移った now では前提そのものが無くなった: timeline のウィンドウには
+    // focus できる `Input` がもう無いので、j/k/l/r/n が「打っている最中に
+    // 発火しない」を示す相手が存在しない。打鍵が新しい `compose_input` へ
+    // 実際に届くかどうかは `compose_window::typing_reaches_the_draft` が
+    // 別ウィンドウの側で引き継ぐ。
 
     #[gpui::test]
-    fn the_bare_keys_type_into_a_focused_composer(cx: &mut gpui::TestAppContext) {
-        // この issue の中心的な危うさ｡`Timeline && !Input` が働いていなければ
-        // `j` は下書きに入らず選択を動かす｡
-        let fixture = Fixture {
-            items: vec![item_with("1", "alice", None), item_with("2", "alice", None)],
-            ..fixture_with(&[], &[])
-        };
-        let (window, timeline) = fixture_window(cx, fixture);
-        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
-        cx.update(|cx| {
-            timeline.update(cx, |view, _cx| {
-                view.client = Some(crate::x_api::XClient::new("token".to_string()));
-            });
-        });
-        draw_until_parked(&mut visual, cx);
-
-        visual.update(|window, cx| {
-            timeline.update(cx, |view, cx| {
-                view.compose_input
-                    .update(cx, |input, cx| input.focus(window, cx));
-            });
-        });
-        draw_until_parked(&mut visual, cx);
-
-        press(&mut visual, cx, "j k l r n");
-
-        visual.update(|window, cx| {
-            let view = timeline.read(cx);
-            assert_eq!(
-                view.compose.text(),
-                "jklrn",
-                "every bare key reaches the draft as a character"
-            );
-            assert_eq!(view.selected, None, "j and k never moved the selection");
-            assert!(view.like_overrides.is_empty(), "l never fired");
-            assert!(view.repost_overrides.is_empty(), "r never fired");
-            assert!(
-                gpui::Focusable::focus_handle(view.compose_input.read(cx), cx).is_focused(window),
-                "n never took focus away from the composer"
-            );
-        });
-
-        // `escape` で timeline へ戻れば､同じ `j` が選ぶ｡
-        press(&mut visual, cx, "escape");
-        press(&mut visual, cx, "j");
-        assert_eq!(
-            selected_id(&timeline, cx).as_deref(),
-            Some("1"),
-            "the same key selects once the composer lets focus go"
-        );
-    }
-
-    #[gpui::test]
-    fn n_moves_to_the_composer_without_touching_the_draft(cx: &mut gpui::TestAppContext) {
-        // #14 の「下書きを決して失わない」は `n` にも掛かる｡
+    fn n_opens_the_composer_window_without_touching_the_draft(cx: &mut gpui::TestAppContext) {
+        // #14 の「下書きを決して失わない」は `n` にも掛かる (#282: 開くのは
+        // 別ウィンドウ)。
         let (window, timeline) = fixture_window(cx, fixture_with(&["1"], &[]));
         let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
         draw_until_parked(&mut visual, cx);
 
-        visual.update(|window, cx| {
-            timeline.update(cx, |view, cx| {
-                view.compose_input
-                    .update(cx, |input, cx| input.set_value("a draft", window, cx));
-            });
-            window.dispatch_action(Box::new(crate::menu::BlurComposer), cx);
+        cx.update(|cx| {
+            timeline.update(cx, |view, _cx| view.compose.set_text("a draft".to_string()));
         });
-        draw_until_parked(&mut visual, cx);
 
         press(&mut visual, cx, "n");
+        cx.run_until_parked();
 
-        visual.update(|window, cx| {
+        cx.update(|cx| {
             let view = timeline.read(cx);
-            assert!(
-                gpui::Focusable::focus_handle(view.compose_input.read(cx), cx).is_focused(window),
-                "n focuses the composer"
-            );
+            assert!(view.compose_window.is_some(), "n opens the composer window");
             assert_eq!(
                 view.compose.text(),
                 "a draft",

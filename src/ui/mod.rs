@@ -3,9 +3,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use gpui::{
-    AnyElement, Context, Div, Entity, FocusHandle, Focusable as _, FontWeight, ObjectFit,
-    ScrollHandle, SharedString, Stateful, Subscription, Task, Window, div, img, prelude::*, px,
-    rgb, rgba, svg,
+    AnyElement, Context, Div, Entity, FocusHandle, FontWeight, ObjectFit, ScrollHandle,
+    SharedString, Stateful, Subscription, Task, Window, div, img, prelude::*, px, rgb, rgba, svg,
 };
 use gpui_component::input::{Input, InputEvent, InputState};
 
@@ -23,6 +22,8 @@ use crate::log;
 mod action_row;
 mod auto_refresh;
 mod chrome;
+// #282: `main` がキーバインドを登録するので､ここだけ crate へ開く｡
+pub(crate) mod compose_window;
 mod composer;
 mod countdown;
 mod fade;
@@ -61,26 +62,23 @@ use reload_policy::{
 use render::Addressable as _;
 use render::{
     AVATAR_SIZE, MAX_RENDERED_MEDIA, MEDIA_GAP, MediaArrangement, author_link, avatar_placeholder,
-    byline, compose_error_message, format_timestamp, header_title_element, icon_button, like_row,
-    link_row, media_arrangement, media_aspect, media_badge, media_column_sizes, media_row_sizes,
-    notice, offers_delete, offers_like, offers_quote, offers_reauthorize, offers_reply,
-    offers_repost, open_post_link, quote_card, quote_row, reload_notice_banner,
+    byline, compose_error_message, format_timestamp, icon_button, like_row, link_row,
+    media_arrangement, media_aspect, media_badge, media_column_sizes, media_row_sizes, notice,
+    offers_delete, offers_like, offers_quote, offers_reauthorize, offers_reply, offers_repost,
+    open_post_link, quote_card, quote_row, reauthorize_banner, reload_notice_banner,
     render_thread_chain, reply_banner_label, reply_row, reply_target_label, repost_banner_label,
     repost_row, session_notice_banner, sign_in_pill, thread_action_label, thread_toggle_row,
     toggle_count_color, usage_color, usage_label, with_count,
 };
 use render::{RowCounts, row_counts};
 pub(crate) use startup::Startup;
-use state::{
-    Cooldown, PrimaryAction, ReloadNotice, ReloadTrigger, StartOutcome, ThreadFetchState,
-    TimelineState,
-};
+use state::{Cooldown, ReloadNotice, ReloadTrigger, StartOutcome, ThreadFetchState, TimelineState};
 use toast::Toast;
 
 use crate::menu::{
-    BlurComposer, CloseWindow, FocusComposer, KEY_CONTEXT, LikeSelected, Minimize, Reload,
+    CloseWindow, KEY_CONTEXT, LikeSelected, LoadOwnedLists, Minimize, OpenComposer, Reload,
     RepostSelected, ScrollToTop, SelectNext, SelectPrevious, ShowAbout, ShowNewPosts, SyncList,
-    ToggleFloatOnTop, ToggleFollowNewPosts, ToggleTranslucent,
+    ToggleFloatOnTop, ToggleFollowNewPosts, ToggleSource, ToggleTranslucent,
 };
 use crate::oauth;
 use crate::paths::Paths;
@@ -139,8 +137,8 @@ pub(crate) struct TimelineView {
     /// home-timeline の endpoint を呼ぶのと [`Self::load_older`] でさらに
     /// 遡るのに要る｡`/me` が一度解決するまでは `None`｡
     home_user_id: Option<String>,
-    /// サインインしたユーザー自身の screen name (これも `/me` から)｡header に
-    /// 出る — [`render::header_title`] を見よ｡
+    /// サインインしたユーザー自身の screen name (これも `/me` から)｡
+    /// 自分の post かどうかの判定 ([`render::offers::is_own_post`]) に使う｡
     home_username: Option<String>,
     /// どの timeline の集合がウィンドウを埋めるか (#161, #43): [`Self::new`] の
     /// 中で [`source_picker::initial_sources`] が決め､再代入するのは
@@ -159,8 +157,6 @@ pub(crate) struct TimelineView {
     /// これを見ず `sources` を全部回す｡`sources.len() == 1` のときは
     /// 描画側が出自を出さないので中身を読まない｡
     item_provenance: HashMap<String, cache::TimelineSource>,
-    /// source picker のドロップダウンが開いているかどうか (#43, #192)｡
-    source_picker_open: source_picker::SourcePickerVisibility,
     /// picker が名前を挙げられる list (#164)｡cache か直近の fetch から来る｡
     /// fetch ボタンが一度押されるまでは空｡
     owned_lists: Vec<crate::x_api::ListSummary>,
@@ -224,13 +220,20 @@ pub(crate) struct TimelineView {
     /// `text.clear()` しても､ウィジェットは古い下書きを表示したままに
     /// なるからである｡
     compose_input: Entity<InputState>,
+    /// 開いている compose window があればその handle (#282)｡`⌘N` は新しく
+    /// 開く代わりにこれを前面へ出す｡窓を閉じても `None` へは戻さない —
+    /// 次に開こうとしたとき `WindowHandle::update` が失敗することが
+    /// 「もう無い」の合図になる ([`compose_window::open`] を見よ)｡
+    compose_window: Option<gpui::WindowHandle<gpui_component::Root>>,
     /// `compose_input` の change subscription を生かしておく — drop すると
     /// 上の `compose` が二度と写されなくなるのに､何も言わない｡`fetch` や
     /// この struct の他の `Task` 保持フィールドと同じ取り消し/生存維持の
-    /// 慣習で､対象が `Subscription` に変わっただけである; 先頭の
-    /// アンダースコア (決して読まず､保持するだけ) は gpui-component が自身の
-    /// search-input subscription でこの同じパターンに付けている名前に倣う｡
-    _compose_input_subscription: Subscription,
+    /// 慣習で､対象が `Subscription` に変わっただけである｡先頭にアンダー
+    /// スコアを付けない (#282): `compose_input` を compose window ごとに
+    /// 作り直す ([`Self::rebind_compose_input`]) たびにこれも差し替える
+    /// ので、`clippy::used_underscore_binding` が二度目の代入を「一度
+    /// 名指したら二度と触れないはず」の破りとして弾く｡
+    compose_input_subscription: Subscription,
     /// これを保持している間は進行中の `POST /2/tweets` が生きつづける｡
     /// `fetch` の drop で取り消す契約に倣っている｡実際には submit の
     /// サイクル一回につき一度しか代入されない: 一つ未完了の間ずっと
@@ -287,6 +290,9 @@ pub(crate) struct TimelineView {
     /// [`Self::start_cooldown_ticker`] を
     /// 見よ｡
     cooldown_ticker: Option<Task<()>>,
+    /// `reload_notice` が生きた `ReloadNotice::Outcome` を出し続ける寿命
+    /// (#282)｡文言と満了タイマーの組で持つ｡[`Self::expire_outcome`] を見よ｡
+    outcome_expiry: Option<(SharedString, Task<()>)>,
     /// Posts の resource 数の合計 (#162､#18 の後継) — `usage::posts_totals`
     /// が返すもの｡header に出る — [`Self::refresh_usage`] を見よ｡最初の
     /// refresh が終わるまでゼロだが､これはプレースホルダではなく正直な
@@ -539,7 +545,6 @@ mod tests {
         reload_outcome_label,
     };
     use super::render::actions::{like_action_label, repost_action_label};
-    use super::render::frame::header_title;
     use super::render::offers::is_own_post;
     use super::render::post::{avatar_initial, post_permalink, profile_url};
     use super::{
@@ -1320,23 +1325,6 @@ mod tests {
     }
 
     #[test]
-    fn header_title_names_the_signed_in_account() {
-        // アカウントだけ｡どの timeline を表示しているかは #95 以降タブバーが
-        // 言うことで､44px の帯の中で二度言ったせいでツールバーは場所を
-        // 使い果たした｡
-        assert_eq!(header_title(Some("alice")), "@alice");
-    }
-
-    #[test]
-    fn header_title_falls_back_before_me_has_resolved() {
-        // #33 以降に残った唯一のケース: ウィンドウは常にホームタイムラインを
-        // 表示するので､分からないのは誰のものかだけだ｡`/me` が答えるまでは
-        // 名指しできるアカウントが無く､macOS のツールバーがその代わりに
-        // 載せるのはアプリ自身の名前だ｡
-        assert_eq!(header_title(None), "twigpui");
-    }
-
-    #[test]
     fn offers_load_older_when_a_next_page_token_is_present_and_the_timeline_is_loaded() {
         assert!(offers_load_older(
             Some("cursor-abc"),
@@ -2029,76 +2017,63 @@ mod tests {
         .unwrap();
     }
 
-    /// #118: コンポーザーから抜けるときは､フォーカスを落とすのではなく
-    /// 返さなければならない｡
-    ///
-    /// `window.blur()` はウィンドウのフォーカス経路を空のまま残し､何かが
-    /// クリックされるまでショートカットとメニューバーの半分を無効にして
-    /// いた — 起動時のものと同じ失敗に､`esc` を押して辿り着く｡
+    /// #14, #282: compose window を閉じても下書きは残る｡composer が別
+    /// ウィンドウへ移った後もこの約束が保たれることの門｡`compose_window`
+    /// 自身のテスト (`cmd_w_closes_the_composer` 等) は「窓が閉じるか」を
+    /// 見ているが、こちらは「閉じた *後* に下書きが本当に生きているか」を
+    /// `TimelineView` 側から見る｡
     #[gpui::test]
-    fn leaving_the_composer_returns_focus_to_the_timeline(cx: &mut gpui::TestAppContext) {
-        use gpui::AppContext as _;
+    fn closing_the_composer_keeps_the_draft(cx: &mut gpui::TestAppContext) {
+        cx.update(super::compose_window::init);
+        let (_window, timeline) = fixture_window(cx, fixture_with(&["1"], &[]));
 
-        cx.update(gpui_component::init);
-        cx.update(crate::menu::init);
+        cx.update(|cx| {
+            timeline.update(cx, |view, _cx| view.compose.set_text("a draft".to_string()));
+            super::compose_window::open(&timeline, cx);
+        });
+        cx.run_until_parked();
 
-        let timeline_slot = std::rc::Rc::new(std::cell::RefCell::new(None));
-        let window = {
-            let slot = timeline_slot.clone();
-            cx.add_window(move |window, cx| {
-                let timeline = cx.new(|cx| {
-                    let mut view = super::TimelineView::new(
-                        smoke_config(),
-                        smoke_paths(),
-                        Startup::Live,
-                        window,
-                        cx,
-                    );
-                    view.signed_in_with_oauth = true;
-                    view
-                });
-                *slot.borrow_mut() = Some(timeline.clone());
-                gpui_component::Root::new(timeline, window, cx)
-            })
+        let compose_window = cx
+            .update(|cx| timeline.read(cx).compose_window)
+            .expect("the composer window opened");
+        let mut composer = gpui::VisualTestContext::from_window(compose_window.into(), cx);
+        draw_until_parked(&mut composer, cx);
+
+        composer.simulate_keystrokes("escape");
+        cx.run_until_parked();
+
+        assert_eq!(
+            cx.update(|cx| cx.windows().len()),
+            1,
+            "escape has to close the composer window, leaving only the timeline"
+        );
+        cx.update(|cx| {
+            assert_eq!(
+                timeline.read(cx).compose.text(),
+                "a draft",
+                "closing the composer must never touch the draft (#14)"
+            );
+        });
+    }
+
+    /// #282: fixture の `composer_open` が立っていれば起動の終わりに compose
+    /// window も開く｡`show_fixture` は `TimelineView::new` の *途中*
+    /// (`cx.entity()` で自分自身の `Entity` を取る) からこれを呼ぶので､
+    /// コンパイルが通ることは「動く」ことの証拠にならない — 実際にもう
+    /// 1 枚ウィンドウが増えることをここで確かめる｡
+    #[gpui::test]
+    fn a_fixture_with_composer_open_opens_the_composer_window(cx: &mut gpui::TestAppContext) {
+        let fixture = Fixture {
+            composer_open: true,
+            ..fixture_with(&["1"], &[])
         };
-        let timeline = timeline_slot.borrow().clone().unwrap();
-        cx.run_until_parked();
+        let (_window, _timeline) = fixture_window(cx, fixture);
 
-        cx.update_window(window.into(), |_, window, cx| {
-            timeline.update(cx, |view, cx| {
-                view.compose_input
-                    .update(cx, |input, cx| input.focus(window, cx));
-            });
-        })
-        .unwrap();
-        cx.run_until_parked();
-
-        cx.update_window(window.into(), |_, window, cx| {
-            let _ = window.draw(cx);
-            timeline.update(cx, |view, _cx| {
-                assert!(
-                    !view.focus_handle.is_focused(window),
-                    "the composer should hold focus once focused"
-                );
-            });
-            // `window.focus(..)` を直接ではなくアクション自体を使う: 検査して
-            // いるのはハンドラのほうで､その中身をテストの中で再現したら
-            // ハンドラが何をしようと通ってしまう｡
-            window.dispatch_action(Box::new(crate::menu::BlurComposer), cx);
-        })
-        .unwrap();
-        cx.run_until_parked();
-
-        cx.update_window(window.into(), |_, window, cx| {
-            let _ = window.draw(cx);
-            timeline.update(cx, |view, _cx| {
-                assert!(
-                    view.focus_handle.is_focused(window),
-                    "focus must return to the timeline, not be dropped"
-                );
-            });
-        })
-        .unwrap();
+        assert_eq!(
+            cx.update(|cx| cx.windows().len()),
+            2,
+            "composer_open must open a second window during startup"
+        );
     }
 
     /// ウィンドウの smoke テストが対象にする `Config`｡
@@ -2318,11 +2293,11 @@ mod tests {
             sync: None,
             sources: Vec::new(),
             list_items: std::collections::BTreeMap::new(),
-            picker_open: false,
             liked: Vec::new(),
             reposted: Vec::new(),
             selected: None,
             translucent: false,
+            composer_open: false,
         }
     }
 
@@ -2433,92 +2408,6 @@ mod tests {
             TimelineState::Loaded(items) => items.iter().map(|item| item.id.clone()).collect(),
             other => panic!("expected a loaded timeline, got {other:?}"),
         }
-    }
-
-    /// #153: composer は使われるまで 1 行に畳まれている｡
-    ///
-    /// 空でフォーカスも無いときだけ畳む｡クリック (フォーカス) すれば広がり､
-    /// 下書きがあればフォーカスを外しても広がったまま — #14 の「下書きを
-    /// 失わない」は､下書きが目に入りつづけることも含む｡空に戻して
-    /// フォーカスを外せば､また畳まれる｡
-    ///
-    /// 「1 行」の絶対値は入力ウィジェット (`gpui-component`) の行の高さと
-    /// 余白で決まるので直値では書かず､avatar の 32px より低いことだけを
-    /// 要求する｡広がった状態はそれより確実に高い (2 行 + 余白)｡
-    #[gpui::test]
-    fn the_composer_folds_to_one_line_until_it_is_used(cx: &mut gpui::TestAppContext) {
-        let (window, timeline) = fixture_window(cx, fixture_with(&["1"], &[]));
-        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
-
-        let height_after_draw = |visual: &mut gpui::VisualTestContext| {
-            visual.update(|window, cx| {
-                let _ = window.draw(cx);
-            });
-            visual
-                .debug_bounds("compose-input")
-                .expect("the composer has to be laid out")
-                .size
-                .height
-        };
-
-        // `Pixels` の四則は `arithmetic_side_effects` に弾かれるので f32 で
-        // 比べる (`rust-lint-gauntlet`)｡
-        let folded = f32::from(height_after_draw(&mut visual));
-        assert!(
-            folded < 40.0,
-            "empty and unfocused, the composer is one line: {folded}px"
-        );
-
-        // クリックの代わりにフォーカスを当てる: 広がる条件はフォーカスで､
-        // クリックはそれを起こす手段の一つにすぎない｡
-        visual.update(|window, cx| {
-            timeline.update(cx, |view, cx| {
-                view.compose_input
-                    .update(cx, |input, cx| input.focus(window, cx));
-            });
-        });
-        let focused = f32::from(height_after_draw(&mut visual));
-        assert!(
-            focused > folded + 12.0,
-            "focused, the composer opens up: {focused}px vs {folded}px"
-        );
-
-        // 下書きを残してフォーカスを外す｡
-        visual.update(|window, cx| {
-            timeline.update(cx, |view, cx| {
-                view.compose_input
-                    .update(cx, |input, cx| input.set_value("a draft", window, cx));
-            });
-            window.dispatch_action(Box::new(crate::menu::BlurComposer), cx);
-        });
-        let drafted = f32::from(height_after_draw(&mut visual));
-        assert!(
-            drafted > folded + 12.0,
-            "a draft keeps the composer open even unfocused: {drafted}px vs {folded}px"
-        );
-        cx.update(|cx| {
-            timeline.update(cx, |view, _cx| {
-                assert_eq!(
-                    view.compose.text(),
-                    "a draft",
-                    "folding never touches the draft"
-                );
-            });
-        });
-
-        // 空に戻してフォーカスを外せば畳まれる｡
-        visual.update(|window, cx| {
-            timeline.update(cx, |view, cx| {
-                view.compose_input
-                    .update(cx, |input, cx| input.set_value("", window, cx));
-            });
-            window.dispatch_action(Box::new(crate::menu::BlurComposer), cx);
-        });
-        let refolded = f32::from(height_after_draw(&mut visual));
-        assert!(
-            (refolded - folded).abs() < 1.0,
-            "emptied and unfocused, it folds again: {refolded}px vs {folded}px"
-        );
     }
 
     /// `name` の要素が置かれた bounds｡置かれていなければ panic — 「無い」を
@@ -3267,8 +3156,130 @@ mod tests {
                 assert_eq!(view.toast.fade, Fade::Hidden);
                 assert!(view.toast_fade_task.is_none());
                 assert!(
-                    view.toast(cx).is_none(),
+                    view.toast(255, cx).is_none(),
                     "a hidden toast is out of the tree, not a transparent capsule"
+                );
+            });
+        });
+    }
+
+    /// #282: 成功した reload の報告 (`ReloadNotice::Outcome`) はバナーでは
+    /// なく toast のカプセルへ出る｡
+    #[gpui::test]
+    fn a_finished_reload_reports_itself_in_a_toast_not_a_banner(cx: &mut gpui::TestAppContext) {
+        let (mut visual, timeline) = drawn(cx, fixture_with(&["2", "1"], &[]));
+        visual.update(|_window, cx| {
+            timeline.update(cx, |view, _cx| {
+                view.reload_notice = Some(ReloadNotice::Outcome("3 new posts.".into()));
+            });
+        });
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        assert!(
+            visual.debug_bounds("banner-reload").is_none(),
+            "a finished reload must not sit in the banner column"
+        );
+        let toast = visual
+            .debug_bounds("outcome-toast")
+            .expect("the outcome has to be laid out as a toast");
+        let body = visual
+            .debug_bounds("timeline")
+            .expect("the timeline is laid out");
+        assert!(
+            f32::from(body.bottom()) - f32::from(toast.bottom()) < 48.,
+            "the outcome toast sits near the bottom edge, not floating mid-screen: \
+             {toast:?} vs {body:?}"
+        );
+    }
+
+    /// #282: `Cooldown` は今までどおりバナーのまま — 数字が進むので寿命付き
+    /// の toast には向かない｡
+    #[gpui::test]
+    fn a_cooldown_still_uses_the_banner(cx: &mut gpui::TestAppContext) {
+        let (mut visual, timeline) = drawn(cx, fixture_with(&["2", "1"], &[]));
+        visual.update(|_window, cx| {
+            timeline.update(cx, |view, _cx| {
+                view.reload_notice = Some(ReloadNotice::Cooldown {
+                    // 時計由来の値なので飽和加算 (`rust-lint-gauntlet`)｡
+                    reset_at: crate::oauth::unix_now().saturating_add(30),
+                    cooldown: Cooldown::LocalInterval,
+                });
+            });
+        });
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        assert!(
+            visual.debug_bounds("banner-reload").is_some(),
+            "a cooldown must still sit in the banner column"
+        );
+        assert!(
+            visual.debug_bounds("outcome-toast").is_none(),
+            "a cooldown must not be reported as a toast"
+        );
+    }
+
+    /// #282: 申し出 (`new-posts`) と報告 (`outcome-toast`) が両方出ていても
+    /// 重ならず縦に積む｡
+    #[gpui::test]
+    fn the_offer_and_the_report_stack_without_overlapping(cx: &mut gpui::TestAppContext) {
+        let (mut visual, timeline) = drawn(cx, fixture_with(&["2", "1"], &["4", "3"]));
+        visual.update(|_window, cx| {
+            timeline.update(cx, |view, _cx| {
+                view.reload_notice = Some(ReloadNotice::Outcome("2 new posts.".into()));
+            });
+        });
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let offer = visual
+            .debug_bounds("new-posts")
+            .expect("posts are waiting, so the offer is laid out");
+        let report = visual
+            .debug_bounds("outcome-toast")
+            .expect("the outcome has to be laid out too");
+        assert!(
+            report.bottom() <= offer.top(),
+            "the report must sit above the offer, not overlap it: {report:?} vs {offer:?}"
+        );
+    }
+
+    /// #282: 報告カプセルは寿命 (`OUTCOME_DWELL_SECONDS`) が尽きると消える —
+    /// `Cooldown`/`Failed` と違い読み終わったらいつまでも居座らない｡
+    #[gpui::test]
+    fn an_outcome_toast_dismisses_itself_after_its_dwell(cx: &mut gpui::TestAppContext) {
+        let (mut visual, timeline) = drawn(cx, fixture_with(&["2", "1"], &[]));
+        visual.update(|_window, cx| {
+            timeline.update(cx, |view, _cx| {
+                view.reload_notice = Some(ReloadNotice::Outcome("3 new posts.".into()));
+            });
+        });
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            visual.debug_bounds("outcome-toast").is_some(),
+            "the report is laid out right after it is set"
+        );
+
+        cx.executor().advance_clock(std::time::Duration::from_secs(
+            super::toast::OUTCOME_DWELL_SECONDS,
+        ));
+        cx.run_until_parked();
+
+        cx.update(|cx| {
+            timeline.update(cx, |view, _cx| {
+                assert!(
+                    view.reload_notice.is_none(),
+                    "the outcome must clear itself once its dwell has passed"
+                );
+                assert!(
+                    view.outcome_expiry.is_none(),
+                    "a settled timer must not linger"
                 );
             });
         });
@@ -3341,7 +3352,7 @@ mod tests {
             timeline.update(cx, |view, cx| {
                 assert_eq!(view.toast.fade, Fade::Hidden);
                 assert!(
-                    view.toast(cx).is_none(),
+                    view.toast(255, cx).is_none(),
                     "with nothing left above, the toast is gone"
                 );
             });
@@ -4153,7 +4164,7 @@ mod tests {
 
     /// #267: fixture が `translucent` と言えば､窓は透過の状態で立ち上がる｡
     /// fixture の窓は window state ファイルを読まないので､透過の見た目を
-    /// 撮るにはこれしか道が無い — `Fixture::picker_open` と同じ例外だ｡
+    /// 撮るにはこれしか道が無い — `Fixture::selected` と同じ例外だ｡
     #[gpui::test]
     fn a_fixture_can_ask_for_a_translucent_window(cx: &mut gpui::TestAppContext) {
         let fixture = Fixture {
@@ -4632,7 +4643,7 @@ mod tests {
 
         let countdown = visual
             .debug_bounds("auto-refresh-countdown")
-            .expect("a counting loop has to reach the toolbar");
+            .expect("a counting loop has to reach the footer");
         let reload = visual
             .debug_bounds("primary-action")
             .expect("the reload icon is always shown");
@@ -4644,16 +4655,21 @@ mod tests {
         );
     }
 
+    /// [`footer_bounds_at`] の戻り値: 帯､usage､次の sync､auto-refresh の
+    /// カウントダウン (無ければ `None`)､primary action ＝ reload の
+    /// アイコン (無ければ `None`)｡保持数の区画は #282 で footer から
+    /// 消えた｡
+    type FooterSegments = (
+        gpui::Bounds<gpui::Pixels>,
+        gpui::Bounds<gpui::Pixels>,
+        gpui::Bounds<gpui::Pixels>,
+        Option<gpui::Bounds<gpui::Pixels>>,
+        Option<gpui::Bounds<gpui::Pixels>>,
+    );
+
     /// footer の主要な区画の bounds を､ウィンドウを `width` にしてから読む
-    /// (#214)｡順に: 帯､次の sync､post の数｡
-    fn footer_bounds_at(
-        visual: &mut gpui::VisualTestContext,
-        width: f32,
-    ) -> (
-        gpui::Bounds<gpui::Pixels>,
-        gpui::Bounds<gpui::Pixels>,
-        gpui::Bounds<gpui::Pixels>,
-    ) {
+    /// (#214, #282)｡
+    fn footer_bounds_at(visual: &mut gpui::VisualTestContext, width: f32) -> FooterSegments {
         visual.simulate_resize(gpui::size(gpui::px(width), gpui::px(700.)));
         visual.update(|window, cx| {
             let _ = window.draw(cx);
@@ -4663,11 +4679,13 @@ mod tests {
                 .debug_bounds("status-bar")
                 .expect("the footer is always shown"),
             visual
+                .debug_bounds("status-usage")
+                .expect("the request count is always shown"),
+            visual
                 .debug_bounds("status-sync-next")
                 .expect("an idle sync has a next time to show"),
-            visual
-                .debug_bounds("status-kept")
-                .expect("a loaded timeline always says how many posts it keeps"),
+            visual.debug_bounds("auto-refresh-countdown"),
+            visual.debug_bounds("primary-action"),
         )
     }
 
@@ -4675,12 +4693,12 @@ mod tests {
     /// 次の sync を "…" で切る｡post の数は決して右端から落ちない｡
     ///
     /// 最初の実装は両方のカウントダウンを footer に置き､550px ですら
-    /// "posts kept" が右端から落ちた｡2 つの幅で見る: `COMPACT_BELOW` を
-    /// わずかに下回る幅では詰めた文言がそのまま入り (同じ密度でもっと広い
-    /// 幅と同じ寸法)､本番の 429px では詰めた文言も切られるが､post の数は
-    /// 帯の中に残る｡テスト環境のフォントは本番より広いので､本番なら 429px
-    /// で入る文言がここでは切られる — このテストが見ているのは寸法ではなく
-    /// 譲る順番だ｡
+    /// "posts kept" が右端から落ちた (今は #282 でその区画自体が消えた)｡
+    /// 2 つの幅で見る: `COMPACT_BELOW` をわずかに下回る幅では詰めた文言が
+    /// そのまま入り (同じ密度でもっと広い幅と同じ寸法)､本番の 429px では
+    /// 詰めた文言も切られるが､reload アイコンは帯の中に残る｡テスト環境の
+    /// フォントは本番より広いので､本番なら 429px で入る文言がここでは
+    /// 切られる — このテストが見ているのは寸法ではなく譲る順番だ｡
     #[gpui::test]
     fn the_footer_shortens_first_and_truncates_last(cx: &mut gpui::TestAppContext) {
         let (mut visual, timeline) = drawn(cx, fixture_with_sync(&["2", "1"], 0));
@@ -4693,36 +4711,54 @@ mod tests {
         // 詰めた文言の本来の幅は､詰める側でいちばん広い幅で読む｡それより
         // 狭い幅で同じ寸法なら､そこでも丸ごと入っている｡
         let roomy = f32::from(countdown::COMPACT_BELOW) - 1.;
-        let (_, unsqueezed, _) = footer_bounds_at(&mut visual, roomy);
-        let (bar, next, kept) = footer_bounds_at(&mut visual, roomy - 20.);
+        let (_, _, unsqueezed, _, _) = footer_bounds_at(&mut visual, roomy);
+        let (bar, _, next, _, primary_action) = footer_bounds_at(&mut visual, roomy - 20.);
+        let primary_action = primary_action.expect("the reload icon is always shown");
         assert_eq!(
             next.size.width, unsqueezed.size.width,
             "a little under the threshold the shortened wording has to fit whole"
         );
         assert!(
-            kept.right() <= bar.right(),
-            "the post count falls off the window: count ends at {:?}, window ends at {:?}",
-            kept.right(),
+            primary_action.right() <= bar.right(),
+            "the reload icon falls off the window: icon ends at {:?}, window ends at {:?}",
+            primary_action.right(),
             bar.right()
         );
 
-        let (bar, _, kept) = footer_bounds_at(&mut visual, 429.);
+        let (bar, _, _, _, primary_action) = footer_bounds_at(&mut visual, 429.);
+        let primary_action = primary_action.expect("the reload icon is always shown");
         assert!(
-            kept.right() <= bar.right(),
-            "at 429px the post count falls off the window: count ends at {:?}, window ends at {:?}",
-            kept.right(),
+            primary_action.right() <= bar.right(),
+            "at 429px the reload icon falls off the window: icon ends at {:?}, window ends at {:?}",
+            primary_action.right(),
             bar.right()
         );
 
-        // 詰めた文言すら入らない幅は寸法から逆算する: 余っている幅を使い
-        // 切り､さらに文言の半分ぶん狭める｡
-        let slack = f32::from(bar.right()) - f32::from(kept.right());
-        let cramped = 429. - slack - f32::from(unsqueezed.size.width) / 2.;
-        let (bar, next, kept) = footer_bounds_at(&mut visual, cramped);
+        // 詰めた文言すら入らない幅を､429px から少しずつ狭めて探す｡保持数の
+        // 区画が消えて footer に余裕ができたぶん (#282)､429px そのものでは
+        // まだ次の sync の文言が丸ごと入ることがあるので､固定の逆算式では
+        // なく実際に狭まる境目を探す｡
+        let mut width = 429.;
+        let (mut bar, mut next, mut countdown, mut primary_action);
+        loop {
+            let (b, _, n, c, p) = footer_bounds_at(&mut visual, width);
+            bar = b;
+            next = n;
+            countdown = c.expect("a counting loop has to reach the footer");
+            primary_action = p.expect("the reload icon is always shown");
+            if next.size.width < unsqueezed.size.width {
+                break;
+            }
+            width -= 20.;
+            assert!(
+                width > 0.,
+                "could not find a width that truncates the sync countdown"
+            );
+        }
         assert!(
-            kept.right() <= bar.right(),
-            "cramped, the post count falls off the window: count ends at {:?}, window ends at {:?}",
-            kept.right(),
+            primary_action.right() <= bar.right(),
+            "cramped, the reload icon falls off the window: icon ends at {:?}, window ends at {:?}",
+            primary_action.right(),
             bar.right()
         );
         assert!(
@@ -4730,17 +4766,45 @@ mod tests {
             "cramped, the next sync time has to be the segment that gives way"
         );
         assert!(
-            next.right() <= kept.left(),
-            "the next sync time runs into the post count: time ends at {:?}, count starts at {:?}",
+            next.right() <= countdown.left(),
+            "the next sync time runs into the countdown: time ends at {:?}, countdown starts at {:?}",
             next.right(),
-            kept.left()
+            countdown.left()
         );
     }
 
-    /// #214: toolbar のカウントダウンは 429px でも reload のアイコンを
+    /// 所有者の指摘 (#282): 既定の 560px の footer で sync のカウントダウン
+    /// ("Next sync in 5h 12m") が "…" で切られていた — usage / 次の sync /
+    /// 保持数 / auto-refresh の期限 / reload アイコンが並んで幅が足りな
+    /// かった｡保持数の区画はこの後 footer から消える｡`Wide` の帯は既定幅
+    /// で誰も切ってはならない｡
+    #[gpui::test]
+    fn the_wide_footer_shows_the_whole_sync_countdown_at_the_default_width(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (mut visual, timeline) = drawn(cx, fixture_with_sync(&["2", "1"], 0));
+        visual.update(|_window, cx| {
+            timeline.update(cx, |view, _cx| {
+                view.refresh_situation = Some(counting_situation());
+            });
+        });
+
+        // 詰めた文言の本来の幅は、余裕のある幅で読む (`the_footer_shortens_
+        // first_and_truncates_last` と同じやり方)。
+        let (_, _, unsqueezed, _, _) = footer_bounds_at(&mut visual, 800.);
+        let (_, _, next, _, _) = footer_bounds_at(&mut visual, 560.);
+        assert_eq!(
+            next.size.width, unsqueezed.size.width,
+            "the sync countdown must not be truncated at the default 560px width: \
+             {:?} at 560px vs {:?} unsqueezed",
+            next.size.width, unsqueezed.size.width
+        );
+    }
+
+    /// #214, #282: footer のカウントダウンは 429px でも reload のアイコンを
     /// ウィンドウの外へ押し出さない｡
     #[gpui::test]
-    fn the_toolbar_countdown_keeps_the_reload_icon_in_the_window(cx: &mut gpui::TestAppContext) {
+    fn the_footer_countdown_keeps_the_reload_icon_in_the_window(cx: &mut gpui::TestAppContext) {
         let (mut visual, timeline) = drawn(cx, fixture_with(&["2", "1"], &[]));
         visual.update(|_window, cx| {
             timeline.update(cx, |view, _cx| {
@@ -4758,7 +4822,7 @@ mod tests {
             .expect("the reload icon is always shown");
         let countdown = visual
             .debug_bounds("auto-refresh-countdown")
-            .expect("a counting loop has to reach the toolbar");
+            .expect("a counting loop has to reach the footer");
         assert!(
             reload.right() <= viewport.width,
             "the reload icon falls off the window: icon ends at {:?}, window ends at {:?}",
@@ -4771,91 +4835,74 @@ mod tests {
         );
     }
 
-    /// #192, #43: 開いたメニューでは､どの項目も配置され､Home が先頭で､
-    /// どれも重ならない — segmented control (#164) が横一列だったのに
-    /// 対し､ドロップダウンは縦に積む｡`the_status_bars_segments_keep_apart`
-    /// がステータスバーについて述べるのと同じ主張を､同じ理由で述べている｡
+    /// #214, #282: header が撤去され保持数の区画も消えた後の最終形 — footer
+    /// は 429px でも全部の区画を窓の中に収める｡左から usage → 次の sync →
+    /// (`ml_auto` で右へ寄せたクラスタ) auto-refresh の期限 → reload の
+    /// アイコンの順で並び､どの隣同士も重ならない｡
     #[gpui::test]
-    fn the_open_menu_lists_home_and_every_list_top_to_bottom(cx: &mut gpui::TestAppContext) {
-        let (mut visual, _timeline) = drawn(
-            cx,
-            fixture_with_lists(&["1"], &[("9101", "Following mirror"), ("9102", "Rust")]),
-        );
-
-        let trigger = visual
-            .debug_bounds("source-picker")
-            .expect("the trigger is always shown");
-        visual.simulate_click(trigger.center(), gpui::Modifiers::none());
-        visual.update(|window, cx| {
-            let _ = window.draw(cx);
+    fn the_footer_keeps_every_segment_in_the_window_at_429px(cx: &mut gpui::TestAppContext) {
+        let (mut visual, timeline) = drawn(cx, fixture_with_sync(&["2", "1"], 0));
+        visual.update(|_window, cx| {
+            timeline.update(cx, |view, _cx| {
+                view.refresh_situation = Some(counting_situation());
+            });
         });
 
-        let home = visual
-            .debug_bounds("tab-home")
-            .expect("Home is always a segment");
-        let first = visual
-            .debug_bounds("tab-list-9101")
-            .expect("the first fixture list is a segment");
-        let second = visual
-            .debug_bounds("tab-list-9102")
-            .expect("the second fixture list is a segment");
-        assert!(first.top() >= home.bottom(), "{home:?} then {first:?}");
-        assert!(second.top() >= first.bottom(), "{first:?} then {second:?}");
+        let (bar, usage, next, countdown, primary_action) = footer_bounds_at(&mut visual, 429.);
+        let countdown = countdown.expect("a counting loop has to reach the footer");
+        let primary_action = primary_action.expect("the reload icon is always shown");
 
-        // 1 段上でまた #182: ツールバーの行の `gap` はタイトルを溝に密着させた
-        // ままにするので､`List@usadamasa` と読めてしまう｡トリガー自体は
-        // 固定幅なので､メニューが開いていてもツールバー行の並びは変わらない｡
-        let title = visual
-            .debug_bounds("header-title")
-            .expect("the title is always shown");
         assert!(
-            title.left() > trigger.right(),
-            "the title runs into the trigger: trigger ends at {:?}, title starts at {:?}",
-            trigger.right(),
-            title.left()
+            usage.right() <= next.left(),
+            "usage runs into the next sync time: usage ends at {:?}, next starts at {:?}",
+            usage.right(),
+            next.left()
+        );
+        assert!(
+            next.right() <= countdown.left(),
+            "the next sync time runs into the countdown: time ends at {:?}, countdown starts at {:?}",
+            next.right(),
+            countdown.left()
+        );
+        assert!(
+            countdown.right() < primary_action.left(),
+            "the countdown runs into the reload icon: countdown ends at {:?}, icon starts at {:?}",
+            countdown.right(),
+            primary_action.left()
+        );
+        assert!(
+            primary_action.right() <= bar.right(),
+            "the reload icon falls off the window: icon ends at {:?}, window ends at {:?}",
+            primary_action.right(),
+            bar.right()
         );
     }
 
-    /// #43: fixture が `sources` (複数) と `picker_open` を宣言できること｡
-    /// `--fixture` の窓はクリックを合成できないので (`fixture-visual-check`)、
-    /// 開いた状態・複数選択の画面を撮るにはこの経路しかない｡
+    /// #282: footer に移った reload のアイコンは帯の高さに収まり､縦方向は
+    /// 帯の中央に来る — header に居たときと違い､footer の他の区画は
+    /// テキストの一行なので､アイコンだけが縦にずれると目立つ｡
     #[gpui::test]
-    fn a_fixture_can_declare_multiple_sources_and_start_the_menu_open(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        let mut fixture = fixture_with_lists(&["1"], &[("9101", "rust")]);
-        fixture.sources = vec![
-            super::source_picker::Selection::Home,
-            super::source_picker::Selection::List {
-                id: "9101".to_string(),
-            },
-        ];
-        fixture.list_items = std::collections::BTreeMap::from([(
-            "9101".to_string(),
-            vec![item_with("2", "someone", None)],
-        )]);
-        fixture.picker_open = true;
-
-        let (mut visual, timeline) = drawn(cx, fixture);
-        visual.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
-
-        cx.update(|cx| {
-            timeline.update(cx, |view, _cx| {
-                assert_eq!(
-                    view.sources,
-                    vec![
-                        crate::cache::TimelineSource::Home,
-                        crate::cache::TimelineSource::List("9101".to_string()),
-                    ]
-                );
-                assert!(view.source_picker_open.is_open());
-                assert_eq!(shown_ids(view), ["2", "1"]);
-            });
-        });
-        // メニューが開いた状態で描かれているので､項目に到達できる｡
-        assert!(visual.debug_bounds("tab-list-9101").is_some());
+    fn the_reload_icon_fits_the_status_bar_height(cx: &mut gpui::TestAppContext) {
+        let (mut visual, _timeline) = drawn(cx, fixture_with(&["2", "1"], &[]));
+        let bar = visual
+            .debug_bounds("status-bar")
+            .expect("the footer is always shown");
+        let primary_action = visual
+            .debug_bounds("primary-action")
+            .expect("the reload icon is always shown");
+        assert!(
+            primary_action.size.height <= bar.size.height,
+            "the reload icon must fit inside the status bar: icon height {:?}, bar height {:?}",
+            primary_action.size.height,
+            bar.size.height
+        );
+        let bar_center_y = bar.center().y;
+        let icon_center_y = primary_action.center().y;
+        assert!(
+            (f32::from(bar_center_y) - f32::from(icon_center_y)).abs() < 2.0,
+            "the reload icon must sit vertically centered in the status bar: \
+             bar center {bar_center_y:?}, icon center {icon_center_y:?}"
+        );
     }
 
     /// `fixtures/lane.json` の撮影で見つかった不具合 (#43): 一覧がウィンドウ
@@ -4899,12 +4946,153 @@ mod tests {
         );
     }
 
+    /// #282: header 撤去の最終形｡バナーも composer も無いとき､timeline の
+    /// 上端はウィンドウの上端に触れる — toolbar が高さぶん押し下げていた
+    /// 分がもう無い｡composer は別ウィンドウへ移ったので (`compose_window`)
+    /// もう timeline の列には残っておらず､`signed_in_with_oauth` を落とす
+    /// 必要は無い — それを確かめるのは下の
+    /// [`the_timeline_window_no_longer_carries_the_composer`]｡
+    #[gpui::test]
+    fn the_window_has_no_toolbar(cx: &mut gpui::TestAppContext) {
+        let (mut visual, timeline) = drawn(cx, fixture_with(&["1"], &[]));
+        visual.update(|_window, cx| {
+            timeline.update(cx, |view, cx| {
+                view.signed_in_with_oauth = false;
+                cx.notify();
+            });
+        });
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let timeline_bounds = visual
+            .debug_bounds("timeline")
+            .expect("the timeline is always laid out");
+        assert!(
+            f32::from(timeline_bounds.top()) < 1.0,
+            "the timeline should start at the window's top edge, not below a toolbar: {:?}",
+            timeline_bounds.top()
+        );
+    }
+
+    /// #282: composer が別ウィンドウへ移った後の門｡`signed_in_with_oauth`
+    /// を立てたまま (fixture は常にそうする — `show_fixture` を見よ) でも
+    /// timeline の列に composer が居残っていない: 上端がウィンドウの上端に
+    /// 触れる｡以前はここに `.when(self.signed_in_with_oauth, ...)` で
+    /// composer が挟まり､`the_window_has_no_toolbar` が oauth を偽で落とす
+    /// ことでしか同じ形を作れなかった｡
+    #[gpui::test]
+    fn the_timeline_window_no_longer_carries_the_composer(cx: &mut gpui::TestAppContext) {
+        let (mut visual, timeline) = drawn(cx, fixture_with(&["1"], &[]));
+        visual.update(|_window, cx| {
+            timeline.update(cx, |view, _cx| {
+                assert!(
+                    view.signed_in_with_oauth,
+                    "the fixture signs in, so this is the case that used to show the composer"
+                );
+            });
+        });
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let timeline_bounds = visual
+            .debug_bounds("timeline")
+            .expect("the timeline is always laid out");
+        assert!(
+            f32::from(timeline_bounds.top()) < 1.0,
+            "the composer must not sit inline above the timeline any more: {:?}",
+            timeline_bounds.top()
+        );
+        assert!(
+            visual.debug_bounds("compose-input").is_none(),
+            "the composer input must not be laid out in the timeline window"
+        );
+    }
+
+    /// #282: Re-authorize は header 撤去とともにバナーの列 (`notice_banners`)
+    /// へ移る｡footer には余地が無いので (#214)､`reauthorize` pill は
+    /// `banner-reauthorize` の中に座り､timeline より上に来る｡
+    #[gpui::test]
+    fn a_session_without_write_scope_offers_re_authorization_in_the_banner_column(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (mut visual, timeline) = drawn(cx, fixture_with(&["1"], &[]));
+        visual.update(|_window, cx| {
+            timeline.update(cx, |view, cx| {
+                view.oauth_scope = Some("tweet.read users.read offline.access".to_string());
+                view.sources = vec![crate::cache::TimelineSource::List("123".to_string())];
+                cx.notify();
+            });
+        });
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let banner = visual
+            .debug_bounds("banner-reauthorize")
+            .expect("a session missing a write scope must offer a way to fix it");
+        let pill = visual
+            .debug_bounds("reauthorize")
+            .expect("the banner must carry the Re-authorize pill");
+        assert!(
+            pill.top() >= banner.top() && pill.bottom() <= banner.bottom(),
+            "the Re-authorize pill must sit inside its banner: pill {pill:?}, banner {banner:?}"
+        );
+
+        let timeline_bounds = visual
+            .debug_bounds("timeline")
+            .expect("the timeline is always laid out");
+        assert!(
+            banner.top() < timeline_bounds.top(),
+            "the banner column sits above the timeline: banner {:?}, timeline {:?}",
+            banner.top(),
+            timeline_bounds.top()
+        );
+    }
+
+    /// 実測した失敗 (2026-08-24、すぐ下のテストを見よ) と同じ形の事故を
+    /// 429px の Re-authorize バナーでも起こさない｡バナーは長い説明文と
+    /// pill を横並びにしているので､幅の狭い本番ウィンドウで pill が
+    /// 右端の外へ押し出される余地がある｡
+    #[gpui::test]
+    fn the_re_authorize_pill_stays_in_the_window_at_429px(cx: &mut gpui::TestAppContext) {
+        let (mut visual, timeline) = drawn(cx, fixture_with(&["1"], &[]));
+        visual.update(|_window, cx| {
+            timeline.update(cx, |view, cx| {
+                view.oauth_scope = Some("tweet.read users.read offline.access".to_string());
+                view.sources = vec![crate::cache::TimelineSource::List("123".to_string())];
+                cx.notify();
+            });
+        });
+        visual.simulate_resize(gpui::size(gpui::px(429.), gpui::px(700.)));
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let banner = visual
+            .debug_bounds("banner-reauthorize")
+            .expect("a session missing a write scope must offer a way to fix it");
+        let pill = visual
+            .debug_bounds("reauthorize")
+            .expect("the banner must carry the Re-authorize pill");
+        assert!(
+            pill.left() >= banner.left() && pill.right() <= banner.right(),
+            "the Re-authorize pill falls outside its banner at 429px: pill {pill:?}, banner {banner:?}"
+        );
+        assert!(
+            pill.size.width > gpui::Pixels::ZERO,
+            "the Re-authorize pill must not collapse to zero width: {pill:?}"
+        );
+    }
+
     /// 実測した失敗 (2026-08-24): 560px でリストのタブが 11 個あるウィンドウは､
     /// ツールバーの "Sign in with X" を右端の外へ押し出したうえ､本文の助言は
     /// それをクリックしろというものだけだった｡X が更新を拒否したばかりの
     /// セッションは､画面からは回復できなかったことになる｡"Not signed in" の
     /// 文が居るのは本文なので､ボタンもそこに居る — ツールバーが何をして
-    /// いようと手が届く｡
+    /// いようと手が届く｡#282 の `a_signed_out_window_still_offers_the_way_back_in`
+    /// を兼ねる regression guard｡
     #[gpui::test]
     fn a_signed_out_window_offers_sign_in_in_the_body(cx: &mut gpui::TestAppContext) {
         let (mut visual, timeline) = drawn(cx, fixture_with(&["1"], &[]));
@@ -4928,193 +5116,36 @@ mod tests {
         );
     }
 
-    /// 同じ失敗のもう半分: ツールバーは 1 本の flex 行で､タブが十分に多いと､
-    /// その右にあるものすべて — タイトル､サインイン / リロードのコントロール —
-    /// を縮めるのではなくウィンドウの外へ押し出した｡タブ自身のあふれ方の見せ方は
-    /// #192 の担当で､ここが押さえるのは､アカウントがいくつリストを持って
-    /// いようと行の右端のコントロールがウィンドウから出ないことだけだ｡
-    #[gpui::test]
-    fn the_toolbar_action_stays_on_screen_under_a_dozen_tabs(cx: &mut gpui::TestAppContext) {
-        let lists: [(&str, &str); 12] = [
-            ("9101", "The Illustrated Compendium"),
-            ("9102", "Watercolour and gouache people"),
-            ("9103", "Neighbourhood announcements"),
-            ("9104", "International correspondents"),
-            ("9105", "Machine fabrication weekly"),
-            ("9106", "Dollhouse district news"),
-            ("9107", "Secondary creation circle"),
-            ("9108", "Drinking club coordination"),
-            ("9109", "Probe accounts for twigpui"),
-            ("9110", "Long-form essay writers"),
-            ("9111", "Camera gear enthusiasts"),
-            ("9112", "Weekend hiking companions"),
-        ];
-        let (mut visual, _timeline) = drawn(cx, fixture_with_lists(&["1"], &lists));
-
-        let action = visual
-            .debug_bounds("primary-action")
-            .expect("the toolbar always carries its action control");
-        let viewport = visual.update(|window, _| window.viewport_size());
-        assert!(
-            action.right() <= viewport.width,
-            "the toolbar's action control is pushed off-screen by the tabs: \
-             {action:?} in {viewport:?}"
-        );
-    }
-
-    /// #192 の判別テスト: 13 本目 (最後) のリストを選択中にしたとき､本番の
-    /// 実寸 429px でその区画に到達できること｡`overflow_hidden` が右側の
-    /// コントロールを守る代わりにタブそのものを画面外へ追いやっていた
-    /// (`the_toolbar_action_stays_on_screen_under_a_dozen_tabs` はそちらを
-    /// 守らない側しか見ていない)｡
-    ///
-    /// トリガーが無い今の実装では `if let` が素通りし､`tab-list-9113` は
-    /// 描かれてはいるが viewport の外にあるので落ちる｡ドロップダウンを
-    /// 実装した後は開いて同じ名前の bounds を viewport の内側で見つける｡
-    #[gpui::test]
-    fn the_thirteenth_list_is_reachable_at_429px(cx: &mut gpui::TestAppContext) {
-        let lists: [(&str, &str); 13] = [
-            ("9101", "The Illustrated Compendium"),
-            ("9102", "Watercolour and gouache people"),
-            ("9103", "Neighbourhood announcements"),
-            ("9104", "International correspondents"),
-            ("9105", "Machine fabrication weekly"),
-            ("9106", "Dollhouse district news"),
-            ("9107", "Secondary creation circle"),
-            ("9108", "Drinking club coordination"),
-            ("9109", "Probe accounts for twigpui"),
-            ("9110", "Long-form essay writers"),
-            ("9111", "Camera gear enthusiasts"),
-            ("9112", "Weekend hiking companions"),
-            ("9113", "Yet another list"),
-        ];
-        let (mut visual, timeline) = drawn(cx, fixture_with_lists(&["1"], &lists));
-        cx.update(|cx| {
-            timeline.update(cx, |view, cx| {
-                view.sources = vec![crate::cache::TimelineSource::List("9113".to_string())];
-                cx.notify();
-            });
-        });
-        visual.simulate_resize(gpui::size(gpui::px(429.), gpui::px(700.)));
-        visual.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
-
-        if let Some(trigger) = visual.debug_bounds("source-picker") {
-            visual.simulate_click(trigger.center(), gpui::Modifiers::none());
-            visual.update(|window, cx| {
-                let _ = window.draw(cx);
-            });
-        }
-        let item = visual
-            .debug_bounds("tab-list-9113")
-            .expect("every list must be addressable by its own name");
-        let viewport = visual.update(|window, _| window.viewport_size());
-        assert!(
-            item.right() <= viewport.width,
-            "the selected list is not reachable at 429px: {item:?} in {viewport:?}"
-        );
-    }
-
-    /// #164: fixture のウィンドウには client が無いので､ツールバーの中で
-    /// リクエストを使う唯一のボタンを出してはならない｡
-    #[gpui::test]
-    fn a_fixture_window_offers_no_list_fetch(cx: &mut gpui::TestAppContext) {
-        let (mut visual, _timeline) = drawn(cx, fixture_with_lists(&["1"], &[("9101", "Rust")]));
-        assert!(
-            visual.debug_bounds("load-lists").is_none(),
-            "a window with no client must not offer to fetch lists"
-        );
-    }
-
-    /// #164 (#192/#43 でメニューへ移動): client を持つウィンドウは
-    /// list fetch のボタンを出す — ただし今はツールバーではなく開いた
-    /// メニューの末尾 (セパレータの後)｡閉じた状態のトリガーは幅を食わない｡
-    ///
-    /// このボタンが実際に描かれる唯一の場所はサインイン済みの live ウィンドウ
-    /// だが､それはどのテストにも構築できない — そこでここでは fixture の
-    /// ウィンドウに client を渡し (トークンの文字列｡`XClient::new` は何も
-    /// 送らない)､描き直す｡これが無いと､ボタンの最初の描画がユーザーの最初の
-    /// 起動になる｡「ボタンが無い」と報告されたのはそういう経緯だ｡
-    #[gpui::test]
-    fn a_signed_in_menu_offers_the_list_fetch_after_the_segments(cx: &mut gpui::TestAppContext) {
-        let (mut visual, timeline) = drawn(cx, fixture_with_lists(&["1"], &[("9101", "Rust")]));
-        cx.update(|cx| {
-            timeline.update(cx, |view, cx| {
-                view.client = Some(crate::x_api::XClient::new("token".to_string()));
-                cx.notify();
-            });
-        });
-        visual.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
-
-        assert!(
-            visual.debug_bounds("load-lists").is_none(),
-            "the closed trigger must not offer the fetch directly"
-        );
-
-        let trigger = visual
-            .debug_bounds("source-picker")
-            .expect("the trigger is always shown");
-        visual.simulate_click(trigger.center(), gpui::Modifiers::none());
-        visual.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
-
-        let button = visual
-            .debug_bounds("load-lists")
-            .expect("a window with a client and a known user offers the fetch in the open menu");
-        let last_segment = visual
-            .debug_bounds("tab-list-9101")
-            .expect("the fixture list is a segment");
-        assert!(
-            button.top() >= last_segment.bottom(),
-            "the button sits after the picker's segments: {last_segment:?} then {button:?}"
-        );
-        assert!(
-            button.size.width > gpui::px(0.0) && button.size.height > gpui::px(0.0),
-            "the button has a size: {button:?}"
-        );
-    }
-
     /// #164 の 2 つ目の完了条件 (#43 でトグルへ拡張): すでにキャッシュ済みの
     /// source どうしを行き来しても何も送らない｡
     ///
     /// Home と list が 2 つ､すべて前もってキャッシュしてある (Home は空)｡
-    /// ウィンドウは Home を外し､list を行き来するようにトグルされ (メニューは
-    /// 項目クリックで閉じないので連続でクリックできる)､各クリックの後には
-    /// きっかりキャッシュ済みの行を表示する｡client はまだ無く
-    /// `last_reload_at` も動いていないので､何も出ていないし試みられても
-    /// いない — `showing_new_posts_sends_nothing` が頼るのと同じ証拠だ｡
+    /// `view.toggle_source` を直に 4 回呼び (#282: `Sources` はメニューバーの
+    /// ネイティブメニューなので gpui のクリックを合成できない — トリガーの
+    /// クリックに代わる唯一の道がこれになった)、各回の後にきっかり
+    /// キャッシュ済みの行を表示する｡client はまだ無く `last_reload_at` も
+    /// 動いていないので､何も出ていないし試みられてもいない —
+    /// `showing_new_posts_sends_nothing` が頼るのと同じ証拠だ｡
+    /// 課金の門: 消してはならない｡
     #[gpui::test]
     fn toggling_between_cached_sources_sends_nothing(cx: &mut gpui::TestAppContext) {
         cache_home(&[]);
         cache_list("9111", &["12", "11"]);
         cache_list("9112", &["22", "21"]);
-        let (mut visual, timeline) = drawn(
+        let (_window, timeline) = fixture_window(
             cx,
             fixture_with_lists(&["1"], &[("9111", "first"), ("9112", "second")]),
         );
 
-        let trigger = visual
-            .debug_bounds("source-picker")
-            .expect("the trigger is always shown");
-        visual.simulate_click(trigger.center(), gpui::Modifiers::none());
-        visual.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
-
-        for segment in [
-            "tab-list-9111", // sources: Home, 9111
-            "tab-home",      // sources: 9111
-            "tab-list-9112", // sources: 9111, 9112
-            "tab-list-9111", // sources: 9112
+        for target in [
+            crate::cache::TimelineSource::List("9111".to_string()), // sources: Home, 9111
+            crate::cache::TimelineSource::Home,                     // sources: 9111
+            crate::cache::TimelineSource::List("9112".to_string()), // sources: 9111, 9112
+            crate::cache::TimelineSource::List("9111".to_string()), // sources: 9112
         ] {
-            let bounds = visual
-                .debug_bounds(segment)
-                .expect("the segment has to be laid out before a click can reach it");
-            visual.simulate_click(bounds.center(), gpui::Modifiers::none());
+            cx.update(|cx| {
+                timeline.update(cx, |view, cx| view.toggle_source(&target, cx));
+            });
             cx.run_until_parked();
 
             cx.update(|cx| {
@@ -5123,14 +5154,9 @@ mod tests {
                     assert!(
                         view.last_reload_at.is_none(),
                         "a toggle between cached sources must not count as a fetch \
-                         (after clicking {segment})"
+                         (after toggling {target:?})"
                     );
                 });
-            });
-            // 次の参照が､前のフレームが置いた場所ではなく今ある場所で区画を
-            // 拾えるように描き直す｡
-            visual.update(|window, cx| {
-                let _ = window.draw(cx);
             });
         }
 
@@ -5145,13 +5171,12 @@ mod tests {
         });
     }
 
-    /// #164: クリックは区画の上に落ち､切り替えは前の取得元に属していたものを
-    /// リセットする — ここでは poll のバッファで､そうしなければ古いリストの
-    /// post を新しいリストに被せて出してしまう｡
+    /// #164: トグルは前の取得元に属していたものをリセットする — ここでは
+    /// poll のバッファで､そうしなければ古いリストの post を新しいリストに
+    /// 被せて出してしまう｡
     /// #43: 区画は「切り替える」ではなく「トグルする」。list を足してから
     /// Home を外し、結局は #164 が確かめていたのと同じ単一選択の終着点
-    /// (list だけ) へたどり着くことを確認する — メニューは項目クリックで
-    /// 閉じないので、2 回続けてクリックできる。
+    /// (list だけ) へたどり着くことを確認する｡
     #[gpui::test]
     fn toggling_segments_changes_the_source_and_drops_the_old_buffer(
         cx: &mut gpui::TestAppContext,
@@ -5159,7 +5184,7 @@ mod tests {
         cache_list("9121", &["32", "31"]);
         let mut fixture = fixture_with_lists(&["2", "1"], &[("9121", "Rust")]);
         fixture.pending = vec![item_with("3", "someone", None)];
-        let (mut visual, timeline) = drawn(cx, fixture);
+        let (_window, timeline) = fixture_window(cx, fixture);
 
         cx.update(|cx| {
             timeline.update(cx, |view, _cx| {
@@ -5168,27 +5193,17 @@ mod tests {
             });
         });
 
-        let trigger = visual
-            .debug_bounds("source-picker")
-            .expect("the trigger is always shown");
-        visual.simulate_click(trigger.center(), gpui::Modifiers::none());
-        visual.update(|window, cx| {
-            let _ = window.draw(cx);
+        cx.update(|cx| {
+            timeline.update(cx, |view, cx| {
+                view.toggle_source(&crate::cache::TimelineSource::List("9121".to_string()), cx);
+            });
         });
-
-        let list_item = visual
-            .debug_bounds("tab-list-9121")
-            .expect("the segment has to be laid out before a click can reach it");
-        visual.simulate_click(list_item.center(), gpui::Modifiers::none());
         cx.run_until_parked();
-        visual.update(|window, cx| {
-            let _ = window.draw(cx);
+        cx.update(|cx| {
+            timeline.update(cx, |view, cx| {
+                view.toggle_source(&crate::cache::TimelineSource::Home, cx);
+            });
         });
-
-        let home_item = visual
-            .debug_bounds("tab-home")
-            .expect("home stays addressable while the menu is open");
-        visual.simulate_click(home_item.center(), gpui::Modifiers::none());
         cx.run_until_parked();
 
         cx.update(|cx| {
@@ -5217,30 +5232,15 @@ mod tests {
     /// テストで押さえてある｡
     #[gpui::test]
     fn toggling_a_source_restarts_the_auto_refresh_loop(cx: &mut gpui::TestAppContext) {
-        let (mut visual, timeline) = drawn(cx, fixture_with_lists(&["1"], &[("9161", "Rust")]));
+        let (_window, timeline) =
+            fixture_window(cx, fixture_with_lists(&["1"], &[("9161", "Rust")]));
         cx.update(|cx| {
             timeline.update(cx, |view, cx| {
                 view.client = Some(crate::x_api::XClient::new("token".to_string()));
                 view.config.auto_refresh = true;
-                cx.notify();
+                view.toggle_source(&crate::cache::TimelineSource::List("9161".to_string()), cx);
             });
         });
-        visual.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
-
-        let trigger = visual
-            .debug_bounds("source-picker")
-            .expect("the trigger is always shown");
-        visual.simulate_click(trigger.center(), gpui::Modifiers::none());
-        visual.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
-
-        let list_item = visual
-            .debug_bounds("tab-list-9161")
-            .expect("the segment has to be laid out before a click can reach it");
-        visual.simulate_click(list_item.center(), gpui::Modifiers::none());
         cx.run_until_parked();
 
         cx.update(|cx| {
@@ -5282,11 +5282,7 @@ mod tests {
         // この HOME の下に token は無いので､起動は client を持たない
         // `NotAuthenticated` へ落ち着く — 起動のゲートは越えていて､なお
         // この後のキャッシュミスに何も使えない｡
-        let (window, timeline) = window_with(cx, smoke_config(), paths.clone(), Startup::Live);
-        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
-        visual.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
+        let (_window, timeline) = window_with(cx, smoke_config(), paths.clone(), Startup::Live);
         cx.update(|cx| {
             timeline.update(cx, |view, _cx| {
                 assert!(matches!(view.state, TimelineState::NotAuthenticated));
@@ -5294,18 +5290,11 @@ mod tests {
             });
         });
 
-        let trigger = visual
-            .debug_bounds("source-picker")
-            .expect("the trigger is always shown");
-        visual.simulate_click(trigger.center(), gpui::Modifiers::none());
-        visual.update(|window, cx| {
-            let _ = window.draw(cx);
+        cx.update(|cx| {
+            timeline.update(cx, |view, cx| {
+                view.toggle_source(&crate::cache::TimelineSource::List("9131".to_string()), cx);
+            });
         });
-
-        let segment = visual
-            .debug_bounds("tab-list-9131")
-            .expect("the segment has to be laid out before a click can reach it");
-        visual.simulate_click(segment.center(), gpui::Modifiers::none());
         cx.run_until_parked();
 
         let remembered = super::source_picker::load_selection(&paths.selection_file());
@@ -5330,20 +5319,14 @@ mod tests {
         cache_list("9151", &["51"]);
         let selection_file = smoke_paths().selection_file();
         let _ = std::fs::remove_file(&selection_file);
-        let (mut visual, timeline) = drawn(cx, fixture_with_lists(&["1"], &[("9151", "Rust")]));
+        let (_window, timeline) =
+            fixture_window(cx, fixture_with_lists(&["1"], &[("9151", "Rust")]));
 
-        let trigger = visual
-            .debug_bounds("source-picker")
-            .expect("the trigger is always shown");
-        visual.simulate_click(trigger.center(), gpui::Modifiers::none());
-        visual.update(|window, cx| {
-            let _ = window.draw(cx);
+        cx.update(|cx| {
+            timeline.update(cx, |view, cx| {
+                view.toggle_source(&crate::cache::TimelineSource::List("9151".to_string()), cx);
+            });
         });
-
-        let segment = visual
-            .debug_bounds("tab-list-9151")
-            .expect("the segment has to be laid out before a click can reach it");
-        visual.simulate_click(segment.center(), gpui::Modifiers::none());
         cx.run_until_parked();
 
         cx.update(|cx| {
@@ -5361,25 +5344,19 @@ mod tests {
         );
     }
 
-    /// #164: すでに持ち上がっているセグメントをクリックしても何も起きない —
-    /// 後の timeline は､単に読み込まれたままなのではなく同一だ｡
+    /// #164: すでに持ち上がっている唯一の source を再びトグルしても何も
+    /// 起きない — 非空 invariant がそのクリックを無視する｡後の timeline は､
+    /// 単に読み込まれたままなのではなく同一だ｡
     #[gpui::test]
-    fn clicking_the_only_showing_segment_changes_nothing(cx: &mut gpui::TestAppContext) {
-        let (mut visual, timeline) =
-            drawn(cx, fixture_with_lists(&["2", "1"], &[("9141", "Rust")]));
+    fn toggling_the_only_shown_source_changes_nothing(cx: &mut gpui::TestAppContext) {
+        let (_window, timeline) =
+            fixture_window(cx, fixture_with_lists(&["2", "1"], &[("9141", "Rust")]));
 
-        let trigger = visual
-            .debug_bounds("source-picker")
-            .expect("the trigger is always shown");
-        visual.simulate_click(trigger.center(), gpui::Modifiers::none());
-        visual.update(|window, cx| {
-            let _ = window.draw(cx);
+        cx.update(|cx| {
+            timeline.update(cx, |view, cx| {
+                view.toggle_source(&crate::cache::TimelineSource::Home, cx);
+            });
         });
-
-        let home = visual
-            .debug_bounds("tab-home")
-            .expect("Home is always a segment");
-        visual.simulate_click(home.center(), gpui::Modifiers::none());
         cx.run_until_parked();
 
         cx.update(|cx| {

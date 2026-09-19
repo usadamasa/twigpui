@@ -4,6 +4,11 @@
 //! 関わらない唯一の部分だからだ: `main` はこのすべてをウィンドウが存在する
 //! 前に登録し､メニューバーは個々のウィンドウより長く生きる｡ここに置くこと
 //! で､キーストロークが名指される場所がすべて一つのファイルに収まる｡
+//!
+//! #282: [`ToggleSource`] が `ui::source_picker::Selection` を運ぶので､
+//! この一方通行だった依存が `ui` へも 1 本増えた｡`Sources` メニューの項目は
+//! macOS のメニューにチェック状態が無いぶん､選んだ selection をデータで
+//! 運ぶしかない｡
 
 gpui::actions!(
     twigpui,
@@ -12,10 +17,8 @@ gpui::actions!(
         /// に割り当ててある — どのアプリも共有するリロードの所作であり､誰かが
         /// 誤って叩く鍵ではない｡
         Reload,
-        /// composer へフォーカスを移す (#58)｡
-        FocusComposer,
-        /// composer からフォーカスを外す (#58)｡下書きには触れない｡
-        BlurComposer,
+        /// compose window を開く (#58, #282)｡既に開いていれば前面へ出す｡
+        OpenComposer,
         /// アプリケーションを終了する (#99)｡gpui は独自の quit アクションを
         /// 持たず､それが無いとアプリメニューには `cmd-q` を吊るす先が無い —
         /// twigpui が Dock からしか終了できなくなっていたのはそのためだ｡
@@ -70,8 +73,25 @@ gpui::actions!(
         /// 選択中の post を repost / undo repost する (#148)｡裸の `r` に
         /// 割り当て｡[`LikeSelected`] と同じく行のボタンの経路を通る｡
         RepostSelected,
+        /// list に名前を与える 1 回のリクエストを送る (#164, #282)｡`Sources`
+        /// メニュー末尾の項目が送る unit action｡値段はラベルに乗る
+        /// (`ui::source_picker_menu::source_menu_items`) — 鍵は持たない｡
+        /// [`SyncList`] と同じ理由: 押すたびに課金する｡
+        LoadOwnedLists,
     ]
 );
+
+/// `Sources` メニューの項目 1 つが運ぶデータ (#43, #282)｡macOS のメニューに
+/// チェック状態は無いので (下の [`menus`] の doc)､どの区画を押したかは
+/// ラベルではなくこれで運ぶ｡`derive(Action)` は `Clone` と `PartialEq` だけを
+/// 要求する — `#[action(no_json)]` が `serde::Deserialize` と
+/// `schemars::JsonSchema` を免除する｡キーバインドが無く JSON keymap から
+/// 組み立てられることは無いので免除して問題ない｡
+#[derive(Clone, PartialEq, gpui::Action)]
+#[action(namespace = twigpui, no_json)]
+pub(crate) struct ToggleSource {
+    pub(crate) selection: crate::ui::source_picker::Selection,
+}
 
 /// timeline の root 要素が担うキーコンテキスト (#58) — 下のバインドは
 /// [`QUIT`] (#99) を除きすべて､グローバルに登録するのではなくこれへスコープ
@@ -92,9 +112,11 @@ pub(crate) const KEY_CONTEXT: &str = "Timeline";
 /// 一致しない — 打鍵は bind に当たらず､`dispatch_keystroke` が文字として
 /// input handler へ流す｡動的にコンテキストを組み替える必要は無い｡
 ///
-/// `"Input"` という名前は gpui-component 側の定数なので､綴りを保証するのは
-/// このファイルのテストではなく､本物の composer を focus して打つ
-/// `ui::selection` のテストのほうだ｡
+/// `"Input"` という名前は gpui-component 側の定数なので､綴りを保証する
+/// テストはこのファイルには無い｡composer が #282 で別ウィンドウへ移った
+/// 今、timeline のウィンドウには focus できる text input がそもそも無く、
+/// この述語は事実上いつも真になる — 将来また何か `Input` を足したときに
+/// 同じ罠 (#148) を踏まないための門として残してある｡
 pub(crate) const BROWSE_CONTEXT: &str = "Timeline && !Input";
 
 /// 一つのバインドを､一度だけ定義する (#99)｡
@@ -118,8 +140,8 @@ struct Shortcut {
     /// `const` は `impl Action` を持てないが､何も捕捉しないクロージャは関数
     /// ポインタへ coerce する — 使うたびにではなくここでアクションを名指す
     /// にはそれで足りる｡以前は `init` と [`menus`] がショートカットと
-    /// アクションを手で対にしており､`menu_item(&RELOAD, FocusComposer)` は
-    /// Reload というラベルの下で `cmd-n` が composer にフォーカスするメニュー
+    /// アクションを手で対にしており､`menu_item(&RELOAD, OpenComposer)` は
+    /// Reload というラベルの下で `cmd-n` が compose window を開くメニュー
     /// 項目として型検査を通ってしまった｡
     bind: fn(&'static str, Option<&'static str>) -> gpui::KeyBinding,
     /// このショートカットのメニュー項目を､[`Shortcut::bind`] と同じアクション
@@ -142,23 +164,13 @@ const RELOAD: Shortcut = Shortcut {
     menu_label: Some("Reload"),
 };
 
-/// composer へフォーカスを移す｡
-const FOCUS_COMPOSER: Shortcut = Shortcut {
+/// compose window を開く (#282)｡既に開いていれば前面へ出す｡
+const OPEN_COMPOSER: Shortcut = Shortcut {
     keystroke: "cmd-n",
     context: Some(KEY_CONTEXT),
-    bind: |keystroke, context| gpui::KeyBinding::new(keystroke, FocusComposer, context),
-    item: |label| gpui::MenuItem::action(label, FocusComposer),
+    bind: |keystroke, context| gpui::KeyBinding::new(keystroke, OpenComposer, context),
+    item: |label| gpui::MenuItem::action(label, OpenComposer),
     menu_label: Some("New Post"),
-};
-
-/// composer から出る｡メニューバーには無い: 「フォーカスを戻す」は所作で
-/// あって､誰かがメニューに探しに行くコマンドではない｡
-const BLUR_COMPOSER: Shortcut = Shortcut {
-    keystroke: "escape",
-    context: Some(KEY_CONTEXT),
-    bind: |keystroke, context| gpui::KeyBinding::new(keystroke, BlurComposer, context),
-    item: |label| gpui::MenuItem::action(label, BlurComposer),
-    menu_label: None,
 };
 
 /// 終了する (#99)｡キーコンテキスト無しで登録される唯一のバインドで､ヘッダが
@@ -271,8 +283,8 @@ const SELECT_NEXT: Shortcut = Shortcut {
     context: Some(BROWSE_CONTEXT),
     bind: |keystroke, context| gpui::KeyBinding::new(keystroke, SelectNext, context),
     item: |label| gpui::MenuItem::action(label, SelectNext),
-    // メニューバーには出さない｡[`BLUR_COMPOSER`] と同じ理由で､一覧を読み
-    // 進める所作はメニューに探しに行くコマンドではない｡
+    // メニューバーには出さない: 一覧を読み進める所作はメニューに探しに
+    // 行くコマンドではない｡
     menu_label: None,
 };
 
@@ -308,15 +320,15 @@ const REPOST_SELECTED: Shortcut = Shortcut {
     menu_label: None,
 };
 
-/// composer へ移る裸の `n` (#148)｡[`FOCUS_COMPOSER`] と同じアクションで､
-/// 鍵とコンテキストだけが違う — メニュー項目は `cmd-n` のほう 1 つだけで
-/// よく (macOS が key equivalent に描けるのはどちらか一方だ)､だから
-/// `menu_label` は `None`｡
-const FOCUS_COMPOSER_BARE: Shortcut = Shortcut {
+/// compose window を開く裸の `n` (#148, #282)｡[`OPEN_COMPOSER`] と同じ
+/// アクションで､鍵とコンテキストだけが違う — メニュー項目は `cmd-n` の
+/// ほう 1 つだけでよく (macOS が key equivalent に描けるのはどちらか一方だ)､
+/// だから `menu_label` は `None`｡
+const OPEN_COMPOSER_BARE: Shortcut = Shortcut {
     keystroke: "n",
     context: Some(BROWSE_CONTEXT),
-    bind: |keystroke, context| gpui::KeyBinding::new(keystroke, FocusComposer, context),
-    item: |label| gpui::MenuItem::action(label, FocusComposer),
+    bind: |keystroke, context| gpui::KeyBinding::new(keystroke, OpenComposer, context),
+    item: |label| gpui::MenuItem::action(label, OpenComposer),
     menu_label: None,
 };
 
@@ -337,10 +349,9 @@ const FOCUS_COMPOSER_BARE: Shortcut = Shortcut {
 /// `SCROLL_TO_TOP` をこの一覧以外のあらゆる場所へ足した後､三つがここで bind
 /// されないまま座っていたのはそのためだ｡今それを捕まえるテストが
 /// `every_menu_item_has_a_binding` である｡
-const ALL_SHORTCUTS: [&Shortcut; 16] = [
+const ALL_SHORTCUTS: [&Shortcut; 15] = [
     &RELOAD,
-    &FOCUS_COMPOSER,
-    &BLUR_COMPOSER,
+    &OPEN_COMPOSER,
     &QUIT,
     &MINIMIZE,
     &CLOSE_WINDOW,
@@ -353,7 +364,7 @@ const ALL_SHORTCUTS: [&Shortcut; 16] = [
     &SELECT_PREVIOUS,
     &LIKE_SELECTED,
     &REPOST_SELECTED,
-    &FOCUS_COMPOSER_BARE,
+    &OPEN_COMPOSER_BARE,
 ];
 
 /// #58 のキーバインドを登録する｡起動時に一度､`gpui_component::init` (こちら
@@ -395,7 +406,15 @@ pub(crate) fn init(cx: &mut gpui::App) {
 ///
 /// 各項目の key equivalent は [`init`] が登録した keymap から来るので､ここが
 /// 名指すのはアクションと言い回しだけだ — キーストロークは決して名指さない｡
-pub(crate) fn menus() -> Vec<gpui::Menu> {
+///
+/// `sources` は `Sources` メニューの中身 (#282)｡呼び出し側の状態
+/// (どの timeline が表示中か､list を取得できるか) 次第で変わるので､この
+/// 関数自身は組まない — ウィンドウが開く前の `main` は空の `Vec` を渡し
+/// (まだどの source も無い)､`TimelineView::refresh_source_menu` が状態が
+/// 変わるたびに全体を作り直して渡す｡gpui の `MenuItem` にチェック状態は
+/// 無いので (`derive_action` の項目にラベルで印を刻む理由もこれ)､選び直す
+/// たびにメニュー全体を組み直すしかない｡
+pub(crate) fn menus(sources: Vec<gpui::MenuItem>) -> Vec<gpui::Menu> {
     vec![
         gpui::Menu {
             name: "twigpui".into(),
@@ -409,7 +428,15 @@ pub(crate) fn menus() -> Vec<gpui::Menu> {
         },
         gpui::Menu {
             name: "File".into(),
-            items: FOCUS_COMPOSER.menu_item().into_iter().collect(),
+            items: OPEN_COMPOSER.menu_item().into_iter().collect(),
+        },
+        // #282: どの timeline を表示するかのトップレベルのメニュー — サブ
+        // メニューにしなかった理由は `PLAN.md`/設計メモを見よ (主たる
+        // ナビゲーションを 2 階層下に埋めることになる)｡中身は空でありうる
+        // (ウィンドウが開く前の `main` はまだどの source も知らない)｡
+        gpui::Menu {
+            name: "Sources".into(),
+            items: sources,
         },
         gpui::Menu {
             name: "View".into(),
@@ -522,6 +549,17 @@ mod tests {
     }
 
     #[test]
+    fn new_post_opens_a_window() {
+        // #282: フォーカスを移すのではなくウィンドウを開くよう意味は
+        // 変わったが、メニュー項目のラベルと `cmd-n` の鍵はそのまま｡
+        let shortcut = ALL_SHORTCUTS
+            .iter()
+            .find(|shortcut| shortcut.keystroke == "cmd-n")
+            .expect("cmd-n has to stay bound");
+        assert_eq!(shortcut.menu_label, Some("New Post"));
+    }
+
+    #[test]
     fn load_older_has_no_shortcut() {
         // 押すたびに有料のリクエスト一つで後ろへページする｡打ち間違いで金を
         // 使う鍵は便利ではない (#58)｡`menu_label` に対して確かめているのは､
@@ -539,7 +577,7 @@ mod tests {
 
     /// メニューバーにあるすべてのアクション項目の名前｡サブメニューも含む｡
     fn menu_action_names() -> Vec<String> {
-        menus()
+        menus(Vec::new())
             .into_iter()
             .flat_map(|menu| menu.items)
             .filter_map(|item| match item {
@@ -658,7 +696,9 @@ mod tests {
         // 働いたまま､メニューだけが静かにただのメニューへ格下げされる｡
         // diff から誰かが気づく類の regression ではない｡
         assert!(
-            menus().iter().any(|menu| menu.name.as_ref() == "Window"),
+            menus(Vec::new())
+                .iter()
+                .any(|menu| menu.name.as_ref() == "Window"),
             "no menu is named \"Window\""
         );
     }
@@ -679,7 +719,7 @@ mod tests {
         // #267: Stickies が Window メニューに置いている対 (Floating Window /
         // Translucent) に倣う｡常駐させるウィンドウの居場所と見え方は､どちらも
         // ウィンドウの属性なので View ではなく Window に入る｡
-        let window = menus()
+        let window = menus(Vec::new())
             .into_iter()
             .find(|menu| menu.name.as_ref() == "Window")
             .expect("a Window menu");

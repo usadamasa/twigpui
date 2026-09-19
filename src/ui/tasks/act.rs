@@ -356,17 +356,18 @@ impl TimelineView {
     /// あの型は下書きの *テキスト* しか知らず､セッションの OAuth scope は
     /// 知らない｡だから `tweet.write` の欠落は — 403 が確定しているリク
     /// エストを使う前に — `can_submit` ではなく `ComposeState::refuse` で
-    /// ここで断る｡実際の解決策はヘッダの "Re-authorize" ボタンだ
+    /// ここで断る｡実際の解決策はバナーの "Re-authorize" ボタンだ
     /// (`offers_reauthorize` を見よ)｡
     ///
-    /// このファイルの他のアクションの多くと違い `window` を取るのは､#38
-    /// の成功経路がそれを必要とするからだ: `compose_input` 自身のバッファ
-    /// を空にする処理は — フィールドの doc を見よ — `InputState::set_value`
-    /// を通り､これが `window` を要求する｡この構造体の他のアクションが使う
-    /// 素の `cx.spawn`/`update` ではなく `cx.spawn_in`/
-    /// `WeakEntity::update_in` を使うのは､まさにそのために `Window` を
-    /// `await` を越えて運ぶためだ｡
-    pub(in crate::ui) fn submit_post(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+    /// #282: `cx.spawn_in`/`update_in` ではなく素の `cx.spawn`/`update` を
+    /// 使う｡この click ハンドラを呼ぶ compose window は escape/cmd-w で
+    /// 送信中でも閉じられるので､window に紐づく方だと await の後の
+    /// `update_in` がその window の消滅とともに失敗し (`let _ =` で握り
+    /// つぶされ)､`apply_result` が一度も走らず `compose.status` が
+    /// `Submitting` のまま固まる — 既に課金は済んでいるのに下書きへ
+    /// 二度と触れなくなる｡入力欄を空にして窓を閉じる仕上げは
+    /// `compose_window` の handle 越しに行う (下の成功経路を見よ)｡
+    pub(in crate::ui) fn submit_post(&mut self, cx: &mut Context<'_, Self>) {
         if !self.compose.can_submit() {
             return;
         }
@@ -397,7 +398,7 @@ impl TimelineView {
         // quote とは排他だ — `ComposeState::set_reply` を見よ｡
         let reply_to_post_id = self.compose.reply().map(|target| target.post_id.clone());
 
-        self.submit_task = Some(cx.spawn_in(window, async move |this, cx| {
+        self.submit_task = Some(cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
                 .spawn(async move {
@@ -413,18 +414,24 @@ impl TimelineView {
                 })
                 .await;
 
-            let _ = this.update_in(cx, |this, window, cx| {
+            let _ = this.update(cx, |this, cx| {
                 let succeeded = result.is_ok();
                 this.compose
                     .apply_result(result.map_err(|error| format!("{error:#}")));
                 if succeeded {
-                    // `apply_result` の `Ok` 分岐は `this.compose` 側の
-                    // 写しを消したところだが､`compose_input` は widget
-                    // 自身のまったく別のバッファだ (#38) — ユーザーに見え
-                    // る入力欄を実際に空にするのはこちらだ｡
-                    this.compose_input.update(cx, |state, cx| {
-                        state.set_value("", window, cx);
-                    });
+                    // #282: 入力欄を空にして窓を閉じるのは compose window
+                    // の handle 越し — `compose_input` はその window で
+                    // 作った `InputState` なので (`rebind_compose_input`
+                    // の doc を見よ)､値を空にするにも `Window` が要る｡
+                    // 開いたままの理由が無くなった (下書きが空になる) ので､
+                    // 閉じてついでに handle を手放す｡
+                    if let Some(handle) = this.compose_window.take() {
+                        let input = this.compose_input.clone();
+                        let _ = handle.update(cx, |_, window, cx| {
+                            input.update(cx, |state, cx| state.set_value("", window, cx));
+                            window.remove_window();
+                        });
+                    }
                     // 成功した post は timeline を変えるので reload へ
                     // 落ちる — ただし #57: これは poll ではなくユーザーが
                     // いまやったことの結果を確かめるもので (post 自体が

@@ -16,7 +16,7 @@ use crate::url::Url;
 /// が､`list.read` は #161 が足した — #7 は post・like・List の読み取りが
 /// それらを必要とするまで意図して外していた｡各追加より前からサインインして
 /// いる人はそれを持たない token を握っており､まさにそれを検知して直すために
-/// `oauth::tokens::has_scope` とヘッダーの "Re-authorize" ボタン (#14) が
+/// `oauth::tokens::has_scope` とバナーの "Re-authorize" ボタン (#14) が
 /// ある｡
 ///
 /// `list.write` は要求し **ない**｡List を作って中身を入れるのは #163 だ｡

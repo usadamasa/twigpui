@@ -1,0 +1,13 @@
+{
+  "signed_in_as": { "id": "5685672", "username": "usadamasa" },
+  "items": [
+    {
+      "id": "9300000000000000001",
+      "text": "compose.json (#282): opened alongside the compose window to confirm it draws without panicking.",
+      "created_at": "2026-08-22T09:50:00.000Z",
+      "author_name": "Compose Probe",
+      "author_username": "composeprobe"
+    }
+  ],
+  "composer_open": true
+}

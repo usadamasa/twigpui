@@ -25,8 +25,8 @@ use super::{
 /// sync の行を今 出すかどうか (#205)｡
 ///
 /// 出さない状態にも根拠がある｡[`SyncStatus::Off`] の 3 つはどれも直し方が
-/// 他の場所にある (ヘッダーの "Re-authorize"､toolbar の picker､サインイン
-/// のボタン)｡[`SyncStatus::Ready`] と `Idle { pending: 0 }` は定常状態で､
+/// 他の場所にある (バナーの "Re-authorize"､メニューバーの `Sources`､
+/// サインインのボタン)｡[`SyncStatus::Ready`] と `Idle { pending: 0 }` は定常状態で､
 /// 定常状態は報告にならない｡
 pub(super) fn wants_sync_row(status: &SyncStatus) -> bool {
     match status {
@@ -54,7 +54,7 @@ pub(super) fn sync_blocked_reason(status: &SyncStatus) -> Option<&'static str> {
             Some("No list is configured, so there is nothing to mirror into.")
         }
         SyncStatus::Off(SyncOff::MissingScope) => {
-            Some("This session predates the scope sync needs. Re-authorize from the header first.")
+            Some("This session predates the scope sync needs. Re-authorize from the banner first.")
         }
         SyncStatus::Off(SyncOff::NotSignedIn) => Some("Sign in first."),
         // 走っている diff に 2 つ目を重ねると両側を 2 回払う｡tick は

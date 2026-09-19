@@ -118,7 +118,7 @@ pub(crate) const TWEET_WRITE_SCOPE: &str = "tweet.write";
 /// #68 の like ボタンが要る scope (`POST`/`DELETE /2/users/:id/likes`)｡
 /// X はこれを `tweet.write` とは別に与えるので､#68 以前に認可されたセッション
 /// は post も repost もできるが like はできない — 直し方は [`has_scope`] と
-/// ヘッダーの "Re-authorize" ボタンで､#14 とまったく同じだ｡
+/// バナーの "Re-authorize" ボタンで､#14 とまったく同じだ｡
 pub(crate) const LIKE_WRITE_SCOPE: &str = "like.write";
 
 /// #161 の List timeline が要る scope (`GET /2/lists/:id/tweets`)｡#167 が
