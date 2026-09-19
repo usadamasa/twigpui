@@ -62,7 +62,7 @@ scripts/credit-report.sh --state-dir "$PWD/tmp/credit-YYYY-MM-DD" --purchase 'YY
 
 ## ログの `usage` 行
 
-`usage::record_response` は数えるたびに INFO を 1 行書く。
+`usage::record_response` は数えるたびに INFO を 1 行書く (何も返らなかった read を除く)。
 
 ```
 2026-09-20T01:02:03Z INFO usage list_timeline (posts): returned 20, counted 3, today 952

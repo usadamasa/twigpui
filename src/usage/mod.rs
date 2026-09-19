@@ -364,14 +364,14 @@ pub(crate) fn record_response(
     let mut file = load_file(paths)?;
     let kind = endpoint.kind();
 
-    let amount = if kind == ResourceKind::Write {
-        1
+    let (returned, amount) = if kind == ResourceKind::Write {
+        (None, 1)
     } else {
         let ids = extract_resource_ids(body);
         let bucket = file.dedup.remove(kind.key()).unwrap_or_default();
         let (updated_bucket, billed) = dedup(bucket, &ids, now);
         file.dedup.insert(kind.key().to_string(), updated_bucket);
-        billed
+        (Some(ids.len()), billed)
     };
 
     let entry = file
@@ -379,10 +379,43 @@ pub(crate) fn record_response(
         .get(endpoint.key())
         .copied()
         .unwrap_or_default();
-    file.endpoints
-        .insert(endpoint.key().to_string(), record(entry, now, amount));
+    let updated = record(entry, now, amount);
+    file.endpoints.insert(endpoint.key().to_string(), updated);
 
-    write_file(paths, file)
+    write_file(paths, file)?;
+    if let Some(line) = usage_line(endpoint, returned, amount, updated.today) {
+        crate::log::info(&line);
+    }
+    Ok(())
+}
+
+/// [`record_response`] がログへ残す 1 行｡`usage.json` は今日の合計しか
+/// 持たないので､いつ数えたかはこの行の時刻にしか残らない｡
+///
+/// `counted` は dedup 後に足した数､`returned` は応答に入っていた数
+/// (write には無い)｡`counted 0` が「何も返らなかった」のか「全部が今日
+/// すでに数えた分だった」のかは `returned` で見分ける｡write は HTTP の
+/// 結果を見ずに数えるので､"billed" とは書かない｡
+///
+/// 何も返らなかった read は書かない｡残高切れの間はポーリングのたびに
+/// 起きて､同じことを ERROR の行がすでに言っている｡
+fn usage_line(
+    endpoint: Endpoint,
+    returned: Option<usize>,
+    counted: u64,
+    today: u64,
+) -> Option<String> {
+    let key = endpoint.key();
+    let kind = endpoint.kind().key();
+    match returned {
+        Some(0) => None,
+        Some(returned) => Some(format!(
+            "usage {key} ({kind}): returned {returned}, counted {counted}, today {today}"
+        )),
+        None => Some(format!(
+            "usage {key} ({kind}): counted {counted}, today {today}"
+        )),
+    }
 }
 
 /// 追跡対象の endpoint を合計した数 — [`kind_totals`]/[`posts_totals`] が
@@ -808,17 +841,23 @@ mod tests {
     #[test]
     fn usage_line_reports_returned_and_counted_for_a_read() {
         assert_eq!(
-            usage_line(Endpoint::ListTimeline, Some(20), 3, 952),
-            "usage list_timeline (posts): returned 20, counted 3, today 952"
+            usage_line(Endpoint::ListTimeline, Some(20), 3, 952).as_deref(),
+            Some("usage list_timeline (posts): returned 20, counted 3, today 952")
         );
     }
 
     #[test]
     fn usage_line_has_no_returned_count_for_a_write() {
         assert_eq!(
-            usage_line(Endpoint::CreateLike, None, 1, 17),
-            "usage create_like (write): counted 1, today 17"
+            usage_line(Endpoint::CreateLike, None, 1, 17).as_deref(),
+            Some("usage create_like (write): counted 1, today 17")
         );
+    }
+
+    #[test]
+    fn usage_line_is_silent_when_a_read_returned_nothing() {
+        // 失敗した応答や空のページ｡残高切れの間はポーリングのたびに起きる｡
+        assert_eq!(usage_line(Endpoint::ListTimeline, Some(0), 0, 952), None);
     }
 
     // --- record_response (#162: 実際の記録経路) ---
