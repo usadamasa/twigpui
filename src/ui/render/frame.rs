@@ -106,7 +106,7 @@ pub(in crate::ui) fn reload_notice_banner(
 /// 見積り金額 (USD) は常に添える: `post_resource_price` はもう既定値
 /// (`config` の `DEFAULT_POST_RESOURCE_PRICE`) を持つので､「価格が未設定」
 /// という状態は無くなった｡
-/// #268: `Density::Compact` では主語 ("Posts today"､"total") を落とす —
+/// #282: `Density::Compact` では主語 ("Posts today"､"total") を落とす —
 /// footer が reload のアイコンとカウントダウンも抱えるようになり､429px で
 /// この行が最初に譲る区画になったからだ｡数字と色 (`usage_color`) だけで
 /// 予算の意味はもう運べている｡

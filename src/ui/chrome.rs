@@ -7,7 +7,7 @@
 use super::*;
 
 impl TimelineView {
-    /// header と footer が共通で見る primary action の状態 (#57, #268)｡
+    /// header と footer が共通で見る primary action の状態 (#57, #282)｡
     /// session が無いあいだは header がサインインの pill を描き､それ以外は
     /// footer が reload のアイコンを描く — どちらを描くかは呼び出し側が
     /// `action` を見て `when` で選ぶので､ここでは二重に計算しない｡
@@ -91,7 +91,7 @@ impl TimelineView {
                         ),
                         |row| row.child(sign_in_pill("reauthorize", "Re-authorize", theme, cx)),
                     )
-                    // #268: reload のアイコンと auto-refresh のカウントダウンは
+                    // #282: reload のアイコンと auto-refresh のカウントダウンは
                     // footer へ移った (`status_bar` を見よ)｡ここに残る action は
                     // session がまだ無いときのサインインだけだ｡
                     .when(matches!(action, PrimaryAction::SignIn), |row| {
@@ -118,7 +118,7 @@ impl TimelineView {
         )
     }
 
-    /// primary action の描画: reload はアイコンで footer に (#268)､まだ
+    /// primary action の描画: reload はアイコンで footer に (#282)､まだ
     /// session が無いときのサインインは header に (#95)｡どちらを描くかは
     /// 呼び出し側が [`primary_action_state`](Self::primary_action_state) の
     /// `action` を見て選ぶ — ここは variant ごとの見た目を持つだけだ｡
@@ -215,7 +215,7 @@ impl TimelineView {
     /// サインイン中や取得中には出せる数が無いし､"0 / 200" は答えの無い
     /// 問いではなく空の cache のように読めてしまう｡
     ///
-    /// #268: header の撤去に伴い､reload の値段 (`×N`) とアイコン､
+    /// #282: header の撤去に伴い､reload の値段 (`×N`) とアイコン､
     /// auto-refresh のカウントダウンもここへ移ってきた｡置き場所の理由は
     /// `countdown` のモジュール doc の「置き場所と幅」を見よ｡
     pub(super) fn status_bar(
@@ -242,7 +242,7 @@ impl TimelineView {
             TimelineState::Loaded(ref items) => Some(items.len()),
             _ => None,
         };
-        // #214, #268: 次の sync と次の auto-refresh､両方の期限をここで
+        // #214, #282: 次の sync と次の auto-refresh､両方の期限をここで
         // 決める｡`countdown` が計算し､それぞれ無ければ出さない｡
         let (next_refresh, next_sync) = self.countdown_labels(oauth::unix_now(), density);
 
@@ -316,7 +316,7 @@ impl TimelineView {
                         )),
                 )
             })
-            // #268: reload のアイコンの隣に置くのは､それがこの期限に
+            // #282: reload のアイコンの隣に置くのは､それがこの期限に
             // 押されるボタンだからだ｡`status-kept` の `ml_auto` がすでに
             // ここから右をまとめて右端へ寄せているので､この区画に margin
             // は要らない｡
@@ -334,7 +334,7 @@ impl TimelineView {
                 )
             })
             .children(self.reload_cost_control())
-            // #268: NotAuthenticated / SigningIn のあいだ session を進める
+            // #282: NotAuthenticated / SigningIn のあいだ session を進める
             // action は header のサインインだけだ｡ここで reload のアイコンを
             // 出すと､押しても何も起きないボタンが並んでしまう｡
             .when(matches!(action, PrimaryAction::Reload), |bar| {

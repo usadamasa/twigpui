@@ -19,7 +19,7 @@
 //!
 //! #214 の当初は auto-refresh を toolbar (header) の reload アイコンの隣に
 //! 置き､sync だけを footer に残した｡550px の fixture ですら両方を footer に
-//! 置くと "posts kept" が右端から落ちたからだ｡#268 で所有者の指示により
+//! 置くと "posts kept" が右端から落ちたからだ｡#282 で所有者の指示により
 //! header ごと撤去するので､auto-refresh も footer へ合流する — 入口が
 //! #248 でメニューへ移り､footer の幅には戻る余地がある｡
 //!

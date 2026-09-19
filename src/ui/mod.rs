@@ -1835,7 +1835,7 @@ mod tests {
         );
     }
 
-    /// #268: 429px で footer が reload のカウントダウンとアイコンも抱える
+    /// #282: 429px で footer が reload のカウントダウンとアイコンも抱える
     /// ようになり､usage の行が最初に譲る区画になった｡`Compact` では
     /// 主語を落とす — 数字と色 (`usage_color`) だけで予算の意味は運べる｡
     #[test]
@@ -4650,7 +4650,7 @@ mod tests {
     );
 
     /// footer の主要な区画の bounds を､ウィンドウを `width` にしてから読む
-    /// (#214, #268)｡
+    /// (#214, #282)｡
     fn footer_bounds_at(visual: &mut gpui::VisualTestContext, width: f32) -> FooterSegments {
         visual.simulate_resize(gpui::size(gpui::px(width), gpui::px(700.)));
         visual.update(|window, cx| {
@@ -4740,7 +4740,7 @@ mod tests {
         );
     }
 
-    /// #214, #268: footer のカウントダウンは 429px でも reload のアイコンを
+    /// #214, #282: footer のカウントダウンは 429px でも reload のアイコンを
     /// ウィンドウの外へ押し出さない｡
     #[gpui::test]
     fn the_footer_countdown_keeps_the_reload_icon_in_the_window(cx: &mut gpui::TestAppContext) {
@@ -4774,7 +4774,7 @@ mod tests {
         );
     }
 
-    /// #214, #268: header が撤去された後の最終形 — footer は 429px でも
+    /// #214, #282: header が撤去された後の最終形 — footer は 429px でも
     /// 全部の区画を窓の中に収める｡左から usage → 次の sync → post の数
     /// (`ml_auto`) → auto-refresh の期限 → reload のアイコンの順で並び､
     /// どの隣同士も重ならない｡
@@ -4824,7 +4824,7 @@ mod tests {
         );
     }
 
-    /// #268: footer に移った reload のアイコンは帯の高さに収まり､縦方向は
+    /// #282: footer に移った reload のアイコンは帯の高さに収まり､縦方向は
     /// 帯の中央に来る — header に居たときと違い､footer の他の区画は
     /// テキストの一行なので､アイコンだけが縦にずれると目立つ｡
     #[gpui::test]
