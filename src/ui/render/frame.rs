@@ -1,5 +1,5 @@
-//! 窓の枠の部品 (#241): バナー､notice､toolbar の表題と segment､usage の
-//! 行､composer のエラー行｡
+//! 窓の枠の部品 (#241): バナー､notice､toolbar の segment､usage の行､
+//! composer のエラー行｡
 
 use crate::ui::*;
 
@@ -140,47 +140,6 @@ pub(in crate::ui) fn compose_error_message(status: &ComposeStatus) -> Option<Sha
 // `NotAuthenticated` だけで､そこでは *主* ボタンがすでに "Sign in with X"
 // と言っている — そして同一のボタンが二つ並ぶことこそ､#31 がそもそも
 // 避けようとしていたものだ｡
-
-/// ヘッダの表題 (#11): これが誰のアカウントの post か､そして — #11 が
-/// 二つ目のモードを持ち込んだので — どのモードを出しているか｡自分の home
-/// timeline を見ているのか一つのアカウントの post を見ているのかを､
-/// ユーザーが推し量る羽目にならないようにするためだ｡
-///
-/// `home_username` が `None` になるのは `/me` が一度も解決していない短い
-/// 間だけで (何かがキャッシュされたか読み込まれたら二度と起きない)､表題
-/// がアカウントを名指せない唯一の場合だ｡
-///
-/// #33 までは `TimelineSource` を取っていた｡#33 でウィンドウは home
-/// timeline 以外を出せなくなった — single-user の view が在ったのは
-/// app-only の bearer token が home を読めなかったからだ｡
-pub(in crate::ui) fn header_title(home_username: Option<&str>) -> String {
-    match home_username {
-        Some(username) => format!("@{username}"),
-        // `/me` が解決するまで名指せるアカウントは無く､macOS のツールバーが
-        // その場所に見せるのはアプリ自身の名前だ｡
-        None => "twigpui".to_string(),
-    }
-}
-
-/// ツールバーが描くままの [`header_title`] (#95)｡
-///
-/// ツールバー行の `gap` に頼らず自前の左マージンを持つ: あの gap では
-/// タイトルが直前にあるものへぴたりと付いたままになる — picker の trough
-/// や #164 の取得ボタンがそれで､最初の実機ウィンドウでは
-/// `Load lists (1 request)@usadamasa` と出た｡#182 がステータスバーで同じ
-/// ものを見つけ､同じやり方で直した｡ウィンドウのテストがこの間隔を測れる
-/// よう名前を付けてある｡
-pub(in crate::ui) fn header_title_element(
-    home_username: Option<&str>,
-    theme: Theme,
-) -> impl IntoElement {
-    div()
-        .addressable("header-title")
-        .ml(theme::ROW_PAD_X)
-        .text_size(theme::TEXT_META)
-        .text_color(rgb(theme.text_tertiary))
-        .child(header_title(home_username))
-}
 
 /// pull-down のトリガー (#192, #43) とメニュー項目に共通の chip｡かつては
 /// segmented control の 1 区画で `tab_trough` という一本のトラックへ並んで

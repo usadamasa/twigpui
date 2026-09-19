@@ -61,12 +61,12 @@ use reload_policy::{
 use render::Addressable as _;
 use render::{
     AVATAR_SIZE, MAX_RENDERED_MEDIA, MEDIA_GAP, MediaArrangement, author_link, avatar_placeholder,
-    byline, compose_error_message, format_timestamp, header_title_element, icon_button, like_row,
-    link_row, media_arrangement, media_aspect, media_badge, media_column_sizes, media_row_sizes,
-    notice, offers_delete, offers_like, offers_quote, offers_reauthorize, offers_reply,
-    offers_repost, open_post_link, quote_card, quote_row, reload_notice_banner,
-    render_thread_chain, reply_banner_label, reply_row, reply_target_label, repost_banner_label,
-    repost_row, session_notice_banner, sign_in_pill, thread_action_label, thread_toggle_row,
+    byline, compose_error_message, format_timestamp, icon_button, like_row, link_row,
+    media_arrangement, media_aspect, media_badge, media_column_sizes, media_row_sizes, notice,
+    offers_delete, offers_like, offers_quote, offers_reauthorize, offers_reply, offers_repost,
+    open_post_link, quote_card, quote_row, reload_notice_banner, render_thread_chain,
+    reply_banner_label, reply_row, reply_target_label, repost_banner_label, repost_row,
+    session_notice_banner, sign_in_pill, thread_action_label, thread_toggle_row,
     toggle_count_color, usage_color, usage_label, with_count,
 };
 use render::{RowCounts, row_counts};
@@ -139,8 +139,8 @@ pub(crate) struct TimelineView {
     /// home-timeline の endpoint を呼ぶのと [`Self::load_older`] でさらに
     /// 遡るのに要る｡`/me` が一度解決するまでは `None`｡
     home_user_id: Option<String>,
-    /// サインインしたユーザー自身の screen name (これも `/me` から)｡header に
-    /// 出る — [`render::header_title`] を見よ｡
+    /// サインインしたユーザー自身の screen name (これも `/me` から)｡
+    /// 自分の post かどうかの判定 ([`render::offers::is_own_post`]) に使う｡
     home_username: Option<String>,
     /// どの timeline の集合がウィンドウを埋めるか (#161, #43): [`Self::new`] の
     /// 中で [`source_picker::initial_sources`] が決め､再代入するのは
@@ -539,7 +539,6 @@ mod tests {
         reload_outcome_label,
     };
     use super::render::actions::{like_action_label, repost_action_label};
-    use super::render::frame::header_title;
     use super::render::offers::is_own_post;
     use super::render::post::{avatar_initial, post_permalink, profile_url};
     use super::{
@@ -1317,23 +1316,6 @@ mod tests {
             compose_error_message(&status).map(|message| message.to_string()),
             Some("network error".to_string())
         );
-    }
-
-    #[test]
-    fn header_title_names_the_signed_in_account() {
-        // アカウントだけ｡どの timeline を表示しているかは #95 以降タブバーが
-        // 言うことで､44px の帯の中で二度言ったせいでツールバーは場所を
-        // 使い果たした｡
-        assert_eq!(header_title(Some("alice")), "@alice");
-    }
-
-    #[test]
-    fn header_title_falls_back_before_me_has_resolved() {
-        // #33 以降に残った唯一のケース: ウィンドウは常にホームタイムラインを
-        // 表示するので､分からないのは誰のものかだけだ｡`/me` が答えるまでは
-        // 名指しできるアカウントが無く､macOS のツールバーがその代わりに
-        // 載せるのはアプリ自身の名前だ｡
-        assert_eq!(header_title(None), "twigpui");
     }
 
     #[test]
@@ -4801,19 +4783,6 @@ mod tests {
             .expect("the second fixture list is a segment");
         assert!(first.top() >= home.bottom(), "{home:?} then {first:?}");
         assert!(second.top() >= first.bottom(), "{first:?} then {second:?}");
-
-        // 1 段上でまた #182: ツールバーの行の `gap` はタイトルを溝に密着させた
-        // ままにするので､`List@usadamasa` と読めてしまう｡トリガー自体は
-        // 固定幅なので､メニューが開いていてもツールバー行の並びは変わらない｡
-        let title = visual
-            .debug_bounds("header-title")
-            .expect("the title is always shown");
-        assert!(
-            title.left() > trigger.right(),
-            "the title runs into the trigger: trigger ends at {:?}, title starts at {:?}",
-            trigger.right(),
-            title.left()
-        );
     }
 
     /// #43: fixture が `sources` (複数) と `picker_open` を宣言できること｡

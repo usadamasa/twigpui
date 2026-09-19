@@ -61,8 +61,7 @@ impl TimelineView {
             .border_color(rgb(theme.border))
             // #95 の枠に #192/#43 の pull-down trigger: 幅は最大 160px の
             // 固定で個数に依存しないので、旧 segmented control が要った
-            // `overflow_hidden` はもう trigger 自体には要らない —
-            // ヘッダタイトルだけを縮められるよう内側にだけ残す｡ドロップ
+            // `overflow_hidden` はもう trigger 自体には要らない｡ドロップ
             // ダウン本体は `deferred()` で画面の最前面に描かれるので、この
             // 行の `overflow_hidden` の影響は受けない｡
             .child(
@@ -71,13 +70,7 @@ impl TimelineView {
                     .items_center()
                     .gap_3()
                     .child(self.source_picker_trigger(cx))
-                    .children(self.source_picker_menu(bg_alpha, cx))
-                    .child(
-                        div()
-                            .min_w(px(0.))
-                            .overflow_hidden()
-                            .child(header_title_element(self.home_username.as_deref(), theme)),
-                    ),
+                    .children(self.source_picker_menu(bg_alpha, cx)),
             )
             .child(
                 div()
