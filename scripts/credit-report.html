@@ -1,0 +1,270 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>twigpui クレジット消費</title>
+<style>
+  :root {
+    --page: #f6f7f8; --surface: #fcfcfb; --ink: #0b0b0b; --ink-2: #4d5156; --muted: #858a90;
+    --grid: #e2e4e6; --axis: #bfc3c7; --series: #2a78d6; --series-soft: rgba(42, 120, 214, .14);
+    --critical: #d03b3b; --good: #0ca30c;
+    --sans: -apple-system, "Hiragino Sans", "Noto Sans JP", system-ui, sans-serif;
+    --mono: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --page: #0e0f10; --surface: #1a1b1c; --ink: #ffffff; --ink-2: #c1c4c8; --muted: #858a90;
+      --grid: #2b2d2f; --axis: #3a3d40; --series: #3987e5; --series-soft: rgba(57, 135, 229, .2);
+    }
+  }
+  :root[data-theme="dark"] {
+    --page: #0e0f10; --surface: #1a1b1c; --ink: #ffffff; --ink-2: #c1c4c8; --muted: #858a90;
+    --grid: #2b2d2f; --axis: #3a3d40; --series: #3987e5; --series-soft: rgba(57, 135, 229, .2);
+  }
+  body { margin: 0; background: var(--page); color: var(--ink); font: 14px/1.6 var(--sans); }
+  main { max-width: 860px; margin: 0 auto; padding-inline: 16px; padding-block: 28px 48px;
+         display: flex; flex-direction: column; gap: 28px; }
+  h1 { font-size: 22px; margin: 0; text-wrap: balance; }
+  h2 { font-size: 15px; margin: 0 0 2px; }
+  .sub, .note { color: var(--ink-2); margin: 0; }
+  .note { font-size: 13px; max-width: 65ch; }
+  .num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px 24px;
+           margin: 0; padding-block: 14px; border-block: 1px solid var(--grid); }
+  .stats dt { color: var(--ink-2); font-size: 12px; }
+  .stats dd { margin: 0; font: 600 22px/1.3 var(--mono); font-variant-numeric: tabular-nums; }
+  .stats small { display: block; color: var(--muted); font: 12px/1.4 var(--sans); }
+  .chart { background: var(--surface); border: 1px solid var(--grid); border-radius: 6px; padding: 14px 12px 8px;
+           position: relative; }
+  .chart svg { display: block; width: 100%; overflow: visible; }
+  .chart text { font: 11px var(--sans); fill: var(--muted); }
+  .chart text.mark { fill: var(--ink); font-weight: 600; }
+  .bar { fill: var(--series); }
+  .bar:hover, .bar.on { opacity: .75; }
+  #tip { position: fixed; pointer-events: none; background: var(--ink); color: var(--page); padding: 6px 9px;
+         border-radius: 4px; font-size: 12px; line-height: 1.5; white-space: nowrap; z-index: 1; }
+  .scroll { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  th, td { padding: 6px 10px; border-bottom: 1px solid var(--grid); text-align: right; white-space: nowrap; }
+  th:first-child, td:first-child { text-align: left; }
+  th { color: var(--ink-2); font-weight: 500; font-size: 12px; }
+  tfoot td { font-weight: 600; }
+  tfoot tr.gap td { color: var(--critical); }
+  details summary { cursor: pointer; color: var(--ink-2); }
+  details summary:focus-visible { outline: 2px solid var(--series); outline-offset: 2px; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>X API クレジット消費</h1>
+    <p class="sub" id="sub"></p>
+  </header>
+  <dl class="stats" id="stats"></dl>
+  <section>
+    <h2>累計消費額 (Posts のみ)</h2>
+    <p class="note">write は時刻が残らないので線には入らない。下の表で合算する。</p>
+    <div class="chart" id="cum"></div>
+  </section>
+  <section>
+    <h2>5 分ごとの課金 Posts</h2>
+    <div class="chart" id="bars"></div>
+    <details>
+      <summary>表で見る</summary>
+      <div class="scroll"><table id="buckets"></table></div>
+    </details>
+  </section>
+  <section>
+    <h2>内訳</h2>
+    <div class="scroll"><table id="ledger"></table></div>
+  </section>
+  <section>
+    <h2>この数字の出どころ</h2>
+    <p class="note">
+      件数は <code>usage.json</code> (アプリ側の集計。X の同日 dedup を再現したもの)。
+      時刻は課金済み post id の snowflake から起こした<strong>作成時刻</strong>で、課金時刻そのものではない。
+      自動更新が数分おきに先頭ページを読むので、ずれは概ねポーリング 1 回ぶんに収まる。
+      購入より前に作られた post は購入時刻へ寄せてある。残高切れはログの最初の HTTP 402。
+      金額は X の公開単価を掛けた見積りで、請求額は Developer Console にしか無い。
+    </p>
+  </section>
+</main>
+<div id="tip" hidden></div>
+<script>
+const DATA = __DATA__;
+
+const POST_USD = 0.005;
+const BUCKET = 5 * 60 * 1000;
+const $ = id => document.getElementById(id);
+const hm = ms => new Date(ms).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' });
+const usd = (v, d = 2) => '$' + v.toFixed(d);
+const span = ms => `${Math.floor(ms / 3600000)} 時間 ${Math.round(ms % 3600000 / 60000)} 分`;
+
+// snowflake の上位ビットが作成時刻 (ms)。id は 2^53 を超えるので BigInt で割る
+const purchase = DATA.purchase == null ? null : DATA.purchase * 1000;
+const times = DATA.post_ids
+  .map(id => Number((BigInt(id) >> 22n) + 1288834974657n))
+  .map(t => purchase == null ? t : Math.max(t, purchase))
+  .sort((a, b) => a - b);
+const first = times[0], last = times[times.length - 1];
+const start = purchase ?? first;
+const depleted = DATA.depleted.map(Date.parse).find(t => t > last) ?? null;
+const end = depleted ?? last;
+
+const x0 = Math.floor(Math.min(start, first) / 1800000) * 1800000;
+const x1 = Math.ceil((end + 1) / 1800000) * 1800000;
+const buckets = [];
+for (let t = x0; t < x1; t += BUCKET) buckets.push({ t, n: 0 });
+for (const t of times) buckets[Math.floor((t - x0) / BUCKET)].n += 1;
+
+// ---- 見出しと数字
+const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+$('sub').textContent = `${DATA.date} (UTC 日) の実績 · 時刻は ${tz}`;
+const postsUsd = times.length * POST_USD;
+const hours = (end - start) / 3600000;
+const stat = (k, v, s) => `<div><dt>${k}</dt><dd>${v}<small>${s}</small></dd></div>`;
+$('stats').innerHTML = [
+  DATA.amount == null ? '' : stat('購入', usd(DATA.amount), purchase == null ? '' : hm(purchase)),
+  stat(depleted == null ? '最後の課金まで' : '残高切れまで', span(end - start),
+    `${hm(start)} → ${hm(end)}` + (depleted == null ? ' (402 は未検出)' : '')),
+  stat('課金 Posts', times.length.toLocaleString(), `${usd(postsUsd, 3)} · ${usd(POST_USD, 3)} / 件`),
+  stat('ペース', `${usd((DATA.amount ?? postsUsd) / hours)}/h`, `${Math.round(times.length / hours)} Posts/h`),
+].join('');
+
+// ---- 描画の道具
+const NS = 'http://www.w3.org/2000/svg';
+const el = (name, attrs, text) => {
+  const e = document.createElementNS(NS, name);
+  for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v);
+  if (text != null) e.textContent = text;
+  return e;
+};
+const niceStep = max => {
+  const raw = max / 4, p = 10 ** Math.floor(Math.log10(raw));
+  return [1, 2, 2.5, 5, 10].map(m => m * p).find(s => s >= raw);
+};
+const tip = $('tip');
+const showTip = (ev, html) => {
+  tip.innerHTML = html;
+  tip.hidden = false;
+  const w = tip.offsetWidth;
+  tip.style.left = Math.min(ev.clientX + 12, innerWidth - w - 8) + 'px';
+  tip.style.top = (ev.clientY - 44) + 'px';
+};
+const hideTip = () => { tip.hidden = true; };
+
+function frame(host, height, yMax, yFmt) {
+  host.replaceChildren();
+  const W = host.clientWidth - 24, m = { t: 26, r: 14, b: 22, l: 40 };
+  const svg = el('svg', { viewBox: `0 0 ${W} ${height}`, height, role: 'img' });
+  const x = t => m.l + (t - x0) / (x1 - x0) * (W - m.l - m.r);
+  const y = v => height - m.b - v / yMax * (height - m.t - m.b);
+  const step = niceStep(yMax);
+  for (let v = 0; v <= yMax + 1e-9; v += step) {
+    svg.append(el('line', { x1: m.l, x2: W - m.r, y1: y(v), y2: y(v), stroke: v ? 'var(--grid)' : 'var(--axis)' }));
+    svg.append(el('text', { x: m.l - 6, y: y(v) + 4, 'text-anchor': 'end' }, yFmt(v)));
+  }
+  const tick = (W < 520 ? 60 : 30) * 60000;
+  for (let t = Math.ceil(x0 / tick) * tick; t <= x1; t += tick)
+    svg.append(el('text', { x: x(t), y: height - 6, 'text-anchor': 'middle' }, hm(t)));
+  const mark = (t, label, color, anchor) => {
+    svg.append(el('line', { x1: x(t), x2: x(t), y1: m.t - 6, y2: y(0), stroke: color, 'stroke-width': 1.5,
+      'stroke-dasharray': '4 3' }));
+    svg.append(el('text', { x: x(t) + (anchor === 'end' ? -5 : 5), y: m.t - 12, 'text-anchor': anchor, class: 'mark' },
+      label));
+  };
+  const marks = () => {
+    if (purchase != null) mark(purchase, `購入 ${hm(purchase)}`, 'var(--good)', 'start');
+    if (depleted != null) mark(depleted, `✕ 残高切れ ${hm(depleted)}`, 'var(--critical)', 'end');
+  };
+  host.append(svg);
+  return { svg, x, y, W, m, marks };
+}
+
+function drawCum() {
+  const top = Math.max(DATA.amount ?? 0, postsUsd);
+  const yMax = Math.ceil(top / niceStep(top)) * niceStep(top);
+  const { svg, x, y, W, m, marks } = frame($('cum'), 240, yMax, v => usd(v, v % 1 ? 1 : 0));
+  if (DATA.amount != null) {
+    svg.append(el('line', { x1: m.l, x2: W - m.r, y1: y(DATA.amount), y2: y(DATA.amount), stroke: 'var(--muted)',
+      'stroke-dasharray': '2 3' }));
+    svg.append(el('text', { x: (m.l + W - m.r) / 2, y: y(DATA.amount) - 5, 'text-anchor': 'middle' },
+      `購入額 ${usd(DATA.amount)}`));
+  }
+  let d = `M${x(start)},${y(0)}`;
+  times.forEach((t, i) => { d += `H${x(t).toFixed(1)}V${y((i + 1) * POST_USD).toFixed(1)}`; });
+  d += `H${x(end)}`;
+  svg.append(el('path', { d: `${d}V${y(0)}Z`, fill: 'var(--series-soft)', stroke: 'none' }));
+  svg.append(el('path', { d, fill: 'none', stroke: 'var(--series)', 'stroke-width': 2, 'stroke-linejoin': 'round' }));
+  svg.append(el('circle', { cx: x(end), cy: y(postsUsd), r: 4, fill: 'var(--series)', stroke: 'var(--surface)',
+    'stroke-width': 2 }));
+  svg.append(el('text', { x: x(end) - 8, y: y(postsUsd) + 16, 'text-anchor': 'end', class: 'mark' },
+    usd(postsUsd, 3)));
+  marks();
+  const cross = el('line', { y1: m.t - 6, y2: y(0), stroke: 'var(--ink-2)', visibility: 'hidden' });
+  svg.append(cross);
+  svg.addEventListener('pointermove', ev => {
+    const r = svg.getBoundingClientRect();
+    const t = x0 + (ev.clientX - r.left - m.l) / (W - m.l - m.r) * (x1 - x0);
+    if (t < x0 || t > x1) return;
+    let n = 0;
+    while (n < times.length && times[n] <= t) n += 1; // ponytail: 線形走査。数万件になったら二分探索
+    cross.setAttribute('x1', x(t)); cross.setAttribute('x2', x(t)); cross.setAttribute('visibility', 'visible');
+    showTip(ev, `${hm(t)}<br>累計 ${usd(n * POST_USD, 3)} · ${n} Posts`);
+  });
+  svg.addEventListener('pointerleave', () => { cross.setAttribute('visibility', 'hidden'); hideTip(); });
+}
+
+function drawBars() {
+  const peak = Math.max(...buckets.map(b => b.n), 1);
+  const yMax = Math.ceil(peak / niceStep(peak)) * niceStep(peak);
+  const { svg, x, y, marks } = frame($('bars'), 200, yMax, v => String(v));
+  for (const b of buckets) {
+    if (!b.n) continue;
+    const l = x(b.t) + 1, r = x(b.t + BUCKET) - 1, top = y(b.n), base = y(0), q = Math.min(4, (r - l) / 2, base - top);
+    const bar = el('path', { class: 'bar',
+      d: `M${l},${base}V${top + q}Q${l},${top} ${l + q},${top}H${r - q}Q${r},${top} ${r},${top + q}V${base}Z` });
+    const html = `${hm(b.t)}–${hm(b.t + BUCKET)}<br>${b.n} Posts · ${usd(b.n * POST_USD, 3)}`;
+    bar.addEventListener('pointermove', ev => showTip(ev, html));
+    bar.addEventListener('pointerleave', hideTip);
+    svg.append(bar);
+  }
+  marks();
+}
+
+// ---- 表
+$('buckets').innerHTML = '<thead><tr><th>時刻</th><th>Posts</th><th>金額</th><th>累計</th></tr></thead><tbody>' +
+  buckets.reduce((acc, b) => {
+    acc.sum += b.n;
+    if (b.n) acc.rows += `<tr><td class="num">${hm(b.t)}</td><td class="num">${b.n}</td>` +
+      `<td class="num">${usd(b.n * POST_USD, 3)}</td><td class="num">${usd(acc.sum * POST_USD, 3)}</td></tr>`;
+    return acc;
+  }, { sum: 0, rows: '' }).rows + '</tbody>';
+
+let known = 0, unpriced = 0;
+const rows = DATA.endpoints.map(e => {
+  const n = e.count - (e.kind === 'write' ? e.failed : 0);
+  if (e.usd == null) unpriced += n; else known += n * e.usd;
+  return `<tr><td>${e.name}</td><td>${e.kind}</td><td class="num">${n}` +
+    (e.kind === 'write' && e.failed ? ` <small>(失敗 ${e.failed} を除く)</small>` : '') + '</td>' +
+    `<td class="num">${e.usd == null ? '不明' : usd(e.usd, 3)}</td>` +
+    `<td class="num">${e.usd == null ? '—' : usd(n * e.usd, 3)}</td></tr>`;
+}).join('');
+let foot = `<tr><td colspan="4">単価が分かる分の小計</td><td class="num">${usd(known, 3)}</td></tr>`;
+if (DATA.amount != null) {
+  const gap = DATA.amount - known;
+  foot += `<tr><td colspan="4">購入額</td><td class="num">${usd(DATA.amount, 3)}</td></tr>` +
+    `<tr class="gap"><td colspan="4">差額` +
+    (unpriced ? ` (単価不明の ${unpriced} 件で割ると ${usd(gap / unpriced, 3)} / 件)` : '') +
+    `</td><td class="num">${usd(gap, 3)}</td></tr>`;
+}
+$('ledger').innerHTML = '<thead><tr><th>endpoint</th><th>種別</th><th>件数</th><th>単価</th><th>金額</th></tr></thead>' +
+  `<tbody>${rows}</tbody><tfoot>${foot}</tfoot>`;
+
+const draw = () => { drawCum(); drawBars(); };
+draw();
+addEventListener('resize', draw);
+</script>
+</body>
+</html>
