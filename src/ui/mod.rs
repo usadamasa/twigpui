@@ -4859,6 +4859,33 @@ mod tests {
         );
     }
 
+    /// 所有者の指摘 (#282): 既定の 560px の footer で sync のカウントダウン
+    /// ("Next sync in 5h 12m") が "…" で切られていた — usage / 次の sync /
+    /// 保持数 / auto-refresh の期限 / reload アイコンが並んで幅が足りない｡
+    /// `Wide` の帯は既定幅で誰も切ってはならない｡
+    #[gpui::test]
+    fn the_wide_footer_shows_the_whole_sync_countdown_at_the_default_width(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (mut visual, timeline) = drawn(cx, fixture_with_sync(&["2", "1"], 0));
+        visual.update(|_window, cx| {
+            timeline.update(cx, |view, _cx| {
+                view.refresh_situation = Some(counting_situation());
+            });
+        });
+
+        // 詰めた文言の本来の幅は、余裕のある幅で読む (`the_footer_shortens_
+        // first_and_truncates_last` と同じやり方)。
+        let (_, _, unsqueezed, _, _, _) = footer_bounds_at(&mut visual, 800.);
+        let (_, _, next, _, _, _) = footer_bounds_at(&mut visual, 560.);
+        assert_eq!(
+            next.size.width, unsqueezed.size.width,
+            "the sync countdown must not be truncated at the default 560px width: \
+             {:?} at 560px vs {:?} unsqueezed",
+            next.size.width, unsqueezed.size.width
+        );
+    }
+
     /// #214, #282: footer のカウントダウンは 429px でも reload のアイコンを
     /// ウィンドウの外へ押し出さない｡
     #[gpui::test]
