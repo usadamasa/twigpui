@@ -112,10 +112,10 @@ impl TimelineView {
             .overflow_hidden()
             .child(list)
             .child(Self::wheel_capture(cx))
-            // #206: 新着の toast｡一覧の外､ずれない wrapper に重ねるので
-            // scroll しても下端に留まる｡`when_some` なので無いときは
-            // 要素そのものが無い｡
-            .when_some(self.toast(cx), ParentElement::child)
+            // #206, #282: 新着の toast と報告のカプセル｡一覧の外､ずれない
+            // wrapper に重ねるので scroll しても下端に留まる｡`when_some` な
+            // ので無いときは要素そのものが無い｡
+            .when_some(self.toast(bg_alpha, cx), ParentElement::child)
     }
 }
 
@@ -151,7 +151,9 @@ impl TimelineView {
     ///
     /// #21 の "N new posts" はここに座っていた｡#206 で `body` の下端に重なる
     /// toast へ移った — 報告ではなく申し出なので､バナーの列ではなく timeline
-    /// の上に住む｡
+    /// の上に住む｡`reload_notice` の `Outcome` variant (成功した reload の
+    /// 報告) も #282 で同じ toast へ移り､ここには `Cooldown` と `Failed`
+    /// だけが残る｡
     fn notice_banners(&self, bg_alpha: u8) -> Vec<AnyElement> {
         let theme = self.theme;
         // 並びは 4 本を 1 つの `Vec` に積んでも変えない｡見ているのは
@@ -170,9 +172,15 @@ impl TimelineView {
                 .clone()
                 .map(|message| session("banner-auto-refresh", message)),
         );
-        banners.extend(self.reload_notice.clone().map(|notice| {
-            reload_notice_banner(&notice, theme, oauth::unix_now(), bg_alpha).into_any_element()
-        }));
+        banners.extend(
+            self.reload_notice
+                .clone()
+                .filter(|notice| !matches!(notice, ReloadNotice::Outcome(_)))
+                .map(|notice| {
+                    reload_notice_banner(&notice, theme, oauth::unix_now(), bg_alpha)
+                        .into_any_element()
+                }),
+        );
         banners.extend(
             self.open_failure
                 .clone()
@@ -188,6 +196,9 @@ impl Render for TimelineView {
         // #206: toast の件数には書き手が多いので､見直すのは描画の頭で —
         // `fade_toast` の doc を見る｡`body` がこの結果を読む｡
         self.fade_toast(cx);
+        // #282: 報告カプセルの寿命も同じ理由で描画の頭に置く —
+        // `expire_outcome` の doc を見る｡
+        self.expire_outcome(cx);
         // #214: 枠の文言はウィンドウの幅で選ぶ｡toolbar と footer が別々の
         // 段にならないよう､ここで 1 回決めて両方へ渡す｡
         let density = countdown::density(window.viewport_size().width);

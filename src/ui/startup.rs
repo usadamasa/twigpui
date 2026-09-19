@@ -146,6 +146,7 @@ impl TimelineView {
             auto_refresh_notice: None,
             reload_notice: None,
             cooldown_ticker: None,
+            outcome_expiry: None,
             usage_totals: usage::Totals::default(),
             usage_refresh: None,
             auto_sync: None,
@@ -194,16 +195,27 @@ impl TimelineView {
         // #118: 何よりも先に｡最初のフレームから focus の経路に空のものでは
         // なく timeline が乗るようにするため｡
         window.focus(&this.focus_handle);
+        this.finish_startup(startup, window, cx);
+        this
+    }
+
+    /// `new` の残り｡100 行の関数上限 (`too_many_lines`) に収めるため､
+    /// 構造体の組み立てから切り離してある｡
+    fn finish_startup(
+        &mut self,
+        startup: Startup,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
         // #267: 前回のトグルを platform の window へ効かせる｡`main` は
         // `WindowOptions` に書かず､live も fixture もここを通る｡
-        this.apply_translucency(window);
-        this.apply_floating(window);
+        self.apply_translucency(window);
+        self.apply_floating(window);
         match startup {
-            Startup::Live => this.start(cx),
-            Startup::Fixture(fixture) => this.show_fixture(*fixture, cx),
+            Startup::Live => self.start(cx),
+            Startup::Fixture(fixture) => self.show_fixture(*fixture, cx),
         }
-        this.refresh_usage(cx);
-        this
+        self.refresh_usage(cx);
     }
 
     /// composer の本物のテキスト入力 (#38) と､打鍵を `compose` へ写す購読｡

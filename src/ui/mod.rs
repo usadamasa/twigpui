@@ -287,6 +287,9 @@ pub(crate) struct TimelineView {
     /// [`Self::start_cooldown_ticker`] を
     /// 見よ｡
     cooldown_ticker: Option<Task<()>>,
+    /// `reload_notice` が生きた `ReloadNotice::Outcome` を出し続ける寿命
+    /// (#282)｡文言と満了タイマーの組で持つ｡[`Self::expire_outcome`] を見よ｡
+    outcome_expiry: Option<(SharedString, Task<()>)>,
     /// Posts の resource 数の合計 (#162､#18 の後継) — `usage::posts_totals`
     /// が返すもの｡header に出る — [`Self::refresh_usage`] を見よ｡最初の
     /// refresh が終わるまでゼロだが､これはプレースホルダではなく正直な
@@ -3260,7 +3263,7 @@ mod tests {
                 assert_eq!(view.toast.fade, Fade::Hidden);
                 assert!(view.toast_fade_task.is_none());
                 assert!(
-                    view.toast(cx).is_none(),
+                    view.toast(255, cx).is_none(),
                     "a hidden toast is out of the tree, not a transparent capsule"
                 );
             });
@@ -3352,6 +3355,43 @@ mod tests {
         );
     }
 
+    /// #282: 報告カプセルは寿命 (`OUTCOME_DWELL_SECONDS`) が尽きると消える —
+    /// `Cooldown`/`Failed` と違い読み終わったらいつまでも居座らない｡
+    #[gpui::test]
+    fn an_outcome_toast_dismisses_itself_after_its_dwell(cx: &mut gpui::TestAppContext) {
+        let (mut visual, timeline) = drawn(cx, fixture_with(&["2", "1"], &[]));
+        visual.update(|_window, cx| {
+            timeline.update(cx, |view, _cx| {
+                view.reload_notice = Some(ReloadNotice::Outcome("3 new posts.".into()));
+            });
+        });
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            visual.debug_bounds("outcome-toast").is_some(),
+            "the report is laid out right after it is set"
+        );
+
+        cx.executor().advance_clock(std::time::Duration::from_secs(
+            super::toast::OUTCOME_DWELL_SECONDS,
+        ));
+        cx.run_until_parked();
+
+        cx.update(|cx| {
+            timeline.update(cx, |view, _cx| {
+                assert!(
+                    view.reload_notice.is_none(),
+                    "the outcome must clear itself once its dwell has passed"
+                );
+                assert!(
+                    view.outcome_expiry.is_none(),
+                    "a settled timer must not linger"
+                );
+            });
+        });
+    }
+
     /// #206: follow が流し込む間､toast は「まだ視界の上にある数」を数え
     /// 下げ､0 で消える｡
     ///
@@ -3419,7 +3459,7 @@ mod tests {
             timeline.update(cx, |view, cx| {
                 assert_eq!(view.toast.fade, Fade::Hidden);
                 assert!(
-                    view.toast(cx).is_none(),
+                    view.toast(255, cx).is_none(),
                     "with nothing left above, the toast is gone"
                 );
             });
