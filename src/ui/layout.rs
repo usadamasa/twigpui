@@ -331,7 +331,7 @@ impl Render for TimelineView {
             .bg(rgba(theme::with_alpha(theme.bg, bg_alpha)))
             .text_color(rgb(theme.text))
             .text_size(theme::TEXT_BODY)
-            .child(self.header(density, bg_alpha, cx))
+            .child(self.header(bg_alpha, cx))
             .children(self.notice_banners(bg_alpha))
             // #14: 投稿は scope に関わらず OAuth を要求する — `tweet.write`
             // scope が欠けている場合は `submit_post` 自身の中で捕まえる
@@ -346,7 +346,7 @@ impl Render for TimelineView {
             .when_some(self.sync_row(bg_alpha), ParentElement::child)
             // #95: ステータスバー｡ヘッダーがツールバーになった今､累計の
             // リクエスト数が住んでいるのはここだ｡
-            .child(self.status_bar(density, bg_alpha))
+            .child(self.status_bar(density, bg_alpha, cx))
             // #205: 手動 sync の確認｡`absolute` なので列の中で場所を取らず
             // ウィンドウ全体を覆う｡最後の子なのは重なり順のため｡
             .when_some(self.sync_dialog(cx), ParentElement::child)

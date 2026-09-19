@@ -7,9 +7,9 @@
 //! 出るのは何かを負っているときだけで､定常状態の "up to date" は次が
 //! いつかを言わない｡
 //!
-//! ここは 2 つの期限を同じ形で出す — toolbar の reload アイコンの隣に
-//! "Auto-refresh in 4m"､footer のリクエスト数の隣に "Next sync in 5h 12m"｡
-//! 期限そのものはここで決めない｡auto-refresh の期限は [`poll_due_at`] が
+//! ここは 2 つの期限を同じ形で出す — どちらも footer の reload アイコンの
+//! 隣に集まっている (`chrome::status_bar` を見よ)｡期限そのものはここで
+//! 決めない｡auto-refresh の期限は [`poll_due_at`] が
 //! ([`super::auto_refresh::next_tick`] と同じ規則で) 出し､sync の期限は
 //! [`SyncStatus::Idle`] が tick から運んできた `until` をそのまま読む｡
 //! ここが持つのは残り秒数を言葉にする [`countdown`] と､幅に合わせて
@@ -17,18 +17,22 @@
 //!
 //! # 置き場所と幅
 //!
-//! 最初は両方を footer に置いた｡550px の fixture ですら "posts kept" が
-//! 右端から落ちた｡footer にはリクエスト数と sync の入口と post の数が
-//! すでに並んでいて､本番で実際に使われている 429px では､それだけで
-//! 幅の 9 割が埋まっていた (入口は #248 でメニューへ移った)｡
+//! #214 の当初は auto-refresh を toolbar (header) の reload アイコンの隣に
+//! 置き､sync だけを footer に残した｡550px の fixture ですら両方を footer に
+//! 置くと "posts kept" が右端から落ちたからだ｡#268 で所有者の指示により
+//! header ごと撤去するので､auto-refresh も footer へ合流する — 入口が
+//! #248 でメニューへ移り､footer の幅には戻る余地がある｡
 //!
-//! だから auto-refresh の期限は toolbar へ — それが次に押すことになる
-//! reload のアイコンの隣は､どのみち読みやすい場所だ — sync の期限は
-//! footer に残し､文言を幅で選ぶ ([`density`])｡広ければ "Next sync in 5h 12m"､
-//! 狭ければ "Sync in 5h 12m"｡post の数も同じ段で "posts kept" から "posts" へ
-//! 縮む｡それでも入らないときは､右端の post の数を落とすのではなく
-//! sync の期限を "…" で切る (`chrome::status_bar` の `truncate`)｡
-//! 数字が読めないより､どこが読めていないか分かるほうがよい｡
+//! footer の並びは左から usage → sync の期限 → 保持数 (`ml_auto`) →
+//! auto-refresh の期限 → reload の値段 (`×N`) → reload アイコン｡reload の
+//! アイコンの隣に auto-refresh の期限を置くのは変わらない — それが次に
+//! 押すことになるボタンだからだ｡
+//!
+//! 文言は幅で選ぶ ([`density`])｡広ければ "Next sync in 5h 12m"､狭ければ
+//! "Sync in 5h 12m"｡post の数も同じ段で "posts kept" から "posts" へ縮む｡
+//! それでも入らないときは､右端の reload アイコンを落とすのではなく sync
+//! の期限を "…" で切る (`chrome::status_bar` の `truncate`)｡数字が読めない
+//! より､どこが読めていないか分かるほうがよい｡
 //!
 //! # なぜ分単位なのか
 //!

@@ -7,43 +7,41 @@
 use super::*;
 
 impl TimelineView {
-    pub(super) fn header(
-        &self,
-        density: countdown::Density,
-        bg_alpha: u8,
-        cx: &mut Context<'_, Self>,
-    ) -> impl IntoElement {
+    /// header と footer が共通で見る primary action の状態 (#57, #268)｡
+    /// session が無いあいだは header がサインインの pill を描き､それ以外は
+    /// footer が reload のアイコンを描く — どちらを描くかは呼び出し側が
+    /// `action` を見て `when` で選ぶので､ここでは二重に計算しない｡
+    fn primary_action_state(&self) -> (String, bool, PrimaryAction) {
         // #57: `state` の match に畳み込まず､その手前で判定する — post が
         // すでに出ている間の進行中の reload は `state` を `Loaded` のままに
         // する (`reload_start_state` を見よ) ので､その場合に fetch が走って
         // いることを示す信号はこれだけである｡
-        let (label, busy, action) = if self.reloading {
-            ("Loading…".to_string(), true, PrimaryAction::Reload)
-        } else {
-            match self.state {
-                TimelineState::Loading => ("Loading…".to_string(), true, PrimaryAction::Reload),
-                TimelineState::SigningIn => {
-                    ("Signing in…".to_string(), true, PrimaryAction::SignIn)
-                }
-                TimelineState::NotAuthenticated => {
-                    ("Sign in with X".to_string(), false, PrimaryAction::SignIn)
-                }
-                // 今も `PrimaryAction::Reload` に繋ぐ: クリックし直しても
-                // (ネットワーク不要の) rate-limit 判定が走り直るだけだ — #10 が
-                // 禁じるのは window を寝て過ごすことで､安い判定の再実行ではない｡
-                TimelineState::RateLimited { reset_at, cooldown } => (
-                    cooldown_label(cooldown, reset_at, oauth::unix_now()),
-                    true,
-                    PrimaryAction::Reload,
-                ),
-                TimelineState::Loaded(_) | TimelineState::Failed(_) => {
-                    ("Reload".to_string(), false, PrimaryAction::Reload)
-                }
+        if self.reloading {
+            return ("Loading…".to_string(), true, PrimaryAction::Reload);
+        }
+        match self.state {
+            TimelineState::Loading => ("Loading…".to_string(), true, PrimaryAction::Reload),
+            TimelineState::SigningIn => ("Signing in…".to_string(), true, PrimaryAction::SignIn),
+            TimelineState::NotAuthenticated => {
+                ("Sign in with X".to_string(), false, PrimaryAction::SignIn)
             }
-        };
+            // 今も `PrimaryAction::Reload` に繋ぐ: クリックし直しても
+            // (ネットワーク不要の) rate-limit 判定が走り直るだけだ — #10 が
+            // 禁じるのは window を寝て過ごすことで､安い判定の再実行ではない｡
+            TimelineState::RateLimited { reset_at, cooldown } => (
+                cooldown_label(cooldown, reset_at, oauth::unix_now()),
+                true,
+                PrimaryAction::Reload,
+            ),
+            TimelineState::Loaded(_) | TimelineState::Failed(_) => {
+                ("Reload".to_string(), false, PrimaryAction::Reload)
+            }
+        }
+    }
 
+    pub(super) fn header(&self, bg_alpha: u8, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        let (label, busy, action) = self.primary_action_state();
         let theme = self.theme;
-        let (next_refresh, _) = self.countdown_labels(oauth::unix_now(), density);
 
         div()
             .flex()
@@ -93,28 +91,12 @@ impl TimelineView {
                         ),
                         |row| row.child(sign_in_pill("reauthorize", "Re-authorize", theme, cx)),
                     )
-                    // #214: 次のポーリングまで｡reload のアイコンの隣に
-                    // 置くのは､それがこの期限に押されるボタンだからで､
-                    // footer に置くと 429px で post の数が右端から落ちる
-                    // からでもある (`countdown` のモジュール doc を見よ)｡
-                    .when_some(next_refresh, |row, label| {
-                        row.child(
-                            div()
-                                .addressable("auto-refresh-countdown")
-                                // #156: HIG の "Keep actions with text
-                                // labels separate" — 記号 (reload) との間隔を
-                                // クラスタ全体の gap_2 (8px) より広げる｡
-                                // クラスタを gap_3 へ上げると 3 箇所すべてが
-                                // 4px 増えて 429px の余裕を食うので､この
-                                // 要素だけへ mr_1 (4px) を足す｡
-                                .mr_1()
-                                .text_size(theme::TEXT_META)
-                                .text_color(rgb(theme.text_tertiary))
-                                .child(label),
-                        )
-                    })
-                    .children(self.reload_cost_control())
-                    .child(self.primary_action_control(&label, busy, action, cx)),
+                    // #268: reload のアイコンと auto-refresh のカウントダウンは
+                    // footer へ移った (`status_bar` を見よ)｡ここに残る action は
+                    // session がまだ無いときのサインインだけだ｡
+                    .when(matches!(action, PrimaryAction::SignIn), |row| {
+                        row.child(self.primary_action_control(&label, busy, action, cx))
+                    }),
             )
     }
 
@@ -136,8 +118,10 @@ impl TimelineView {
         )
     }
 
-    /// toolbar の唯一の action: reload､あるいはまだ session が無いときは
-    /// サインイン (#95)｡
+    /// primary action の描画: reload はアイコンで footer に (#268)､まだ
+    /// session が無いときのサインインは header に (#95)｡どちらを描くかは
+    /// 呼び出し側が [`primary_action_state`](Self::primary_action_state) の
+    /// `action` を見て選ぶ — ここは variant ごとの見た目を持つだけだ｡
     ///
     /// 二つがまったく似ていないのは意図的だ｡reload はアイコンである —
     /// この操作は不変で頻繁で､どのアプリも共有する記号で名指されるので､
@@ -230,8 +214,18 @@ impl TimelineView {
     /// 保持している post の数は timeline が読み込まれてからしか出さない｡
     /// サインイン中や取得中には出せる数が無いし､"0 / 200" は答えの無い
     /// 問いではなく空の cache のように読めてしまう｡
-    pub(super) fn status_bar(&self, density: countdown::Density, bg_alpha: u8) -> impl IntoElement {
+    ///
+    /// #268: header の撤去に伴い､reload の値段 (`×N`) とアイコン､
+    /// auto-refresh のカウントダウンもここへ移ってきた｡置き場所の理由は
+    /// `countdown` のモジュール doc の「置き場所と幅」を見よ｡
+    pub(super) fn status_bar(
+        &self,
+        density: countdown::Density,
+        bg_alpha: u8,
+        cx: &mut Context<'_, Self>,
+    ) -> impl IntoElement {
         let theme = self.theme;
+        let (label, busy, action) = self.primary_action_state();
 
         // #162: Posts の resource 数を常に出す; 見積り金額 (USD､常に
         // 設定されている単価から) を隣に添える (`usage_label` の doc を
@@ -242,14 +236,15 @@ impl TimelineView {
             self.usage_totals.today,
             self.usage_totals.total,
             self.config.post_resource_price,
+            density,
         );
         let kept = match self.state {
             TimelineState::Loaded(ref items) => Some(items.len()),
             _ => None,
         };
-        // #214: 次の sync まで｡`countdown` が決め､無ければ出さない｡
-        // auto-refresh のほうは toolbar (`header`) に居る｡
-        let (_, next_sync) = self.countdown_labels(oauth::unix_now(), density);
+        // #214, #268: 次の sync と次の auto-refresh､両方の期限をここで
+        // 決める｡`countdown` が計算し､それぞれ無ければ出さない｡
+        let (next_refresh, next_sync) = self.countdown_labels(oauth::unix_now(), density);
 
         div()
             // #205: sync の行が「footer の 1 段上」に居ることをテストが
@@ -320,6 +315,30 @@ impl TimelineView {
                             density,
                         )),
                 )
+            })
+            // #268: reload のアイコンの隣に置くのは､それがこの期限に
+            // 押されるボタンだからだ｡`status-kept` の `ml_auto` がすでに
+            // ここから右をまとめて右端へ寄せているので､この区画に margin
+            // は要らない｡
+            .when_some(next_refresh, |bar, label| {
+                bar.child(
+                    div()
+                        .addressable("auto-refresh-countdown")
+                        // #156: HIG の "Keep actions with text labels
+                        // separate" — 記号 (reload) との間隔を帯の
+                        // `gap_3` (12px) よりさらに広げる｡
+                        .mr_1()
+                        .text_size(theme::TEXT_META)
+                        .text_color(rgb(theme.text_tertiary))
+                        .child(label),
+                )
+            })
+            .children(self.reload_cost_control())
+            // #268: NotAuthenticated / SigningIn のあいだ session を進める
+            // action は header のサインインだけだ｡ここで reload のアイコンを
+            // 出すと､押しても何も起きないボタンが並んでしまう｡
+            .when(matches!(action, PrimaryAction::Reload), |bar| {
+                bar.child(self.primary_action_control(&label, busy, action, cx))
             })
     }
 }
