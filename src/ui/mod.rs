@@ -3267,6 +3267,91 @@ mod tests {
         });
     }
 
+    /// #282: 成功した reload の報告 (`ReloadNotice::Outcome`) はバナーでは
+    /// なく toast のカプセルへ出る｡
+    #[gpui::test]
+    fn a_finished_reload_reports_itself_in_a_toast_not_a_banner(cx: &mut gpui::TestAppContext) {
+        let (mut visual, timeline) = drawn(cx, fixture_with(&["2", "1"], &[]));
+        visual.update(|_window, cx| {
+            timeline.update(cx, |view, _cx| {
+                view.reload_notice = Some(ReloadNotice::Outcome("3 new posts.".into()));
+            });
+        });
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        assert!(
+            visual.debug_bounds("banner-reload").is_none(),
+            "a finished reload must not sit in the banner column"
+        );
+        let toast = visual
+            .debug_bounds("outcome-toast")
+            .expect("the outcome has to be laid out as a toast");
+        let body = visual
+            .debug_bounds("timeline")
+            .expect("the timeline is laid out");
+        assert!(
+            f32::from(body.bottom()) - f32::from(toast.bottom()) < 48.,
+            "the outcome toast sits near the bottom edge, not floating mid-screen: \
+             {toast:?} vs {body:?}"
+        );
+    }
+
+    /// #282: `Cooldown` は今までどおりバナーのまま — 数字が進むので寿命付き
+    /// の toast には向かない｡
+    #[gpui::test]
+    fn a_cooldown_still_uses_the_banner(cx: &mut gpui::TestAppContext) {
+        let (mut visual, timeline) = drawn(cx, fixture_with(&["2", "1"], &[]));
+        visual.update(|_window, cx| {
+            timeline.update(cx, |view, _cx| {
+                view.reload_notice = Some(ReloadNotice::Cooldown {
+                    // 時計由来の値なので飽和加算 (`rust-lint-gauntlet`)｡
+                    reset_at: crate::oauth::unix_now().saturating_add(30),
+                    cooldown: Cooldown::LocalInterval,
+                });
+            });
+        });
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        assert!(
+            visual.debug_bounds("banner-reload").is_some(),
+            "a cooldown must still sit in the banner column"
+        );
+        assert!(
+            visual.debug_bounds("outcome-toast").is_none(),
+            "a cooldown must not be reported as a toast"
+        );
+    }
+
+    /// #282: 申し出 (`new-posts`) と報告 (`outcome-toast`) が両方出ていても
+    /// 重ならず縦に積む｡
+    #[gpui::test]
+    fn the_offer_and_the_report_stack_without_overlapping(cx: &mut gpui::TestAppContext) {
+        let (mut visual, timeline) = drawn(cx, fixture_with(&["2", "1"], &["4", "3"]));
+        visual.update(|_window, cx| {
+            timeline.update(cx, |view, _cx| {
+                view.reload_notice = Some(ReloadNotice::Outcome("2 new posts.".into()));
+            });
+        });
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let offer = visual
+            .debug_bounds("new-posts")
+            .expect("posts are waiting, so the offer is laid out");
+        let report = visual
+            .debug_bounds("outcome-toast")
+            .expect("the outcome has to be laid out too");
+        assert!(
+            report.bottom() <= offer.top(),
+            "the report must sit above the offer, not overlap it: {report:?} vs {offer:?}"
+        );
+    }
+
     /// #206: follow が流し込む間､toast は「まだ視界の上にある数」を数え
     /// 下げ､0 で消える｡
     ///
