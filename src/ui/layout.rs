@@ -188,6 +188,24 @@ impl TimelineView {
         );
         banners
     }
+
+    /// `Sources` メニューの 2 つのアクション (#282)｡`render` の 100 行の
+    /// 上限に収めるため他の `on_action` チェーンから切り出した — 意味の
+    /// 上でもひとまとまり: どちらもメニューバー発の Sources 操作で､
+    /// キーボードのバインドを持たない｡
+    fn bind_source_actions(element: Div, cx: &mut Context<'_, Self>) -> Div {
+        element
+            .on_action(cx.listener(|this, action: &ToggleSource, _window, cx| {
+                // #282: メニューが組んだ selection は必ず有効 —
+                // `into_source` が `None` になるのは手編集の選択ファイルだけ｡
+                if let Some(source) = action.selection.clone().into_source() {
+                    this.toggle_source(&source, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &LoadOwnedLists, _window, cx| {
+                this.fetch_owned_lists(cx);
+            }))
+    }
 }
 
 impl Render for TimelineView {
@@ -208,15 +226,23 @@ impl Render for TimelineView {
         // 上にそれらが不透明の板として残る｡
         let bg_alpha = self.bg_alpha(window);
 
-        div()
-            // #58: どのバインディングもグローバルに登録するのではなく､この
-            // コンテキストへ閉じてある — `init` を見る｡
-            .key_context(KEY_CONTEXT)
-            // #118: コンテキストが効くのは､その要素がウィンドウのフォーカス
-            // パス上にあるあいだだけで､本当のルートは
-            // `gpui_component::Root` だ (`main` を見る) — なのでこれが無いと
-            // パスがコンテキストの手前で止まり､全バインディングが外れた｡
-            .track_focus(&self.focus_handle)
+        // #282: `Sources` メニューの 2 つの `on_action` はここで先に足す —
+        // `render` は 100 行の上限にすでに近く､下のチェーンへそのまま
+        // 足すと超える｡`self.bind_source_actions` に切り出した｡
+        let container = Self::bind_source_actions(
+            div()
+                // #58: どのバインディングもグローバルに登録するのではなく
+                // このコンテキストへ閉じてある — `init` を見る｡
+                .key_context(KEY_CONTEXT)
+                // #118: コンテキストが効くのは､その要素がウィンドウの
+                // フォーカスパス上にあるあいだだけで､本当のルートは
+                // `gpui_component::Root` だ (`main` を見る) — なのでこれが
+                // 無いとパスがコンテキストの手前で止まり､全バインディングが
+                // 外れた｡
+                .track_focus(&self.focus_handle),
+            cx,
+        );
+        container
             .on_action(cx.listener(|this, _: &Reload, _window, cx| {
                 // ヘッダーのボタンが通るのと同じ経路｡#10 の間隔と #57 の
                 // クールダウン報告も含む｡ショートカットが､このアプリが

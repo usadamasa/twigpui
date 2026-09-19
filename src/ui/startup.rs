@@ -216,6 +216,10 @@ impl TimelineView {
             Startup::Fixture(fixture) => self.show_fixture(*fixture, cx),
         }
         self.refresh_usage(cx);
+        // #282: 最初の Sources メニュー｡live のウィンドウでは `client` が
+        // まだ無く取得ボタンは出ない — `start` の完了が埋め直す
+        // (`refresh_source_menu` の doc に呼ぶ場所を列挙してある)｡
+        self.refresh_source_menu(cx);
     }
 
     /// composer の本物のテキスト入力 (#38) と､打鍵を `compose` へ写す購読｡
@@ -357,10 +361,11 @@ impl TimelineView {
     /// 今この瞬間の背景の不透明度 (#267)｡本体も toolbar も status bar も
     /// これで塗る — 帯だけが不透明に残ると､透けた一覧の上に板が浮く｡行の中に
     /// 埋め込まれた post の面 (引用カード､スレッドの行､composer のカード)､
-    /// バナー､sync の行､source picker のメニューも同じもので塗る｡`bg_header`
-    /// を塗る面で残るのは sync のダイアログだけで､あれは覆いの上のモーダル
-    /// なので読みやすさを取って不透明のままにしてある｡render が 1 回読んで
-    /// 枠と行へ渡す｡
+    /// バナー､sync の行も同じもので塗る｡`bg_header` を塗る面で残るのは
+    /// sync のダイアログだけで､あれは覆いの上のモーダルなので読みやすさを
+    /// 取って不透明のままにしてある (#282: `Sources` メニューは macOS の
+    /// ネイティブメニューになったので､この不透明度は最初から効かない)｡
+    /// render が 1 回読んで枠と行へ渡す｡
     pub(super) fn bg_alpha(&self, window: &Window) -> u8 {
         theme::bg_alpha(self.window_state.translucent, window.is_window_active())
     }

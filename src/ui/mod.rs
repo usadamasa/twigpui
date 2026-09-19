@@ -78,9 +78,9 @@ use state::{
 use toast::Toast;
 
 use crate::menu::{
-    BlurComposer, CloseWindow, FocusComposer, KEY_CONTEXT, LikeSelected, Minimize, Reload,
-    RepostSelected, ScrollToTop, SelectNext, SelectPrevious, ShowAbout, ShowNewPosts, SyncList,
-    ToggleFloatOnTop, ToggleFollowNewPosts, ToggleTranslucent,
+    BlurComposer, CloseWindow, FocusComposer, KEY_CONTEXT, LikeSelected, LoadOwnedLists, Minimize,
+    Reload, RepostSelected, ScrollToTop, SelectNext, SelectPrevious, ShowAbout, ShowNewPosts,
+    SyncList, ToggleFloatOnTop, ToggleFollowNewPosts, ToggleSource, ToggleTranslucent,
 };
 use crate::oauth;
 use crate::paths::Paths;

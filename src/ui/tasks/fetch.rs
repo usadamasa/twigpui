@@ -130,6 +130,11 @@ impl TimelineView {
                 // いたのはこれが理由だ｡上にある兄弟たちは `state` では
                 // なくディスクから読むので位置は関係ない; これは関係する｡
                 this.refresh_images(cx);
+                // #282: `client`/`home_user_id` をここで初めて埋める起動
+                // もある (`Ok(StartOutcome::Home { me: Some(_), .. })`)｡
+                // Sources メニューの取得ボタンはその両方が要る
+                // (`refresh_source_menu` の doc)｡
+                this.refresh_source_menu(cx);
             });
         }));
 
@@ -302,6 +307,10 @@ impl TimelineView {
                 // 取ってしまい､新しく着いた行はすべて次の reload まで
                 // placeholder のままになる｡
                 this.refresh_images(cx);
+                // #282: 起動時のキャッシュミスがここで初めて `home_user_id`
+                // を埋めることがある (`start` の `None` 分岐、`refresh_source_menu`
+                // の doc を見よ)｡
+                this.refresh_source_menu(cx);
                 cx.notify();
             });
         }));

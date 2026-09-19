@@ -169,7 +169,9 @@ fn main() {
             // 置いたハンドラではそうならない｡どちらもウィンドウが開く前に走る:
             // 下でウィンドウを開けそこねたアプリにも､メニューバーはある｡
             cx.on_action(|_: &menu::Quit, cx| cx.quit());
-            cx.set_menus(menu::menus());
+            // #282: まだどの source も無い — `TimelineView::refresh_source_menu`
+            // が起動の終わりに実際の中身で作り直す｡
+            cx.set_menus(menu::menus(Vec::new()));
             // #139: 最後のウィンドウを閉じるとアプリが終わる｡gpui は独自に
             // プロセスを生かし続ける — もう一枚ウィンドウを頼めるアプリには
             // 正しいが､このアプリには誤りで､`cmd-w` は画面に何も無いまま

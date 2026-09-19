@@ -45,8 +45,10 @@ use serde::{Deserialize, Serialize};
 // `use super::*` ではなく書き下している｡理由は [`super::list_sync`] と同じ｡
 use super::{
     Context, ReloadNotice, ReloadTrigger, Startup, TimelineState, TimelineView, lane, log, oauth,
+    source_picker_menu,
 };
 use crate::cache::{self, TimelineSource};
+use crate::menu;
 use crate::paths::Paths;
 use crate::x_api::ListSummary;
 
@@ -406,6 +408,8 @@ impl TimelineView {
         self.start_auto_refresh(cx);
         // `state` を差し替えた後で｡理由は `start` と同じ (#120)｡
         self.refresh_images(cx);
+        // #282: 選択が変わったので Sources メニューの ✓ も作り直す｡
+        self.refresh_source_menu(cx);
         cx.notify();
     }
 
@@ -449,10 +453,39 @@ impl TimelineView {
                         ));
                     }
                 }
+                // #282: 新しい list 名を Sources メニューへ映す｡
+                this.refresh_source_menu(cx);
                 cx.notify();
             });
         }));
         cx.notify();
+    }
+
+    /// `Sources` メニューを今の状態で作り直す (#282)｡macOS のメニューは
+    /// `MenuItem` にチェック状態を持てないので (`menu::menus` の doc)､選択が
+    /// 変わるたびメニュー全体を組み直すほかない｡呼び忘れは鮮度の落ちた
+    /// メニューという静かな欠陥になるので､呼ぶ場所をここに列挙する:
+    ///
+    /// - 起動の終わり ([`TimelineView::finish_startup`])
+    /// - この impl の [`Self::toggle_source`] の末尾
+    /// - この impl の [`Self::fetch_owned_lists`] の完了 (`owned_lists` を
+    ///   代入した直後)
+    /// - [`super::tasks::fetch::TimelineView::start`] の完了
+    /// - [`super::tasks::fetch::TimelineView::reload_sources`] の完了
+    ///
+    /// 下の 2 つが要る理由は上の 3 つだけでは足りないからだ: 起動直後は
+    /// `client`/`home_user_id` がまだ無く (`offers_list_fetch` が false)､
+    /// live のウィンドウで取得ボタンが現れるのは非同期の `start`/`reload`
+    /// が両方を埋めた後だけになる｡設計メモは 3 か所と見積もっていたが､
+    /// 実装時にこの抜けが見つかったので 5 か所へ広げた｡
+    pub(super) fn refresh_source_menu(&self, cx: &mut Context<'_, Self>) {
+        let items = source_picker_menu::source_menu_items(
+            &self.sources,
+            &self.owned_lists,
+            offers_list_fetch(self.client.is_some(), self.home_user_id.is_some()),
+            self.lists_fetch.is_some(),
+        );
+        cx.set_menus(menu::menus(items));
     }
 }
 
