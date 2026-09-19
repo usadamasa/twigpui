@@ -86,12 +86,6 @@ pub(crate) struct Fixture {
     /// list ごとの post が要る｡
     #[serde(default)]
     pub list_items: std::collections::BTreeMap<String, Vec<TimelineItem>>,
-    /// 起動直後に source picker のドロップダウンを開いた状態にするか (#43,
-    /// #192)｡widget の開閉状態を fixture に持つのはこのモジュールの規則の
-    /// 例外だが、`--fixture` の窓はクリックを合成する手段が無く、開いた
-    /// 状態を撮るにはここで宣言する以外に道が無い｡
-    #[serde(default)]
-    pub picker_open: bool,
     /// いいね済みとして描く post id (#156)｡`toggle::load_all` の永続ファイルを
     /// 読む代わりに､fixture が直接そう言う｡撮る画面は毎回同じでなければ
     /// ならないので､手元の状態ファイルに依存させられない｡
@@ -108,7 +102,7 @@ pub(crate) struct Fixture {
     /// なるだけだ｡
     #[serde(default)]
     pub selected: Option<String>,
-    /// 起動直後から背景を透かすか (#267)｡[`Fixture::picker_open`] と同じ
+    /// 起動直後から背景を透かすか (#267)｡[`Fixture::selected`] と同じ
     /// 例外で､fixture の窓は window state ファイルを読まないので､透過の
     /// 見た目を撮るにはここで宣言する以外に道が無い｡
     #[serde(default)]

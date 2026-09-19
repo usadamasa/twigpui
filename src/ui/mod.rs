@@ -159,8 +159,6 @@ pub(crate) struct TimelineView {
     /// これを見ず `sources` を全部回す｡`sources.len() == 1` のときは
     /// 描画側が出自を出さないので中身を読まない｡
     item_provenance: HashMap<String, cache::TimelineSource>,
-    /// source picker のドロップダウンが開いているかどうか (#43, #192)｡
-    source_picker_open: source_picker::SourcePickerVisibility,
     /// picker が名前を挙げられる list (#164)｡cache か直近の fetch から来る｡
     /// fetch ボタンが一度押されるまでは空｡
     owned_lists: Vec<crate::x_api::ListSummary>,
@@ -2314,7 +2312,6 @@ mod tests {
             sync: None,
             sources: Vec::new(),
             list_items: std::collections::BTreeMap::new(),
-            picker_open: false,
             liked: Vec::new(),
             reposted: Vec::new(),
             selected: None,
@@ -4271,7 +4268,7 @@ mod tests {
 
     /// #267: fixture が `translucent` と言えば､窓は透過の状態で立ち上がる｡
     /// fixture の窓は window state ファイルを読まないので､透過の見た目を
-    /// 撮るにはこれしか道が無い — `Fixture::picker_open` と同じ例外だ｡
+    /// 撮るにはこれしか道が無い — `Fixture::selected` と同じ例外だ｡
     #[gpui::test]
     fn a_fixture_can_ask_for_a_translucent_window(cx: &mut gpui::TestAppContext) {
         let fixture = Fixture {
@@ -4976,80 +4973,6 @@ mod tests {
         );
     }
 
-    /// #192, #43: 開いたメニューでは､どの項目も配置され､Home が先頭で､
-    /// どれも重ならない — segmented control (#164) が横一列だったのに
-    /// 対し､ドロップダウンは縦に積む｡`the_status_bars_segments_keep_apart`
-    /// がステータスバーについて述べるのと同じ主張を､同じ理由で述べている｡
-    #[gpui::test]
-    fn the_open_menu_lists_home_and_every_list_top_to_bottom(cx: &mut gpui::TestAppContext) {
-        let (mut visual, _timeline) = drawn(
-            cx,
-            fixture_with_lists(&["1"], &[("9101", "Following mirror"), ("9102", "Rust")]),
-        );
-
-        let trigger = visual
-            .debug_bounds("source-picker")
-            .expect("the trigger is always shown");
-        visual.simulate_click(trigger.center(), gpui::Modifiers::none());
-        visual.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
-
-        let home = visual
-            .debug_bounds("tab-home")
-            .expect("Home is always a segment");
-        let first = visual
-            .debug_bounds("tab-list-9101")
-            .expect("the first fixture list is a segment");
-        let second = visual
-            .debug_bounds("tab-list-9102")
-            .expect("the second fixture list is a segment");
-        assert!(first.top() >= home.bottom(), "{home:?} then {first:?}");
-        assert!(second.top() >= first.bottom(), "{first:?} then {second:?}");
-    }
-
-    /// #43: fixture が `sources` (複数) と `picker_open` を宣言できること｡
-    /// `--fixture` の窓はクリックを合成できないので (`fixture-visual-check`)、
-    /// 開いた状態・複数選択の画面を撮るにはこの経路しかない｡
-    #[gpui::test]
-    fn a_fixture_can_declare_multiple_sources_and_start_the_menu_open(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        let mut fixture = fixture_with_lists(&["1"], &[("9101", "rust")]);
-        fixture.sources = vec![
-            super::source_picker::Selection::Home,
-            super::source_picker::Selection::List {
-                id: "9101".to_string(),
-            },
-        ];
-        fixture.list_items = std::collections::BTreeMap::from([(
-            "9101".to_string(),
-            vec![item_with("2", "someone", None)],
-        )]);
-        fixture.picker_open = true;
-
-        let (mut visual, timeline) = drawn(cx, fixture);
-        visual.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
-
-        cx.update(|cx| {
-            timeline.update(cx, |view, _cx| {
-                assert_eq!(
-                    view.sources,
-                    vec![
-                        crate::cache::TimelineSource::Home,
-                        crate::cache::TimelineSource::List("9101".to_string()),
-                    ]
-                );
-                assert!(view.source_picker_open.is_open());
-                assert_eq!(shown_ids(view), ["2", "1"]);
-            });
-        });
-        // メニューが開いた状態で描かれているので､項目に到達できる｡
-        assert!(visual.debug_bounds("tab-list-9101").is_some());
-    }
-
     /// `fixtures/lane.json` の撮影で見つかった不具合 (#43): 一覧がウィンドウ
     /// より短いとき､本文が折り返す行の下に約 180px の空白が挟まった｡
     /// 行の高さは中身だけで決まるべきで､一覧の残りの長さに依存してはいけない｡
@@ -5120,193 +5043,36 @@ mod tests {
         );
     }
 
-    /// 同じ失敗のもう半分: ツールバーは 1 本の flex 行で､タブが十分に多いと､
-    /// その右にあるものすべて — タイトル､サインイン / リロードのコントロール —
-    /// を縮めるのではなくウィンドウの外へ押し出した｡タブ自身のあふれ方の見せ方は
-    /// #192 の担当で､ここが押さえるのは､アカウントがいくつリストを持って
-    /// いようと行の右端のコントロールがウィンドウから出ないことだけだ｡
-    #[gpui::test]
-    fn the_toolbar_action_stays_on_screen_under_a_dozen_tabs(cx: &mut gpui::TestAppContext) {
-        let lists: [(&str, &str); 12] = [
-            ("9101", "The Illustrated Compendium"),
-            ("9102", "Watercolour and gouache people"),
-            ("9103", "Neighbourhood announcements"),
-            ("9104", "International correspondents"),
-            ("9105", "Machine fabrication weekly"),
-            ("9106", "Dollhouse district news"),
-            ("9107", "Secondary creation circle"),
-            ("9108", "Drinking club coordination"),
-            ("9109", "Probe accounts for twigpui"),
-            ("9110", "Long-form essay writers"),
-            ("9111", "Camera gear enthusiasts"),
-            ("9112", "Weekend hiking companions"),
-        ];
-        let (mut visual, _timeline) = drawn(cx, fixture_with_lists(&["1"], &lists));
-
-        let action = visual
-            .debug_bounds("primary-action")
-            .expect("the toolbar always carries its action control");
-        let viewport = visual.update(|window, _| window.viewport_size());
-        assert!(
-            action.right() <= viewport.width,
-            "the toolbar's action control is pushed off-screen by the tabs: \
-             {action:?} in {viewport:?}"
-        );
-    }
-
-    /// #192 の判別テスト: 13 本目 (最後) のリストを選択中にしたとき､本番の
-    /// 実寸 429px でその区画に到達できること｡`overflow_hidden` が右側の
-    /// コントロールを守る代わりにタブそのものを画面外へ追いやっていた
-    /// (`the_toolbar_action_stays_on_screen_under_a_dozen_tabs` はそちらを
-    /// 守らない側しか見ていない)｡
-    ///
-    /// トリガーが無い今の実装では `if let` が素通りし､`tab-list-9113` は
-    /// 描かれてはいるが viewport の外にあるので落ちる｡ドロップダウンを
-    /// 実装した後は開いて同じ名前の bounds を viewport の内側で見つける｡
-    #[gpui::test]
-    fn the_thirteenth_list_is_reachable_at_429px(cx: &mut gpui::TestAppContext) {
-        let lists: [(&str, &str); 13] = [
-            ("9101", "The Illustrated Compendium"),
-            ("9102", "Watercolour and gouache people"),
-            ("9103", "Neighbourhood announcements"),
-            ("9104", "International correspondents"),
-            ("9105", "Machine fabrication weekly"),
-            ("9106", "Dollhouse district news"),
-            ("9107", "Secondary creation circle"),
-            ("9108", "Drinking club coordination"),
-            ("9109", "Probe accounts for twigpui"),
-            ("9110", "Long-form essay writers"),
-            ("9111", "Camera gear enthusiasts"),
-            ("9112", "Weekend hiking companions"),
-            ("9113", "Yet another list"),
-        ];
-        let (mut visual, timeline) = drawn(cx, fixture_with_lists(&["1"], &lists));
-        cx.update(|cx| {
-            timeline.update(cx, |view, cx| {
-                view.sources = vec![crate::cache::TimelineSource::List("9113".to_string())];
-                cx.notify();
-            });
-        });
-        visual.simulate_resize(gpui::size(gpui::px(429.), gpui::px(700.)));
-        visual.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
-
-        if let Some(trigger) = visual.debug_bounds("source-picker") {
-            visual.simulate_click(trigger.center(), gpui::Modifiers::none());
-            visual.update(|window, cx| {
-                let _ = window.draw(cx);
-            });
-        }
-        let item = visual
-            .debug_bounds("tab-list-9113")
-            .expect("every list must be addressable by its own name");
-        let viewport = visual.update(|window, _| window.viewport_size());
-        assert!(
-            item.right() <= viewport.width,
-            "the selected list is not reachable at 429px: {item:?} in {viewport:?}"
-        );
-    }
-
-    /// #164: fixture のウィンドウには client が無いので､ツールバーの中で
-    /// リクエストを使う唯一のボタンを出してはならない｡
-    #[gpui::test]
-    fn a_fixture_window_offers_no_list_fetch(cx: &mut gpui::TestAppContext) {
-        let (mut visual, _timeline) = drawn(cx, fixture_with_lists(&["1"], &[("9101", "Rust")]));
-        assert!(
-            visual.debug_bounds("load-lists").is_none(),
-            "a window with no client must not offer to fetch lists"
-        );
-    }
-
-    /// #164 (#192/#43 でメニューへ移動): client を持つウィンドウは
-    /// list fetch のボタンを出す — ただし今はツールバーではなく開いた
-    /// メニューの末尾 (セパレータの後)｡閉じた状態のトリガーは幅を食わない｡
-    ///
-    /// このボタンが実際に描かれる唯一の場所はサインイン済みの live ウィンドウ
-    /// だが､それはどのテストにも構築できない — そこでここでは fixture の
-    /// ウィンドウに client を渡し (トークンの文字列｡`XClient::new` は何も
-    /// 送らない)､描き直す｡これが無いと､ボタンの最初の描画がユーザーの最初の
-    /// 起動になる｡「ボタンが無い」と報告されたのはそういう経緯だ｡
-    #[gpui::test]
-    fn a_signed_in_menu_offers_the_list_fetch_after_the_segments(cx: &mut gpui::TestAppContext) {
-        let (mut visual, timeline) = drawn(cx, fixture_with_lists(&["1"], &[("9101", "Rust")]));
-        cx.update(|cx| {
-            timeline.update(cx, |view, cx| {
-                view.client = Some(crate::x_api::XClient::new("token".to_string()));
-                cx.notify();
-            });
-        });
-        visual.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
-
-        assert!(
-            visual.debug_bounds("load-lists").is_none(),
-            "the closed trigger must not offer the fetch directly"
-        );
-
-        let trigger = visual
-            .debug_bounds("source-picker")
-            .expect("the trigger is always shown");
-        visual.simulate_click(trigger.center(), gpui::Modifiers::none());
-        visual.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
-
-        let button = visual
-            .debug_bounds("load-lists")
-            .expect("a window with a client and a known user offers the fetch in the open menu");
-        let last_segment = visual
-            .debug_bounds("tab-list-9101")
-            .expect("the fixture list is a segment");
-        assert!(
-            button.top() >= last_segment.bottom(),
-            "the button sits after the picker's segments: {last_segment:?} then {button:?}"
-        );
-        assert!(
-            button.size.width > gpui::px(0.0) && button.size.height > gpui::px(0.0),
-            "the button has a size: {button:?}"
-        );
-    }
-
     /// #164 の 2 つ目の完了条件 (#43 でトグルへ拡張): すでにキャッシュ済みの
     /// source どうしを行き来しても何も送らない｡
     ///
     /// Home と list が 2 つ､すべて前もってキャッシュしてある (Home は空)｡
-    /// ウィンドウは Home を外し､list を行き来するようにトグルされ (メニューは
-    /// 項目クリックで閉じないので連続でクリックできる)､各クリックの後には
-    /// きっかりキャッシュ済みの行を表示する｡client はまだ無く
-    /// `last_reload_at` も動いていないので､何も出ていないし試みられても
-    /// いない — `showing_new_posts_sends_nothing` が頼るのと同じ証拠だ｡
+    /// `view.toggle_source` を直に 4 回呼び (#282: `Sources` はメニューバーの
+    /// ネイティブメニューなので gpui のクリックを合成できない — トリガーの
+    /// クリックに代わる唯一の道がこれになった)、各回の後にきっかり
+    /// キャッシュ済みの行を表示する｡client はまだ無く `last_reload_at` も
+    /// 動いていないので､何も出ていないし試みられてもいない —
+    /// `showing_new_posts_sends_nothing` が頼るのと同じ証拠だ｡
+    /// 課金の門: 消してはならない｡
     #[gpui::test]
     fn toggling_between_cached_sources_sends_nothing(cx: &mut gpui::TestAppContext) {
         cache_home(&[]);
         cache_list("9111", &["12", "11"]);
         cache_list("9112", &["22", "21"]);
-        let (mut visual, timeline) = drawn(
+        let (_window, timeline) = fixture_window(
             cx,
             fixture_with_lists(&["1"], &[("9111", "first"), ("9112", "second")]),
         );
 
-        let trigger = visual
-            .debug_bounds("source-picker")
-            .expect("the trigger is always shown");
-        visual.simulate_click(trigger.center(), gpui::Modifiers::none());
-        visual.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
-
-        for segment in [
-            "tab-list-9111", // sources: Home, 9111
-            "tab-home",      // sources: 9111
-            "tab-list-9112", // sources: 9111, 9112
-            "tab-list-9111", // sources: 9112
+        for target in [
+            crate::cache::TimelineSource::List("9111".to_string()), // sources: Home, 9111
+            crate::cache::TimelineSource::Home,                     // sources: 9111
+            crate::cache::TimelineSource::List("9112".to_string()), // sources: 9111, 9112
+            crate::cache::TimelineSource::List("9111".to_string()), // sources: 9112
         ] {
-            let bounds = visual
-                .debug_bounds(segment)
-                .expect("the segment has to be laid out before a click can reach it");
-            visual.simulate_click(bounds.center(), gpui::Modifiers::none());
+            cx.update(|cx| {
+                timeline.update(cx, |view, cx| view.toggle_source(&target, cx));
+            });
             cx.run_until_parked();
 
             cx.update(|cx| {
@@ -5315,14 +5081,9 @@ mod tests {
                     assert!(
                         view.last_reload_at.is_none(),
                         "a toggle between cached sources must not count as a fetch \
-                         (after clicking {segment})"
+                         (after toggling {target:?})"
                     );
                 });
-            });
-            // 次の参照が､前のフレームが置いた場所ではなく今ある場所で区画を
-            // 拾えるように描き直す｡
-            visual.update(|window, cx| {
-                let _ = window.draw(cx);
             });
         }
 
@@ -5337,13 +5098,12 @@ mod tests {
         });
     }
 
-    /// #164: クリックは区画の上に落ち､切り替えは前の取得元に属していたものを
-    /// リセットする — ここでは poll のバッファで､そうしなければ古いリストの
-    /// post を新しいリストに被せて出してしまう｡
+    /// #164: トグルは前の取得元に属していたものをリセットする — ここでは
+    /// poll のバッファで､そうしなければ古いリストの post を新しいリストに
+    /// 被せて出してしまう｡
     /// #43: 区画は「切り替える」ではなく「トグルする」。list を足してから
     /// Home を外し、結局は #164 が確かめていたのと同じ単一選択の終着点
-    /// (list だけ) へたどり着くことを確認する — メニューは項目クリックで
-    /// 閉じないので、2 回続けてクリックできる。
+    /// (list だけ) へたどり着くことを確認する｡
     #[gpui::test]
     fn toggling_segments_changes_the_source_and_drops_the_old_buffer(
         cx: &mut gpui::TestAppContext,
@@ -5351,7 +5111,7 @@ mod tests {
         cache_list("9121", &["32", "31"]);
         let mut fixture = fixture_with_lists(&["2", "1"], &[("9121", "Rust")]);
         fixture.pending = vec![item_with("3", "someone", None)];
-        let (mut visual, timeline) = drawn(cx, fixture);
+        let (_window, timeline) = fixture_window(cx, fixture);
 
         cx.update(|cx| {
             timeline.update(cx, |view, _cx| {
@@ -5360,27 +5120,17 @@ mod tests {
             });
         });
 
-        let trigger = visual
-            .debug_bounds("source-picker")
-            .expect("the trigger is always shown");
-        visual.simulate_click(trigger.center(), gpui::Modifiers::none());
-        visual.update(|window, cx| {
-            let _ = window.draw(cx);
+        cx.update(|cx| {
+            timeline.update(cx, |view, cx| {
+                view.toggle_source(&crate::cache::TimelineSource::List("9121".to_string()), cx);
+            });
         });
-
-        let list_item = visual
-            .debug_bounds("tab-list-9121")
-            .expect("the segment has to be laid out before a click can reach it");
-        visual.simulate_click(list_item.center(), gpui::Modifiers::none());
         cx.run_until_parked();
-        visual.update(|window, cx| {
-            let _ = window.draw(cx);
+        cx.update(|cx| {
+            timeline.update(cx, |view, cx| {
+                view.toggle_source(&crate::cache::TimelineSource::Home, cx);
+            });
         });
-
-        let home_item = visual
-            .debug_bounds("tab-home")
-            .expect("home stays addressable while the menu is open");
-        visual.simulate_click(home_item.center(), gpui::Modifiers::none());
         cx.run_until_parked();
 
         cx.update(|cx| {
@@ -5409,30 +5159,15 @@ mod tests {
     /// テストで押さえてある｡
     #[gpui::test]
     fn toggling_a_source_restarts_the_auto_refresh_loop(cx: &mut gpui::TestAppContext) {
-        let (mut visual, timeline) = drawn(cx, fixture_with_lists(&["1"], &[("9161", "Rust")]));
+        let (_window, timeline) =
+            fixture_window(cx, fixture_with_lists(&["1"], &[("9161", "Rust")]));
         cx.update(|cx| {
             timeline.update(cx, |view, cx| {
                 view.client = Some(crate::x_api::XClient::new("token".to_string()));
                 view.config.auto_refresh = true;
-                cx.notify();
+                view.toggle_source(&crate::cache::TimelineSource::List("9161".to_string()), cx);
             });
         });
-        visual.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
-
-        let trigger = visual
-            .debug_bounds("source-picker")
-            .expect("the trigger is always shown");
-        visual.simulate_click(trigger.center(), gpui::Modifiers::none());
-        visual.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
-
-        let list_item = visual
-            .debug_bounds("tab-list-9161")
-            .expect("the segment has to be laid out before a click can reach it");
-        visual.simulate_click(list_item.center(), gpui::Modifiers::none());
         cx.run_until_parked();
 
         cx.update(|cx| {
@@ -5474,11 +5209,7 @@ mod tests {
         // この HOME の下に token は無いので､起動は client を持たない
         // `NotAuthenticated` へ落ち着く — 起動のゲートは越えていて､なお
         // この後のキャッシュミスに何も使えない｡
-        let (window, timeline) = window_with(cx, smoke_config(), paths.clone(), Startup::Live);
-        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
-        visual.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
+        let (_window, timeline) = window_with(cx, smoke_config(), paths.clone(), Startup::Live);
         cx.update(|cx| {
             timeline.update(cx, |view, _cx| {
                 assert!(matches!(view.state, TimelineState::NotAuthenticated));
@@ -5486,18 +5217,11 @@ mod tests {
             });
         });
 
-        let trigger = visual
-            .debug_bounds("source-picker")
-            .expect("the trigger is always shown");
-        visual.simulate_click(trigger.center(), gpui::Modifiers::none());
-        visual.update(|window, cx| {
-            let _ = window.draw(cx);
+        cx.update(|cx| {
+            timeline.update(cx, |view, cx| {
+                view.toggle_source(&crate::cache::TimelineSource::List("9131".to_string()), cx);
+            });
         });
-
-        let segment = visual
-            .debug_bounds("tab-list-9131")
-            .expect("the segment has to be laid out before a click can reach it");
-        visual.simulate_click(segment.center(), gpui::Modifiers::none());
         cx.run_until_parked();
 
         let remembered = super::source_picker::load_selection(&paths.selection_file());
@@ -5522,20 +5246,14 @@ mod tests {
         cache_list("9151", &["51"]);
         let selection_file = smoke_paths().selection_file();
         let _ = std::fs::remove_file(&selection_file);
-        let (mut visual, timeline) = drawn(cx, fixture_with_lists(&["1"], &[("9151", "Rust")]));
+        let (_window, timeline) =
+            fixture_window(cx, fixture_with_lists(&["1"], &[("9151", "Rust")]));
 
-        let trigger = visual
-            .debug_bounds("source-picker")
-            .expect("the trigger is always shown");
-        visual.simulate_click(trigger.center(), gpui::Modifiers::none());
-        visual.update(|window, cx| {
-            let _ = window.draw(cx);
+        cx.update(|cx| {
+            timeline.update(cx, |view, cx| {
+                view.toggle_source(&crate::cache::TimelineSource::List("9151".to_string()), cx);
+            });
         });
-
-        let segment = visual
-            .debug_bounds("tab-list-9151")
-            .expect("the segment has to be laid out before a click can reach it");
-        visual.simulate_click(segment.center(), gpui::Modifiers::none());
         cx.run_until_parked();
 
         cx.update(|cx| {
@@ -5553,25 +5271,19 @@ mod tests {
         );
     }
 
-    /// #164: すでに持ち上がっているセグメントをクリックしても何も起きない —
-    /// 後の timeline は､単に読み込まれたままなのではなく同一だ｡
+    /// #164: すでに持ち上がっている唯一の source を再びトグルしても何も
+    /// 起きない — 非空 invariant がそのクリックを無視する｡後の timeline は､
+    /// 単に読み込まれたままなのではなく同一だ｡
     #[gpui::test]
-    fn clicking_the_only_showing_segment_changes_nothing(cx: &mut gpui::TestAppContext) {
-        let (mut visual, timeline) =
-            drawn(cx, fixture_with_lists(&["2", "1"], &[("9141", "Rust")]));
+    fn toggling_the_only_shown_source_changes_nothing(cx: &mut gpui::TestAppContext) {
+        let (_window, timeline) =
+            fixture_window(cx, fixture_with_lists(&["2", "1"], &[("9141", "Rust")]));
 
-        let trigger = visual
-            .debug_bounds("source-picker")
-            .expect("the trigger is always shown");
-        visual.simulate_click(trigger.center(), gpui::Modifiers::none());
-        visual.update(|window, cx| {
-            let _ = window.draw(cx);
+        cx.update(|cx| {
+            timeline.update(cx, |view, cx| {
+                view.toggle_source(&crate::cache::TimelineSource::Home, cx);
+            });
         });
-
-        let home = visual
-            .debug_bounds("tab-home")
-            .expect("Home is always a segment");
-        visual.simulate_click(home.center(), gpui::Modifiers::none());
         cx.run_until_parked();
 
         cx.update(|cx| {

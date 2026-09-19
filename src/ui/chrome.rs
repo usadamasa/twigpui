@@ -57,19 +57,9 @@ impl TimelineView {
             .bg(rgba(theme::with_alpha(theme.bg_header, bg_alpha)))
             .border_b_1()
             .border_color(rgb(theme.border))
-            // #95 の枠に #192/#43 の pull-down trigger: 幅は最大 160px の
-            // 固定で個数に依存しないので、旧 segmented control が要った
-            // `overflow_hidden` はもう trigger 自体には要らない｡ドロップ
-            // ダウン本体は `deferred()` で画面の最前面に描かれるので、この
-            // 行の `overflow_hidden` の影響は受けない｡
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .child(self.source_picker_trigger(cx))
-                    .children(self.source_picker_menu(bg_alpha, cx)),
-            )
+            // #282: source picker のトリガーとドロップダウンはメニューバーの
+            // `Sources` メニューへ移った｡この帯の左側はここでは空になる
+            // (`header` 自体の撤去は次のステップ)｡
             .child(
                 div()
                     .flex()

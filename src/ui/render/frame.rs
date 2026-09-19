@@ -154,30 +154,3 @@ pub(in crate::ui) fn compose_error_message(status: &ComposeStatus) -> Option<Sha
 // `NotAuthenticated` だけで､そこでは *主* ボタンがすでに "Sign in with X"
 // と言っている — そして同一のボタンが二つ並ぶことこそ､#31 がそもそも
 // 避けようとしていたものだ｡
-
-/// pull-down のトリガー (#192, #43) とメニュー項目に共通の chip｡かつては
-/// segmented control の 1 区画で `tab_trough` という一本のトラックへ並んで
-/// いたが (#164)､#192/#43 でドロップダウンへ置き換わり trough は不要に
-/// なった｡`selected` は今もトリガー自身の常時「持ち上がった」見た目
-/// (`source_picker.rs::source_picker_trigger`) と､メニュー項目のチェック
-/// 済み表現の両方に使う｡
-pub(in crate::ui) fn tab_segment(label: &str, selected: bool, theme: Theme) -> Div {
-    div()
-        .px_2()
-        .py_0p5()
-        .rounded(px(4.0))
-        .when(selected, |segment| {
-            // 色を付けるだけでなくトラックから持ち上げる: 影が無いと
-            // segment は素のテキストの傍らに置かれた枠付きの chip に
-            // 読め､それはまったく別の control になってしまう｡
-            segment
-                .bg(rgb(theme.bg))
-                .shadow_sm()
-                .text_color(rgb(theme.text))
-                .font_weight(FontWeight::MEDIUM)
-        })
-        .when(!selected, |segment| {
-            segment.text_color(rgb(theme.text_muted))
-        })
-        .child(label.to_string())
-}

@@ -123,7 +123,6 @@ impl TimelineView {
             home_username: None,
             sources,
             item_provenance: HashMap::new(),
-            source_picker_open: source_picker::SourcePickerVisibility::default(),
             owned_lists,
             lists_fetch: None,
             selection_file,
@@ -414,11 +413,6 @@ impl TimelineView {
         self.home_user_id = Some(fixture.signed_in_as.id);
         self.home_username = Some(fixture.signed_in_as.username);
         self.owned_lists = fixture.lists;
-        self.source_picker_open = if fixture.picker_open {
-            source_picker::SourcePickerVisibility::Open
-        } else {
-            source_picker::SourcePickerVisibility::Closed
-        };
         // #43: `sources` が空なら単一 source (Home) のままの元の挙動を
         // 保つ — `compose` の created_at ソートを経由すると、`created_at`
         // 無しの item を末尾へ沈める既存の並び替え規則が単一選択の

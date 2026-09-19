@@ -259,7 +259,7 @@ impl Render for TimelineView {
                 this.compose_input
                     .update(cx, |input, cx| input.focus(window, cx));
             }))
-            .on_action(cx.listener(|this, _: &BlurComposer, window, cx| {
+            .on_action(cx.listener(|this, _: &BlurComposer, window, _cx| {
                 // フォーカスだけ｡下書きは打ったとおりに残す｡誤爆した `esc` で
                 // 失うと取り返しがつかないし､#14 はすでに下書きを絶対に
                 // 失わないことを composer の主たる約束としている｡
@@ -269,12 +269,6 @@ impl Render for TimelineView {
                 // 届かなくなり､次のクリックまで `esc` がショートカットと
                 // メニューバーの半分を無効にしていた｡
                 window.focus(&this.focus_handle);
-                // #43: 同じ `esc` で source picker のドロップダウンも閉じる｡
-                // 新しい KeyBinding は足さず既存の escape を共有する｡
-                if this.source_picker_open.is_open() {
-                    this.source_picker_open = source_picker::SourcePickerVisibility::Closed;
-                    cx.notify();
-                }
             }))
             .on_action(cx.listener(|_this, _: &ShowAbout, window, cx| {
                 // レシーバは待たずに落とす｡ボタンは 1 つしかないので､どれが
