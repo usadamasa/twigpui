@@ -123,7 +123,6 @@ impl TimelineView {
             home_username: None,
             sources,
             item_provenance: HashMap::new(),
-            source_picker_open: source_picker::SourcePickerVisibility::default(),
             owned_lists,
             lists_fetch: None,
             selection_file,
@@ -139,13 +138,15 @@ impl TimelineView {
             thread_fetches: HashMap::new(),
             compose: ComposeState::new(),
             compose_input,
-            _compose_input_subscription: compose_input_subscription,
+            compose_window: None,
+            compose_input_subscription,
             submit_task: None,
             oauth_scope: None,
             session_notice: None,
             auto_refresh_notice: None,
             reload_notice: None,
             cooldown_ticker: None,
+            outcome_expiry: None,
             usage_totals: usage::Totals::default(),
             usage_refresh: None,
             auto_sync: None,
@@ -194,16 +195,31 @@ impl TimelineView {
         // #118: 何よりも先に｡最初のフレームから focus の経路に空のものでは
         // なく timeline が乗るようにするため｡
         window.focus(&this.focus_handle);
+        this.finish_startup(startup, window, cx);
+        this
+    }
+
+    /// `new` の残り｡100 行の関数上限 (`too_many_lines`) に収めるため､
+    /// 構造体の組み立てから切り離してある｡
+    fn finish_startup(
+        &mut self,
+        startup: Startup,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
         // #267: 前回のトグルを platform の window へ効かせる｡`main` は
         // `WindowOptions` に書かず､live も fixture もここを通る｡
-        this.apply_translucency(window);
-        this.apply_floating(window);
+        self.apply_translucency(window);
+        self.apply_floating(window);
         match startup {
-            Startup::Live => this.start(cx),
-            Startup::Fixture(fixture) => this.show_fixture(*fixture, cx),
+            Startup::Live => self.start(cx),
+            Startup::Fixture(fixture) => self.show_fixture(*fixture, cx),
         }
-        this.refresh_usage(cx);
-        this
+        self.refresh_usage(cx);
+        // #282: 最初の Sources メニュー｡live のウィンドウでは `client` が
+        // まだ無く取得ボタンは出ない — `start` の完了が埋め直す
+        // (`refresh_source_menu` の doc に呼ぶ場所を列挙してある)｡
+        self.refresh_source_menu(cx);
     }
 
     /// composer の本物のテキスト入力 (#38) と､打鍵を `compose` へ写す購読｡
@@ -218,6 +234,21 @@ impl TimelineView {
         });
         let subscription = cx.subscribe(&input, Self::on_compose_input_event);
         (input, subscription)
+    }
+
+    /// compose window を開く直前に呼ぶ (#282)｡`InputState::new` はカーソル
+    /// の点滅と blur の購読を渡された window へ束ねる (gpui-component の
+    /// 実装を見よ) ので､timeline の window で作った `compose_input` を
+    /// 別の window で描いても点滅も blur も届かない｡だから開くたびに
+    /// 新しい window へ束ね直す — 下書きの本文は `compose.text()` が正本
+    /// なので (`compose_input` フィールドの doc を見よ)､作り直しても失う
+    /// ものは無い｡
+    pub(super) fn rebind_compose_input(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        let (input, subscription) = Self::compose_input(window, cx);
+        let text = self.compose.text().to_string();
+        input.update(cx, |state, cx| state.set_value(text, window, cx));
+        self.compose_input = input;
+        self.compose_input_subscription = subscription;
     }
 
     /// ウィンドウの矩形 (#211) とフォーカスの出入り (#267) の購読｡
@@ -345,10 +376,11 @@ impl TimelineView {
     /// 今この瞬間の背景の不透明度 (#267)｡本体も toolbar も status bar も
     /// これで塗る — 帯だけが不透明に残ると､透けた一覧の上に板が浮く｡行の中に
     /// 埋め込まれた post の面 (引用カード､スレッドの行､composer のカード)､
-    /// バナー､sync の行､source picker のメニューも同じもので塗る｡`bg_header`
-    /// を塗る面で残るのは sync のダイアログだけで､あれは覆いの上のモーダル
-    /// なので読みやすさを取って不透明のままにしてある｡render が 1 回読んで
-    /// 枠と行へ渡す｡
+    /// バナー､sync の行も同じもので塗る｡`bg_header` を塗る面で残るのは
+    /// sync のダイアログだけで､あれは覆いの上のモーダルなので読みやすさを
+    /// 取って不透明のままにしてある (#282: `Sources` メニューは macOS の
+    /// ネイティブメニューになったので､この不透明度は最初から効かない)｡
+    /// render が 1 回読んで枠と行へ渡す｡
     pub(super) fn bg_alpha(&self, window: &Window) -> u8 {
         theme::bg_alpha(self.window_state.translucent, window.is_window_active())
     }
@@ -397,11 +429,6 @@ impl TimelineView {
         self.home_user_id = Some(fixture.signed_in_as.id);
         self.home_username = Some(fixture.signed_in_as.username);
         self.owned_lists = fixture.lists;
-        self.source_picker_open = if fixture.picker_open {
-            source_picker::SourcePickerVisibility::Open
-        } else {
-            source_picker::SourcePickerVisibility::Closed
-        };
         // #43: `sources` が空なら単一 source (Home) のままの元の挙動を
         // 保つ — `compose` の created_at ソートを経由すると、`created_at`
         // 無しの item を末尾へ沈める既存の並び替え規則が単一選択の
@@ -498,6 +525,14 @@ impl TimelineView {
         // fetch せずそのまま返す｡ネットワークへ出ないので､オフラインでも
         // 起動のたびに同じ画面になり､WARN も出ない｡
         self.refresh_images(cx);
+        // #282: `--fixture` の窓は打鍵を合成できないので、compose window が
+        // 別ウィンドウでも panic せず描けることを撮って確かめる手段が
+        // これしかない｡`compose_window::open` 自身が `cx.defer` するので、
+        // まだ構築の途中のここから呼んでも安全 (`open` の doc を見よ)｡
+        if fixture.composer_open {
+            let this = cx.entity();
+            compose_window::open(&this, cx);
+        }
         cx.notify();
     }
 }

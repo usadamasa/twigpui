@@ -94,6 +94,12 @@ impl Profile {
         format!("{} — Photo", self.window_title())
     }
 
+    /// compose window (#282) のタイトルバー文字列｡[`Self::photo_window_title`]
+    /// と同じ形｡
+    pub(crate) fn compose_window_title(self) -> String {
+        format!("{} — New Post", self.window_title())
+    }
+
     /// `X_LIST_ID` も `config.toml` の `list_id` も List を指定しないときに
     /// このプロファイルが fallback する先の List (#161, #169)｡
     ///
@@ -167,6 +173,26 @@ mod tests {
         // クエリも出してはならない｡
         for profile in [Profile::Dev, Profile::Release] {
             let title = profile.photo_window_title();
+            assert!(
+                !title.contains('/') && !title.contains("http") && !title.contains('?'),
+                "{title:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_two_profiles_never_share_a_compose_window_title() {
+        // #282: compose window にも photo viewer と同じ invariant を課す｡
+        assert_ne!(
+            Profile::Dev.compose_window_title(),
+            Profile::Release.compose_window_title()
+        );
+    }
+
+    #[test]
+    fn the_compose_window_title_names_no_url_or_path() {
+        for profile in [Profile::Dev, Profile::Release] {
+            let title = profile.compose_window_title();
             assert!(
                 !title.contains('/') && !title.contains("http") && !title.contains('?'),
                 "{title:?}"

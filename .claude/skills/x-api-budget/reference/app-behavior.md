@@ -104,6 +104,10 @@ twigpui は実際の resource 数 (書き込みは request 数) をすべて数�
 リクエストは何も出ていないので数え**ない**｡`includes` は数えない (`pricing.md` の
 実測ログ 4)｡
 
+**いつ数えたかはログに残る｡** `usage.json` が持つのは今日の合計だけなので､
+数えるたびに `usage <endpoint> (<種別>): returned N, counted M, today T` の INFO を
+1 行書く (形は `app-logs`､集計は `credit-report`)｡何も返らなかった read は書かない｡
+
 **resource の種別｡** 単価が種別ごとに 10 倍違うので､`usage::ResourceKind`
 (Posts/Users/Owned/Write) ごとに分けて持つ — `Endpoint::kind()`
 (`src/usage/kind.rs`) が endpoint ごとの対応表だ｡2 か所は安全側 (高い方の単価) に

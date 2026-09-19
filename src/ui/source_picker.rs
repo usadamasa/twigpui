@@ -1,12 +1,17 @@
-//! ツールバーの source picker (#43, #192): ウィンドウがどの timeline の
-//! *集合* を見せるか､その選択が再起動をどう生き延びるか､pull-down の
-//! メニュー項目がどこから名前を得るか｡
+//! source picker (#43, #192, #282): ウィンドウがどの timeline の *集合* を
+//! 見せるか､その選択が再起動をどう生き延びるか､メニュー項目がどこから
+//! 名前を得るか｡
 //!
 //! #164 まではここが単一選択の segmented control だった｡所有リストが
 //! 十数本あるアカウントでは既定幅 (429px) のツールバーが壊れ (#192)､
-//! かつ「合成レーン」(#43) は複数選択そのものを要求する｡どちらも
-//! macOS の pull-down button + チェックマーク付きメニューで一度に解決する
-//! (他アプリ調査と HIG の根拠は `PLAN.md` を見よ)｡
+//! かつ「合成レーン」(#43) は複数選択そのものを要求する｡#192/#43 は
+//! macOS の pull-down button + チェックマーク付きメニューで一度に解決した
+//! (他アプリ調査と HIG の根拠は `PLAN.md` を見よ)が､#282 でそのツールバー
+//! 自身を撤去し､メニューバーの `Sources` メニュー
+//! (`super::source_picker_menu::source_menu_items`) へ移した｡ここは今も
+//! 状態の読み書きだけを持つ — 区画をどう並べ何と呼ぶかの純粋関数
+//! ([`segments`] 等) と､クリックの結果を反映する `impl TimelineView`
+//! ([`TimelineView::toggle_source`] 等)｡
 //!
 //! 並びは [`super::list_sync`] と同じ: まず純粋な関数とそのテスト､続いて
 //! ウィンドウに触れるかリクエストを使う部分の `impl TimelineView`
@@ -18,7 +23,7 @@
 //! 読まれていない source — キャッシュファイルがそもそも無い場合 — だけが
 //! reload に落ちる｡それは初回起動が出すのと同じリクエストだ｡すでに読んだ
 //! source の間を行き来する分には､何度やってもリクエストは 0 だ｡
-//! `ui` のテストの `switching_between_cached_sources_sends_nothing` が
+//! `ui` のテストの `toggling_between_cached_sources_sends_nothing` が
 //! それを押さえている｡
 //!
 //! 区画に名前を付けるのはリクエストを 1 つ使う: `GET
@@ -45,8 +50,10 @@ use serde::{Deserialize, Serialize};
 // `use super::*` ではなく書き下している｡理由は [`super::list_sync`] と同じ｡
 use super::{
     Context, ReloadNotice, ReloadTrigger, Startup, TimelineState, TimelineView, lane, log, oauth,
+    source_picker_menu,
 };
 use crate::cache::{self, TimelineSource};
+use crate::menu;
 use crate::paths::Paths;
 use crate::x_api::ListSummary;
 
@@ -89,29 +96,6 @@ impl Selection {
             Self::Home => Some(TimelineSource::Home),
             Self::List { id } => (!id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit()))
                 .then_some(TimelineSource::List(id)),
-        }
-    }
-}
-
-/// ドロップダウンの開閉 (#192, #43)｡`bool` ではなく専用の 2 値 enum に
-/// してある — `TimelineView` はすでに clippy の `struct_excessive_bools`
-/// (上限 3) に達する本数の `bool` フィールドを持っており､これ以上増やさない｡
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(super) enum SourcePickerVisibility {
-    #[default]
-    Closed,
-    Open,
-}
-
-impl SourcePickerVisibility {
-    pub(super) fn is_open(self) -> bool {
-        matches!(self, Self::Open)
-    }
-
-    pub(super) fn toggled(self) -> Self {
-        match self {
-            Self::Closed => Self::Open,
-            Self::Open => Self::Closed,
         }
     }
 }
@@ -210,25 +194,6 @@ pub(super) fn toggle(
     sources
 }
 
-/// ツールバーのトリガーが言うこと (#192, #43)｡1 件なら名前をそのまま､
-/// 複数なら表示順で先頭の名前 + `+N`｡`owned` から名前を引けない source
-/// (所有していない list) は `segment_label` 相当のフォールバックにはせず
-/// id をそのまま出す — トリガーは常に何か読めるものを返す必要がある｡
-pub(super) fn trigger_label(sources: &[TimelineSource], owned: &[ListSummary]) -> String {
-    let name = |source: &TimelineSource| match source {
-        TimelineSource::Home => "Home".to_string(),
-        TimelineSource::List(id) => owned
-            .iter()
-            .find(|list| &list.id == id)
-            .map_or_else(|| id.clone(), segment_label),
-    };
-    match sources {
-        [] => String::new(),
-        [only] => name(only),
-        [first, rest @ ..] => format!("{} +{}", name(first), rest.len()),
-    }
-}
-
 /// picker が最後に取得した list｡一度も取得していなければ空 — キャッシュ
 /// ファイルが読めなかった場合もログ 1 行を残して空だ｡どの list にも名前を
 /// 付けられない picker にも Home の区画と残りを取得するボタンはあるので､
@@ -247,9 +212,6 @@ pub(super) fn cached_lists_or_empty(paths: &Paths) -> Vec<ListSummary> {
 /// 表示中のものかどうか｡
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Segment {
-    /// ウィンドウのテストがこの区画を見つけるための要素名
-    /// (`render::Addressable`)｡
-    pub name: String,
     /// 区画が言うこと｡
     pub label: String,
     /// クリックしたときウィンドウが切り替わる先｡
@@ -283,18 +245,9 @@ pub(super) fn segments(current: &[TimelineSource], owned: &[ListSummary]) -> Vec
 
 fn segment(source: TimelineSource, label: String, current: &[TimelineSource]) -> Segment {
     Segment {
-        name: segment_name(&source),
         selected: current.contains(&source),
         label,
         source,
-    }
-}
-
-/// `source` へ切り替える区画の要素名｡
-pub(super) fn segment_name(source: &TimelineSource) -> String {
-    match source {
-        TimelineSource::Home => "tab-home".to_string(),
-        TimelineSource::List(id) => format!("tab-list-{id}"),
     }
 }
 
@@ -309,9 +262,9 @@ pub(super) fn segment_label(list: &ListSummary) -> String {
     }
 }
 
-/// ツールバーが list を取得するボタンを出すかどうか: 金を使うための
-/// client と､問い合わせる id の両方があるときだけだ｡fixture の
-/// ウィンドウはどちらも持たない｡それが fixture を無課金に保っている｡
+/// メニューバーの `Sources` が list を取得する項目を出すかどうか: 金を
+/// 使うための client と､問い合わせる id の両方があるときだけだ｡fixture
+/// のウィンドウはどちらも持たない｡それが fixture を無課金に保っている｡
 pub(super) fn offers_list_fetch(has_client: bool, user_known: bool) -> bool {
     has_client && user_known
 }
@@ -406,6 +359,8 @@ impl TimelineView {
         self.start_auto_refresh(cx);
         // `state` を差し替えた後で｡理由は `start` と同じ (#120)｡
         self.refresh_images(cx);
+        // #282: 選択が変わったので Sources メニューの ✓ も作り直す｡
+        self.refresh_source_menu(cx);
         cx.notify();
     }
 
@@ -449,10 +404,39 @@ impl TimelineView {
                         ));
                     }
                 }
+                // #282: 新しい list 名を Sources メニューへ映す｡
+                this.refresh_source_menu(cx);
                 cx.notify();
             });
         }));
         cx.notify();
+    }
+
+    /// `Sources` メニューを今の状態で作り直す (#282)｡macOS のメニューは
+    /// `MenuItem` にチェック状態を持てないので (`menu::menus` の doc)､選択が
+    /// 変わるたびメニュー全体を組み直すほかない｡呼び忘れは鮮度の落ちた
+    /// メニューという静かな欠陥になるので､呼ぶ場所をここに列挙する:
+    ///
+    /// - 起動の終わり ([`TimelineView::finish_startup`])
+    /// - この impl の [`Self::toggle_source`] の末尾
+    /// - この impl の [`Self::fetch_owned_lists`] の完了 (`owned_lists` を
+    ///   代入した直後)
+    /// - [`super::tasks::fetch::TimelineView::start`] の完了
+    /// - [`super::tasks::fetch::TimelineView::reload_sources`] の完了
+    ///
+    /// 下の 2 つが要る理由は上の 3 つだけでは足りないからだ: 起動直後は
+    /// `client`/`home_user_id` がまだ無く (`offers_list_fetch` が false)､
+    /// live のウィンドウで取得ボタンが現れるのは非同期の `start`/`reload`
+    /// が両方を埋めた後だけになる｡設計メモは 3 か所と見積もっていたが､
+    /// 実装時にこの抜けが見つかったので 5 か所へ広げた｡
+    pub(super) fn refresh_source_menu(&self, cx: &mut Context<'_, Self>) {
+        let items = source_picker_menu::source_menu_items(
+            &self.sources,
+            &self.owned_lists,
+            offers_list_fetch(self.client.is_some(), self.home_user_id.is_some()),
+            self.lists_fetch.is_some(),
+        );
+        cx.set_menus(menu::menus(items));
     }
 }
 
@@ -696,45 +680,6 @@ mod tests {
         assert_eq!(sources, vec![TimelineSource::Home]);
     }
 
-    // --- トリガーのラベル (#192, #43) ---
-
-    #[test]
-    fn a_single_selection_shows_its_own_name() {
-        assert_eq!(
-            trigger_label(&[TimelineSource::Home], &[]),
-            "Home".to_string()
-        );
-        assert_eq!(
-            trigger_label(
-                &[TimelineSource::List("1".to_string())],
-                &[list("1", "rust")]
-            ),
-            "rust".to_string()
-        );
-    }
-
-    #[test]
-    fn multiple_selections_summarize_as_the_first_name_plus_a_count() {
-        assert_eq!(
-            trigger_label(
-                &[TimelineSource::Home, TimelineSource::List("1".to_string())],
-                &[list("1", "rust")]
-            ),
-            "Home +1".to_string()
-        );
-        assert_eq!(
-            trigger_label(
-                &[
-                    TimelineSource::Home,
-                    TimelineSource::List("1".to_string()),
-                    TimelineSource::List("2".to_string())
-                ],
-                &[list("1", "rust"), list("2", "art")]
-            ),
-            "Home +2".to_string()
-        );
-    }
-
     // --- 区画 ---
 
     #[test]
@@ -755,8 +700,6 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![false, true, false]
         );
-        assert_eq!(segments[1].name, "tab-list-2");
-        assert_eq!(segments[0].name, "tab-home");
         assert_eq!(segments[0].source, TimelineSource::Home);
     }
 
@@ -847,11 +790,11 @@ mod tests {
             sync: None,
             sources: Vec::new(),
             list_items: std::collections::BTreeMap::new(),
-            picker_open: false,
             liked: Vec::new(),
             reposted: Vec::new(),
             selected: None,
             translucent: false,
+            composer_open: false,
         };
         assert_eq!(
             saved_selection_for(&Startup::Fixture(Box::new(fixture)), &paths),

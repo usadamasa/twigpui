@@ -86,12 +86,6 @@ pub(crate) struct Fixture {
     /// list ごとの post が要る｡
     #[serde(default)]
     pub list_items: std::collections::BTreeMap<String, Vec<TimelineItem>>,
-    /// 起動直後に source picker のドロップダウンを開いた状態にするか (#43,
-    /// #192)｡widget の開閉状態を fixture に持つのはこのモジュールの規則の
-    /// 例外だが、`--fixture` の窓はクリックを合成する手段が無く、開いた
-    /// 状態を撮るにはここで宣言する以外に道が無い｡
-    #[serde(default)]
-    pub picker_open: bool,
     /// いいね済みとして描く post id (#156)｡`toggle::load_all` の永続ファイルを
     /// 読む代わりに､fixture が直接そう言う｡撮る画面は毎回同じでなければ
     /// ならないので､手元の状態ファイルに依存させられない｡
@@ -108,11 +102,17 @@ pub(crate) struct Fixture {
     /// なるだけだ｡
     #[serde(default)]
     pub selected: Option<String>,
-    /// 起動直後から背景を透かすか (#267)｡[`Fixture::picker_open`] と同じ
+    /// 起動直後から背景を透かすか (#267)｡[`Fixture::selected`] と同じ
     /// 例外で､fixture の窓は window state ファイルを読まないので､透過の
     /// 見た目を撮るにはここで宣言する以外に道が無い｡
     #[serde(default)]
     pub translucent: bool,
+    /// 起動の終わりに compose window も開くか (#282)｡打鍵を合成できない
+    /// `--fixture` の窓では `⌘N` を押せないので､「別ウィンドウで
+    /// `compose_input` を描いても panic しない」ことを確かめる手段はこれ
+    /// しかない｡
+    #[serde(default)]
+    pub composer_open: bool,
 }
 
 /// フィクスチャが言う list sync の状態 (#205)｡
@@ -359,6 +359,22 @@ mod tests {
                 pending.id
             );
         }
+    }
+
+    #[test]
+    fn the_compose_fixture_declares_composer_open() {
+        // #282: `cargo run -- --fixture fixtures/compose.json` が compose
+        // window も開くことを確かめる元になっているフラグ｡`timeline.json`
+        // にはこのフィールドが無く (`#[serde(default)]` で `false`) 読める
+        // ことは別のテストが押さえている — こちらは "compose.json 自身が
+        // 本当に `true` と書いているか" を見る｡
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/compose.json");
+        let fixture = load(&path).expect("fixtures/compose.json must load");
+
+        assert!(
+            fixture.composer_open,
+            "compose.json exists to open the composer window"
+        );
     }
 
     /// #156: `metrics` の JSON キーは `PostMetrics` の `rename` (API の

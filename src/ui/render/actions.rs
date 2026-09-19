@@ -311,6 +311,10 @@ pub(in crate::ui) fn reply_row(
             replying_to: replying_to.clone(),
         });
         cx.notify();
+        // #282: 対象を据えたら compose window を開く｡`compose_window::open`
+        // 自身が `cx.defer` するので､ここではただ呼ぶだけでよい｡
+        let timeline = cx.entity();
+        compose_window::open(&timeline, cx);
     }))
     .into_any_element()
 }
@@ -362,6 +366,9 @@ pub(in crate::ui) fn quote_row(
             quoted: quoted.clone(),
         });
         cx.notify();
+        // #282: `reply_row` と同じ経路｡
+        let timeline = cx.entity();
+        compose_window::open(&timeline, cx);
     }))
     .into_any_element()
 }

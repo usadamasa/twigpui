@@ -25,7 +25,7 @@ use std::borrow::Cow;
 use anyhow::Result;
 use gpui::{AssetSource, SharedString};
 
-/// toolbar のリロードアイコン — SF Symbols 風の `arrow.clockwise` で､
+/// footer のリロードアイコン — SF Symbols 風の `arrow.clockwise` で､
 /// 開いた円に矢印の先端を付けた形で描いてある｡
 pub(crate) const RELOAD_ICON: &str = "icons/arrow.clockwise.svg";
 
@@ -118,7 +118,7 @@ mod tests {
     #[test]
     fn the_reload_icon_is_in_the_binary() {
         // これが守る失敗は静かだ: パスが解決しないとき `svg()` は何も
-        // 描かないので､リネームや移動をしたファイルは toolbar に空白を
+        // 描かないので､リネームや移動をしたファイルは footer に空白を
         // 残すだけで､エラーはどこにも出ない｡
         let bytes = Assets
             .load(RELOAD_ICON)

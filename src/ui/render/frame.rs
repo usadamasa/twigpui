@@ -1,9 +1,11 @@
-//! 窓の枠の部品 (#241): バナー､notice､toolbar の表題と segment､usage の
-//! 行､composer のエラー行｡
+//! 窓の枠の部品 (#241): バナー､notice､footer の segment､usage の行､
+//! composer のエラー行｡
 
 use crate::ui::*;
 
-/// sign-in flow を始める､ヘッダの輪郭だけの pill｡
+/// sign-in flow を始める輪郭だけの pill｡呼び出し側は 2 つ (#282 で
+/// [`reauthorize_banner`] の `reauthorize` が加わった): body の
+/// `sign-in-body` (session がまだ無い) と `reauthorize` (scope が足りない)｡
 ///
 /// #31 (app-only の bearer token からの脱却) と #14 (セッションが
 /// `tweet.write` より前のもの) は同じ場所へ至る別々の理由なので､二つの
@@ -41,9 +43,10 @@ pub(in crate::ui) fn notice(message: impl Into<SharedString>, color: u32) -> imp
 }
 
 /// 常設の「セッションが切れた」バナー (#54): [`TimelineView::body`] の
-/// `state` を鍵にした match へ畳み込むのではなく､ヘッダと他のすべての
-/// 間にある独立した行だ — 眼目は､`body` がまったく正常に読み込まれた
-/// timeline を描いている間 (bearer token への fallback 時) でも出しつづけ
+/// `state` を鍵にした match へ畳み込むのではなく､`body` とは独立した
+/// バナーの列 (`notice_banners`) に住む行だ — 眼目は､`body` がまったく
+/// 正常に読み込まれた timeline を描いている間 (bearer token への fallback
+/// 時) でも出しつづけ
 /// ねばならない点で､それこそ #54 が起票された状態そのものだ｡
 /// `name` は #184 の呼び名だ｡3 人の呼び出し側が同じ姿のバナーを描くので､
 /// テストは「どれが出ているか」を名前でしか見分けられない｡
@@ -100,12 +103,57 @@ pub(in crate::ui) fn reload_notice_banner(
         .child(message)
 }
 
-/// ヘッダの簡潔な usage 要約 (#162､#18 の後継): 数えるのは Posts の
+/// Re-authorize の誘導 (#14, #282) — [`session_notice_banner`] と同じ体裁
+/// のバナーに､短い説明と既存の [`sign_in_pill`] を並べる｡footer は 429px
+/// で余地が無く (#214)､輪郭付きの pill は 24px の帯に入らない｡出す条件は
+/// [`offers_reauthorize`](super::offers_reauthorize) — header に居た頃と
+/// 変えていない｡
+///
+/// 説明文に `flex_1()` + `min_w(px(0.))` を､pill に `flex_shrink_0()` を
+/// 付けてある｡2026-08-24 に実測した事故 (560px で "Sign in with X" が
+/// 右端の外へ出て回復不能になった) と同じ形の危険が横並びのここにも
+/// ある — 幅の狭い本番ウィンドウでは pill を残して文の側が折り返す｡
+pub(in crate::ui) fn reauthorize_banner(
+    theme: Theme,
+    bg_alpha: u8,
+    cx: &mut Context<'_, TimelineView>,
+) -> impl IntoElement {
+    div()
+        .addressable("banner-reauthorize")
+        .flex()
+        .items_center()
+        .gap_3()
+        .px_4()
+        .py_2()
+        // #267: 本体と同じ不透明度で — 帯だけ不透明に残さない｡
+        .bg(rgba(theme::with_alpha(theme.bg_header, bg_alpha)))
+        .border_b_1()
+        .border_color(rgb(theme.border))
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.))
+                .text_color(rgb(theme.text_muted))
+                .child("This session is missing a scope twigpui needs — re-authorize to grant it."),
+        )
+        .child(
+            div()
+                .flex_shrink_0()
+                .child(sign_in_pill("reauthorize", "Re-authorize", theme, cx)),
+        )
+}
+
+/// footer の簡潔な usage 要約 (#162､#18 の後継): 数えるのは Posts の
 /// resource 数で､リクエスト本数ではない — `usage::posts_totals` が既に
 /// Posts kind だけへ絞っているので､ここは受け取った数をそのまま出す｡
 /// 見積り金額 (USD) は常に添える: `post_resource_price` はもう既定値
 /// (`config` の `DEFAULT_POST_RESOURCE_PRICE`) を持つので､「価格が未設定」
 /// という状態は無くなった｡
+///
+/// 主語 ("Posts today"､"total") を幅で落とす分岐が #282 で一時期あったが､
+/// 同じ #282 で保持数の区画 (旧 "posts kept") が footer から消えて余裕が
+/// できたので､429px の門 (`the_footer_keeps_every_segment_in_the_window_
+/// at_429px`) を通したまま外した｡
 pub(in crate::ui) fn usage_label(today: u64, total: u64, post_resource_price: f64) -> String {
     let amount = usage::estimated_amount(today, post_resource_price);
     format!("Posts today: {today} (~${amount:.2}) · total: {total}")
@@ -140,71 +188,3 @@ pub(in crate::ui) fn compose_error_message(status: &ComposeStatus) -> Option<Sha
 // `NotAuthenticated` だけで､そこでは *主* ボタンがすでに "Sign in with X"
 // と言っている — そして同一のボタンが二つ並ぶことこそ､#31 がそもそも
 // 避けようとしていたものだ｡
-
-/// ヘッダの表題 (#11): これが誰のアカウントの post か､そして — #11 が
-/// 二つ目のモードを持ち込んだので — どのモードを出しているか｡自分の home
-/// timeline を見ているのか一つのアカウントの post を見ているのかを､
-/// ユーザーが推し量る羽目にならないようにするためだ｡
-///
-/// `home_username` が `None` になるのは `/me` が一度も解決していない短い
-/// 間だけで (何かがキャッシュされたか読み込まれたら二度と起きない)､表題
-/// がアカウントを名指せない唯一の場合だ｡
-///
-/// #33 までは `TimelineSource` を取っていた｡#33 でウィンドウは home
-/// timeline 以外を出せなくなった — single-user の view が在ったのは
-/// app-only の bearer token が home を読めなかったからだ｡
-pub(in crate::ui) fn header_title(home_username: Option<&str>) -> String {
-    match home_username {
-        Some(username) => format!("@{username}"),
-        // `/me` が解決するまで名指せるアカウントは無く､macOS のツールバーが
-        // その場所に見せるのはアプリ自身の名前だ｡
-        None => "twigpui".to_string(),
-    }
-}
-
-/// ツールバーが描くままの [`header_title`] (#95)｡
-///
-/// ツールバー行の `gap` に頼らず自前の左マージンを持つ: あの gap では
-/// タイトルが直前にあるものへぴたりと付いたままになる — picker の trough
-/// や #164 の取得ボタンがそれで､最初の実機ウィンドウでは
-/// `Load lists (1 request)@usadamasa` と出た｡#182 がステータスバーで同じ
-/// ものを見つけ､同じやり方で直した｡ウィンドウのテストがこの間隔を測れる
-/// よう名前を付けてある｡
-pub(in crate::ui) fn header_title_element(
-    home_username: Option<&str>,
-    theme: Theme,
-) -> impl IntoElement {
-    div()
-        .addressable("header-title")
-        .ml(theme::ROW_PAD_X)
-        .text_size(theme::TEXT_META)
-        .text_color(rgb(theme.text_tertiary))
-        .child(header_title(home_username))
-}
-
-/// pull-down のトリガー (#192, #43) とメニュー項目に共通の chip｡かつては
-/// segmented control の 1 区画で `tab_trough` という一本のトラックへ並んで
-/// いたが (#164)､#192/#43 でドロップダウンへ置き換わり trough は不要に
-/// なった｡`selected` は今もトリガー自身の常時「持ち上がった」見た目
-/// (`source_picker.rs::source_picker_trigger`) と､メニュー項目のチェック
-/// 済み表現の両方に使う｡
-pub(in crate::ui) fn tab_segment(label: &str, selected: bool, theme: Theme) -> Div {
-    div()
-        .px_2()
-        .py_0p5()
-        .rounded(px(4.0))
-        .when(selected, |segment| {
-            // 色を付けるだけでなくトラックから持ち上げる: 影が無いと
-            // segment は素のテキストの傍らに置かれた枠付きの chip に
-            // 読め､それはまったく別の control になってしまう｡
-            segment
-                .bg(rgb(theme.bg))
-                .shadow_sm()
-                .text_color(rgb(theme.text))
-                .font_weight(FontWeight::MEDIUM)
-        })
-        .when(!selected, |segment| {
-            segment.text_color(rgb(theme.text_muted))
-        })
-        .child(label.to_string())
-}

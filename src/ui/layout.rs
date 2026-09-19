@@ -1,6 +1,7 @@
 //! ウィンドウの組み立て (#241): timeline の本体 (`body`) と､枠・バナー・
-//! composer・本体・sync の行・status bar を縦に積む [`Render`] の impl｡
-//! 枠そのものは `chrome.rs`､1 行の post は `post_row.rs`｡
+//! 本体・sync の行・status bar を縦に積む [`Render`] の impl｡composer は
+//! #282 で別ウィンドウへ移り､ここには残らない｡枠そのものは `chrome.rs`､
+//! 1 行の post は `post_row.rs`｡
 //!
 //! `ui/mod.rs` にあったものをそのまま移した｡
 
@@ -112,10 +113,10 @@ impl TimelineView {
             .overflow_hidden()
             .child(list)
             .child(Self::wheel_capture(cx))
-            // #206: 新着の toast｡一覧の外､ずれない wrapper に重ねるので
-            // scroll しても下端に留まる｡`when_some` なので無いときは
-            // 要素そのものが無い｡
-            .when_some(self.toast(cx), ParentElement::child)
+            // #206, #282: 新着の toast と報告のカプセル｡一覧の外､ずれない
+            // wrapper に重ねるので scroll しても下端に留まる｡`when_some` な
+            // ので無いときは要素そのものが無い｡
+            .when_some(self.toast(bg_alpha, cx), ParentElement::child)
     }
 }
 
@@ -134,12 +135,15 @@ fn load_older_row(theme: Theme, cx: &mut Context<'_, TimelineView>) -> impl Into
 }
 
 impl TimelineView {
-    /// ヘッダと composer の間に積むバナーの列｡出るものだけが並ぶ｡
+    /// 枠の一番上、composer の前に積むバナーの列｡出るものだけが並ぶ｡
     ///
     /// どれも `body` からは独立に生き残らねばならない — timeline がまったく
     /// 正常に読み込まれた post を描いている間でも出しつづける必要があるからだ｡
     /// それぞれの理由:
     ///
+    /// - #14, #282 scope が足りない｡投稿・いいねを差し出す前に直す道が要る —
+    ///   header に居た頃と条件は変えていない｡先頭に置くのは書き込みの
+    ///   回復こそこの列でいちばん行動を促す用件だからだ｡
     /// - #54 セッションが切れた｡bearer token へ fallback した状態がまさに
     ///   これで､`body` は何も起きなかったかのように描かれる｡
     /// - #239 止まった auto-refresh｡timeline は起動時に読んだ post を出した
@@ -151,15 +155,30 @@ impl TimelineView {
     ///
     /// #21 の "N new posts" はここに座っていた｡#206 で `body` の下端に重なる
     /// toast へ移った — 報告ではなく申し出なので､バナーの列ではなく timeline
-    /// の上に住む｡
-    fn notice_banners(&self, bg_alpha: u8) -> Vec<AnyElement> {
+    /// の上に住む｡`reload_notice` の `Outcome` variant (成功した reload の
+    /// 報告) も #282 で同じ toast へ移り､ここには `Cooldown` と `Failed`
+    /// だけが残る｡
+    fn notice_banners(&self, bg_alpha: u8, cx: &mut Context<'_, Self>) -> Vec<AnyElement> {
         let theme = self.theme;
-        // 並びは 4 本を 1 つの `Vec` に積んでも変えない｡見ているのは
-        // `the_banners_keep_their_order` だけだ｡
+        // 並びは 5 本を 1 つの `Vec` に積んでも変えない｡見ているのは
+        // `the_banners_keep_their_order` だけだ (reauthorize は条件が
+        // 立たないのでこのテストには映らない)｡
         let session = |name, message: SharedString| {
             session_notice_banner(name, message, theme, bg_alpha).into_any_element()
         };
         let mut banners: Vec<AnyElement> = Vec::new();
+        // #14, #282: header に居た頃と同じ条件｡すでに有効な session が
+        // 自分の格上げ経路を隠してしまわないよう (#31 の教訓)､届くところに
+        // 置いておく｡
+        if offers_reauthorize(
+            self.signed_in_with_oauth,
+            self.oauth_scope.as_deref(),
+            self.sources
+                .iter()
+                .any(|source| matches!(source, cache::TimelineSource::List(_))),
+        ) {
+            banners.push(reauthorize_banner(theme, bg_alpha, cx).into_any_element());
+        }
         banners.extend(
             self.session_notice
                 .clone()
@@ -170,15 +189,39 @@ impl TimelineView {
                 .clone()
                 .map(|message| session("banner-auto-refresh", message)),
         );
-        banners.extend(self.reload_notice.clone().map(|notice| {
-            reload_notice_banner(&notice, theme, oauth::unix_now(), bg_alpha).into_any_element()
-        }));
+        banners.extend(
+            self.reload_notice
+                .clone()
+                .filter(|notice| !matches!(notice, ReloadNotice::Outcome(_)))
+                .map(|notice| {
+                    reload_notice_banner(&notice, theme, oauth::unix_now(), bg_alpha)
+                        .into_any_element()
+                }),
+        );
         banners.extend(
             self.open_failure
                 .clone()
                 .map(|message| session("banner-open-failure", message.into())),
         );
         banners
+    }
+
+    /// `Sources` メニューの 2 つのアクション (#282)｡`render` の 100 行の
+    /// 上限に収めるため他の `on_action` チェーンから切り出した — 意味の
+    /// 上でもひとまとまり: どちらもメニューバー発の Sources 操作で､
+    /// キーボードのバインドを持たない｡
+    fn bind_source_actions(element: Div, cx: &mut Context<'_, Self>) -> Div {
+        element
+            .on_action(cx.listener(|this, action: &ToggleSource, _window, cx| {
+                // #282: メニューが組んだ selection は必ず有効 —
+                // `into_source` が `None` になるのは手編集の選択ファイルだけ｡
+                if let Some(source) = action.selection.clone().into_source() {
+                    this.toggle_source(&source, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &LoadOwnedLists, _window, cx| {
+                this.fetch_owned_lists(cx);
+            }))
     }
 }
 
@@ -188,8 +231,10 @@ impl Render for TimelineView {
         // #206: toast の件数には書き手が多いので､見直すのは描画の頭で —
         // `fade_toast` の doc を見る｡`body` がこの結果を読む｡
         self.fade_toast(cx);
-        // #214: 枠の文言はウィンドウの幅で選ぶ｡toolbar と footer が別々の
-        // 段にならないよう､ここで 1 回決めて両方へ渡す｡
+        // #282: 報告カプセルの寿命も同じ理由で描画の頭に置く —
+        // `expire_outcome` の doc を見る｡
+        self.expire_outcome(cx);
+        // #214: footer の文言はウィンドウの幅で選ぶ｡`status_bar` へ渡す｡
         let density = countdown::density(window.viewport_size().width);
         // #267: 背景の不透明度も 1 回決めて､本体と両方の帯へ渡す｡行の中に
         // 埋め込まれた post の面 (引用カード､スレッドの行､composer の
@@ -197,17 +242,25 @@ impl Render for TimelineView {
         // 上にそれらが不透明の板として残る｡
         let bg_alpha = self.bg_alpha(window);
 
-        div()
-            // #58: どのバインディングもグローバルに登録するのではなく､この
-            // コンテキストへ閉じてある — `init` を見る｡
-            .key_context(KEY_CONTEXT)
-            // #118: コンテキストが効くのは､その要素がウィンドウのフォーカス
-            // パス上にあるあいだだけで､本当のルートは
-            // `gpui_component::Root` だ (`main` を見る) — なのでこれが無いと
-            // パスがコンテキストの手前で止まり､全バインディングが外れた｡
-            .track_focus(&self.focus_handle)
+        // #282: `Sources` メニューの 2 つの `on_action` はここで先に足す —
+        // `render` は 100 行の上限にすでに近く､下のチェーンへそのまま
+        // 足すと超える｡`self.bind_source_actions` に切り出した｡
+        let container = Self::bind_source_actions(
+            div()
+                // #58: どのバインディングもグローバルに登録するのではなく
+                // このコンテキストへ閉じてある — `init` を見る｡
+                .key_context(KEY_CONTEXT)
+                // #118: コンテキストが効くのは､その要素がウィンドウの
+                // フォーカスパス上にあるあいだだけで､本当のルートは
+                // `gpui_component::Root` だ (`main` を見る) — なのでこれが
+                // 無いとパスがコンテキストの手前で止まり､全バインディングが
+                // 外れた｡
+                .track_focus(&self.focus_handle),
+            cx,
+        );
+        container
             .on_action(cx.listener(|this, _: &Reload, _window, cx| {
-                // ヘッダーのボタンが通るのと同じ経路｡#10 の間隔と #57 の
+                // footer のボタンが通るのと同じ経路｡#10 の間隔と #57 の
                 // クールダウン報告も含む｡ショートカットが､このアプリが
                 // ループで金を使うのを止めるためにあるスロットルの抜け道に
                 // なってはいけない｡
@@ -218,26 +271,12 @@ impl Render for TimelineView {
                 // 始められない状態ではその理由を出す (`ask_to_sync`)｡
                 this.ask_to_sync(cx);
             }))
-            .on_action(cx.listener(|this, _: &FocusComposer, window, cx| {
-                this.compose_input
-                    .update(cx, |input, cx| input.focus(window, cx));
-            }))
-            .on_action(cx.listener(|this, _: &BlurComposer, window, cx| {
-                // フォーカスだけ｡下書きは打ったとおりに残す｡誤爆した `esc` で
-                // 失うと取り返しがつかないし､#14 はすでに下書きを絶対に
-                // 失わないことを composer の主たる約束としている｡
-                //
-                // `window.blur()` で落とすのではなく timeline へ戻す (#118)｡
-                // フォーカスパスが空になると `Timeline` コンテキストへ手が
-                // 届かなくなり､次のクリックまで `esc` がショートカットと
-                // メニューバーの半分を無効にしていた｡
-                window.focus(&this.focus_handle);
-                // #43: 同じ `esc` で source picker のドロップダウンも閉じる｡
-                // 新しい KeyBinding は足さず既存の escape を共有する｡
-                if this.source_picker_open.is_open() {
-                    this.source_picker_open = source_picker::SourcePickerVisibility::Closed;
-                    cx.notify();
-                }
+            .on_action(cx.listener(|_this, _: &OpenComposer, _window, cx| {
+                // #282: 開くのは別ウィンドウ｡`TimelineView` は既に lease に
+                // 出ているので `compose_window::open` の `cx.defer` に任せる
+                // (`compose_window::open` の doc を見よ)｡
+                let timeline = cx.entity();
+                compose_window::open(&timeline, cx);
             }))
             .on_action(cx.listener(|_this, _: &ShowAbout, window, cx| {
                 // レシーバは待たずに落とす｡ボタンは 1 つしかないので､どれが
@@ -331,22 +370,15 @@ impl Render for TimelineView {
             .bg(rgba(theme::with_alpha(theme.bg, bg_alpha)))
             .text_color(rgb(theme.text))
             .text_size(theme::TEXT_BODY)
-            .child(self.header(density, bg_alpha, cx))
-            .children(self.notice_banners(bg_alpha))
-            // #14: 投稿は scope に関わらず OAuth を要求する — `tweet.write`
-            // scope が欠けている場合は `submit_post` 自身の中で捕まえる
-            // (直し方はヘッダーの "Re-authorize" ボタン)｡composer ごと隠して
-            // なぜ消えたのかを知る手立てを残さない､という形は取らない｡
-            .when(self.signed_in_with_oauth, |column| {
-                column.child(self.composer(window, bg_alpha, cx))
-            })
+            .children(self.notice_banners(bg_alpha, cx))
             .child(self.body(bg_alpha, cx))
             // #205: sync が今していることは footer の 1 段上｡`when_some` なので
             // 無いときは行そのものが無い｡高さ 0 の要素を置き続けるのではない｡
             .when_some(self.sync_row(bg_alpha), ParentElement::child)
-            // #95: ステータスバー｡ヘッダーがツールバーになった今､累計の
-            // リクエスト数が住んでいるのはここだ｡
-            .child(self.status_bar(density, bg_alpha))
+            // #95, #282: ステータスバー｡header は撤去され､累計の
+            // リクエスト数も reload も auto-refresh のカウントダウンも
+            // 住んでいるのはここだけだ｡
+            .child(self.status_bar(density, bg_alpha, cx))
             // #205: 手動 sync の確認｡`absolute` なので列の中で場所を取らず
             // ウィンドウ全体を覆う｡最後の子なのは重なり順のため｡
             .when_some(self.sync_dialog(cx), ParentElement::child)

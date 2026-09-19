@@ -102,12 +102,7 @@ impl TimelineView {
     /// `tweet.write` scope が無くてもこれを丸ごと隠さない理由は
     /// [`Render::render`] の doc を見よ｡#16 で quote の対象の card が
     /// 設定されていれば加わる — [`Self::composer_quote_card`] を見よ｡
-    pub(super) fn composer(
-        &self,
-        window: &mut Window,
-        bg_alpha: u8,
-        cx: &mut Context<'_, Self>,
-    ) -> impl IntoElement {
+    pub(super) fn composer(&self, bg_alpha: u8, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let theme = self.theme;
         let text = self.compose.text().to_string();
         let length = compose::weighted_length(&text);
@@ -119,18 +114,6 @@ impl TimelineView {
         } else {
             theme.text_muted
         };
-        // #95: カウンタと Post ボタンは入力欄が使われはじめてから現れる｡
-        // 何もしていないウィンドウには､誰も書いていない post のための
-        // 件数とボタンではなく､静かな一行だけが出るようにするためだ｡
-        //
-        // 空でない下書きがあれば focus に関わらず出しつづける｡下書きが
-        // あるのにボタンを隠すと､それを送る唯一の道が入力欄をクリック
-        // し直す先に隠れてしまう — #14 は下書きを決して失わないことを
-        // composer の主たる約束としているのに､隠れた送信ボタンはそれを
-        // 黙って破る｡
-        let showing_controls = self.compose_input.focus_handle(cx).is_focused(window)
-            || !text.trim().is_empty()
-            || is_submitting;
 
         div()
             .flex()
@@ -143,19 +126,10 @@ impl TimelineView {
             // submit が進行中の間は編集を拒む｡下の submit ボタン自身の
             // 無効状態に倣う — なぜそれが大事なのかは
             // `ComposeState::can_submit` の doc を見よ｡
-            //
-            // #153: カウンタとボタンを隠す条件がそのまま､入力欄を 1 行に
-            // 畳む条件でもある｡畳むのは高さの上書きだけで､ウィジェットも
-            // その中の下書きも作り直さない — 畳んだ状態は定義から空なので､
-            // 固定の高さが `auto_grow` と喧嘩することは無い｡
             .child(
-                div().addressable("compose-input").child(
-                    Input::new(&self.compose_input)
-                        .disabled(is_submitting)
-                        .when(!showing_controls, |input| {
-                            input.h(theme::COMPOSER_FOLDED_HEIGHT)
-                        }),
-                ),
+                div()
+                    .addressable("compose-input")
+                    .child(Input::new(&self.compose_input).disabled(is_submitting)),
             )
             // #16: "Quote" が設定していれば quote の対象 —
             // `composer_quote_card` の doc を見よ｡
@@ -171,73 +145,74 @@ impl TimelineView {
                 compose_error_message(self.compose.status()),
                 |column, message| column.child(div().text_color(rgb(theme.danger)).child(message)),
             )
-            .when(showing_controls, |composer| {
-                composer.child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .child(
-                            div()
-                                // #95: 本文ではなく､操作の脇に添える
-                                // 読み取り値｡
-                                .text_size(theme::TEXT_META)
-                                .text_color(rgb(counter_color))
-                                .child(format!("{length}/{}", compose::MAX_WEIGHTED_LENGTH)),
-                        )
-                        .child(
-                            div()
-                                .addressable("compose-submit")
-                                .px_2()
-                                .py_1()
-                                .rounded(theme::RADIUS_CONTROL)
-                                // #95: これは *本当に* default ボタンである
-                                // — composer の存在意義そのものだ — ので､
-                                // 押せる間は accent の塗りを保つ｡変えたのは
-                                // もう一方の状態だ: 押せないボタンは以前
-                                // 濃い灰色の塗りつぶしで､それは off の操作
-                                // ではなく単に色が違う操作に見える｡macOS は
-                                // 代わりに塗りを
-                                // 抜く｡
-                                .when(can_submit, |button| {
-                                    // #156: 主ボタンと同じ blend —
-                                    // `can_submit` は `is_submitting` を
-                                    // 含むので "Posting…" のときは塗らない｡
-                                    button
-                                        .bg(rgb(theme.accent))
-                                        .text_color(rgb(theme.button_label))
-                                        .cursor_pointer()
-                                        .hover(|style| {
-                                            style.bg(rgb(theme.accent)
-                                                .blend(rgba(theme.control_hover_overlay)))
-                                        })
-                                        .active(|style| {
-                                            style.bg(rgb(theme.accent)
-                                                .blend(rgba(theme.control_pressed_overlay)))
-                                        })
-                                })
-                                .when(!can_submit, |button| {
-                                    button
-                                        .border_1()
-                                        .border_color(rgb(theme.border))
-                                        .text_color(rgb(theme.text_tertiary))
-                                })
-                                .text_size(theme::TEXT_META)
-                                .child(if is_submitting { "Posting…" } else { "Post" })
-                                // #14 の二重送信ガード､その二: submit が
-                                // 進行中の間 (あるいは下書きが空か長さ超過
-                                // のとき) ボタンは無効に見える見た目だけで
-                                // なく､click ハンドラをそもそも持たない —
-                                // `submit_post` はどのみち同じ条件を再確認
-                                // するが､click がそこへ届くこと自体を
-                                // 止めているのはこちらである｡
-                                .when(can_submit, |button| {
-                                    button.on_click(cx.listener(|this, _event, window, cx| {
-                                        this.submit_post(window, cx);
-                                    }))
-                                }),
-                        ),
-                )
-            })
+            // #95, #282: 専用ウィンドウになったので､カウンタと Post ボタンは
+            // 常に出す｡以前はここが空で未フォーカスの間だけ畳んでいたが､
+            // ウィンドウを開く動機そのものが「post を書く」なので畳む理由が
+            // 無くなった｡
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            // #95: 本文ではなく､操作の脇に添える読み取り値｡
+                            .text_size(theme::TEXT_META)
+                            .text_color(rgb(counter_color))
+                            .child(format!("{length}/{}", compose::MAX_WEIGHTED_LENGTH)),
+                    )
+                    .child(
+                        div()
+                            .addressable("compose-submit")
+                            .px_2()
+                            .py_1()
+                            .rounded(theme::RADIUS_CONTROL)
+                            // #95: これは *本当に* default ボタンである
+                            // — composer の存在意義そのものだ — ので､
+                            // 押せる間は accent の塗りを保つ｡変えたのは
+                            // もう一方の状態だ: 押せないボタンは以前
+                            // 濃い灰色の塗りつぶしで､それは off の操作
+                            // ではなく単に色が違う操作に見える｡macOS は
+                            // 代わりに塗りを
+                            // 抜く｡
+                            .when(can_submit, |button| {
+                                // #156: 主ボタンと同じ blend —
+                                // `can_submit` は `is_submitting` を
+                                // 含むので "Posting…" のときは塗らない｡
+                                button
+                                    .bg(rgb(theme.accent))
+                                    .text_color(rgb(theme.button_label))
+                                    .cursor_pointer()
+                                    .hover(|style| {
+                                        style.bg(rgb(theme.accent)
+                                            .blend(rgba(theme.control_hover_overlay)))
+                                    })
+                                    .active(|style| {
+                                        style.bg(rgb(theme.accent)
+                                            .blend(rgba(theme.control_pressed_overlay)))
+                                    })
+                            })
+                            .when(!can_submit, |button| {
+                                button
+                                    .border_1()
+                                    .border_color(rgb(theme.border))
+                                    .text_color(rgb(theme.text_tertiary))
+                            })
+                            .text_size(theme::TEXT_META)
+                            .child(if is_submitting { "Posting…" } else { "Post" })
+                            // #14 の二重送信ガード､その二: submit が
+                            // 進行中の間 (あるいは下書きが空か長さ超過
+                            // のとき) ボタンは無効に見える見た目だけで
+                            // なく､click ハンドラをそもそも持たない —
+                            // `submit_post` はどのみち同じ条件を再確認
+                            // するが､click がそこへ届くこと自体を
+                            // 止めているのはこちらである｡
+                            .when(can_submit, |button| {
+                                button.on_click(cx.listener(|this, _event, _window, cx| {
+                                    this.submit_post(cx);
+                                }))
+                            }),
+                    ),
+            )
     }
 }

@@ -86,21 +86,12 @@ pub(super) enum ReloadNotice {
     /// ゼロ件も含む｡
     ///
     /// 他の二つの variant は何かが失敗したことを報告するもので､これが
-    /// できるまで成功した reload は何も言わなかった: header のボタンが
-    /// `Loading…` へ切り替わって戻るだけで､応答が速ければ 1､2 フレームの
+    /// できるまで成功した reload は何も言わなかった: footer の reload
+    /// アイコンが `Loading…` へ切り替わって戻るだけで､応答が速ければ 1､2 フレームの
     /// 話であり､`cmd-r` のあとに誰かが見ている場所でもない｡問題ではない
     /// 唯一の variant なので､`danger` ではなく muted の色で
     /// 描く｡
     Outcome(SharedString),
-}
-
-/// header の主ボタンが何をするか｡今のラベルとは独立している —
-/// `self.state` を借りずにクリックのクロージャへ取り込めるよう `Copy` の
-/// ままにしてある｡
-#[derive(Clone, Copy)]
-pub(super) enum PrimaryAction {
-    Reload,
-    SignIn,
 }
 
 /// [`super::TimelineView::reload`] がそもそも `config.min_fetch_interval_seconds`
