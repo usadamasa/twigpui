@@ -44,6 +44,20 @@ tail -f ~/.local/state/twigpui/logs/twigpui.log
 起動のたびに `starting twigpui <version> (<commit>)` が 1 行入る (#231)。
 どのビルドの挙動かはここで確かめる。`-dirty` が付いていれば未コミットの変更入り。
 
+## `usage` の行
+
+X API の応答を数えるたびに INFO が 1 行入る (`usage::record_response`)。
+
+```
+2026-09-20T01:02:03Z INFO usage list_timeline (posts): returned 20, counted 3, today 952
+2026-09-20T01:02:09Z INFO usage create_like (write): counted 1, today 17
+```
+
+`returned` は応答に入っていた数、`counted` は同日 dedup 後に `usage.json` へ足した数。
+何も返らなかった read (失敗した応答、空のページ) は書かない。
+`usage.json` は今日の合計しか持たないので、いつ数えたかはこの行にしか残らない。
+集計して見せる手順は `credit-report`。
+
 ## レベル
 
 `error` / `warn` / `info` / `debug`。既定は `info`。`off` は無い。
