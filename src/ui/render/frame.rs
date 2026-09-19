@@ -108,6 +108,11 @@ pub(in crate::ui) fn reload_notice_banner(
 /// で余地が無く (#214)､輪郭付きの pill は 24px の帯に入らない｡出す条件は
 /// [`offers_reauthorize`](super::offers_reauthorize) — header に居た頃と
 /// 変えていない｡
+///
+/// 説明文に `flex_1()` + `min_w(px(0.))` を､pill に `flex_shrink_0()` を
+/// 付けてある｡2026-08-24 に実測した事故 (560px で "Sign in with X" が
+/// 右端の外へ出て回復不能になった) と同じ形の危険が横並びのここにも
+/// ある — 幅の狭い本番ウィンドウでは pill を残して文の側が折り返す｡
 pub(in crate::ui) fn reauthorize_banner(
     theme: Theme,
     bg_alpha: u8,
@@ -126,10 +131,16 @@ pub(in crate::ui) fn reauthorize_banner(
         .border_color(rgb(theme.border))
         .child(
             div()
+                .flex_1()
+                .min_w(px(0.))
                 .text_color(rgb(theme.text_muted))
                 .child("This session is missing a scope twigpui needs — re-authorize to grant it."),
         )
-        .child(sign_in_pill("reauthorize", "Re-authorize", theme, cx))
+        .child(
+            div()
+                .flex_shrink_0()
+                .child(sign_in_pill("reauthorize", "Re-authorize", theme, cx)),
+        )
 }
 
 /// footer の簡潔な usage 要約 (#162､#18 の後継): 数えるのは Posts の

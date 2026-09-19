@@ -5080,6 +5080,41 @@ mod tests {
         );
     }
 
+    /// 実測した失敗 (2026-08-24、すぐ下のテストを見よ) と同じ形の事故を
+    /// 429px の Re-authorize バナーでも起こさない｡バナーは長い説明文と
+    /// pill を横並びにしているので､幅の狭い本番ウィンドウで pill が
+    /// 右端の外へ押し出される余地がある｡
+    #[gpui::test]
+    fn the_re_authorize_pill_stays_in_the_window_at_429px(cx: &mut gpui::TestAppContext) {
+        let (mut visual, timeline) = drawn(cx, fixture_with(&["1"], &[]));
+        visual.update(|_window, cx| {
+            timeline.update(cx, |view, cx| {
+                view.oauth_scope = Some("tweet.read users.read offline.access".to_string());
+                view.sources = vec![crate::cache::TimelineSource::List("123".to_string())];
+                cx.notify();
+            });
+        });
+        visual.simulate_resize(gpui::size(gpui::px(429.), gpui::px(700.)));
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let banner = visual
+            .debug_bounds("banner-reauthorize")
+            .expect("a session missing a write scope must offer a way to fix it");
+        let pill = visual
+            .debug_bounds("reauthorize")
+            .expect("the banner must carry the Re-authorize pill");
+        assert!(
+            pill.left() >= banner.left() && pill.right() <= banner.right(),
+            "the Re-authorize pill falls outside its banner at 429px: pill {pill:?}, banner {banner:?}"
+        );
+        assert!(
+            pill.size.width > gpui::Pixels::ZERO,
+            "the Re-authorize pill must not collapse to zero width: {pill:?}"
+        );
+    }
+
     /// 実測した失敗 (2026-08-24): 560px でリストのタブが 11 個あるウィンドウは､
     /// ツールバーの "Sign in with X" を右端の外へ押し出したうえ､本文の助言は
     /// それをクリックしろというものだけだった｡X が更新を拒否したばかりの
