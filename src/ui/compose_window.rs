@@ -35,7 +35,7 @@ const KEY_CONTEXT: &str = "Composer";
 /// 開く大きさ｡本文 280 字とカウンタ､Post ボタンが収まればよいので
 /// `image_viewer` のような画面依存の計算はしない｡
 const WIDTH: f32 = 420.0;
-const HEIGHT: f32 = 200.0;
+const HEIGHT: f32 = 280.0;
 
 /// compose window のキーバインドを登録する (#282)｡`main` が `menu::init` /
 /// `image_viewer::init` の隣で一度だけ呼ぶ｡
