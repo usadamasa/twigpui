@@ -5014,12 +5014,82 @@ mod tests {
         );
     }
 
+    /// #282: header 撤去の最終形｡バナーも composer も無いとき､timeline の
+    /// 上端はウィンドウの上端に触れる — toolbar が高さぶん押し下げていた
+    /// 分がもう無い｡composer は `signed_in_with_oauth` を直接落として消す
+    /// (この PR ではまだインラインに居るので､`Startup::Fixture` 経由では
+    /// 必ず true になる — `show_fixture` の doc を見よ)｡
+    #[gpui::test]
+    fn the_window_has_no_toolbar(cx: &mut gpui::TestAppContext) {
+        let (mut visual, timeline) = drawn(cx, fixture_with(&["1"], &[]));
+        visual.update(|_window, cx| {
+            timeline.update(cx, |view, cx| {
+                view.signed_in_with_oauth = false;
+                cx.notify();
+            });
+        });
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let timeline_bounds = visual
+            .debug_bounds("timeline")
+            .expect("the timeline is always laid out");
+        assert!(
+            f32::from(timeline_bounds.top()) < 1.0,
+            "the timeline should start at the window's top edge, not below a toolbar: {:?}",
+            timeline_bounds.top()
+        );
+    }
+
+    /// #282: Re-authorize は header 撤去とともにバナーの列 (`notice_banners`)
+    /// へ移る｡footer には余地が無いので (#214)､`reauthorize` pill は
+    /// `banner-reauthorize` の中に座り､timeline より上に来る｡
+    #[gpui::test]
+    fn a_session_without_write_scope_offers_re_authorization_in_the_banner_column(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (mut visual, timeline) = drawn(cx, fixture_with(&["1"], &[]));
+        visual.update(|_window, cx| {
+            timeline.update(cx, |view, cx| {
+                view.oauth_scope = Some("tweet.read users.read offline.access".to_string());
+                view.sources = vec![crate::cache::TimelineSource::List("123".to_string())];
+                cx.notify();
+            });
+        });
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let banner = visual
+            .debug_bounds("banner-reauthorize")
+            .expect("a session missing a write scope must offer a way to fix it");
+        let pill = visual
+            .debug_bounds("reauthorize")
+            .expect("the banner must carry the Re-authorize pill");
+        assert!(
+            pill.top() >= banner.top() && pill.bottom() <= banner.bottom(),
+            "the Re-authorize pill must sit inside its banner: pill {pill:?}, banner {banner:?}"
+        );
+
+        let timeline_bounds = visual
+            .debug_bounds("timeline")
+            .expect("the timeline is always laid out");
+        assert!(
+            banner.top() < timeline_bounds.top(),
+            "the banner column sits above the timeline: banner {:?}, timeline {:?}",
+            banner.top(),
+            timeline_bounds.top()
+        );
+    }
+
     /// 実測した失敗 (2026-08-24): 560px でリストのタブが 11 個あるウィンドウは､
     /// ツールバーの "Sign in with X" を右端の外へ押し出したうえ､本文の助言は
     /// それをクリックしろというものだけだった｡X が更新を拒否したばかりの
     /// セッションは､画面からは回復できなかったことになる｡"Not signed in" の
     /// 文が居るのは本文なので､ボタンもそこに居る — ツールバーが何をして
-    /// いようと手が届く｡
+    /// いようと手が届く｡#282 の `a_signed_out_window_still_offers_the_way_back_in`
+    /// を兼ねる regression guard｡
     #[gpui::test]
     fn a_signed_out_window_offers_sign_in_in_the_body(cx: &mut gpui::TestAppContext) {
         let (mut visual, timeline) = drawn(cx, fixture_with(&["1"], &[]));
