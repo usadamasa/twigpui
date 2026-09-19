@@ -803,6 +803,24 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
     }
 
+    // --- usage_line (scripts/credit-report.sh が読む行の形) ---
+
+    #[test]
+    fn usage_line_reports_returned_and_counted_for_a_read() {
+        assert_eq!(
+            usage_line(Endpoint::ListTimeline, Some(20), 3, 952),
+            "usage list_timeline (posts): returned 20, counted 3, today 952"
+        );
+    }
+
+    #[test]
+    fn usage_line_has_no_returned_count_for_a_write() {
+        assert_eq!(
+            usage_line(Endpoint::CreateLike, None, 1, 17),
+            "usage create_like (write): counted 1, today 17"
+        );
+    }
+
     // --- record_response (#162: 実際の記録経路) ---
 
     #[test]
