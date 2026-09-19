@@ -23,16 +23,16 @@
 //! header ごと撤去するので､auto-refresh も footer へ合流する — 入口が
 //! #248 でメニューへ移り､footer の幅には戻る余地がある｡
 //!
-//! footer の並びは左から usage → sync の期限 → 保持数 (`ml_auto`) →
-//! auto-refresh の期限 → reload の値段 (`×N`) → reload アイコン｡reload の
-//! アイコンの隣に auto-refresh の期限を置くのは変わらない — それが次に
-//! 押すことになるボタンだからだ｡
+//! footer の並びは左から usage → sync の期限 → (`ml_auto` で右へ寄せた
+//! クラスタ) auto-refresh の期限 → reload の値段 (`×N`) → reload アイコン｡
+//! reload のアイコンの隣に auto-refresh の期限を置くのは変わらない —
+//! それが次に押すことになるボタンだからだ｡保持数の区画 ("N / 500 posts
+//! kept") は所有者の判断で #282 に footer から消えた｡
 //!
 //! 文言は幅で選ぶ ([`density`])｡広ければ "Next sync in 5h 12m"､狭ければ
-//! "Sync in 5h 12m"｡post の数も同じ段で "posts kept" から "posts" へ縮む｡
-//! それでも入らないときは､右端の reload アイコンを落とすのではなく sync
-//! の期限を "…" で切る (`chrome::status_bar` の `truncate`)｡数字が読めない
-//! より､どこが読めていないか分かるほうがよい｡
+//! "Sync in 5h 12m"｡それでも入らないときは､右端の reload アイコンを
+//! 落とすのではなく sync の期限を "…" で切る (`chrome::status_bar` の
+//! `truncate`)｡数字が読めないより､どこが読めていないか分かるほうがよい｡
 //!
 //! # なぜ分単位なのか
 //!
@@ -59,9 +59,9 @@ use crate::activity::Activity;
 /// 縮める先が無いからだ — "5h 12m" より短い残り時間の書き方は無い｡
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Density {
-    /// 全部書く: "Auto-refresh in 4m"､"Next sync in 5h 12m"､"posts kept"｡
+    /// 全部書く: "Auto-refresh in 4m"､"Next sync in 5h 12m"｡
     Wide,
-    /// 主語を落とす: "in 4m"､"Sync in 5h 12m"､"posts"｡
+    /// 主語を落とす: "in 4m"､"Sync in 5h 12m"｡
     Compact,
 }
 
@@ -71,9 +71,11 @@ pub(super) enum Density {
 /// (usage 140､入口 54､"next in 5h 59m" 82､"N / 500 posts kept" 118､
 /// 余白 84)｡#248 で入口 (54 と margin 12) が抜け､代わりに文言が
 /// "Next sync in 5h 59m" へ伸びた — こちらの幅は本番のフォントでは
-/// 測っていない｡520 は `Wide` に余裕を残す — フォントや桁数の揺れで
-/// "…" が出たり消えたりする境目を､使う幅から離しておく｡
-/// 既定のウィンドウ (560px) は `Wide`､本番の 429px は `Compact`｡
+/// 測っていない｡#282 で保持数の区画 (118) も footer から消えたので､この
+/// 内訳はさらに古い — 現在の合計を本番のフォントで測り直してはいない｡
+/// 520 は `Wide` に余裕を残す — フォントや桁数の揺れで "…" が出たり
+/// 消えたりする境目を､使う幅から離しておく｡既定のウィンドウ (560px) は
+/// `Wide`､本番の 429px は `Compact`｡
 pub(super) const COMPACT_BELOW: Pixels = px(520.);
 
 /// ウィンドウの幅から [`Density`] を選ぶ｡
@@ -173,15 +175,6 @@ pub(super) fn sync_next_label(until: i64, now: i64, density: Density) -> String 
     match density {
         Density::Wide => format!("Next sync in {remaining}"),
         Density::Compact => format!("Sync in {remaining}"),
-    }
-}
-
-/// footer の右端､保持している post の数 (#95)｡`Compact` では "kept" を
-/// 落とす｡"N / 500 posts" だけで上限に対する数だと読める｡
-pub(super) fn kept_label(kept: usize, cap: usize, density: Density) -> String {
-    match density {
-        Density::Wide => format!("{kept} / {cap} posts kept"),
-        Density::Compact => format!("{kept} / {cap} posts"),
     }
 }
 
@@ -418,13 +411,5 @@ mod tests {
             sync_next_label(19_720, 1_000, Density::Compact),
             "Sync in 5h 12m"
         );
-    }
-
-    // --- kept_label ---
-
-    #[test]
-    fn the_post_count_drops_kept_when_the_window_is_narrow() {
-        assert_eq!(kept_label(10, 500, Density::Wide), "10 / 500 posts kept");
-        assert_eq!(kept_label(10, 500, Density::Compact), "10 / 500 posts");
     }
 }

@@ -102,10 +102,6 @@ impl TimelineView {
     /// 変わった (`usage_label` の doc を見よ) — 色付けの規則自体は変わって
     /// いない｡
     ///
-    /// 保持している post の数は timeline が読み込まれてからしか出さない｡
-    /// サインイン中や取得中には出せる数が無いし､"0 / 200" は答えの無い
-    /// 問いではなく空の cache のように読めてしまう｡
-    ///
     /// #282: header の撤去に伴い､reload の値段 (`×N`) とアイコン､
     /// auto-refresh のカウントダウンもここへ移ってきた｡置き場所の理由は
     /// `countdown` のモジュール doc の「置き場所と幅」を見よ｡
@@ -127,12 +123,7 @@ impl TimelineView {
             self.usage_totals.today,
             self.usage_totals.total,
             self.config.post_resource_price,
-            density,
         );
-        let kept = match self.state {
-            TimelineState::Loaded(ref items) => Some(items.len()),
-            _ => None,
-        };
         // #214, #282: 次の sync と次の auto-refresh､両方の期限をここで
         // 決める｡`countdown` が計算し､それぞれ無ければ出さない｡
         let (next_refresh, next_sync) = self.countdown_labels(oauth::unix_now(), density);
@@ -180,9 +171,10 @@ impl TimelineView {
             //
             // 文言は `density` が幅で選ぶ｡それでも帯に入りきらないとき最初に
             // 譲るのはこれだ: `min_w(0)` が無いと flex item は中身より狭く
-            // なれず､代わりに右端の post の数がウィンドウの外へ押し出される｡
-            // `truncate` は切れた側に "…" を出す — 読めない数字より､読めて
-            // いないと分かるほうがよい (`countdown` のモジュール doc)｡
+            // なれず､代わりに右側のクラスタ (auto-refresh の期限や reload
+            // アイコン) がウィンドウの外へ押し出される｡`truncate` は切れた
+            // 側に "…" を出す — 読めない数字より､読めていないと分かる
+            // ほうがよい (`countdown` のモジュール doc)｡
             .when_some(next_sync, |bar, label| {
                 bar.child(
                     div()
@@ -194,43 +186,43 @@ impl TimelineView {
                         .child(label),
                 )
             })
-            .when_some(kept, |bar, kept| {
-                bar.child(
-                    div()
-                        .addressable("status-kept")
-                        .ml_auto()
-                        .text_color(rgb(theme.text_tertiary))
-                        .child(countdown::kept_label(
-                            kept,
-                            cache::MAX_CACHED_POSTS,
-                            density,
-                        )),
-                )
-            })
-            // #282: reload のアイコンの隣に置くのは､それがこの期限に
-            // 押されるボタンだからだ｡`status-kept` の `ml_auto` がすでに
-            // ここから右をまとめて右端へ寄せているので､この区画に margin
-            // は要らない｡
-            .when_some(next_refresh, |bar, label| {
-                bar.child(
-                    div()
-                        .addressable("auto-refresh-countdown")
-                        // #156: HIG の "Keep actions with text labels
-                        // separate" — 記号 (reload) との間隔を帯の
-                        // `gap_3` (12px) よりさらに広げる｡
-                        .mr_1()
-                        .text_size(theme::TEXT_META)
-                        .text_color(rgb(theme.text_tertiary))
-                        .child(label),
-                )
-            })
-            .children(self.reload_cost_control())
-            // #282: NotAuthenticated / SigningIn のあいだ session を進める
-            // 手段は body の `sign-in-body` pill だけだ｡ここで reload の
-            // アイコンを出すと､押しても何も起きないボタンが並んでしまう —
-            // `primary_action_state` がその間 `None` を返す理由｡
-            .when_some(primary_action, |bar, (label, busy)| {
-                bar.child(self.primary_action_control(&label, busy, cx))
-            })
+            // #282: 保持数の区画 (`status-kept`) が消えたので､右側の
+            // クラスタ (auto-refresh の期限 / reload の値段 / reload
+            // アイコン) が `ml_auto` を引き継いで右端へ寄る｡3 つとも
+            // 出ないことがある (countdown はループが無ければ `None`､
+            // `×N` は source が 1 つなら出ない､reload アイコンは
+            // `NotAuthenticated`/`SigningIn` の間出ない) ので 1 つの
+            // 箱に包む — 中身が空でも `ml_auto` だけの空の div が残る
+            // だけで害は無い｡
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .ml_auto()
+                    .when_some(next_refresh, |cluster, label| {
+                        cluster.child(
+                            div()
+                                .addressable("auto-refresh-countdown")
+                                // #156: HIG の "Keep actions with text
+                                // labels separate" — 記号 (reload) との
+                                // 間隔を帯の `gap_3` (12px) よりさらに
+                                // 広げる｡
+                                .mr_1()
+                                .text_size(theme::TEXT_META)
+                                .text_color(rgb(theme.text_tertiary))
+                                .child(label),
+                        )
+                    })
+                    .children(self.reload_cost_control())
+                    // #282: NotAuthenticated / SigningIn のあいだ session
+                    // を進める手段は body の `sign-in-body` pill だけだ｡
+                    // ここで reload のアイコンを出すと､押しても何も起き
+                    // ないボタンが並んでしまう —
+                    // `primary_action_state` がその間 `None` を返す理由｡
+                    .when_some(primary_action, |cluster, (label, busy)| {
+                        cluster.child(self.primary_action_control(&label, busy, cx))
+                    }),
+            )
     }
 }

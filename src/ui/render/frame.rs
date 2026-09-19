@@ -149,23 +149,14 @@ pub(in crate::ui) fn reauthorize_banner(
 /// 見積り金額 (USD) は常に添える: `post_resource_price` はもう既定値
 /// (`config` の `DEFAULT_POST_RESOURCE_PRICE`) を持つので､「価格が未設定」
 /// という状態は無くなった｡
-/// #282: `Density::Compact` では主語 ("Posts today"､"total") を落とす —
-/// footer が reload のアイコンとカウントダウンも抱えるようになり､429px で
-/// この行が最初に譲る区画になったからだ｡数字と色 (`usage_color`) だけで
-/// 予算の意味はもう運べている｡
-pub(in crate::ui) fn usage_label(
-    today: u64,
-    total: u64,
-    post_resource_price: f64,
-    density: countdown::Density,
-) -> String {
+///
+/// 主語 ("Posts today"､"total") を幅で落とす分岐が #282 で一時期あったが､
+/// 同じ #282 で保持数の区画 (旧 "posts kept") が footer から消えて余裕が
+/// できたので､429px の門 (`the_footer_keeps_every_segment_in_the_window_
+/// at_429px`) を通したまま外した｡
+pub(in crate::ui) fn usage_label(today: u64, total: u64, post_resource_price: f64) -> String {
     let amount = usage::estimated_amount(today, post_resource_price);
-    match density {
-        countdown::Density::Wide => {
-            format!("Posts today: {today} (~${amount:.2}) · total: {total}")
-        }
-        countdown::Density::Compact => format!("{today} (~${amount:.2}) · {total}"),
-    }
+    format!("Posts today: {today} (~${amount:.2}) · total: {total}")
 }
 
 /// usage の行をどの theme のスロットで描くか: 今日の件数が

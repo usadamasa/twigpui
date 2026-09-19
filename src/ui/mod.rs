@@ -1820,7 +1820,7 @@ mod tests {
     #[test]
     fn usage_label_shows_posts_counts_with_an_estimated_amount() {
         assert_eq!(
-            usage_label(4, 40, 2.5, countdown::Density::Wide),
+            usage_label(4, 40, 2.5),
             "Posts today: 4 (~$10.00) · total: 40"
         );
     }
@@ -1828,19 +1828,8 @@ mod tests {
     #[test]
     fn usage_label_shows_zero_counts_plainly() {
         assert_eq!(
-            usage_label(0, 0, 0.005, countdown::Density::Wide),
+            usage_label(0, 0, 0.005),
             "Posts today: 0 (~$0.00) · total: 0"
-        );
-    }
-
-    /// #282: 429px で footer が reload のカウントダウンとアイコンも抱える
-    /// ようになり､usage の行が最初に譲る区画になった｡`Compact` では
-    /// 主語を落とす — 数字と色 (`usage_color`) だけで予算の意味は運べる｡
-    #[test]
-    fn the_usage_line_drops_its_subjects_when_the_window_is_narrow() {
-        assert_eq!(
-            usage_label(4, 40, 2.5, countdown::Density::Compact),
-            "4 (~$10.00) · 40"
         );
     }
 
@@ -4756,11 +4745,11 @@ mod tests {
         );
     }
 
-    /// [`footer_bounds_at`] の戻り値: 帯､usage､次の sync､post の数､
-    /// auto-refresh のカウントダウン (無ければ `None`)､primary action ＝
-    /// reload のアイコン (無ければ `None`)｡
+    /// [`footer_bounds_at`] の戻り値: 帯､usage､次の sync､auto-refresh の
+    /// カウントダウン (無ければ `None`)､primary action ＝ reload の
+    /// アイコン (無ければ `None`)｡保持数の区画は #282 で footer から
+    /// 消えた｡
     type FooterSegments = (
-        gpui::Bounds<gpui::Pixels>,
         gpui::Bounds<gpui::Pixels>,
         gpui::Bounds<gpui::Pixels>,
         gpui::Bounds<gpui::Pixels>,
@@ -4785,9 +4774,6 @@ mod tests {
             visual
                 .debug_bounds("status-sync-next")
                 .expect("an idle sync has a next time to show"),
-            visual
-                .debug_bounds("status-kept")
-                .expect("a loaded timeline always says how many posts it keeps"),
             visual.debug_bounds("auto-refresh-countdown"),
             visual.debug_bounds("primary-action"),
         )
@@ -4797,12 +4783,12 @@ mod tests {
     /// 次の sync を "…" で切る｡post の数は決して右端から落ちない｡
     ///
     /// 最初の実装は両方のカウントダウンを footer に置き､550px ですら
-    /// "posts kept" が右端から落ちた｡2 つの幅で見る: `COMPACT_BELOW` を
-    /// わずかに下回る幅では詰めた文言がそのまま入り (同じ密度でもっと広い
-    /// 幅と同じ寸法)､本番の 429px では詰めた文言も切られるが､post の数は
-    /// 帯の中に残る｡テスト環境のフォントは本番より広いので､本番なら 429px
-    /// で入る文言がここでは切られる — このテストが見ているのは寸法ではなく
-    /// 譲る順番だ｡
+    /// "posts kept" が右端から落ちた (今は #282 でその区画自体が消えた)｡
+    /// 2 つの幅で見る: `COMPACT_BELOW` をわずかに下回る幅では詰めた文言が
+    /// そのまま入り (同じ密度でもっと広い幅と同じ寸法)､本番の 429px では
+    /// 詰めた文言も切られるが､reload アイコンは帯の中に残る｡テスト環境の
+    /// フォントは本番より広いので､本番なら 429px で入る文言がここでは
+    /// 切られる — このテストが見ているのは寸法ではなく譲る順番だ｡
     #[gpui::test]
     fn the_footer_shortens_first_and_truncates_last(cx: &mut gpui::TestAppContext) {
         let (mut visual, timeline) = drawn(cx, fixture_with_sync(&["2", "1"], 0));
@@ -4815,36 +4801,54 @@ mod tests {
         // 詰めた文言の本来の幅は､詰める側でいちばん広い幅で読む｡それより
         // 狭い幅で同じ寸法なら､そこでも丸ごと入っている｡
         let roomy = f32::from(countdown::COMPACT_BELOW) - 1.;
-        let (_, _, unsqueezed, _, _, _) = footer_bounds_at(&mut visual, roomy);
-        let (bar, _, next, kept, _, _) = footer_bounds_at(&mut visual, roomy - 20.);
+        let (_, _, unsqueezed, _, _) = footer_bounds_at(&mut visual, roomy);
+        let (bar, _, next, _, primary_action) = footer_bounds_at(&mut visual, roomy - 20.);
+        let primary_action = primary_action.expect("the reload icon is always shown");
         assert_eq!(
             next.size.width, unsqueezed.size.width,
             "a little under the threshold the shortened wording has to fit whole"
         );
         assert!(
-            kept.right() <= bar.right(),
-            "the post count falls off the window: count ends at {:?}, window ends at {:?}",
-            kept.right(),
+            primary_action.right() <= bar.right(),
+            "the reload icon falls off the window: icon ends at {:?}, window ends at {:?}",
+            primary_action.right(),
             bar.right()
         );
 
-        let (bar, _, _, kept, _, _) = footer_bounds_at(&mut visual, 429.);
+        let (bar, _, _, _, primary_action) = footer_bounds_at(&mut visual, 429.);
+        let primary_action = primary_action.expect("the reload icon is always shown");
         assert!(
-            kept.right() <= bar.right(),
-            "at 429px the post count falls off the window: count ends at {:?}, window ends at {:?}",
-            kept.right(),
+            primary_action.right() <= bar.right(),
+            "at 429px the reload icon falls off the window: icon ends at {:?}, window ends at {:?}",
+            primary_action.right(),
             bar.right()
         );
 
-        // 詰めた文言すら入らない幅は寸法から逆算する: 余っている幅を使い
-        // 切り､さらに文言の半分ぶん狭める｡
-        let slack = f32::from(bar.right()) - f32::from(kept.right());
-        let cramped = 429. - slack - f32::from(unsqueezed.size.width) / 2.;
-        let (bar, _, next, kept, _, _) = footer_bounds_at(&mut visual, cramped);
+        // 詰めた文言すら入らない幅を､429px から少しずつ狭めて探す｡保持数の
+        // 区画が消えて footer に余裕ができたぶん (#282)､429px そのものでは
+        // まだ次の sync の文言が丸ごと入ることがあるので､固定の逆算式では
+        // なく実際に狭まる境目を探す｡
+        let mut width = 429.;
+        let (mut bar, mut next, mut countdown, mut primary_action);
+        loop {
+            let (b, _, n, c, p) = footer_bounds_at(&mut visual, width);
+            bar = b;
+            next = n;
+            countdown = c.expect("a counting loop has to reach the footer");
+            primary_action = p.expect("the reload icon is always shown");
+            if next.size.width < unsqueezed.size.width {
+                break;
+            }
+            width -= 20.;
+            assert!(
+                width > 0.,
+                "could not find a width that truncates the sync countdown"
+            );
+        }
         assert!(
-            kept.right() <= bar.right(),
-            "cramped, the post count falls off the window: count ends at {:?}, window ends at {:?}",
-            kept.right(),
+            primary_action.right() <= bar.right(),
+            "cramped, the reload icon falls off the window: icon ends at {:?}, window ends at {:?}",
+            primary_action.right(),
             bar.right()
         );
         assert!(
@@ -4852,17 +4856,18 @@ mod tests {
             "cramped, the next sync time has to be the segment that gives way"
         );
         assert!(
-            next.right() <= kept.left(),
-            "the next sync time runs into the post count: time ends at {:?}, count starts at {:?}",
+            next.right() <= countdown.left(),
+            "the next sync time runs into the countdown: time ends at {:?}, countdown starts at {:?}",
             next.right(),
-            kept.left()
+            countdown.left()
         );
     }
 
     /// 所有者の指摘 (#282): 既定の 560px の footer で sync のカウントダウン
     /// ("Next sync in 5h 12m") が "…" で切られていた — usage / 次の sync /
-    /// 保持数 / auto-refresh の期限 / reload アイコンが並んで幅が足りない｡
-    /// `Wide` の帯は既定幅で誰も切ってはならない｡
+    /// 保持数 / auto-refresh の期限 / reload アイコンが並んで幅が足りな
+    /// かった｡保持数の区画はこの後 footer から消える｡`Wide` の帯は既定幅
+    /// で誰も切ってはならない｡
     #[gpui::test]
     fn the_wide_footer_shows_the_whole_sync_countdown_at_the_default_width(
         cx: &mut gpui::TestAppContext,
@@ -4876,8 +4881,8 @@ mod tests {
 
         // 詰めた文言の本来の幅は、余裕のある幅で読む (`the_footer_shortens_
         // first_and_truncates_last` と同じやり方)。
-        let (_, _, unsqueezed, _, _, _) = footer_bounds_at(&mut visual, 800.);
-        let (_, _, next, _, _, _) = footer_bounds_at(&mut visual, 560.);
+        let (_, _, unsqueezed, _, _) = footer_bounds_at(&mut visual, 800.);
+        let (_, _, next, _, _) = footer_bounds_at(&mut visual, 560.);
         assert_eq!(
             next.size.width, unsqueezed.size.width,
             "the sync countdown must not be truncated at the default 560px width: \
@@ -4920,10 +4925,10 @@ mod tests {
         );
     }
 
-    /// #214, #282: header が撤去された後の最終形 — footer は 429px でも
-    /// 全部の区画を窓の中に収める｡左から usage → 次の sync → post の数
-    /// (`ml_auto`) → auto-refresh の期限 → reload のアイコンの順で並び､
-    /// どの隣同士も重ならない｡
+    /// #214, #282: header が撤去され保持数の区画も消えた後の最終形 — footer
+    /// は 429px でも全部の区画を窓の中に収める｡左から usage → 次の sync →
+    /// (`ml_auto` で右へ寄せたクラスタ) auto-refresh の期限 → reload の
+    /// アイコンの順で並び､どの隣同士も重ならない｡
     #[gpui::test]
     fn the_footer_keeps_every_segment_in_the_window_at_429px(cx: &mut gpui::TestAppContext) {
         let (mut visual, timeline) = drawn(cx, fixture_with_sync(&["2", "1"], 0));
@@ -4933,8 +4938,7 @@ mod tests {
             });
         });
 
-        let (bar, usage, next, kept, countdown, primary_action) =
-            footer_bounds_at(&mut visual, 429.);
+        let (bar, usage, next, countdown, primary_action) = footer_bounds_at(&mut visual, 429.);
         let countdown = countdown.expect("a counting loop has to reach the footer");
         let primary_action = primary_action.expect("the reload icon is always shown");
 
@@ -4945,15 +4949,9 @@ mod tests {
             next.left()
         );
         assert!(
-            next.right() <= kept.left(),
-            "the next sync time runs into the post count: time ends at {:?}, count starts at {:?}",
+            next.right() <= countdown.left(),
+            "the next sync time runs into the countdown: time ends at {:?}, countdown starts at {:?}",
             next.right(),
-            kept.left()
-        );
-        assert!(
-            kept.right() <= countdown.left(),
-            "the post count runs into the countdown: count ends at {:?}, countdown starts at {:?}",
-            kept.right(),
             countdown.left()
         );
         assert!(
