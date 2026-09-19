@@ -560,8 +560,15 @@ Translucent は文字と画像を薄くせず､地だけを 70% にする — �
 | --- | --- |
 | twigpui | About twigpui, Quit twigpui |
 | File | New Post |
+| Sources | Home と所有リストごとに 1 項目 (表示中は先頭に `✓`)、末尾に list 名を取得するボタン (1 request) |
 | View | Reload, Sync List…, Show New Posts, Follow New Posts, Back to Top |
 | Window | Minimize, Close Window, Float on Top, Translucent |
+
+`Sources` はどの timeline の集合を表示するかを選ぶ (#43, #282)｡項目を選ぶたびに
+足す・外すが切り替わり (トグル)､複数選んだ集合を合成して表示できる｡最後の
+1 件は外せない｡macOS のメニューはチェック状態を項目に持てないので､選択は
+`✓ ` をラベルの先頭に置くことで示す｡かつてはツールバーの pull-down だったが
+(#192, #43)､#282 でメニューバーへ移った｡
 
 どの項目もキー操作と同じアクションを発行し､macOS はキーマップからキー等価表示を
 その横に描く｡1 つの `menu::Shortcut` 定数がキー操作､2 通りの文言､**そして
