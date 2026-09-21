@@ -1,6 +1,13 @@
-//! list members の全件取得を保存し､成功した write を追従する｡
-
-use std::collections::HashSet;
+//! このアプリが list に入れた相手の台帳｡最初の全件取得を種にし､成功した
+//! write を追従する｡
+//!
+//! list の写しではない｡x.com で手で足した相手は載らないので diff に現れず､
+//! prune も届かない｡手で外した相手は載ったままなので､足し直されない｡
+//! どちらも手の編集を尊重する側に倒れる｡
+//!
+//! 古さでは読み直さない｡member の全件取得は following の 10 倍高く
+//! (`x-api-budget` の pricing.md 実測ログ 5)､残高が足りなければ途中の 402 で
+//! 何も残らない｡読み直したいときは `sync_members.json` を消す｡
 
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
@@ -8,10 +15,6 @@ use serde::{Deserialize, Serialize};
 use super::{Action, Plan};
 use crate::paths::Paths;
 use crate::x_api::model::User;
-
-// ponytail: x.com での手編集は最大 30 日見えない｡list.fields=member_count の
-// probe へ拡張できる｡今すぐ全件を読むには sync_members.json を削除する｡
-const MIRROR_MAX_AGE_SECONDS: i64 = 2_592_000;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Member {
@@ -28,22 +31,13 @@ pub(super) struct Mirror {
 }
 
 impl Mirror {
-    /// 時計の巻き戻りも期限切れと同じく全件取得へ戻す｡
-    pub(super) fn usable(&self, list_id: &str, now: i64) -> bool {
-        let reason = if self.list_id != list_id {
-            Some("belongs to a different list")
-        } else if self.read_at > now {
-            Some("has a future read_at")
-        // 外部の時刻同士なので､差が溢れたら期限切れとして扱う｡
-        } else if now.saturating_sub(self.read_at) >= MIRROR_MAX_AGE_SECONDS {
-            Some("has expired")
-        } else {
-            None
-        };
-        if let Some(reason) = reason {
-            crate::log::info(&format!(
-                "list sync: members mirror {reason}; a full member read is needed"
-            ));
+    /// 別の list の台帳だけを退ける｡`read_at` は記録で､判定には使わない｡
+    pub(super) fn usable(&self, list_id: &str) -> bool {
+        if self.list_id != list_id {
+            crate::log::info(
+                "list sync: members mirror belongs to a different list; a full member read is \
+                 needed",
+            );
             return false;
         }
         true
@@ -70,20 +64,6 @@ impl Mirror {
         let json =
             serde_json::to_string_pretty(self).context("could not serialize the members mirror")?;
         std::fs::write(&path, json).with_context(|| format!("could not write {}", path.display()))
-    }
-
-    fn log_drift(&self, fresh: &[User]) {
-        let old: HashSet<&str> = self
-            .members
-            .iter()
-            .map(|member| member.id.as_str())
-            .collect();
-        let new: HashSet<&str> = fresh.iter().map(|user| user.id.as_str()).collect();
-        crate::log::info(&format!(
-            "list sync: members mirror drift: {} only in mirror, {} only in fresh read",
-            old.difference(&new).count(),
-            new.difference(&old).count()
-        ));
     }
 }
 
@@ -124,16 +104,12 @@ pub(super) fn members(
     now: i64,
     read: impl FnOnce() -> Result<Vec<User>>,
 ) -> Result<Vec<User>> {
-    let old = load(paths);
-    if let Some(mirror) = &old
-        && mirror.usable(list_id, now)
+    if let Some(mirror) = load(paths)
+        && mirror.usable(list_id)
     {
         return Ok(mirror.users());
     }
     let users = read()?;
-    if let Some(mirror) = old.filter(|mirror| mirror.list_id == list_id) {
-        mirror.log_drift(&users);
-    }
     Mirror {
         version: 1,
         list_id: list_id.to_string(),

@@ -79,13 +79,11 @@ fn changed_first_and_forced_counts_run_the_diff_and_store_the_probe() {
 
 #[test]
 fn unchanged_count_requires_a_usable_mirror() {
-    for label in ["absent", "expired", "future", "other", "corrupt"] {
+    for label in ["absent", "other", "corrupt"] {
         let scratch = Scratch::new(&format!("count-mirror-{label}"));
         prepare(scratch.paths(), Some(4), NOW);
         match label {
             "absent" => std::fs::remove_file(scratch.paths().sync_members_file()).unwrap(),
-            "expired" => prepare(scratch.paths(), Some(4), 0),
-            "future" => prepare(scratch.paths(), Some(4), NOW.saturating_add(1)),
             "other" => std::fs::write(
                 scratch.paths().sync_members_file(),
                 r#"{"version":1,"list_id":"8","read_at":3000000,"members":[]}"#,
@@ -172,7 +170,9 @@ fn old_state_files_default_the_following_count() {
 #[test]
 fn a_refreshed_mirror_after_a_failed_follow_read_cannot_skip_the_retry() {
     let scratch = Scratch::new("count-refreshed-failure");
-    prepare(scratch.paths(), Some(4), 0);
+    prepare(scratch.paths(), Some(4), NOW);
+    // 台帳が無い状態から始める｡members の全件取得が走る唯一の入口｡
+    std::fs::remove_file(scratch.paths().sync_members_file()).unwrap();
     let api = FakeApi::new()
         .counts(vec![Ok(4)])
         .members(vec![Ok(page(&[("2", "bob")], None))])

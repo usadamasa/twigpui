@@ -32,14 +32,13 @@ pub(super) fn unchanged(
     list_id: &str,
     old: Option<u64>,
     count: Option<u64>,
-    now: i64,
 ) -> bool {
     // ponytail: 確認間に 1 follow と 1 unfollow が相殺すると､次の count 変化か
     // 強制実行まで見逃す｡dev の同期元は固定 seed なので count と比較しない｡
     paths.profile().sync_seed_usernames().is_none()
         && count.is_some()
         && count == old
-        && mirror::load(paths).is_some_and(|mirror| mirror.usable(list_id, now))
+        && mirror::load(paths).is_some_and(|mirror| mirror.usable(list_id))
 }
 
 /// CLI の diff は probe と見込み表示を済ませてから読み始める｡
@@ -53,7 +52,7 @@ pub(super) fn dry_run(
 ) -> Result<String> {
     let mut state = load_state(&paths.sync_state_file());
     let count = probe(paths, client, now)?;
-    if !reread && unchanged(paths, list_id, state.following_count, count, now) {
+    if !reread && unchanged(paths, list_id, state.following_count, count) {
         return Ok(format!(
             "no follow list or list members were read because the following count ({}) has \
              not changed since the last diff (the count probe read 1 Owned resource). \
@@ -62,9 +61,7 @@ pub(super) fn dry_run(
         ));
     }
     let mirror = mirror::load(paths);
-    let mirrored = mirror
-        .as_ref()
-        .is_some_and(|mirror| mirror.usable(list_id, now));
+    let mirrored = mirror.as_ref().is_some_and(|mirror| mirror.usable(list_id));
     let members = mirror
         .as_ref()
         .and_then(|mirror| mirror.members_total(list_id))

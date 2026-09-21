@@ -34,18 +34,20 @@ API を読まずに plan を表示する｡`--apply` はその続きの write �
 ガードを越えて新しい diff で plan を置き換える｡
 
 diff の前には `/2/users/me?user.fields=public_metrics` でフォロー数を確認する (Owned 1 件)｡
-前回成功した diff と count が同じで有効な members ミラーがあれば､全件読みを省略する｡
+前回成功した diff と count が同じで members の台帳があれば､全件読みを省略する｡
 GUI の強制実行と CLI の `--reread` は count による省略をしない｡probe の一般的な失敗は
 full diff へ戻し､402 と rate limit / usage cap は後続の read を止める｡
 
-diff はフォロー全件 (Owned Reads) と members ミラーから組み立てる｡ミラーが使えない場合は
-members 全件 (Users､Owned の 10 倍の単価) を先に読み､直後に `sync_members.json` へ保存する｡
+diff はフォロー全件 (Owned Reads) と members の台帳 (`sync_members.json`) から組み立てる｡
+台帳が使えない場合は members 全件 (Users､Owned の 10 倍の単価) を先に読み､直後に保存する｡
 その後のフォロー取得が失敗しても､取得済みの members は残る｡CLI は全件読みの前に件数と種類を表示する｡
 
-ミラーは同じ list で全件取得から 30 日未満のものだけを使い､write が成功するたびに更新する｡
-破損・別 list・期限切れ・未来の取得時刻は full read へ戻す｡再取得時は古いミラーとの
-差分件数をログへ残す｡x.com での手編集をすぐ反映するには `sync_members.json` を削除し､
-`--sync-list --reread` を実行する｡`--reread` 自体は有効なミラーを捨てない｡
+台帳は list の写しではなく､このアプリが list に入れたアカウントの記録｡最初の全件取得を種にして､
+write が成功するたびに更新する｡**古さでは読み直さない｡** members の全件取得は残高が足りなければ
+途中の 402 で何も残らないので､自動では買わない｡full read へ戻るのは､ファイルが無い・破損・別 list のときだけ｡
+x.com で手で足したアカウントは台帳に載らないので削除されず､手で外したアカウントは載ったままなので
+足し直されない｡list の実態に合わせ直すには `sync_members.json` を削除して `--sync-list --reread` を実行する｡
+`--reread` 自体は台帳を捨てない｡
 count が変わらない follow / unfollow の入れ替えは､次の count 変化か強制実行まで見逃す｡
 
 #169 以降､その読み取りは **release** ビルドでしか起きない｡debug ビルドは開発用の
@@ -57,7 +59,7 @@ count が変わらない follow / unfollow の入れ替えは､次の count 変
 
 ドキュメントを読み書きするときに覚えておくべき帰結: **`--release` の付かない
 `--sync-list` の例は開発用の同期である｡** 失敗するのではなく､別の組を同期する｡
-リストのメンバーは両プロファイルで同じミラーを使う仕組みだが､保存先はそれぞれ独立する｡
+リストのメンバーは両プロファイルで同じ台帳の仕組みを使うが､保存先はそれぞれ独立する｡
 debug の同期元は固定 seed なので､サインイン中のアカウントの count による省略は行わない｡
 
 ## レートリミット

@@ -260,7 +260,7 @@ fn diff(
 
     let count = super::preflight::probe(paths, client, now)?;
     if !options.pacing.forced
-        && super::preflight::unchanged(paths, list_id, state.following_count, count, now)
+        && super::preflight::unchanged(paths, list_id, state.following_count, count)
     {
         crate::log::info(&format!(
             "list sync: following count unchanged ({}); skipped the diff",

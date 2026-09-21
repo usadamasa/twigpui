@@ -77,7 +77,11 @@ fn age_alone_never_buys_a_member_read() {
         let plan = plan_sync(scratch.paths(), &client, "me", "7", 3_000_000).unwrap();
         assert!(plan.is_complete(), "{label}");
         assert_eq!(client.calls(), [Call::Following(None)], "{label}");
-        assert_eq!(saved_members(scratch.paths())["read_at"], read_at, "{label}");
+        assert_eq!(
+            saved_members(scratch.paths())["read_at"],
+            read_at,
+            "{label}"
+        );
     }
 }
 
@@ -104,7 +108,8 @@ fn corrupt_or_unknown_version_mirrors_are_replaced() {
 #[test]
 fn partial_member_read_does_not_replace_the_old_mirror_or_read_following() {
     let scratch = Scratch::new("mirror-partial");
-    write_mirror(scratch.paths(), "7", 0);
+    // 別の list の台帳は使えないので､全件取得が始まる｡
+    write_mirror(scratch.paths(), "8", 0);
     let original = saved_members(scratch.paths());
     let client = FakeApi::new().members(vec![
         Ok(page(&[("3", "carol")], Some("next"))),
