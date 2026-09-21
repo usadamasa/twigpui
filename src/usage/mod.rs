@@ -903,6 +903,25 @@ mod tests {
     }
 
     #[test]
+    fn record_response_bills_a_list_member_already_returned_by_following() {
+        // 2026-09-21 の実測: list の member は全員 following でも返っていたが､
+        // list_members の読み取りで残高が尽きた｡X は両者を別に課金している｡
+        let root = temp_root("record-response-following-then-members");
+        let paths = test_paths(&root);
+        paths.ensure_dirs().unwrap();
+
+        let body = r#"{"data":[{"id":"1"}]}"#;
+        record_response(&paths, Endpoint::Following, body, 0).unwrap();
+        record_response(&paths, Endpoint::ListMembers, body, 100).unwrap();
+
+        let all = load_all(&paths).unwrap();
+        assert_eq!(all[&Endpoint::Following].total, 1);
+        assert_eq!(all[&Endpoint::ListMembers].total, 1);
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
     fn record_response_keeps_dedup_state_separate_per_resource_kind() {
         // id が "1" で衝突しても Posts と Users は別勘定 — dedup は
         // (kind, id) のキーで､id だけでは判定しない｡

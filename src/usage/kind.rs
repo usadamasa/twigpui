@@ -129,7 +129,9 @@ mod tests {
             (Endpoint::HomeTimeline, Posts),
             (Endpoint::ListTimeline, Posts),
             (Endpoint::TweetById, Posts),
-            (Endpoint::Following, Users),
+            // 2026-09-21 の実測: $5 の残高で following 2340 件が完走し､
+            // 続く list_members が 3 ページ前後で 402 になった｡
+            (Endpoint::Following, Owned),
             (Endpoint::ListMembers, Users),
             (Endpoint::OwnedLists, Owned),
             (Endpoint::CreatePost, Write),
