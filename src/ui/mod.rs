@@ -2297,6 +2297,7 @@ mod tests {
             reposted: Vec::new(),
             selected: None,
             translucent: false,
+            float_on_top: false,
             composer_open: false,
         }
     }

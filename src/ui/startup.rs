@@ -48,6 +48,7 @@ fn startup_window_state(
     let mut state = window_state::load_or_default(file);
     if let Startup::Fixture(fixture) = startup {
         state.translucent = fixture.translucent;
+        state.float_on_top = fixture.float_on_top;
     }
     state
 }
