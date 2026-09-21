@@ -163,7 +163,7 @@ fn main() {
             cx.on_action(|_: &menu::Quit, cx| cx.quit());
             // #282: まだどの source も無い — `TimelineView::refresh_source_menu`
             // が起動の終わりに実際の中身で作り直す｡
-            cx.set_menus(menu::menus(Vec::new()));
+            cx.set_menus(menu::menus(Vec::new(), menu::Checks::default()));
             // #139: 最後のウィンドウを閉じるとアプリが終わる｡gpui は独自に
             // プロセスを生かし続ける — もう一枚ウィンドウを頼めるアプリには
             // 正しいが､このアプリには誤りで､`cmd-w` は画面に何も無いまま

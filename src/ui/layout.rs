@@ -302,10 +302,11 @@ impl Render for TimelineView {
                 this.apply_pending(cx);
             }))
             .on_action(cx.listener(|this, _: &ToggleFollowNewPosts, _window, cx| {
-                // #22: メニューバーはチェックマークを描けないので､切り替えが
-                // どちらへ倒れたかは､リロード完了時に使うバナーで報告する —
-                // 失敗ではないほうのバリアントなので `Outcome` を使う｡
+                // #22: 切り替えがどちらへ倒れたかは､メニューのチェックマークと､
+                // リロード完了時に使うバナーで報告する — 失敗ではないほうの
+                // バリアントなので `Outcome` を使う｡
                 this.follow = this.follow.flipped();
+                this.refresh_source_menu(cx);
                 let outcome = if this.follow.is_following() {
                     "Following new posts."
                 } else {

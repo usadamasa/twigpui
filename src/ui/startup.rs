@@ -309,6 +309,7 @@ impl TimelineView {
         };
         self.reload_notice = Some(ReloadNotice::Outcome(outcome.into()));
         self.persist_window_state(cx);
+        self.refresh_source_menu(cx);
         cx.notify();
     }
 
@@ -324,6 +325,7 @@ impl TimelineView {
         };
         self.reload_notice = Some(ReloadNotice::Outcome(outcome.into()));
         self.persist_window_state(cx);
+        self.refresh_source_menu(cx);
         cx.notify();
     }
 
