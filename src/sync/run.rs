@@ -408,8 +408,13 @@ fn run(
                 return Ok(format!(
                     "{}\n\n{unsent} write(s) from the plan on file are still unsent. Re-run \
                      with --apply to send them (no reads needed), or pass --reread to pay \
-                     for a fresh diff that replaces the plan.",
-                    report(&plan)
+                     for a fresh diff that replaces the plan.{}",
+                    report(&plan),
+                    super::preflight::seed_first_note(
+                        paths,
+                        list_id,
+                        plan.pending_count(Action::Add)
+                    )
                 ));
             }
         }

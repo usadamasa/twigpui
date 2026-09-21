@@ -41,6 +41,21 @@ pub(super) fn unchanged(
         && mirror::load(paths).is_some_and(|mirror| mirror.usable(list_id))
 }
 
+/// 台帳が無いまま plan を送ると､種になる members の全件取得がその分だけ
+/// 大きくなる｡先に読めば list が小さいうちに済み､以後は読まない｡
+/// 台帳があれば空文字｡
+pub(super) fn seed_first_note(paths: &Paths, list_id: &str, additions: usize) -> String {
+    if mirror::load(paths).is_some_and(|mirror| mirror.usable(list_id)) {
+        return String::new();
+    }
+    format!(
+        "\n\nThere is no members ledger (sync_members.json) for this list yet, so the next diff \
+         after these are sent reads every list member (Users — 10x the Owned price) from a list \
+         that is {additions} account(s) larger. Run --sync-list --reread first to seed the \
+         ledger while the list is small; after that the members are not read again."
+    )
+}
+
 /// CLI の diff は probe と見込み表示を済ませてから読み始める｡
 pub(super) fn dry_run(
     paths: &Paths,
