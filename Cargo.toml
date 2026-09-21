@@ -142,12 +142,18 @@ getrandom = { version = "0.4.3", features = ["std"] }
 # (`cargo-shear` の ignored リストに載っている理由もそれ)､それを使う cfg は
 # crate 自身のソースのどこにも無い — 実際に読むのは `gpui_platform` 経由の
 # `gpui_macos` (下) なので､ここでは立てない｡
-gpui = { package = "gpui-pre", version = "0.3.5", default-features = false }
+#
+# 版を `=` で固定する (下の `gpui_platform` と dev-dependencies も)｡gpui-pre は
+# zed の main の snapshot で､0.3.x の中でも API が変わる｡gpui-component 0.6.4 は
+# `^0.3.5` としか言わないので､固定しないと lock を作り直したときに 0.3.6 を拾い､
+# gpui-component がコンパイルできなくなる (`register_inspector_element` の
+# クロージャの引数が変わった)｡上げるときは gpui-component が通る版と揃える｡
+gpui = { package = "gpui-pre", version = "=0.3.5", default-features = false }
 # runtime_shaders: プリコンパイル済みの Metal シェーダではなく実行時コンパイルで
 # 描画するので､ビルドに `xcrun metal` が要らない — あれは Command Line Tools では
 # なく完全な Xcode に付いてくる｡x11/wayland は Linux 専用で､このプロジェクトは
 # macOS 専用だ｡
-gpui_platform = { package = "gpui-pre-platform", version = "0.3.5", features = [
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.5", features = [
     "font-kit",
     "runtime_shaders",
 ] }
@@ -169,6 +175,6 @@ window-level = { path = "crates/window-level" }
 # この経路は `cargo test` がそれまで一度も覆っていなかったところで､#55 が
 # 隠れていた場所だ: 実際に何かが描画されて初めて到達する panic｡
 [dev-dependencies]
-gpui = { package = "gpui-pre", version = "0.3.5", default-features = false, features = [
+gpui = { package = "gpui-pre", version = "=0.3.5", default-features = false, features = [
     "test-support",
 ] }
