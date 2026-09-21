@@ -178,13 +178,12 @@ fn should_rotate(len: u64, cap: u64) -> bool {
 
 /// 認証情報らしきものをすべて取り除く｡
 ///
-/// 意図的に大雑把だ｡次の順で書き換える:
-///
-/// - `Bearer <token>` — `Authorization` ヘッダが取るそのままの形｡
-/// - `access_token` / `refresh_token` / `client_secret` / `code` /
-///   `token` のいずれかのキーに `=` か `":"` が続くもの｡token
-///   エンドポイントの JSON レスポンスや redirect URL のクエリ文字列に
-///   現れる形だ｡
+/// 意図的に大雑把だ｡[`SECRET_KEYS`] のどれかが語の頭に現れ､[`skip_separator`]
+/// の言う区切り (`=` か `":`) が続いたら､そこから次の区切りまでを伏せる｡
+/// これでクエリ文字列の `access_token=abc` も token エンドポイントの
+/// `"access_token": "abc"` も同じ 1 つの規則で捕まる — 綴りは同じで､
+/// 違うのは区切りだけだからだ｡[`BEARER`] だけは区切りが空白で､
+/// `Authorization` ヘッダの形になる｡
 ///
 /// ここでは大雑把なほうを取るのが正しい: 取りこぼす redactor は､
 /// メッセージを使いものにならないほど消しすぎる redactor より悪い｡失敗が
@@ -195,50 +194,127 @@ pub(crate) fn redact(message: &str) -> String {
     let mut rest = message;
 
     while !rest.is_empty() {
-        let Some((keyword, at)) = next_secret(rest) else {
+        let Some(secret) = next_secret(rest) else {
             out.push_str(rest);
             break;
         };
-        let (before, from) = rest.split_at(at);
-        out.push_str(before);
-        out.push_str(keyword);
+        // キーと区切りはそのまま通す｡伏せた行がまだ読めるように｡
+        out.push_str(rest.get(..secret.value_at).unwrap_or_default());
+        let value = rest.get(secret.value_at..).unwrap_or_default();
         // ここから次の区切りまでがすべて値だ｡
-        let after_keyword = from.get(keyword.len()..).unwrap_or_default();
-        let value_end = after_keyword
+        let value_end = value
             .find(|c: char| c.is_whitespace() || c == '&' || c == '"' || c == ',' || c == '}')
-            .unwrap_or(after_keyword.len());
+            .unwrap_or(value.len());
         out.push_str("[redacted]");
-        rest = after_keyword.get(value_end..).unwrap_or_default();
+        rest = value.get(value_end..).unwrap_or_default();
     }
 
     out
 }
 
-/// `haystack` の中で次に認証情報を導くトークン: 何を残すかと､どこから
-/// 始まるか｡その後ろから区切りまでがすべて秘密の値だ｡
-fn next_secret(haystack: &str) -> Option<(&'static str, usize)> {
-    const KEYWORDS: [&str; 8] = [
-        "Bearer ",
-        "bearer ",
-        "access_token=",
-        "refresh_token=",
-        "client_secret=",
-        "token=",
-        "code=",
-        "state=",
-    ];
+/// 値を伏せるキー｡クエリ文字列でも JSON の本文でも綴りはこれで､
+/// 違うのは区切りだけだ｡
+const SECRET_KEYS: [&str; 6] = [
+    "access_token",
+    "refresh_token",
+    "client_secret",
+    "token",
+    "code",
+    "state",
+];
+
+/// `Authorization: Bearer <token>` の形｡ここだけ区切りが空白になる｡
+const BEARER: &str = "bearer ";
+
+/// 見つけた認証情報の居場所｡
+#[derive(Clone, Copy)]
+struct Hit {
+    /// キーが始まる位置｡
+    at: usize,
+    /// 値が始まる位置｡`at` からここまで (キー､区切り､JSON なら開きの
+    /// `"`) は本文として残す｡
+    value_at: usize,
+}
+
+/// `haystack` の中で最も早く現れる認証情報｡
+fn next_secret(haystack: &str) -> Option<Hit> {
+    // 綴りの大小は問わない｡バイト長は変わらないので位置は元の文字列と
+    // そのまま対応する｡
     let lowered = haystack.to_ascii_lowercase();
-    KEYWORDS
-        .iter()
-        .filter_map(|keyword| {
-            let at = if keyword.starts_with("Bearer") {
-                haystack.find(*keyword)?
-            } else {
-                lowered.find(*keyword)?
+    let mut best: Option<Hit> = None;
+
+    for (at, _) in lowered.match_indices(BEARER) {
+        if starts_a_word(&lowered, at) {
+            keep_earliest(
+                &mut best,
+                Hit {
+                    at,
+                    value_at: at.saturating_add(BEARER.len()),
+                },
+            );
+        }
+    }
+
+    for key in SECRET_KEYS {
+        for (at, _) in lowered.match_indices(key) {
+            if !starts_a_word(&lowered, at) {
+                continue;
+            }
+            let after_key = at.saturating_add(key.len());
+            let Some(gap) = lowered.get(after_key..).and_then(skip_separator) else {
+                continue;
             };
-            Some((*keyword, at))
-        })
-        .min_by_key(|(_, at)| *at)
+            keep_earliest(
+                &mut best,
+                Hit {
+                    at,
+                    value_at: after_key.saturating_add(gap),
+                },
+            );
+        }
+    }
+
+    best
+}
+
+/// `at` から始まるキーが別の語の尻尾でないか｡`status_code` の中の `code`
+/// を拾って 429 を伏せてしまうと､読むために出したログが読めなくなる｡
+fn starts_a_word(haystack: &str, at: usize) -> bool {
+    haystack
+        .get(..at)
+        .and_then(|before| before.chars().next_back())
+        .is_none_or(|c| !c.is_ascii_alphanumeric() && c != '_')
+}
+
+/// キーの直後から数えて値が始まる位置｡区切りは 2 つの形しかない —
+/// クエリ文字列の `=` と JSON の `":` — で､どちらでもなければ `None`｡
+/// そのキーは値を導いておらず､ただ文中に出てきただけだ｡
+///
+/// JSON 側で閉じ引用符まで求めるのは､ログの地の文を巻き込まないためだ｡
+/// 裸の `:` を区切りと見ると `could not save its state: {error}` の
+/// `state:` が当たり､読むために出した行からエラーが消える｡
+fn skip_separator(after_key: &str) -> Option<usize> {
+    let separator = if after_key.starts_with('=') {
+        1
+    } else if after_key.starts_with("\":") {
+        2
+    } else {
+        return None;
+    };
+    // 値の前に挟まる空白と開きの `"` は値ではない｡
+    let value = after_key.get(separator..)?;
+    let lead = value
+        .len()
+        .saturating_sub(value.trim_start_matches([' ', '\t', '"']).len());
+    Some(separator.saturating_add(lead))
+}
+
+/// より早く現れるほうを残す｡先に伏せた値の中へ入り込まないよう､
+/// 書き換えは必ず最も早い一致から進める｡
+fn keep_earliest(best: &mut Option<Hit>, candidate: Hit) {
+    if best.is_none_or(|current| candidate.at < current.at) {
+        *best = Some(candidate);
+    }
 }
 
 /// Unix epoch からの秒数｡時計がそれより前なら 0｡
@@ -327,10 +403,46 @@ mod tests {
 
     #[test]
     fn a_token_response_body_never_survives() {
+        // token エンドポイントが返すそのままの形｡書き換えずに入れる｡
         let body = r#"{"access_token":"abc123","refresh_token":"def456","expires_in":7200}"#;
-        let safe = redact(&body.replace("\":\"", "="));
+        let safe = redact(body);
         assert!(!safe.contains("abc123"), "{safe}");
         assert!(!safe.contains("def456"), "{safe}");
+        // 消しすぎないこと: 残高や有効期限を読めないログでは意味がない｡
+        assert!(safe.contains("7200"), "{safe}");
+    }
+
+    #[test]
+    fn a_pretty_printed_token_body_never_survives() {
+        // 値の前に空白が入る形｡区切りの `"` を値の始まりと取り違えると
+        // `[redacted]` が引用符の手前に落ち、token はそのまま残る｡
+        let safe = redact(r#"{"access_token": "abc123", "client_secret": "s3cr3t"}"#);
+        assert!(!safe.contains("abc123"), "{safe}");
+        assert!(!safe.contains("s3cr3t"), "{safe}");
+    }
+
+    #[test]
+    fn an_error_body_keeps_the_fields_that_explain_it() {
+        // `log_429` が出す本文はここを通る｡`status_code` の尻尾の `code`
+        // まで伏せると、読むために出したログが読めなくなる｡
+        let body = r#"{"title":"Too Many Requests","status_code":429}"#;
+        assert_eq!(redact(body), body);
+        assert_eq!(redact("retry: status_code=429"), "retry: status_code=429");
+    }
+
+    #[test]
+    fn a_colon_in_the_prose_is_not_a_separator() {
+        // `sync::auto` が実際に出す行｡地の文の `state:` を区切りと見ると、
+        // エラーの中身が消えて調べようがなくなる｡JSON の区切りは `":` だ｡
+        let message = "list sync: could not save its state: permission denied";
+        assert_eq!(redact(message), message);
+    }
+
+    #[test]
+    fn a_key_without_a_value_is_left_alone() {
+        // 区切りが続かないなら値を導いていない｡ただ文中に出てきただけだ｡
+        let message = "refresh: the access_token expired, refreshing";
+        assert_eq!(redact(message), message);
     }
 
     #[test]
