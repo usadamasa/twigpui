@@ -116,8 +116,8 @@ fn width_of(args: &[String]) -> Result<f32, String> {
 /// `TimelineView` を `gpui_component::Root` に包む｡別の描画経路を持たせると､
 /// 撮ったものが本物の window の証拠でなくなる｡
 ///
-/// 描くのは 2 回｡1 回目でアバターと添付の読み込みが走り出し､`run_until_parked`
-/// がそれを終わらせ､2 回目がその画像を置いた画面を描く｡
+/// 描くのは 1 回では足りない｡1 回目でアバターと添付の読み込みが走り出し､
+/// `run_until_parked` がそれを終わらせ､次の回がその画像を置いた画面を描く｡
 fn capture(
     fixture_path: &Path,
     width: f32,
@@ -147,8 +147,13 @@ fn capture(
 
     // 画像はディスクから読む｡`allow_parking` が無いと､その await で
     // `run_until_parked` が止まる｡
+    //
+    // 時計は 50ms ずつ 10 回進める｡sync の行などの fade (180ms) は tick ごとに
+    // 次の timer を張るので､一度に進めても 1 段しか進まない｡合計 500ms は
+    // `pending` が届く 5 秒より手前｡
     cx.allow_parking();
-    for _ in 0..2 {
+    for _ in 0..10 {
+        cx.advance_clock(std::time::Duration::from_millis(50));
         cx.run_until_parked();
         cx.update_window(window.into(), |_, window, cx| {
             let _ = window.draw(cx);
