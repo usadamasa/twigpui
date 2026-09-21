@@ -57,7 +57,7 @@ project の日次カウンタが 20 から 119 へ動いた。返却は 98 件�
 | 「Show thread」1 クリック | 最大 5 | Posts 最大 5 |
 | 自動更新 1 ポーリング (#21) | 1 | Posts 20 (同日 dedup 後は新着分のみ) |
 | 「N new posts」バーを押す | 0 | 0 |
-| ステータスバーから手動同期 (#174) | フォロー数と List 件数に比例 | Users 両側の全件 |
+| ステータスバーから手動同期 (#174) | フォロー数に比例 | Owned 1 (count の probe) + Owned フォロー全件。members の台帳が無い初回だけ Users List 全件 |
 
 `GET /2/tweets?ids=` は 1 リクエストで 100 件まで束ねられるが、**課金は件数のまま**。
 まとめて減るのはリクエスト本数と待ち時間であって、請求ではない。
@@ -85,9 +85,15 @@ dedup の前提が崩れたらこの段落ごと書き直すこと。
 
 ### 手動同期 (#174) はこのアプリで一番高いクリック
 
-ステータスバーの「List sync:」を押すと同期が始まる。**diff は両側を全件読む**ので、
+ステータスバーの「List sync:」を押すと同期が始まる。**diff はフォロー一覧を全件読む**ので、
 フォロー数千件なら 1 クリックでドル単位。表の「リクエスト」が数字でないのはそのためで、
 ページングが伸びる分だけ本数も resource も増える。
+
+List の member 側は 10 倍高い (Users $0.010) ので、読むのは台帳 (`sync_members.json`) が無い
+初回だけにしてある。以降は台帳から diff を取り、古さでは読み直さない。タイマーでの自動同期は
+既定で off (`auto_sync_list`)。読み取りの経路は `reference/app-behavior.md` にある。
+**members の全件読みを自動で走らせる変更は入れない。** 残高が足りないと途中の 402 で何も残らない
+(`reference/pricing.md` 実測ログ 5 がその実例)。
 
 だから 2 段クリックにしてある (`x-api-budget` の「押す前に最悪ケースを UI に出す」)。
 1 クリック目で課金の内容を出し、2 クリック目で初めて撃つ。
@@ -127,11 +133,14 @@ request 単位 (`Endpoint::kind()` が `Write` を返すもの)。
 `project_usage` と同じ単位で、Developer Console の数字と直接照合できる。
 Users/Owned/Write は `--usage` の JSON (`by_kind`) に残るが、ヘッダには出ない。
 
-`Endpoint::kind()` は 2 か所で安全側 (高い方の単価) に倒している: `Timeline` は
+`Endpoint::kind()` は 1 か所で安全側 (高い方の単価) に倒している: `Timeline` は
 見ている相手が自分自身の post でも Posts ($0.005) のまま (`Owned Reads` $0.001 に
-仕分けない)、`Following`/`ListMembers` も自分のフォロー一覧を Users ($0.010) のまま
-数える。どちらも著者や自分の id と突き合わせるコストを払わないための意図した
+仕分けない)。著者と自分の id を突き合わせるコストを払わないための意図した
 過大見積りで、`src/usage/kind.rs` に `ponytail:` コメントで天井と上げ方を残してある。
+
+`Following` は Owned ($0.001)、`ListMembers` は Users ($0.010)。種別が違うので dedup も別で、
+following で返ったアカウントを list_members がもう一度返せば、もう一度数える
+(`reference/pricing.md` 実測ログ 5)。**list の member を読むのは following の 10 倍高い。**
 
 `GET /2/usage/tweets` (Post 消費のみ、app-only Bearer 必須) や Developer Console の
 明細と突き合わせて裏取りしたい手順は `reference/pricing.md` を見よ。

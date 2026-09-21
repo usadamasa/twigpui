@@ -8,9 +8,9 @@ use super::XClient;
 use super::status::describe_problem;
 use super::urls::{
     create_like_url, create_post_url, create_repost_url, delete_like_url, delete_post_url,
-    delete_repost_url, following_url, home_timeline_url, list_members_url, list_members_write_url,
-    list_timeline_url, me_url, owned_lists_url, remove_list_member_url, timeline_url,
-    tweets_by_id_url, user_lookup_url,
+    delete_repost_url, following_count_url, following_url, home_timeline_url, list_members_url,
+    list_members_write_url, list_timeline_url, me_url, owned_lists_url, remove_list_member_url,
+    timeline_url, tweets_by_id_url, user_lookup_url,
 };
 use crate::paths::Paths;
 use crate::rate_limit::Endpoint;
@@ -20,6 +20,12 @@ use crate::x_api::model::{
 };
 
 impl XClient {
+    /// キャッシュ済みの me とは別にフォロー数を読む｡Owned resource は 1 件｡
+    pub(crate) fn probe_following_count(&self, paths: &Paths, now: i64) -> Result<u64> {
+        let body = self.get(paths, Endpoint::Me, &following_count_url(), now)?;
+        parse_following_count(&body)
+    }
+
     /// screen name を､timeline エンドポイントが要る数値の user id へ解決する｡
     pub(crate) fn user_id_by_username(
         &self,
@@ -374,6 +380,25 @@ fn parse_user_page(body: &str, what: &str) -> Result<(Vec<User>, Option<String>)
     Ok((response.data, next_token))
 }
 
+/// metrics の欠落をゼロ件と扱わず､省略判定から外す｡
+fn parse_following_count(body: &str) -> Result<u64> {
+    #[derive(serde::Deserialize)]
+    struct Response {
+        data: Data,
+    }
+    #[derive(serde::Deserialize)]
+    struct Data {
+        public_metrics: Metrics,
+    }
+    #[derive(serde::Deserialize)]
+    struct Metrics {
+        following_count: u64,
+    }
+    let response: Response =
+        serde_json::from_str(body).context("could not parse the following count response")?;
+    Ok(response.data.public_metrics.following_count)
+}
+
 /// `GET /2/users/:id/owned_lists` から list の 1 ページをパースする (#164)｡
 fn parse_list_page(body: &str) -> Result<(Vec<ListSummary>, Option<String>)> {
     let response: ListPageResponse =
@@ -385,6 +410,23 @@ fn parse_list_page(body: &str) -> Result<(Vec<ListSummary>, Option<String>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_the_following_count_from_public_metrics() {
+        let body = r#"{"data":{"id":"1","username":"alice","name":"Alice","public_metrics":{"followers_count":99,"following_count":2340,"tweet_count":12,"listed_count":1}}}"#;
+        assert_eq!(parse_following_count(body).unwrap(), 2340);
+        assert_eq!(
+            parse_following_count(r#"{"data":{"public_metrics":{"following_count":0}}}"#).unwrap(),
+            0
+        );
+        for body in [
+            r#"{"data":{"id":"1"}}"#,
+            r#"{"errors":[]}"#,
+            r#"{"data":{"public_metrics":{"following_count":-1}}}"#,
+        ] {
+            assert!(parse_following_count(body).is_err());
+        }
+    }
 
     #[test]
     fn parses_a_user_page_and_its_cursor() {

@@ -52,6 +52,15 @@ pub(super) fn me_url() -> String {
     Url::api(API_BASE).segment("users").segment("me").build()
 }
 
+/// user-context `OAuth2` で現在のフォロー数を確認する｡
+pub(super) fn following_count_url() -> String {
+    Url::api(API_BASE)
+        .segment("users")
+        .segment("me")
+        .params(&[("user.fields", "public_metrics")])
+        .build()
+}
+
 /// home timeline のエンドポイント (#11)｡返る post の形が同じなので
 /// [`timeline_url`] と同じ expansions を付ける｡`since_id` (差分リロード) と
 /// `pagination_token` (#11 の "Load older") は実際上は排他だ — リロードは
@@ -310,6 +319,15 @@ pub(super) fn delete_like_url(user_id: &str, tweet_id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn following_count_requests_public_metrics_without_changing_me() {
+        assert_eq!(
+            following_count_url(),
+            "https://api.x.com/2/users/me?user.fields=public_metrics"
+        );
+        assert_eq!(me_url(), "https://api.x.com/2/users/me");
+    }
 
     #[test]
     fn builds_the_user_lookup_url() {

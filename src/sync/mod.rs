@@ -55,6 +55,8 @@ use crate::x_api::model::User;
 
 mod api;
 mod auto;
+mod mirror;
+mod preflight;
 mod run;
 mod schedule;
 mod state;

@@ -56,11 +56,9 @@ fn read_all(
     anyhow::bail!("the {what} did not finish paging after {MAX_PAGES} pages — nothing was changed")
 }
 
-/// 両側を丸ごと読んで diff する (#163 の dry-run)｡
-///
-/// sync の read 費用をすべて使う: 両側のどのアカウントも課金 resource だ｡
-/// ここでは X に何も書かない — 結果は [`apply`] が消費する [`super::Plan`]
-/// だ｡
+/// members のミラーと following の全件から diff を作る｡
+/// ミラーが無効なら先に members を全件取得し､保存してから following を読む｡
+/// X への write は行わず､[`apply`] が消費する plan を返す｡
 pub(super) fn plan_sync(
     paths: &Paths,
     client: &dyn ListSyncApi,
@@ -68,15 +66,17 @@ pub(super) fn plan_sync(
     list_id: &str,
     now: i64,
 ) -> Result<Plan> {
+    let members = super::mirror::members(paths, list_id, now, || {
+        read_all("list members", |cursor| {
+            client.list_members_page(paths, list_id, cursor, now)
+        })
+    })?;
     let following = match paths.profile().sync_seed_usernames() {
         None => read_all("follow list", |cursor| {
             client.following_page(paths, user_id, cursor, now)
         })?,
         Some(usernames) => seed_users(paths, client, usernames, now)?,
     };
-    let members = read_all("list members", |cursor| {
-        client.list_members_page(paths, list_id, cursor, now)
-    })?;
     Ok(plan(list_id, now, &following, &members))
 }
 
@@ -207,6 +207,7 @@ pub(super) fn apply_some(
             Action::Add => client.add_member(paths, &plan.list_id, &user_id, now),
             Action::Remove => client.remove_member(paths, &plan.list_id, &user_id, now),
         };
+        let landed = result.is_ok();
         match result {
             Ok(()) => {
                 plan.mark_applied(&user_id, action);
@@ -234,7 +235,7 @@ pub(super) fn apply_some(
                 None => return (sent, Err(error)),
             },
         }
-        if let Err(error) = save_plan(&paths.sync_plan_file(), plan) {
+        if let Err(error) = save_progress(paths, plan, &user_id, action, landed) {
             return (sent, Err(error));
         }
         if rejected_in_a_row >= REJECTIONS_IN_A_ROW_LIMIT {
@@ -264,6 +265,15 @@ pub(super) fn apply_some(
     (sent, Ok(()))
 }
 
+/// plan の送信済み印を先に保存し､成功時だけミラーにも反映する｡
+fn save_progress(paths: &Paths, plan: &Plan, id: &str, action: Action, landed: bool) -> Result<()> {
+    save_plan(&paths.sync_plan_file(), plan)?;
+    if landed {
+        super::mirror::applied(paths, plan, id, action)?;
+    }
+    Ok(())
+}
+
 /// 連続してこの件数の write が 400 で拒まれたら apply を止める (#254)｡
 ///
 /// 拒否 1 件は entry の問題だが､続けざまなら list や request の形そのものが
@@ -274,14 +284,13 @@ const REJECTIONS_IN_A_ROW_LIMIT: u32 = 3;
 /// `--sync-list` が何をするよう求められたか｡
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Request {
-    /// plan の write を送る｡これが無ければ実行は dry-run になる: 両側を
-    /// 読み､plan ファイルを書き､report を印字して止まる｡既定を dry-run に
-    /// することが #163 の「適用前に確認する」そのものだ — 対話的な
-    /// プロンプトは無い｡ドルのかかる実行が shell の履歴からキー 1 つで
-    /// 届く場所にあってはならないからだ｡
+    /// plan の write を送る｡指定が無ければ dry-run として､既存 plan と
+    /// count を確認し､必要なときだけ読み取って plan と report を作る｡
     pub apply: bool,
     /// removal も送る｡既定では off — [`apply`] を見よ｡
     pub prune: bool,
+    /// 未送信の plan と count の省略判定を越えて diff を買い直す｡
+    pub reread: bool,
 }
 
 /// `--sync-list` (#163)｡プロセスの exit code を返す｡
@@ -391,12 +400,25 @@ fn run(
     let now = oauth::unix_now();
 
     if !request.apply {
-        let plan = plan_sync(paths, client, user_id, list_id, now)?;
-        save_plan(&plan_path, &plan)?;
-        return Ok(format!(
-            "{}\n\nnothing was changed. Re-run with --apply to send these.",
-            report(&plan)
-        ));
+        if !request.reread
+            && let Some(plan) = load_plan(&plan_path)?.filter(|plan| plan.list_id == list_id)
+        {
+            let unsent = super::schedule::sendable(&plan, false);
+            if unsent > 0 {
+                return Ok(format!(
+                    "{}\n\n{unsent} write(s) from the plan on file are still unsent. Re-run \
+                     with --apply to send them (no reads needed), or pass --reread to pay \
+                     for a fresh diff that replaces the plan.{}",
+                    report(&plan),
+                    super::preflight::seed_first_note(
+                        paths,
+                        list_id,
+                        plan.pending_count(Action::Add)
+                    )
+                ));
+            }
+        }
+        return super::preflight::dry_run(paths, client, user_id, list_id, request.reread, now);
     }
 
     let Some(mut plan) = load_plan(&plan_path)? else {
@@ -481,6 +503,10 @@ fn run(
 }
 
 #[cfg(test)]
+#[path = "mirror_tests.rs"]
+mod mirror_tests;
+
+#[cfg(test)]
 mod tests {
     use super::super::api::fake::{Call, FakeApi, Scratch, page, rate_limited, rejected, user};
     use super::*;
@@ -488,7 +514,7 @@ mod tests {
 
     /// 未適用の entry だけを持つ plan｡`members_total` は removal を測る
     /// 分母なので､prune の判定が絡むテストが自分で上書きする｡
-    fn plan_of(list_id: &str, adds: &[&str], removals: &[&str]) -> Plan {
+    pub(super) fn plan_of(list_id: &str, adds: &[&str], removals: &[&str]) -> Plan {
         let entry = |user_id: &str, action| PlanEntry {
             user_id: user_id.to_string(),
             username: format!("user{user_id}"),
@@ -593,25 +619,27 @@ mod tests {
         assert_eq!(
             client.calls(),
             [
+                Call::Members(None),
                 Call::Following(None),
                 Call::Following(Some("page-2".to_string())),
-                Call::Members(None),
             ]
         );
     }
 
     #[test]
-    fn a_failed_follow_read_never_reaches_the_member_read() {
-        // 続ければ diff の片側だけに金を払ったうえで捨てることになる｡
+    fn a_failed_follow_read_keeps_the_paid_member_mirror() {
         let scratch = Scratch::new("plan-sync-fail");
-        let client = FakeApi::new().following(vec![Err(anyhow::anyhow!("the API said 401"))]);
+        let client = FakeApi::new()
+            .members(vec![Ok(page(&[("2", "bob")], None))])
+            .following(vec![Err(anyhow::anyhow!("the API said 401"))]);
 
         let error = plan_sync(scratch.paths(), &client, "me", "7", 100)
             .unwrap_err()
             .to_string();
 
         assert!(error.contains("nothing was changed"), "{error}");
-        assert_eq!(client.calls(), [Call::Following(None)]);
+        assert_eq!(client.calls(), [Call::Members(None), Call::Following(None)]);
+        assert!(scratch.paths().sync_members_file().exists());
     }
 
     #[test]
@@ -672,7 +700,9 @@ mod tests {
     #[test]
     fn a_seed_name_that_will_not_resolve_names_itself() {
         let scratch = Scratch::dev("seed-fail");
-        let client = FakeApi::new().lookups(vec![Err(anyhow::anyhow!("the API said 404"))]);
+        let client = FakeApi::new()
+            .members(vec![Ok(page(&[], None))])
+            .lookups(vec![Err(anyhow::anyhow!("the API said 404"))]);
 
         let error = plan_sync(scratch.paths(), &client, "me", "7", 100)
             .unwrap_err()
@@ -880,7 +910,233 @@ mod tests {
     // --- run: dry-run と apply の入口 ---
 
     fn request(apply: bool, prune: bool) -> Request {
-        Request { apply, prune }
+        Request {
+            apply,
+            prune,
+            reread: false,
+        }
+    }
+
+    #[test]
+    fn a_dry_run_preserves_unsent_additions_without_any_api_calls() {
+        let scratch = Scratch::new("dry-guard");
+        let original = plan_of("7", &["1", "2"], &["3"]);
+        save_plan(&scratch.paths().sync_plan_file(), &original).unwrap();
+        let client = FakeApi::new();
+        let text = run(
+            scratch.paths(),
+            &client,
+            "me",
+            "7",
+            request(false, false),
+            21_600,
+        )
+        .unwrap();
+        assert!(client.calls().is_empty());
+        assert!(text.starts_with(&report(&original)), "{text}");
+        assert!(text.contains("2 write(s)"), "{text}");
+        assert!(
+            text.contains("--apply") && text.contains("--reread"),
+            "{text}"
+        );
+        assert_eq!(
+            load_plan(&scratch.paths().sync_plan_file()).unwrap(),
+            Some(original)
+        );
+    }
+
+    #[test]
+    fn the_guard_says_to_seed_the_ledger_before_sending_when_there_is_none() {
+        // 台帳が無いまま plan を流し切ると､次の diff は膨らんだ list を全件読む｡
+        // 先に読めば小さいうちに済み､以後は二度と読まない｡
+        let scratch = Scratch::new("dry-guard-no-ledger");
+        save_plan(
+            &scratch.paths().sync_plan_file(),
+            &plan_of("7", &["1", "2"], &[]),
+        )
+        .unwrap();
+        let client = FakeApi::new();
+        let without = run(
+            scratch.paths(),
+            &client,
+            "me",
+            "7",
+            request(false, false),
+            21_600,
+        )
+        .unwrap();
+        assert!(without.contains("sync_members.json"), "{without}");
+        assert!(without.contains("--reread first"), "{without}");
+        assert!(without.contains("2 account(s) larger"), "{without}");
+        assert!(!without.contains('$'), "{without}");
+
+        let ledger = serde_json::json!({"version":1,"list_id":"7","read_at":1,"members":[]});
+        std::fs::write(scratch.paths().sync_members_file(), ledger.to_string()).unwrap();
+        let with = run(
+            scratch.paths(),
+            &client,
+            "me",
+            "7",
+            request(false, false),
+            21_600,
+        )
+        .unwrap();
+        assert!(!with.contains("--reread first"), "{with}");
+        assert!(client.calls().is_empty());
+    }
+
+    #[test]
+    fn unchanged_count_skips_cli_reads_unless_reread_was_requested() {
+        let scratch = Scratch::new("cli-count-skip");
+        let now = oauth::unix_now();
+        let json = serde_json::json!({"version":1,"list_id":"7","read_at":now,"members":[]});
+        std::fs::write(scratch.paths().sync_members_file(), json.to_string()).unwrap();
+        save_state(
+            &scratch.paths().sync_state_file(),
+            &super::super::SyncState {
+                following_count: Some(4),
+                ..super::super::SyncState::default()
+            },
+        )
+        .unwrap();
+        let client = FakeApi::new().counts(vec![Ok(4)]);
+        let text = run(
+            scratch.paths(),
+            &client,
+            "me",
+            "7",
+            request(false, false),
+            21_600,
+        )
+        .unwrap();
+        assert!(
+            text.contains("following count (4)") && text.contains("--reread"),
+            "{text}"
+        );
+        assert_eq!(client.calls(), [Call::FollowingCount]);
+        let client = FakeApi::new()
+            .counts(vec![Ok(4)])
+            .following(vec![Ok(page(&[], None))]);
+        run(
+            scratch.paths(),
+            &client,
+            "me",
+            "7",
+            Request {
+                reread: true,
+                ..request(false, false)
+            },
+            21_600,
+        )
+        .unwrap();
+        assert_eq!(
+            client.calls(),
+            [Call::FollowingCount, Call::Following(None)]
+        );
+        assert_eq!(
+            load_state(&scratch.paths().sync_state_file()).following_count,
+            Some(4)
+        );
+    }
+
+    #[test]
+    fn reread_replaces_an_unsent_plan() {
+        let scratch = Scratch::new("dry-reread");
+        save_plan(
+            &scratch.paths().sync_plan_file(),
+            &plan_of("7", &["old"], &[]),
+        )
+        .unwrap();
+        let client = FakeApi::new()
+            .following(vec![Ok(page(&[("1", "alice")], None))])
+            .members(vec![Ok(page(&[], None))]);
+        let request = Request {
+            reread: true,
+            ..request(false, false)
+        };
+        run(scratch.paths(), &client, "me", "7", request, 21_600).unwrap();
+        assert!(client.calls().contains(&Call::Following(None)));
+        assert!(client.calls().contains(&Call::Members(None)));
+        let saved = load_plan(&scratch.paths().sync_plan_file())
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.entries[0].user_id, "1");
+    }
+
+    #[test]
+    fn cli_retries_a_diff_whose_member_refresh_succeeded_but_follow_read_failed() {
+        let scratch = Scratch::new("cli-count-retry");
+        save_state(
+            &scratch.paths().sync_state_file(),
+            &super::super::SyncState {
+                following_count: Some(4),
+                ..super::super::SyncState::default()
+            },
+        )
+        .unwrap();
+        let client = FakeApi::new()
+            .counts(vec![Ok(4)])
+            .members(vec![Ok(page(&[("2", "bob")], None))])
+            .following(vec![Err(anyhow::anyhow!("following unavailable"))]);
+        assert!(
+            run(
+                scratch.paths(),
+                &client,
+                "me",
+                "7",
+                request(false, false),
+                21_600
+            )
+            .is_err()
+        );
+        let client = FakeApi::new()
+            .counts(vec![Ok(4)])
+            .following(vec![Ok(page(&[], None))]);
+        run(
+            scratch.paths(),
+            &client,
+            "me",
+            "7",
+            request(false, false),
+            21_600,
+        )
+        .unwrap();
+        assert_eq!(
+            client.calls(),
+            [Call::FollowingCount, Call::Following(None)]
+        );
+        assert_eq!(
+            load_plan(&scratch.paths().sync_plan_file())
+                .unwrap()
+                .unwrap()
+                .pending_count(Action::Remove),
+            1
+        );
+    }
+
+    #[test]
+    fn dry_run_reads_when_the_plan_has_no_sendable_additions_for_this_list() {
+        for (label, old) in [
+            ("other", plan_of("other", &["1"], &[])),
+            ("complete", plan_of("7", &[], &[])),
+            ("removals", plan_of("7", &[], &["3"])),
+        ] {
+            let scratch = Scratch::new(&format!("dry-guard-{label}"));
+            save_plan(&scratch.paths().sync_plan_file(), &old).unwrap();
+            let client = FakeApi::new()
+                .following(vec![Ok(page(&[], None))])
+                .members(vec![Ok(page(&[], None))]);
+            run(
+                scratch.paths(),
+                &client,
+                "me",
+                "7",
+                request(false, false),
+                21_600,
+            )
+            .unwrap();
+            assert!(client.calls().contains(&Call::Following(None)));
+        }
     }
 
     #[test]

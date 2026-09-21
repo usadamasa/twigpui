@@ -12,11 +12,11 @@ pub(crate) enum ResourceKind {
     /// 他人の post — home timeline､単一ユーザーの timeline､list の
     /// timeline､`GET /2/tweets?ids=`｡$0.005 / resource｡
     Posts,
-    /// 他人のアカウント情報 — screen name の解決､フォロー一覧､list の
-    /// メンバー｡$0.010 / resource｡
+    /// 他人のアカウント情報 — screen name の解決､list のメンバー｡
+    /// $0.010 / resource｡
     Users,
-    /// 自分のデータ (Owned Reads) — `/2/users/me`､自分が所有する list｡
-    /// $0.001 / resource｡
+    /// 自分のデータ (Owned Reads) — `/2/users/me`､自分が所有する list､
+    /// 自分のフォロー一覧｡$0.001 / resource｡
     Owned,
     /// 書き込み — post/repost/like の作成・削除､list メンバーの追加・削除｡
     /// per resource ではなく per request｡
@@ -42,23 +42,26 @@ impl ResourceKind {
 impl Endpoint {
     /// この endpoint が課金される resource の種別 (#162 issue の対応表そのもの)｡
     ///
-    /// 2 箇所は安全側に倒してある — 実際には Owned Reads ($0.001) の可能性が
-    /// あるが､著者を見て仕分けるコストを払わず高い方の単価で数える:
+    /// `Timeline` は安全側に倒してある — 見ている相手が自分自身の post なら
+    /// Owned Reads ($0.001) の可能性があるが､著者を見て仕分けるコストを
+    /// 払わず Posts ($0.005) で数える｡
+    /// ponytail: 天井は「自分の timeline を見るだけで 5 倍の見積りになる」｡
+    /// 上げるなら､返ってきた post の `author_id` と signed-in user id を
+    /// 比較して Owned/Posts を仕分ける枝を [`extract_resource_ids`] の隣に足す｡
     ///
-    /// - `Timeline`: 見ている相手が自分自身の post でも Posts ($0.005) に倒す｡
-    ///   ponytail: 天井は「自分の timeline を見るだけで 5 倍の見積りになる」｡
-    ///   上げるなら､返ってきた post の `author_id` と signed-in user id を
-    ///   比較して Owned/Posts を仕分ける枝を [`extract_resource_ids`] の隣に足す｡
-    /// - `Following` / `ListMembers`: 自分のフォロー一覧も Users ($0.010) に
-    ///   倒す｡同じ理由､同じ ponytail｡
+    /// `Following` は Owned､`ListMembers` は Users｡2026-09-21 の実測による
+    /// (`x-api-budget` の `reference/pricing.md` 実測ログ 5): $5 の残高で
+    /// following 2340 件が完走し､続く `list_members` が 3 ページ前後で 402 に
+    /// なった｡種別が分かれるので dedup も分かれる — following で返った
+    /// アカウントを `list_members` がもう一度返せば､X はもう一度課金する｡
     ///
     /// 網羅的な `match` にしてあるので､新しい [`Endpoint`] variant を足して
     /// ここを更新し忘れるとコンパイルが落ちる — [`Endpoint::ALL`] の doc が
     /// 同じ理由で挙げている失敗モードだ｡
     pub(crate) fn kind(self) -> ResourceKind {
         match self {
-            Self::UserLookup | Self::Following | Self::ListMembers => ResourceKind::Users,
-            Self::Me | Self::OwnedLists => ResourceKind::Owned,
+            Self::UserLookup | Self::ListMembers => ResourceKind::Users,
+            Self::Me | Self::OwnedLists | Self::Following => ResourceKind::Owned,
             Self::Timeline | Self::HomeTimeline | Self::ListTimeline | Self::TweetById => {
                 ResourceKind::Posts
             }
@@ -129,7 +132,9 @@ mod tests {
             (Endpoint::HomeTimeline, Posts),
             (Endpoint::ListTimeline, Posts),
             (Endpoint::TweetById, Posts),
-            (Endpoint::Following, Users),
+            // 2026-09-21 の実測: $5 の残高で following 2340 件が完走し､
+            // 続く list_members が 3 ページ前後で 402 になった｡
+            (Endpoint::Following, Owned),
             (Endpoint::ListMembers, Users),
             (Endpoint::OwnedLists, Owned),
             (Endpoint::CreatePost, Write),

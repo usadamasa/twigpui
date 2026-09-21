@@ -140,3 +140,22 @@ GET /2/lists/2091351590695588200/tweets?max_results=100
 **`includes.users` が Users 単価 ($0.010) で課金されているかは未解決。**
 `GET /2/usage/tweets` は Post 専用なので、この方法では答えが出ない。
 コンソールの明細を見るしかない。
+
+### 5. following は Owned、list members は Users。endpoint をまたぐ dedup は無い (2026-09-21)
+
+残高切れの状態で 10:31 JST に $5 を購入し、直後に release の `--sync-list` (dry-run) を 1 回実行した。
+この UTC 日にほかの読み取りと書き込みは無い (`usage.json` の posts と write は 09-19 のまま)。
+
+```
+following     24 ページ完走、返却 2340 件
+list_members  4 リクエスト、途中で 402 (plan は保存されなかった)
+```
+
+- following が $0.010 なら 500 件前後で 402 になる。2340 件が完走したので **Owned Reads $0.001** (= $2.34)。
+- 残り約 $2.66 が list_members の 3 ページ前後で尽きた。**Users $0.010** と整合する。
+  docs の料金ウィジェットが `get-list-members` を Owned の対象外にしているのと同じ読み。
+- list の member は全員 following でも返っていた。それでも課金されたので、
+  **同じアカウントでも endpoint (種別) が違えば同日に再課金される。**
+
+金額は残高の尽き方からの推定で、Developer Console の明細とは突き合わせていない。
+同じ endpoint を同日にもう一度読んだときに Users / Owned へ dedup が効くかは、この観測では分からない。

@@ -122,6 +122,26 @@ impl std::fmt::Display for InvalidRequest {
 
 impl std::error::Error for InvalidRequest {}
 
+/// 残高不足を probe の後続 read に持ち越さないための 402｡
+#[derive(Debug)]
+pub(crate) struct PaymentRequired {
+    pub endpoint: Endpoint,
+    pub detail: String,
+}
+
+impl std::fmt::Display for PaymentRequired {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "{}: HTTP 402 Payment Required — {}",
+            self.endpoint.key(),
+            self.detail
+        )
+    }
+}
+
+impl std::error::Error for PaymentRequired {}
+
 /// レスポンスのステータスを検証し､2xx でないものをエラーへ変換する｡
 ///
 /// `refusal` は普通の 429 がどの limit から来たかで､生の
@@ -138,7 +158,7 @@ impl std::error::Error for InvalidRequest {}
 /// 401/403 は [`Denied`] へ (#239)､2 種類の 429 は
 /// [`rate_limit::classify_429`] を通じて [`rate_limit::UsageCapExceeded`] と
 /// [`rate_limit::RateLimited`] へ分かれる｡400 は [`InvalidRequest`] へ (#254)｡
-/// 404 とその他のステータスだけが平文の `anyhow` エラーのままだ — 呼び出し側が
+/// 402 は [`PaymentRequired`] へ｡404 とその他は平文の `anyhow` エラーのまま — 呼び出し側が
 /// これらを型で見分ける必要はまだ無い｡
 pub(super) fn check_status(
     endpoint: Endpoint,
@@ -175,6 +195,7 @@ pub(super) fn check_status(
         }
         .into()),
         400 => Err(InvalidRequest { endpoint, detail }.into()),
+        402 => Err(PaymentRequired { endpoint, detail }.into()),
         404 => bail!("{key}: 404 Not Found — {detail}"),
         429 => match rate_limit::classify_429(body) {
             rate_limit::RateLimitKind::UsageCapExceeded => {
@@ -189,6 +210,22 @@ pub(super) fn check_status(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn payment_required_has_a_type_for_the_sync_probe() {
+        let error = check_status(
+            Endpoint::Me,
+            402,
+            r#"{"detail":"Credits depleted"}"#,
+            rate_limit::Refusal::Opaque,
+            0,
+        )
+        .unwrap_err();
+        let typed = error.downcast_ref::<PaymentRequired>().unwrap();
+        assert_eq!(typed.endpoint, Endpoint::Me);
+        assert!(typed.detail.contains("Credits depleted"));
+        assert!(error.to_string().contains("402"));
+    }
 
     #[test]
     fn accepts_success_statuses() {
