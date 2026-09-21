@@ -152,17 +152,24 @@ fn request_token(form: &[(&str, &str)]) -> Result<TokenResponse> {
         .send_form(form.iter().copied())
         .context("token request failed")?;
     let status = response.status().as_u16();
-    let body = response
-        .body_mut()
-        .read_to_string()
-        .context("could not read the token response body")?;
 
+    // 本文を文字列にするのは断られたときだけだ (#246)｡成功のレスポンスは
+    // token そのものなので､`String` のまま置くと `Secret` が守れない場所を
+    // 通ることになる — `read_json` で直に型へ入れれば､生の本文はどこにも
+    // 残らない｡断りの本文に token は入らない (RFC 6749 §5.2)｡
     if !(200..300).contains(&status) {
-        let detail = tokens::describe_token_error(&body).unwrap_or_else(|| body.clone());
+        let body = response
+            .body_mut()
+            .read_to_string()
+            .context("could not read the token response body")?;
+        let detail = tokens::describe_token_error(&body).unwrap_or(body);
         return Err(TokenRequestRejected { status, detail }.into());
     }
 
-    serde_json::from_str(&body).context("could not parse the token response")
+    response
+        .body_mut()
+        .read_json()
+        .context("could not parse the token response")
 }
 
 /// 保存された (あるいは今 refresh した) OAuth セッション由来の user-context
