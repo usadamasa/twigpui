@@ -127,11 +127,14 @@ request 単位 (`Endpoint::kind()` が `Write` を返すもの)。
 `project_usage` と同じ単位で、Developer Console の数字と直接照合できる。
 Users/Owned/Write は `--usage` の JSON (`by_kind`) に残るが、ヘッダには出ない。
 
-`Endpoint::kind()` は 2 か所で安全側 (高い方の単価) に倒している: `Timeline` は
+`Endpoint::kind()` は 1 か所で安全側 (高い方の単価) に倒している: `Timeline` は
 見ている相手が自分自身の post でも Posts ($0.005) のまま (`Owned Reads` $0.001 に
-仕分けない)、`Following`/`ListMembers` も自分のフォロー一覧を Users ($0.010) のまま
-数える。どちらも著者や自分の id と突き合わせるコストを払わないための意図した
+仕分けない)。著者と自分の id を突き合わせるコストを払わないための意図した
 過大見積りで、`src/usage/kind.rs` に `ponytail:` コメントで天井と上げ方を残してある。
+
+`Following` は Owned ($0.001)、`ListMembers` は Users ($0.010)。種別が違うので dedup も別で、
+following で返ったアカウントを list_members がもう一度返せば、もう一度数える
+(`reference/pricing.md` 実測ログ 5)。**list の member を読むのは following の 10 倍高い。**
 
 `GET /2/usage/tweets` (Post 消費のみ、app-only Bearer 必須) や Developer Console の
 明細と突き合わせて裏取りしたい手順は `reference/pricing.md` を見よ。
