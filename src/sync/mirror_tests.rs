@@ -51,24 +51,33 @@ fn absent_mirror_saves_every_member_page_before_the_follow_read() {
 }
 
 #[test]
-fn unusable_mirrors_require_a_full_member_read() {
-    for (label, list, read_at) in [
-        ("expired", "7", 0),
-        ("other", "8", 3_000_000),
-        ("future", "7", 3_000_001),
-        ("boundary", "7", 408_000),
-    ] {
+fn a_mirror_for_another_list_requires_a_full_member_read() {
+    let scratch = Scratch::new("mirror-other");
+    write_mirror(scratch.paths(), "8", 3_000_000);
+    let client = FakeApi::new()
+        .members(vec![Ok(page(&[("3", "carol")], None))])
+        .following(vec![Ok(page(&[], None))]);
+    let plan = plan_sync(scratch.paths(), &client, "me", "7", 3_000_000).unwrap();
+    assert_eq!(plan.members_total, 1);
+    assert!(client.calls().contains(&Call::Members(None)));
+    let saved = saved_members(scratch.paths());
+    assert_eq!(saved["read_at"], 3_000_000);
+    assert_eq!(saved["members"][0]["id"], "3");
+}
+
+#[test]
+fn age_alone_never_buys_a_member_read() {
+    // member の全件取得は following の 10 倍高く､残高が足りなければ途中の
+    // 402 で何も残らない｡このファイルはアプリが list に入れた相手の台帳で､
+    // 古さは読み直す理由にならない｡読み直すのはファイルを消した人だけ｡
+    for (label, read_at) in [("old", 0), ("future", 3_000_001)] {
         let scratch = Scratch::new(&format!("mirror-{label}"));
-        write_mirror(scratch.paths(), list, read_at);
-        let client = FakeApi::new()
-            .members(vec![Ok(page(&[("3", "carol")], None))])
-            .following(vec![Ok(page(&[], None))]);
+        write_mirror(scratch.paths(), "7", read_at);
+        let client = FakeApi::new().following(vec![Ok(page(&[("2", "bob")], None))]);
         let plan = plan_sync(scratch.paths(), &client, "me", "7", 3_000_000).unwrap();
-        assert_eq!(plan.members_total, 1);
-        assert!(client.calls().contains(&Call::Members(None)));
-        let saved = saved_members(scratch.paths());
-        assert_eq!(saved["read_at"], 3_000_000);
-        assert_eq!(saved["members"][0]["id"], "3");
+        assert!(plan.is_complete(), "{label}");
+        assert_eq!(client.calls(), [Call::Following(None)], "{label}");
+        assert_eq!(saved_members(scratch.paths())["read_at"], read_at, "{label}");
     }
 }
 
