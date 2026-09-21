@@ -20,11 +20,18 @@
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
+use redact::Secret;
 
 use super::tokens::{self, TokenResponse, TokenSet};
 use crate::paths::Paths;
 
 /// 保存された OAuth セッションの、生きている姿。
+///
+/// `Debug` を derive してよいのは、token が `TokenSet` の `Secret`
+/// フィールドとして入っていて中身を出さないからだ (#246)。ログは
+/// `log::redact` を通るが、通らない経路 (panic の payload など) があり、
+/// そこを守っているのは型のほうになる。
+#[derive(Debug)]
 pub(crate) struct Session {
     client_id: String,
     paths: Paths,
@@ -32,19 +39,6 @@ pub(crate) struct Session {
     /// 差し替える。同時に走る 2 つのポーリングが同じ refresh token を
     /// 二重に使うことはない。
     state: Mutex<TokenSet>,
-}
-
-/// `access_token` と `refresh_token` は `Debug` にも出さない。ログは
-/// `log::redact` を通るが、通らない経路 (panic の payload など) がある。
-impl std::fmt::Debug for Session {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("Session")
-            .field("client_id", &self.client_id)
-            .field("expires_at", &self.expires_at())
-            .field("scope", &self.scope())
-            .finish_non_exhaustive()
-    }
 }
 
 impl Session {
@@ -62,12 +56,8 @@ impl Session {
         self.locked().scope.clone()
     }
 
-    fn expires_at(&self) -> i64 {
-        self.locked().expires_at
-    }
-
     /// このリクエストに使う access token。期限の手前なら、返す前に更新する。
-    pub(crate) fn bearer(&self, now: i64) -> Result<String> {
+    pub(crate) fn bearer(&self, now: i64) -> Result<Secret<String>> {
         self.bearer_with(now, |client_id, refresh_token| {
             super::refresh_access_token(client_id, refresh_token)
         })
@@ -78,8 +68,8 @@ impl Session {
     fn bearer_with(
         &self,
         now: i64,
-        refresh: impl FnOnce(&str, &str) -> Result<TokenResponse>,
-    ) -> Result<String> {
+        refresh: impl FnOnce(&str, &Secret<String>) -> Result<TokenResponse>,
+    ) -> Result<Secret<String>> {
         let mut state = self.locked();
         if !state.needs_refresh(now) {
             return Ok(state.access_token.clone());
@@ -152,8 +142,8 @@ mod tests {
 
     fn stored(expires_at: i64) -> TokenSet {
         TokenSet {
-            access_token: "old-access".to_string(),
-            refresh_token: Some("old-refresh".to_string()),
+            access_token: tokens::secret("old-access"),
+            refresh_token: Some(tokens::secret("old-refresh")),
             expires_at,
             scope: Some("tweet.read users.read".to_string()),
         }
@@ -161,11 +151,27 @@ mod tests {
 
     fn renewed() -> TokenResponse {
         TokenResponse {
-            access_token: "new-access".to_string(),
-            refresh_token: Some("new-refresh".to_string()),
+            access_token: tokens::secret("new-access"),
+            refresh_token: Some(tokens::secret("new-refresh")),
             expires_in: 7200,
             scope: None,
         }
+    }
+
+    #[test]
+    fn the_debug_output_never_carries_a_token() {
+        // 手書きの `Debug` を消して derive に戻せた根拠 (#246)｡token を
+        // 隠しているのは `TokenSet` の `Secret` フィールドで、この struct が
+        // 何を持つかではない｡
+        let root = temp_root("debug");
+        let paths = test_paths(&root);
+
+        let session = Session::new("client".to_string(), paths, stored(10_000));
+        let rendered = format!("{session:?}");
+
+        assert!(!rendered.contains("old-access"), "{rendered}");
+        assert!(!rendered.contains("old-refresh"), "{rendered}");
+        assert!(rendered.contains("client"), "{rendered}");
     }
 
     #[test]
@@ -179,7 +185,7 @@ mod tests {
             .bearer_with(1_000, |_, _| panic!("must not refresh a fresh token"))
             .unwrap();
 
-        assert_eq!(token, "old-access");
+        assert_eq!(token.expose_secret(), "old-access");
         std::fs::remove_dir_all(&root).unwrap();
     }
 
@@ -195,15 +201,18 @@ mod tests {
         let token = session
             .bearer_with(10_000, |client_id, refresh_token| {
                 assert_eq!(client_id, "client");
-                assert_eq!(refresh_token, "old-refresh");
+                assert_eq!(refresh_token.expose_secret(), "old-refresh");
                 Ok(renewed())
             })
             .unwrap();
 
-        assert_eq!(token, "new-access");
+        assert_eq!(token.expose_secret(), "new-access");
         let saved = tokens::load(&paths).unwrap().unwrap();
-        assert_eq!(saved.access_token, "new-access");
-        assert_eq!(saved.refresh_token.as_deref(), Some("new-refresh"));
+        assert_eq!(saved.access_token.expose_secret(), "new-access");
+        assert_eq!(
+            tokens::exposed(saved.refresh_token.as_ref()),
+            Some("new-refresh")
+        );
         assert_eq!(saved.expires_at, 17_200);
 
         std::fs::remove_dir_all(&root).unwrap();
@@ -221,7 +230,7 @@ mod tests {
             .bearer_with(11_000, |_, _| panic!("the refreshed token is still fresh"))
             .unwrap();
 
-        assert_eq!(token, "new-access");
+        assert_eq!(token.expose_secret(), "new-access");
         std::fs::remove_dir_all(&root).unwrap();
     }
 

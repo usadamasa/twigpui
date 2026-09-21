@@ -9,6 +9,7 @@ use std::io::Write as _;
 use std::os::unix::fs::OpenOptionsExt as _;
 
 use anyhow::{Context as _, Result};
+use redact::Secret;
 use serde::{Deserialize, Serialize};
 
 use crate::paths::Paths;
@@ -21,9 +22,9 @@ const REFRESH_SKEW_SECONDS: i64 = 60;
 /// 返す JSON の body (RFC 6749 §5.1)｡
 #[derive(Debug, Deserialize)]
 pub(crate) struct TokenResponse {
-    pub access_token: String,
+    pub access_token: Secret<String>,
     #[serde(default)]
-    pub refresh_token: Option<String>,
+    pub refresh_token: Option<Secret<String>>,
     pub expires_in: u64,
     /// X が実際に与えた scope (#14) — 空白区切り､RFC 6749 §5.1｡
     /// `#[serde(default)]` なのは､リクエストから変わらない場合に token
@@ -63,9 +64,15 @@ pub(crate) fn describe_token_error(body: &str) -> Option<String> {
 /// 覚えていなくても新しさが分かる｡
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct TokenSet {
-    pub access_token: String,
-    #[serde(default)]
-    pub refresh_token: Option<String>,
+    /// `Secret` なので `Debug` に中身が出ない (#246)｡ログは
+    /// `log::redact` を通るが､通らない経路 — panic の payload､
+    /// `anyhow` の chain — があり､そこはこの型だけが守る｡
+    /// 保存するときは `serialize_with` で中身を出す: ファイルは 0600 で､
+    /// 次の起動がここから読む｡
+    #[serde(serialize_with = "redact::serde::expose_secret")]
+    pub access_token: Secret<String>,
+    #[serde(default, serialize_with = "redact::serde::expose_secret")]
+    pub refresh_token: Option<Secret<String>>,
     pub expires_at: i64,
     /// この token と一緒に与えられた scope (#14)｡RFC 6749 §3.3 に従い空白
     /// 区切り｡ここの `#[serde(default)]` は､この struct とクレートの他の
@@ -86,6 +93,21 @@ pub(crate) struct TokenSet {
     /// 既定に頼らない｡
     #[serde(default)]
     pub scope: Option<String>,
+}
+
+/// テストが token のリテラルを書くための短い形｡`Secret<String>` は
+/// `From<&str>` を持たない — うっかり `String` から秘匿型へ入れ替わるのを
+/// 防ぐためで､テストではその手間に意味が無い｡
+#[cfg(test)]
+pub(crate) fn secret(value: &str) -> Secret<String> {
+    Secret::new(value.to_string())
+}
+
+/// テストが `Option<Secret<String>>` を素の文字列と突き合わせるための形｡
+/// `Option::as_deref` の代わりに使う｡
+#[cfg(test)]
+pub(crate) fn exposed(value: Option<&Secret<String>>) -> Option<&str> {
+    value.map(|secret| secret.expose_secret().as_str())
 }
 
 impl TokenSet {
@@ -201,8 +223,11 @@ mod tests {
     #[test]
     fn parses_a_token_response() {
         let response: TokenResponse = serde_json::from_str(TOKEN_RESPONSE_JSON).unwrap();
-        assert_eq!(response.access_token, "access-abc");
-        assert_eq!(response.refresh_token.as_deref(), Some("refresh-xyz"));
+        assert_eq!(response.access_token.expose_secret(), "access-abc");
+        assert_eq!(
+            exposed(response.refresh_token.as_ref()),
+            Some("refresh-xyz")
+        );
         assert_eq!(response.expires_in, 7200);
         assert_eq!(
             response.scope.as_deref(),
@@ -215,7 +240,7 @@ mod tests {
         let response: TokenResponse = serde_json::from_str(TOKEN_RESPONSE_JSON).unwrap();
         let tokens = TokenSet::from_response(response, 1_000);
         assert_eq!(tokens.expires_at, 1_000 + 7200);
-        assert_eq!(tokens.access_token, "access-abc");
+        assert_eq!(tokens.access_token.expose_secret(), "access-abc");
         assert_eq!(
             tokens.scope.as_deref(),
             Some("tweet.read users.read offline.access")
@@ -223,9 +248,29 @@ mod tests {
     }
 
     #[test]
+    fn the_debug_output_never_carries_a_token() {
+        // この型が `String` でなく `Secret<String>` を持つ理由 (#246)｡
+        // ログは `log::redact` を通るが､panic の payload や `anyhow` の
+        // chain は通らない｡そこを守るのは型のほうだ｡
+        let tokens = TokenSet {
+            access_token: secret("access-abc"),
+            refresh_token: Some(secret("refresh-xyz")),
+            expires_at: 1,
+            scope: None,
+        };
+
+        let rendered = format!("{tokens:?}");
+
+        assert!(!rendered.contains("access-abc"), "{rendered}");
+        assert!(!rendered.contains("refresh-xyz"), "{rendered}");
+        // 消しすぎない: 期限が読めないと `Debug` を出す意味が無い｡
+        assert!(rendered.contains("expires_at: 1"), "{rendered}");
+    }
+
+    #[test]
     fn needs_refresh_is_false_well_before_expiry() {
         let tokens = TokenSet {
-            access_token: "a".into(),
+            access_token: secret("a"),
             refresh_token: None,
             expires_at: 10_000,
             scope: None,
@@ -236,7 +281,7 @@ mod tests {
     #[test]
     fn needs_refresh_is_true_inside_the_skew_window() {
         let tokens = TokenSet {
-            access_token: "a".into(),
+            access_token: secret("a"),
             refresh_token: None,
             expires_at: 10_000,
             scope: None,
@@ -247,7 +292,7 @@ mod tests {
     #[test]
     fn needs_refresh_is_true_after_expiry() {
         let tokens = TokenSet {
-            access_token: "a".into(),
+            access_token: secret("a"),
             refresh_token: None,
             expires_at: 10_000,
             scope: None,
@@ -307,8 +352,8 @@ mod tests {
             "expires_at": 1700000000
         }"#;
         let tokens: TokenSet = serde_json::from_str(old_format).unwrap();
-        assert_eq!(tokens.access_token, "access-abc");
-        assert_eq!(tokens.refresh_token.as_deref(), Some("refresh-xyz"));
+        assert_eq!(tokens.access_token.expose_secret(), "access-abc");
+        assert_eq!(exposed(tokens.refresh_token.as_ref()), Some("refresh-xyz"));
         assert_eq!(tokens.scope, None);
     }
 
@@ -352,12 +397,17 @@ mod tests {
         paths.ensure_dirs().unwrap();
 
         let tokens = TokenSet {
-            access_token: "access".to_string(),
-            refresh_token: Some("refresh".to_string()),
+            access_token: secret("access"),
+            refresh_token: Some(secret("refresh")),
             expires_at: 123_456,
             scope: Some("tweet.read tweet.write".to_string()),
         };
         save(&paths, &tokens).unwrap();
+        // ファイルには素の token が要る｡`Secret` の `Debug` の形
+        // (`[REDACTED …]`) を書いてしまうと、次の起動はサインイン済みの
+        // まま何も取得できなくなる｡
+        let on_disk = std::fs::read_to_string(paths.oauth_token_file()).unwrap();
+        assert!(on_disk.contains(r#""access_token": "access""#), "{on_disk}");
         let loaded = load(&paths).unwrap();
         assert_eq!(loaded, Some(tokens));
 
@@ -375,7 +425,7 @@ mod tests {
         save(
             &paths,
             &TokenSet {
-                access_token: "a".into(),
+                access_token: secret("a"),
                 refresh_token: None,
                 expires_at: 1,
                 scope: None,

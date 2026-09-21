@@ -14,6 +14,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context as _, Result};
+use redact::Secret;
 use ureq::Agent;
 
 use super::model::{Draft, TweetIdRequest, UserIdRequest};
@@ -56,7 +57,7 @@ enum Bearer {
     /// どのみち何も送らないので､`oauth::Session` とそれが要る `Paths` を
     /// 組み立てさせる意味が無い｡
     #[cfg(test)]
-    Static(String),
+    Static(Secret<String>),
 }
 
 impl XClient {
@@ -69,7 +70,7 @@ impl XClient {
     /// 固定の token を持つ client｡[`Bearer::Static`] を見よ｡
     #[cfg(test)]
     pub(crate) fn new(bearer_token: String) -> Self {
-        Self::with_bearer(Bearer::Static(bearer_token))
+        Self::with_bearer(Bearer::Static(Secret::new(bearer_token)))
     }
 
     fn with_bearer(bearer: Bearer) -> Self {
@@ -90,13 +91,19 @@ impl XClient {
     /// 送信 1 回ごとに (retry のたびにも) 通る — 更新の判断は
     /// [`oauth::Session::bearer`] にあり､まだ新しければネットワークへは
     /// 出ない｡
-    fn authorization(&self, now: i64) -> Result<String> {
+    fn authorization(&self, now: i64) -> Result<Secret<String>> {
         let token = match &self.bearer {
             Bearer::Renewing(session) => session.bearer(now)?,
             #[cfg(test)]
             Bearer::Static(token) => token.clone(),
         };
-        Ok(format!("Bearer {token}"))
+        // ヘッダの中身も `Secret` のまま運ぶ｡`Bearer ` を前に付けただけで
+        // token であることは変わらんので、`{:?}` や anyhow の chain へ
+        // 迷い込んだときに出てよい理由が無い (#246)｡
+        Ok(Secret::new(format!(
+            "Bearer {}",
+            token.expose_secret().as_str()
+        )))
     }
 
     /// GET を 1 回行う｡まず #10 の中心的な規則を守る — `endpoint` の追跡中の
@@ -237,7 +244,10 @@ impl XClient {
         let mut response = self
             .agent
             .get(url)
-            .header("Authorization", self.authorization(now)?)
+            .header(
+                "Authorization",
+                self.authorization(now)?.expose_secret().as_str(),
+            )
             .call()
             .with_context(|| format!("request to {url} failed"))?;
 
@@ -279,7 +289,10 @@ impl XClient {
         let mut response = self
             .agent
             .post(url)
-            .header("Authorization", self.authorization(now)?)
+            .header(
+                "Authorization",
+                self.authorization(now)?.expose_secret().as_str(),
+            )
             .send_json(draft.to_request())
             .with_context(|| format!("request to {url} failed"))?;
 
@@ -311,7 +324,10 @@ impl XClient {
         let mut response = self
             .agent
             .delete(url)
-            .header("Authorization", self.authorization(now)?)
+            .header(
+                "Authorization",
+                self.authorization(now)?.expose_secret().as_str(),
+            )
             .call()
             .with_context(|| format!("request to {url} failed"))?;
 
@@ -353,7 +369,10 @@ impl XClient {
         let mut response = self
             .agent
             .post(url)
-            .header("Authorization", self.authorization(now)?)
+            .header(
+                "Authorization",
+                self.authorization(now)?.expose_secret().as_str(),
+            )
             .send_json(TweetIdRequest { tweet_id })
             .with_context(|| format!("request to {url} failed"))?;
 
@@ -393,7 +412,10 @@ impl XClient {
         let mut response = self
             .agent
             .post(url)
-            .header("Authorization", self.authorization(now)?)
+            .header(
+                "Authorization",
+                self.authorization(now)?.expose_secret().as_str(),
+            )
             .send_json(UserIdRequest { user_id })
             .with_context(|| format!("request to {url} failed"))?;
 

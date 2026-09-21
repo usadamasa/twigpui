@@ -19,6 +19,7 @@ use std::time::Duration;
 
 use anyhow::{Context as _, Result};
 use gpui::BackgroundExecutor;
+use redact::Secret;
 use ureq::Agent;
 
 use crate::config::Config;
@@ -95,10 +96,10 @@ fn exchange_authorization_code(
     ])
 }
 
-fn refresh_access_token(client_id: &str, refresh_token: &str) -> Result<TokenResponse> {
+fn refresh_access_token(client_id: &str, refresh_token: &Secret<String>) -> Result<TokenResponse> {
     request_token(&[
         ("grant_type", "refresh_token"),
-        ("refresh_token", refresh_token),
+        ("refresh_token", refresh_token.expose_secret()),
         ("client_id", client_id),
     ])
 }
@@ -393,7 +394,7 @@ mod tests {
         tokens::save(
             &paths,
             &TokenSet {
-                access_token: "oauth-token".into(),
+                access_token: tokens::secret("oauth-token"),
                 refresh_token: None,
                 expires_at: 0,
                 scope: Some("tweet.read tweet.write".into()),
@@ -422,7 +423,7 @@ mod tests {
         tokens::save(
             &paths,
             &TokenSet {
-                access_token: "oauth-token".into(),
+                access_token: tokens::secret("oauth-token"),
                 refresh_token: None,
                 expires_at: 0,
                 scope: None,

@@ -77,6 +77,19 @@ chrono-tz = { version = "0.10.4", default-features = false }
 # ちょうどその ζ = 1｡
 charmed-harmonica = "=0.2.3"
 dotenvy = "0.15.7"
+# OAuth の token を型で秘匿する (#246)｡`Secret<T>` の `Debug` は中身を出さず、
+# 出口は `expose_secret()` だけ — `Deref` も `AsRef` も無いので、うっかり
+# `String` に戻ることがない｡`log::redact` の文字列スキャンとは別の防御線で、
+# こちらはパース済みのフィールドを、あちらは未パースの body を守る｡
+#
+# `secrecy` を先に読み、採らなかった: `SecretString` は `PartialEq` を持たず、
+# `Serialize` が orphan rule で塞がっているので、ディスクへ保存する
+# `oauth::TokenSet` が組み立てられない｡
+#
+# drop 時の zeroize (`zeroize` feature) は入れない｡token はプロセスの一生ぶん
+# 生きて、どのみち 0600 のファイルに載っている｡守る相手はログの漏洩であって
+# メモリフォレンジックではない｡
+redact = { version = "0.1.11", features = ["serde"] }
 # 必要なのは生のランダムバイトの供給源だけで (PKCE の verifier と OAuth の
 # `state`)､`rand` の API 全面 (分布､シード､シャッフル補助) ではない｡
 # `getrandom` がちょうどそこを覆うので､`rand` ではなくこちらを使う｡
