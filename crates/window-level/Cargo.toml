@@ -1,0 +1,63 @@
+[package]
+name = "window-level"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# 本体 (`../../Cargo.toml`) と同じ deny 群｡違いは 2 点だけで､どちらも
+# この crate が在る理由そのものだ: `unsafe_code` は forbid できない代わりに､
+# unsafe の書き方を縛る 2 つを deny にしてある｡
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_debug_implementations = "deny"
+unreachable_pub = "deny"
+unused_qualifications = "deny"
+rust_2018_idioms = { level = "deny", priority = -1 }
+missing_docs = "deny"
+trivial_casts = "deny"
+trivial_numeric_casts = "deny"
+unused_lifetimes = "deny"
+unused_macro_rules = "deny"
+unused_crate_dependencies = "deny"
+variant_size_differences = "deny"
+
+[lints.clippy]
+pedantic = { level = "deny", priority = -1 }
+# unsafe ブロックには必ず `// SAFETY:` を付ける｡この crate の存在意義は
+# 生ポインタを 1 か所へ閉じ込めることなので､前提が書かれていない unsafe が
+# 増えたらその閉じ込めは意味を失う｡
+undocumented_unsafe_blocks = "deny"
+multiple_unsafe_ops_per_block = "deny"
+unwrap_used = "deny"
+expect_used = "deny"
+todo = "deny"
+dbg_macro = "deny"
+indexing_slicing = "deny"
+string_slice = "deny"
+panic = "deny"
+unwrap_in_result = "deny"
+float_cmp = "deny"
+verbose_file_reads = "deny"
+same_name_method = "deny"
+missing_assert_message = "deny"
+redundant_type_annotations = "deny"
+arithmetic_side_effects = "deny"
+
+[dependencies]
+# `MainThreadMarker`｡AppKit の型を触ってよいかを Option で答える｡
+objc2 = "0.6.4"
+# `NSView::window()` と `NSWindow::setLevel` はどちらも safe fn｡この crate の
+# unsafe は生ポインタから `&NSView` を作る 1 か所だけで済む｡version は
+# gpui-pre-macos が引いている objc2 0.6 系に合わせてあり､重複は作らない｡
+objc2-app-kit = { version = "0.3.2", default-features = false, features = [
+    "std",
+    # `NSView` の型そのものは superclass の `NSResponder` と両方が要る
+    # (`objc2-app-kit` の `generated/mod.rs` の `cfg(all(…))`)｡片方だけだと
+    # workspace 全体のビルドでは gpui 側の feature 統合に救われて通り､
+    # `--package window-level` 単体で落ちる｡
+    "NSResponder",
+    "NSView",
+    "NSWindow",
+] }
+# gpui の `Window` が実装している trait｡この crate は gpui に依存しない｡
+raw-window-handle = "0.6.2"

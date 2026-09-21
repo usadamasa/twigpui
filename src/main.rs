@@ -56,7 +56,7 @@ mod x_api;
 use std::collections::HashSet;
 use std::io::IsTerminal as _;
 
-use gpui::{AppContext as _, Application, TitlebarOptions, WindowBounds, WindowOptions};
+use gpui::{AppContext as _, TitlebarOptions, WindowBounds, WindowOptions};
 
 fn main() {
     let config = match config::Config::from_env() {
@@ -158,7 +158,7 @@ fn main() {
 
     // #95: ツールバーが描くアイコン｡gpui は `svg()` のパスをこれを通して
     // 解決するので､これが無いとどのアイコンも何も描かれない｡
-    Application::new()
+    gpui_platform::application()
         .with_assets(assets::Assets)
         .run(move |cx| {
             register_key_bindings(cx);
@@ -179,7 +179,7 @@ fn main() {
             // プロセスを走らせ､`cmd-q` だけがそこへ届く状態を残していた｡
             // 決め打ちせず数えているので､二枚目のウィンドウがあっても最後の
             // 一枚が出るまでは終わらない｡
-            cx.on_window_closed(|cx| {
+            cx.on_window_closed(|cx, _window_id| {
                 if cx.windows().is_empty() {
                     cx.quit();
                 }
@@ -203,12 +203,6 @@ fn main() {
                 }),
                 ..Default::default()
             };
-
-            // fork した gpui の patch (Cargo.toml の `[patch.crates-io]`):
-            // fixture の window は画面がロックされていても描き続ける｡
-            // `open_window` の前でなければならない理由は
-            // `ui::Startup::draws_while_occluded` を見よ｡
-            gpui::set_draw_while_occluded(startup.draws_while_occluded());
 
             let opened = cx.open_window(options, |window, cx| {
                 let timeline =

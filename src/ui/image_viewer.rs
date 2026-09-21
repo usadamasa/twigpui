@@ -213,7 +213,7 @@ impl ImageViewer {
             focus_handle: cx.focus_handle(),
             _timeline_changed: timeline_changed,
         };
-        window.focus(&this.focus_handle);
+        window.focus(&this.focus_handle, cx);
         this
     }
 

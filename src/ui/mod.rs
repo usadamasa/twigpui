@@ -6,7 +6,7 @@ use gpui::{
     AnyElement, Context, Div, Entity, FocusHandle, FontWeight, ObjectFit, ScrollHandle,
     SharedString, Stateful, Subscription, Task, Window, div, img, prelude::*, px, rgb, rgba, svg,
 };
-use gpui_component::input::{Input, InputEvent, InputState};
+use gpui_component::input::{InputEvent, Textarea, TextareaState};
 
 use crate::activity::{self, Activity};
 use crate::assets;
@@ -211,7 +211,7 @@ pub(crate) struct TimelineView {
     compose: ComposeState,
     /// composer の本物のテキスト入力ウィジェット (#38)｡`div().on_key_down()`
     /// でやっていた生のキーストローク読みを置き換えたもの: 実体は
-    /// `gpui_component::input::InputState` で､`EntityInputHandler` を
+    /// `gpui_component::input::TextareaState` で､`EntityInputHandler` を
     /// きちんと実装しているため､IME の変換 (日本語､中国語､韓国語)､カーソル
     /// 移動､選択､コピー/ペーストがすべて動く｡ユーザーが実際に見て打ち込む
     /// のはこのバッファであり､上の `compose` がこちらへ追従する｡逆ではない｡
@@ -219,7 +219,7 @@ pub(crate) struct TimelineView {
     /// そこではこれを明示的に消している｡submit 成功時に `compose` だけを
     /// `text.clear()` しても､ウィジェットは古い下書きを表示したままに
     /// なるからである｡
-    compose_input: Entity<InputState>,
+    compose_input: Entity<TextareaState>,
     /// 開いている compose window があればその handle (#282)｡`⌘N` は新しく
     /// 開く代わりにこれを前面へ出す｡窓を閉じても `None` へは戻さない —
     /// 次に開こうとしたとき `WindowHandle::update` が失敗することが
@@ -4181,8 +4181,9 @@ mod tests {
     }
 
     /// #267: Window メニューの Float on Top も同じ形 — 反転させ､言い､覚える｡
-    /// window の level そのものは gpui の fork の patch が触るので､テスト
-    /// プラットフォームでは no-op｡ここで見えるのは view 側の配線だけだ｡
+    /// window の level そのものは `window-level` crate が触るが､テスト
+    /// platform の window は raw handle を返さないので `Err` に落ちる｡
+    /// ここで見えるのは view 側の配線だけだ｡
     #[gpui::test]
     fn toggling_float_on_top_flips_the_switch_and_reports_itself(cx: &mut gpui::TestAppContext) {
         use gpui::AppContext as _;

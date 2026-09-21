@@ -68,6 +68,16 @@ allowlist=(
 # 断線を CI に持ち込む｡
 never_allowed=('thread::sleep' 'reqwest' 'ureq')
 
+# 見る対象の .rs｡本体の `src/` と､workspace の member (`crates/*/src`)｡
+# helper crate のテストも同じゲートの下に置く｡引数はそのまま `find` へ渡す｡
+rust_sources() {
+  local roots=(src)
+  if [ -d crates ]; then
+    roots+=(crates)
+  fi
+  find "${roots[@]}" -name '*.rs' "$@"
+}
+
 # allowlist 自身の検算｡置けないマーカーが入っていれば､どのファイルを見るより
 # 先に落とす｡
 validate_allowlist() {
@@ -94,7 +104,7 @@ validate_allowlist() {
 #
 # shellcheck disable=SC2016  # 下の `$0` は awk のフィールドで shell のものではない
 classify() {
-  find src -name '*.rs' -print0 |
+  rust_sources -print0 |
     xargs -0 awk '
       function flush(   size, markers) {
         if (file == "" || !has_tests) return

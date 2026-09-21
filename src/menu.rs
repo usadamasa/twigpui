@@ -267,8 +267,8 @@ const TOGGLE_TRANSLUCENT: Shortcut = Shortcut {
 ///
 /// 鍵は Stickies の Floating Window (⌥⌘F) から借りた — [`TOGGLE_TRANSLUCENT`]
 /// と対で､同じメニューに同じ順で並ぶ｡`cmd-shift-f` (follow) とは
-/// 修飾キーが違う｡level を動かすのは gpui の fork の patch
-/// (`Window::set_floating`) で､upstream の 0.2.2 には無い｡
+/// 修飾キーが違う｡level を動かすのは `window-level` crate で､gpui-pre には
+/// 開いた後に level を動かす口が無い｡
 const TOGGLE_FLOAT_ON_TOP: Shortcut = Shortcut {
     keystroke: "cmd-alt-f",
     context: Some(KEY_CONTEXT),
@@ -425,10 +425,12 @@ pub(crate) fn menus(sources: Vec<gpui::MenuItem>) -> Vec<gpui::Menu> {
             .into_iter()
             .chain(QUIT.menu_item())
             .collect(),
+            disabled: false,
         },
         gpui::Menu {
             name: "File".into(),
             items: OPEN_COMPOSER.menu_item().into_iter().collect(),
+            disabled: false,
         },
         // #282: どの timeline を表示するかのトップレベルのメニュー — サブ
         // メニューにしなかった理由は `PLAN.md`/設計メモを見よ (主たる
@@ -437,6 +439,7 @@ pub(crate) fn menus(sources: Vec<gpui::MenuItem>) -> Vec<gpui::Menu> {
         gpui::Menu {
             name: "Sources".into(),
             items: sources,
+            disabled: false,
         },
         gpui::Menu {
             name: "View".into(),
@@ -454,6 +457,7 @@ pub(crate) fn menus(sources: Vec<gpui::MenuItem>) -> Vec<gpui::Menu> {
             .into_iter()
             .flatten()
             .collect(),
+            disabled: false,
         },
         // この名前は荷重を負っている (#109): gpui の macOS プラットフォーム
         // がメニューを AppKit の `setWindowsMenu_` へ渡すのは､それが厳密に
@@ -475,6 +479,7 @@ pub(crate) fn menus(sources: Vec<gpui::MenuItem>) -> Vec<gpui::Menu> {
             .into_iter()
             .flatten()
             .collect(),
+            disabled: false,
         },
     ]
 }

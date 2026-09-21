@@ -194,7 +194,7 @@ impl TimelineView {
         };
         // #118: 何よりも先に｡最初のフレームから focus の経路に空のものでは
         // なく timeline が乗るようにするため｡
-        window.focus(&this.focus_handle);
+        window.focus(&this.focus_handle, cx);
         this.finish_startup(startup, window, cx);
         this
     }
@@ -226,9 +226,9 @@ impl TimelineView {
     fn compose_input(
         window: &mut Window,
         cx: &mut Context<'_, Self>,
-    ) -> (Entity<InputState>, Subscription) {
+    ) -> (Entity<TextareaState>, Subscription) {
         let input = cx.new(|cx| {
-            InputState::new(window, cx)
+            TextareaState::new(window, cx)
                 .auto_grow(2, 8)
                 .placeholder("What's happening?")
         });
@@ -236,7 +236,7 @@ impl TimelineView {
         (input, subscription)
     }
 
-    /// compose window を開く直前に呼ぶ (#282)｡`InputState::new` はカーソル
+    /// compose window を開く直前に呼ぶ (#282)｡`TextareaState::new` はカーソル
     /// の点滅と blur の購読を渡された window へ束ねる (gpui-component の
     /// 実装を見よ) ので､timeline の window で作った `compose_input` を
     /// 別の window で描いても点滅も blur も届かない｡だから開くたびに
@@ -331,7 +331,7 @@ impl TimelineView {
 
     /// Window メニューの Float on Top (#267)｡[`Self::toggle_translucent`] と
     /// 同じ形: 反転させ､効かせ､言い､覚える｡
-    pub(super) fn toggle_float_on_top(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+    pub(super) fn toggle_float_on_top(&mut self, window: &Window, cx: &mut Context<'_, Self>) {
         self.window_state.float_on_top = !self.window_state.float_on_top;
         self.apply_floating(window);
         let outcome = if self.window_state.float_on_top {
@@ -346,12 +346,19 @@ impl TimelineView {
 
     /// `window_state.float_on_top` を platform の window に伝える (#267)｡
     ///
-    /// `Window::set_floating` は gpui の fork の patch (Cargo.toml の
-    /// `[patch.crates-io]`) にしか無い｡upstream 0.2.2 の `WindowKind` は
-    /// 開くときに決めるもので､macOS では `Floating` も `Normal` と同じ
-    /// level に置かれる — 開いた後に切り替える口はこれだけだ｡
+    /// gpui-pre には window を開いた後に level を動かす口が無いので
+    /// (`WindowKind` は `open_window` のときに決まる)､raw window handle から
+    /// `NSWindow` を辿って level だけを差し替える｡なぜ `WindowKind::Floating`
+    /// で開き直さないのかは [`window_level`] の crate doc に｡
+    ///
+    /// 届かなかったときは 1 行言って続ける｡level は描画にも状態にも関わら
+    /// ないので､失うのは見た目だけだ — テスト platform の window は raw
+    /// handle を返さないので (`HandleError::NotSupported`)､テストからの
+    /// トグルは必ずここを通る｡
     fn apply_floating(&self, window: &Window) {
-        window.set_floating(self.window_state.float_on_top);
+        if let Err(error) = window_level::set_floating(window, self.window_state.float_on_top) {
+            log::warn(&format!("could not set the window level: {error}"));
+        }
     }
 
     /// `window_state.translucent` を platform の window に伝える (#267)｡

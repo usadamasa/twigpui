@@ -38,6 +38,19 @@ cd "$repo_root"
 
 baseline_file="metrics-baseline.tsv"
 
+# 測る対象の .rs｡本体の `src/` と､workspace の member (`crates/*/src`)｡
+#
+# helper crate も同じ上限の下に置く｡`crates/window-level` は `unsafe` を
+# 抱えるために本体から分けたものなので､そこだけ上限の外に居るのでは
+# 分けた意味が薄れる｡引数はそのまま `find` へ渡す (`-print0` など)｡
+rust_sources() {
+  local roots=(src)
+  if [ -d crates ]; then
+    roots+=(crates)
+  fi
+  find "${roots[@]}" -name '*.rs' "$@"
+}
+
 # 1 ファイルの実装行数の上限｡テスト行は数えない (`implementation_lines`)｡
 #
 # 600 は今日の分布から置いた｡49 ファイルのうち 38 がすでに下にいて､上に
@@ -115,7 +128,7 @@ if [ "${1:-}" = "--check" ]; then
         "$file" "$impl" "$ceiling" >&2
       failed=1
     fi
-  done < <(find src -name '*.rs' | sort)
+  done < <(rust_sources | sort)
 
   # --- 2. 天井の一覧を base と突き合わせる ---------------------------------
   #
@@ -175,7 +188,7 @@ while IFS= read -r file; do
   impl_lines=$(implementation_lines "$file")
   test_lines=$((total - impl_lines))
   printf '| %s | %s | %s | %s |\n' "$file" "$total" "$impl_lines" "$test_lines"
-done < <(find src -name '*.rs' | sort)
+done < <(rust_sources | sort)
 
 # --- 最も長い関数 -----------------------------------------------------------
 #
@@ -189,7 +202,7 @@ printf '| Lines | Function | File |\n'
 printf '| ---: | --- | --- |\n'
 
 # shellcheck disable=SC2016  # 下の `$0`/`$1` は awk のフィールドで shell のものではない
-find src -name '*.rs' -print0 |
+rust_sources -print0 |
   xargs -0 awk '
     FNR == 1 { in_tests = 0 }
     /^#\[cfg\(test\)\]/ { in_tests = 1 }

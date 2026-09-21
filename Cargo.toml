@@ -4,6 +4,17 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
+# #267 の Float on Top のために `unsafe` を 1 か所へ閉じ込めた helper
+# (`crates/window-level`)｡本体は `unsafe_code = "forbid"` のままでいられる｡
+#
+# `default-members` に両方を並べてあるので､CLAUDE.md の 3 コマンド
+# (`cargo fmt --check` / `cargo clippy --all-targets -- -D warnings` /
+# `cargo test`) と CI がそのまま helper も見る｡片方だけにすると､helper は
+# 誰にも lint されないまま `unsafe` を抱えることになる｡
+[workspace]
+members = ["crates/window-level"]
+default-members = [".", "crates/window-level"]
+
 # `warn` ではなく `deny` (#47)｡CI は `cargo clippy -- -D warnings` を走らせる
 # ので､ここに並ぶものはどれも手元では通るのに CI ではすでにビルド失敗だった —
 # この非対称は､コードを書いたマシンで分かったはずのことを CI で知る羽目に
@@ -94,20 +105,29 @@ redact = { version = "0.1.11", features = ["serde"] }
 # `state`)､`rand` の API 全面 (分布､シード､シャッフル補助) ではない｡
 # `getrandom` がちょうどそこを覆うので､`rand` ではなくこちらを使う｡
 getrandom = { version = "0.4.3", features = ["std"] }
-# macos-blade はプリコンパイル済みの Metal シェーダではなく blade 経由で描画
-# するので､ビルドに `xcrun metal` が要らない — あれは Command Line Tools では
+# `gpui-pre` 自身は `font-kit` を optional dependency として宣言しているが
+# (`cargo-shear` の ignored リストに載っている理由もそれ)､それを使う cfg は
+# crate 自身のソースのどこにも無い — 実際に読むのは `gpui_platform` 経由の
+# `gpui_macos` (下) なので､ここでは立てない｡
+gpui = { package = "gpui-pre", version = "0.3.5", default-features = false }
+# runtime_shaders: プリコンパイル済みの Metal シェーダではなく実行時コンパイルで
+# 描画するので､ビルドに `xcrun metal` が要らない — あれは Command Line Tools では
 # なく完全な Xcode に付いてくる｡x11/wayland は Linux 専用で､このプロジェクトは
 # macOS 専用だ｡
-gpui = { version = "0.2.2", default-features = false, features = [
+gpui_platform = { package = "gpui-pre-platform", version = "0.3.5", features = [
     "font-kit",
-    "macos-blade",
+    "runtime_shaders",
 ] }
-gpui-component = "0.5.1"
+gpui-component = "0.6.4"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 sha2 = "0.11.0"
 toml = "1.1.4"
 ureq = { version = "3.4.0", features = ["json"] }
+# #267 の Float on Top｡gpui-pre には window を開いた後に level を動かす口が
+# 無いので､`NSWindow` の level だけを差し替える｡`unsafe` はこの crate の中の
+# 1 か所に閉じてある (crate の doc を見よ)｡
+window-level = { path = "crates/window-level" }
 
 # これを必要とするのは起動の smoke test (#59) だけだ｡`test-support` は
 # `TestAppContext` を引き込む｡そのウィンドウ実装はどこにも描画しないので
@@ -116,33 +136,6 @@ ureq = { version = "3.4.0", features = ["json"] }
 # この経路は `cargo test` がそれまで一度も覆っていなかったところで､#55 が
 # 隠れていた場所だ: 実際に何かが描画されて初めて到達する panic｡
 [dev-dependencies]
-gpui = { version = "0.2.2", default-features = false, features = [
-    "font-kit",
-    "macos-blade",
+gpui = { package = "gpui-pre", version = "0.3.5", default-features = false, features = [
     "test-support",
 ] }
-
-# gpui は crates.io の 0.2.2 ではなく､同じ commit (69e2130､0.2.2 を publish
-# した元) に 2 commit 足した fork を使う｡差分は 2 機能:
-#
-# - `gpui::set_draw_while_occluded`: on にした window は画面が
-#   ロックされていても (occluded でも) 描き続ける｡upstream は occluded な
-#   window の display link を止め､ロック中は OS が CVDisplayLink の生成を
-#   拒む (-6661) ので､ロック中に開いた window は 1 フレームも描かず､window
-#   capture が真っ黒になる｡`--fixture` だけがこのスイッチを入れる
-#   (`ui::Startup::draws_while_occluded`)｡off が既定で､そのときの挙動は
-#   upstream と同一なので本番の消費電力は変わらない｡
-#   upstream への報告: https://github.com/zed-industries/zed/issues/63217
-# - `Window::set_floating` (#267): 開いた後に window を macOS の floating
-#   level へ出し入れする｡upstream の `WindowKind` は開くときに決めるもので､
-#   しかも macOS では `Floating` が `Normal` と同じ level に置かれるので､
-#   Window メニューの Float on Top を作る口が無い｡
-#
-# fork の branch: https://github.com/usadamasa/zed/tree/gpui-0.2.2-draw-while-occluded
-#
-# `rev` で固定する｡branch 名だと fork を動かした瞬間にビルドが変わる｡
-# gpui を上げるときは､その版を publish した commit の上に同じ patch を
-# 載せ直して rev を差し替える (crates.io の `.cargo_vcs_info.json` が元の
-# commit を持っている)｡
-[patch.crates-io]
-gpui = { git = "https://github.com/usadamasa/zed.git", rev = "21f6531555aec2a464278835427bada94faa1d8a" }

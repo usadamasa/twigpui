@@ -382,11 +382,7 @@ pub(crate) fn start(cx: &mut App, plan: Option<Plan>) {
         for line in report.lines() {
             log::info(line);
         }
-        // `Err` はアプリがもう畳まれているときだけで､そのときは終わって
-        // いるのだから､することは無い｡
-        if cx.update(|cx| cx.quit()).is_err() {
-            log::warn("perf: the app was already gone when the run ended");
-        }
+        cx.update(|cx| cx.quit());
     })
     .detach();
 }
