@@ -64,8 +64,8 @@ if ! html="$(cat "${logs[@]}" | jq -R -s -r \
   {
     timeline: ["posts", 0.005], home_timeline: ["posts", 0.005], list_timeline: ["posts", 0.005],
     tweet_by_id: ["posts", 0.005],
-    user_lookup: ["users", 0.010], following: ["users", 0.010], list_members: ["users", 0.010],
-    me: ["owned", 0.001], owned_lists: ["owned", 0.001],
+    user_lookup: ["users", 0.010], list_members: ["users", 0.010],
+    me: ["owned", 0.001], owned_lists: ["owned", 0.001], following: ["owned", 0.001],
     create_post: ["write", 0.015]
   } as $price
   | $usage[0] as $u
