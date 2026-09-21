@@ -104,6 +104,9 @@ pub(crate) const OPAQUE_BACKOFF_CEILING_SECONDS: i64 = 21_600;
 /// 読み込めなければならない｡
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub(crate) struct SyncState {
+    /// 最後に全 diff が成功したときの､read 前に確認したフォロー数｡
+    #[serde(default)]
+    pub following_count: Option<u64>,
     /// 最後に diff を *試みた* 時刻｡失敗した試行でもこれが動く理由は
     /// [`super::auto`] を見よ｡
     #[serde(default)]
@@ -339,6 +342,7 @@ mod tests {
     fn calm() -> SyncState {
         SyncState {
             last_diff_at: Some(1_000),
+            following_count: None,
             blocked_until: None,
             paused_until: None,
             refusals: 0,
@@ -681,6 +685,7 @@ mod tests {
 
         let written = SyncState {
             last_diff_at: Some(1_700_000_000),
+            following_count: Some(2340),
             blocked_until: Some(1_700_000_900),
             paused_until: Some(1_700_000_077),
             refusals: 3,

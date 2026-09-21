@@ -142,6 +142,11 @@ impl Paths {
         self.state_dir.join("sync_plan.json")
     }
 
+    /// list members の全件取得と適用済み write を記録するミラー｡
+    pub(crate) fn sync_members_file(&self) -> PathBuf {
+        self.state_dir.join("sync_members.json")
+    }
+
     /// `state_dir` 配下の､バックグラウンド sync の時計へのパス: 最後に差分
     /// を試みた時刻｡
     ///
@@ -484,7 +489,7 @@ mod tests {
         let user = "2244994945";
         let reply = "1800000000000000003";
         let list = "2091351590695588200";
-        let pairs: [(PathBuf, PathBuf); 20] = [
+        let pairs: [(PathBuf, PathBuf); 22] = [
             (release.owned_lists_file(), dev.owned_lists_file()),
             (release.selection_file(), dev.selection_file()),
             (release.window_state_file(), dev.window_state_file()),
@@ -501,6 +506,8 @@ mod tests {
                 dev.list_timeline_file(list),
             ),
             (release.sync_plan_file(), dev.sync_plan_file()),
+            (release.sync_state_file(), dev.sync_state_file()),
+            (release.sync_members_file(), dev.sync_members_file()),
             (release.me_file(), dev.me_file()),
             (release.thread_file(reply), dev.thread_file(reply)),
             (release.rate_limit_file(), dev.rate_limit_file()),
@@ -652,6 +659,17 @@ mod tests {
             paths.sync_plan_file(),
             PathBuf::from("/home/alice/.local/state/twigpui/sync_plan.json")
         );
+    }
+
+    #[test]
+    fn sync_members_file_is_under_the_state_dir() {
+        let paths = release_paths(vars(&[("HOME", "/home/alice")])).unwrap();
+        assert_eq!(
+            paths.sync_members_file(),
+            PathBuf::from("/home/alice/.local/state/twigpui/sync_members.json")
+        );
+        assert_ne!(paths.sync_members_file(), paths.sync_plan_file());
+        assert_ne!(paths.sync_members_file(), paths.sync_state_file());
     }
 
     #[test]

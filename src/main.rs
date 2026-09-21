@@ -110,6 +110,7 @@ fn main() {
         let request = sync::Request {
             apply: args.iter().any(|arg| arg == "--apply"),
             prune: args.iter().any(|arg| arg == "--prune"),
+            reread: args.iter().any(|arg| arg == "--reread"),
         };
         std::process::exit(sync::run_cli(&config, &paths, request));
     }

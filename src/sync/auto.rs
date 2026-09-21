@@ -154,9 +154,8 @@ pub(crate) fn tick(
 
 /// tick の仕事: [`schedule::next_step`] が言うことを､実行する｡
 ///
-/// `state` が変わるのはただ一つの場合だけ — diff が読む前に
-/// `last_diff_at` を打刻する — で､出てきたものは呼び出し側が settle して
-/// 保存する｡
+/// diff 前に `last_diff_at` を打刻し､成功後に probe の count を記録する｡
+/// 呼び出し側はその state を settle して保存する｡
 #[allow(clippy::too_many_arguments)]
 fn perform(
     paths: &Paths,
@@ -201,7 +200,10 @@ fn perform(
             client,
             user_id,
             list_id,
-            prune_limit_percent,
+            DiffOptions {
+                pacing,
+                prune_limit_percent,
+            },
             state,
             now,
         ),
@@ -225,7 +227,14 @@ fn perform(
     }
 }
 
-/// 両側を読み､新しい plan を書く｡
+/// diff の実行条件と削除の上限｡
+#[derive(Clone, Copy)]
+struct DiffOptions {
+    pacing: Pacing,
+    prune_limit_percent: u8,
+}
+
+/// count を確認し､必要なら読み取って新しい plan を書く｡
 ///
 /// 時刻は read の **前** に打刻し､read が成功したかどうかによらず打刻された
 /// ままにする｡どちらの側面も効く: 途中で crash しても届いたページ分は既に
@@ -242,18 +251,37 @@ fn diff(
     client: &dyn ListSyncApi,
     user_id: &str,
     list_id: &str,
-    prune_limit_percent: u8,
+    options: DiffOptions,
     state: &mut SyncState,
     now: i64,
 ) -> Result<Outcome> {
     state.last_diff_at = Some(now);
     save_state(&paths.sync_state_file(), state)?;
 
+    let count = super::preflight::probe(paths, client, now)?;
+    if !options.pacing.forced
+        && super::preflight::unchanged(paths, list_id, state.following_count, count, now)
+    {
+        crate::log::info(&format!(
+            "list sync: following count unchanged ({}); skipped the diff",
+            count.unwrap_or_default()
+        ));
+        // Idle は完了扱いになり､notice を出さず次の interval まで待つ｡
+        return Ok(Outcome::Idle {
+            until: now.saturating_add(i64::from(options.pacing.interval_seconds)),
+            pending: 0,
+        });
+    }
+    // members の更新後に following が失敗しても､古い count では省略しない｡
+    state.following_count = None;
+    save_state(&paths.sync_state_file(), state)?;
     let plan = super::run::plan_sync(paths, client, user_id, list_id, now)?;
     let adds = plan.pending_count(Action::Add);
     let removals = plan.pending_count(Action::Remove);
+    let prune_limit_percent = options.prune_limit_percent;
     let held = !schedule::prune_allowed(&plan, prune_limit_percent);
     save_plan(&paths.sync_plan_file(), &plan)?;
+    state.following_count = count;
     if held {
         crate::log::warn(&format!(
             "list sync: holding {removals} removal(s) against a list of {} members — over \
@@ -344,6 +372,10 @@ fn log_outcome(outcome: &Result<Outcome>, state: SyncState, wake_at: i64) {
         )),
     }
 }
+
+#[cfg(test)]
+#[path = "count_tests.rs"]
+mod count_tests;
 
 #[cfg(test)]
 mod tests {

@@ -1,4 +1,4 @@
-//! sync が X に頼む 6 つのことと､write と write のあいだの待ち｡
+//! sync が X に頼む操作と､write と write のあいだの待ち｡
 //!
 //! [`super::run`] と [`super::auto`] が [`XClient`] に求めるのはこれだけだ｡
 //! その分を trait に括り出してあるので､両 module は `&dyn ListSyncApi` を
@@ -29,6 +29,9 @@ use crate::x_api::model::User;
 /// `XClient` の値に対する `client.following(..)` がどちらを呼ぶのかは､
 /// 名前がずれていればそもそも問いにならない｡
 pub(crate) trait ListSyncApi {
+    /// サインイン中のアカウントの現在のフォロー数｡
+    fn following_count(&self, paths: &Paths, now: i64) -> Result<u64>;
+
     /// `user_id` が follow しているアカウントを 1 ページ｡
     fn following_page(
         &self,
@@ -70,6 +73,10 @@ pub(crate) trait ListSyncApi {
 }
 
 impl ListSyncApi for XClient {
+    fn following_count(&self, paths: &Paths, now: i64) -> Result<u64> {
+        self.probe_following_count(paths, now)
+    }
+
     fn following_page(
         &self,
         paths: &Paths,
@@ -126,6 +133,8 @@ pub(super) mod fake {
     /// fake が受けた呼び出し 1 件｡どの順で何を訊かれたかを assert する｡
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub(crate) enum Call {
+        /// 現在のフォロー数｡
+        FollowingCount,
         /// follow list を 1 ページ｡持つのは渡された cursor｡
         Following(Option<String>),
         /// list の member を 1 ページ｡
@@ -149,6 +158,7 @@ pub(super) mod fake {
     /// 期待した以上に呼んだことが「何も見つからなかった」に化ける｡
     #[derive(Debug, Default)]
     pub(crate) struct FakeApi {
+        counts: RefCell<Vec<Result<u64>>>,
         following: RefCell<Vec<Page>>,
         members: RefCell<Vec<Page>>,
         lookups: RefCell<Vec<Result<String>>>,
@@ -159,6 +169,12 @@ pub(super) mod fake {
     }
 
     impl FakeApi {
+        /// フォロー数の probe が順に返すもの｡
+        pub(crate) fn counts(self, results: Vec<Result<u64>>) -> Self {
+            *self.counts.borrow_mut() = results;
+            self
+        }
+
         pub(crate) fn new() -> Self {
             Self::default()
         }
@@ -215,6 +231,11 @@ pub(super) mod fake {
     }
 
     impl ListSyncApi for FakeApi {
+        fn following_count(&self, _paths: &Paths, _now: i64) -> Result<u64> {
+            self.calls.borrow_mut().push(Call::FollowingCount);
+            take(&self.counts, "following count")
+        }
+
         fn following_page(
             &self,
             _paths: &Paths,

@@ -640,6 +640,7 @@ mod tests {
     #[test]
     fn forcing_does_not_get_past_a_live_rate_limit() {
         let refused = crate::sync::SyncState {
+            following_count: None,
             last_diff_at: Some(1_000),
             blocked_until: Some(5_000),
             paused_until: None,
@@ -660,6 +661,7 @@ mod tests {
     #[test]
     fn forcing_steps_over_the_interval_a_failed_tick_earned() {
         let failed = crate::sync::SyncState {
+            following_count: None,
             last_diff_at: Some(1_000),
             blocked_until: Some(22_600),
             paused_until: None,
@@ -677,6 +679,7 @@ mod tests {
     #[test]
     fn an_unforced_tick_honours_every_block() {
         let failed = crate::sync::SyncState {
+            following_count: None,
             last_diff_at: Some(1_000),
             blocked_until: Some(22_600),
             paused_until: None,
@@ -689,6 +692,7 @@ mod tests {
     fn forcing_never_steps_over_a_refusal_streak() {
         // ボタンを押すことは上限が明けた証拠にならない｡
         let refused = crate::sync::SyncState {
+            following_count: None,
             last_diff_at: Some(1_000),
             blocked_until: Some(22_600),
             paused_until: None,
@@ -750,6 +754,7 @@ mod tests {
         // 揺らぎは機械らしく見えないためのもの｡ボタンを押したのは人間
         // なので､隠す相手がそもそも居ない｡
         let paced = crate::sync::SyncState {
+            following_count: None,
             last_diff_at: Some(1_000),
             blocked_until: None,
             paused_until: Some(1_090),

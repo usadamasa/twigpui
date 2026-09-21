@@ -793,6 +793,7 @@ mod tests {
             4_600,
         );
         refused.state = sync::SyncState {
+            following_count: None,
             last_diff_at: Some(500),
             blocked_until: Some(4_600),
             paused_until: None,
@@ -821,6 +822,7 @@ mod tests {
             4_600,
         );
         idle.state = sync::SyncState {
+            following_count: None,
             last_diff_at: Some(500),
             blocked_until: Some(4_600),
             paused_until: None,
