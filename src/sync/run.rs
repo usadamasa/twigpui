@@ -941,6 +941,46 @@ mod tests {
     }
 
     #[test]
+    fn the_guard_says_to_seed_the_ledger_before_sending_when_there_is_none() {
+        // 台帳が無いまま plan を流し切ると､次の diff は膨らんだ list を全件読む｡
+        // 先に読めば小さいうちに済み､以後は二度と読まない｡
+        let scratch = Scratch::new("dry-guard-no-ledger");
+        save_plan(
+            &scratch.paths().sync_plan_file(),
+            &plan_of("7", &["1", "2"], &[]),
+        )
+        .unwrap();
+        let client = FakeApi::new();
+        let without = run(
+            scratch.paths(),
+            &client,
+            "me",
+            "7",
+            request(false, false),
+            21_600,
+        )
+        .unwrap();
+        assert!(without.contains("sync_members.json"), "{without}");
+        assert!(without.contains("--reread first"), "{without}");
+        assert!(without.contains("2 account(s) larger"), "{without}");
+        assert!(!without.contains('$'), "{without}");
+
+        let ledger = serde_json::json!({"version":1,"list_id":"7","read_at":1,"members":[]});
+        std::fs::write(scratch.paths().sync_members_file(), ledger.to_string()).unwrap();
+        let with = run(
+            scratch.paths(),
+            &client,
+            "me",
+            "7",
+            request(false, false),
+            21_600,
+        )
+        .unwrap();
+        assert!(!with.contains("--reread first"), "{with}");
+        assert!(client.calls().is_empty());
+    }
+
+    #[test]
     fn unchanged_count_skips_cli_reads_unless_reread_was_requested() {
         let scratch = Scratch::new("cli-count-skip");
         let now = oauth::unix_now();
