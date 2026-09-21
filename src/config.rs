@@ -1624,12 +1624,27 @@ mod tests {
         assert!(error.contains("list_id in config.toml"), "{error}");
     }
 
-    // --- auto_sync_list (env > file > on) ---
+    // --- auto_sync_list (env > file > off) ---
 
     #[test]
-    fn the_background_sync_is_on_unless_someone_turns_it_off() {
+    fn the_background_sync_is_off_unless_someone_turns_it_on() {
+        // タイマーで課金する loop は頼まれるまで回さない｡list が埋まると
+        // diff 1 回が $20 を超える (`x-api-budget` の pricing.md 実測ログ 5)｡
         let config = Config::resolve(
             vars(&[("X_OAUTH_CLIENT_ID", "client-123")]),
+            FileSettings::default(),
+        )
+        .unwrap();
+        assert!(!config.auto_sync_list);
+    }
+
+    #[test]
+    fn the_background_sync_turns_on_from_the_env() {
+        let config = Config::resolve(
+            vars(&[
+                ("X_OAUTH_CLIENT_ID", "client-123"),
+                ("X_AUTO_SYNC_LIST", "true"),
+            ]),
             FileSettings::default(),
         )
         .unwrap();
