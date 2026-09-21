@@ -4197,6 +4197,24 @@ mod tests {
         });
     }
 
+    /// #267: `Root` が window 全体に塗る背景は透明のまま｡
+    ///
+    /// gpui-component 0.6 の `Root` は `colors.background` ではなく
+    /// `tokens.background` を読む｡`colors` だけを透明にして `tokens` を写し
+    /// 忘れると､不透明な地が塗られて透過が効かなくなる (gpui-pre への移行で
+    /// 実際に起きた)｡
+    #[gpui::test]
+    fn the_root_paints_a_transparent_background(cx: &mut gpui::TestAppContext) {
+        let (_window, _timeline) = fixture_window(cx, fixture_with(&["1"], &[]));
+
+        let background = cx.update(|cx| gpui_component::theme::Theme::global(cx).tokens.background);
+        assert!(
+            background.color.a <= f32::EPSILON,
+            "the Root's background token must stay transparent, got alpha {}",
+            background.color.a
+        );
+    }
+
     /// #182 に遡って: ステータスバーの 2 つの区画は接触しない｡
     ///
     /// これは #182 が無いままマージされたテストだ｡`Total: 11 req` と
