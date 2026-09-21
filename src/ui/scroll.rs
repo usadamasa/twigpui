@@ -9,7 +9,7 @@
 //!
 //! # gpui が入力をどこまで運んでくるか (#175 の「先に確認すること」)
 //!
-//! gpui 0.2.2 の `Div` は `overflow_y_scroll` の要素に自分でホイールの
+//! gpui-pre 0.3.5 の `Div` は `overflow_y_scroll` の要素に自分でホイールの
 //! listener を張り､bubble phase で `offset += delta.pixel_delta(line_height)`
 //! を足す (`elements/div.rs` の `paint_scroll_listener`)｡滑らかにする
 //! 段も､端で跳ねる段も無い — clamp は次の prepaint でされるので､端を

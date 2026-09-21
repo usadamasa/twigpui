@@ -268,7 +268,7 @@ fn startup_banner(version: &str, hash: &str) -> String {
 /// 起動した `.app` (#40) には端末が無い: stderr は誰の目にも触れない先へ
 /// 行くので､そうでなければプロセスは目に見える症状も無く消える｡それこそ
 /// #40 が挙げる「説明の無い空白ウィンドウ」の失敗である｡`gpui` のウィンドウ
-/// ではなく `osascript` を使うのは､これが `Application::new()` の *前* に
+/// ではなく `osascript` を使うのは､これが `gpui_platform::application()` の *前* に
 /// 走るからだ — `gpui` のアラートを吊るす window server への接続はまだ無い
 /// が､`osascript` は普通の macOS アプリであること以上をこのプロセスに
 /// 求めない｡

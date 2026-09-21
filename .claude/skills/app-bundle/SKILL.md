@@ -105,7 +105,7 @@ bundle 起動には一切効かない。ここから 2 つ出てくる。
   macOS が「"twigpui" が外部からの接続を受け入れようとしています」を出しうる。
   ad-hoc 署名はリビルドごとに署名 identity が変わる (トークンを Keychain に置かない
   のと同じ理由) ので、このプロンプトはリビルドのたびに再登場しうる。
-- **`macos-blade` と WindowServer も変わらない。** Finder/Dock/Spotlight から
+- **描画の仕組みと WindowServer も変わらない。** Finder/Dock/Spotlight から
   起動した `.app` は Terminal.app から起動したバイナリと同じ通常のユーザー
   WindowServer セッションを持つ。bundle であること自体はこの接続に影響しない。
   これは bundle スクリプトを書いた環境からは検証できなかった。sandbox は

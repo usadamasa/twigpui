@@ -43,7 +43,7 @@ jobs:
 
   test:
     name: Test
-    # gpui は `macos-blade` で､x11/wayland のスタック無しでビルドしている｡
+    # gpui_platform は `runtime_shaders` で､x11/wayland のスタック無しでビルドしている｡
     # だからこの crate は macOS でしかコンパイルできない｡
     runs-on: macos-latest
     timeout-minutes: 30

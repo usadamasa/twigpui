@@ -52,9 +52,8 @@ worktree で走らせるときは `--target-dir` に本体の `target` を渡す
 - `ps_pcpu`: `ps -o %cpu`。カーネルの減衰平均。起動直後は当てにならないので参考値。
 
 要約は stderr とログファイルの両方に出る。**`perf conditions:` を必ず読む。**
-`screen locked` かつ `draws while occluded: yes` の数字は、画面ロック中も fixture の
-window が描き続けている数字で (`Cargo.toml` の `[patch.crates-io]`)、本番の idle とは
-比べられない。記録には条件ごと書く。
+`screen locked` の数字は、window が隠れていて描画が止まっている間の数字で、
+`screen unlocked` の idle とは比べられない。記録には条件ごと書く。
 
 ### 最初の 10 秒は捨てる
 
