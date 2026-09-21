@@ -66,13 +66,12 @@ pub(crate) struct Config {
     /// ウィンドウが動いている間､`list_id` のメンバーシップをこのアプリが
     /// フォローしているアカウントに合わせ続けるかどうか｡
     ///
-    /// 既定は on｡効くのは `list_id` が設定され､かつセッションが
-    /// `sync::missing_scope` の求める scope を持っているときだけだ — どちらも
-    /// 既に意図的な行為である｡off にするのは､設定済みの list を代わりに自分の
-    /// 手元に置いておくためのやり方だ｡
+    /// 既定は off｡on にしても効くのは `list_id` が設定され､かつセッションが
+    /// `sync::missing_scope` の求める scope を持っているときだけ｡off の間も
+    /// ステータスバーからの手動同期と `--sync-list` は使える｡
     ///
-    /// **これはタイマーで金を使う**｡下の interval が長いのも､README が声に
-    /// 出してそう言っているのもそのためだ｡
+    /// **これはタイマーで金を使う**｡list の member は 1 件 $0.010 で､埋まった
+    /// list なら diff 1 回が $20 を超える｡頼まれるまで回さないのはそのため｡
     pub auto_sync_list: bool,
     /// background sync が diff と diff の間に待つ長さ｡秒｡
     ///
@@ -442,15 +441,16 @@ impl Config {
         let post_resource_price = resolve_post_resource_price(&var, file.post_resource_price)?;
         let daily_post_budget = resolve_daily_post_budget(&var, file.daily_post_budget)?;
 
-        let auto_sync_list = resolve_switch("X_AUTO_SYNC_LIST", &var, file.auto_sync_list)?;
+        let auto_sync_list = resolve_switch("X_AUTO_SYNC_LIST", &var, file.auto_sync_list, false)?;
         let sync_interval_seconds = resolve_sync_interval(&var, file.sync_interval_seconds)?;
         let sync_prune_limit_percent =
             resolve_sync_prune_limit(&var, file.sync_prune_limit_percent)?;
         let sync_writes_per_batch =
             resolve_sync_writes_per_batch(&var, file.sync_writes_per_batch)?;
 
-        let auto_refresh = resolve_switch("X_AUTO_REFRESH", &var, file.auto_refresh)?;
-        let follow_new_posts = resolve_switch("X_FOLLOW_NEW_POSTS", &var, file.follow_new_posts)?;
+        let auto_refresh = resolve_switch("X_AUTO_REFRESH", &var, file.auto_refresh, true)?;
+        let follow_new_posts =
+            resolve_switch("X_FOLLOW_NEW_POSTS", &var, file.follow_new_posts, true)?;
         // `min_fetch_interval_seconds` を取るのは､これが強制する下限がそれ
         // だからだ — [`resolve_auto_refresh_interval`] を見よ｡
         let auto_refresh_interval_seconds = resolve_auto_refresh_interval(
@@ -524,7 +524,10 @@ fn resolve_list_id(
     Ok(Some(raw))
 }
 
-/// 既定で on の boolean スイッチを解決する: env > file > on｡
+/// boolean スイッチを解決する: env > file > `default`｡
+///
+/// `default` が off なのは `X_AUTO_SYNC_LIST` だけ — タイマーで課金する
+/// loop は頼まれるまで回さない｡
 ///
 /// `theme` のようにフォールバックせず､認識できない値は拒否する｡theme の
 /// 打ち間違いは見た目の話だが､`X_AUTO_SYNC_LIST=flase` の打ち間違いを
@@ -536,12 +539,13 @@ fn resolve_switch(
     key: &str,
     var: impl Fn(&str) -> Option<String>,
     file_value: Option<bool>,
+    default: bool,
 ) -> Result<bool> {
     let Some(raw) = var(key)
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
     else {
-        return Ok(file_value.unwrap_or(true));
+        return Ok(file_value.unwrap_or(default));
     };
     match raw.to_ascii_lowercase().as_str() {
         "true" | "1" | "yes" | "on" => Ok(true),
