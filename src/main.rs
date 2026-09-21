@@ -130,24 +130,7 @@ fn main() {
     #[cfg(feature = "headless-shot")]
     headless_shot::run_if_asked(&args, &config, &paths);
 
-    // #146: `--fixture <path>` はアカウントではなくファイルからウィンドウを
-    // 埋める｡ウィンドウが開く前のここで解決するので､fixture が無かったり
-    // 壊れていたりしたときは､説明の無い空のウィンドウとしてではなく､打ち
-    // 込んだ端末の上で失敗する｡
-    let startup = match fetch_post_arg(&args, "--fixture") {
-        FetchPostArg::Absent => ui::Startup::Live,
-        FetchPostArg::Value(path) => match fixture::load(std::path::Path::new(path)) {
-            Ok(loaded) => ui::Startup::Fixture(Box::new(loaded)),
-            Err(error) => {
-                eprintln!("--fixture: {error:#}");
-                std::process::exit(1);
-            }
-        },
-        FetchPostArg::MissingValue => {
-            eprintln!("--fixture requires a path to a fixture JSON file.");
-            std::process::exit(1);
-        }
-    };
+    let startup = startup_from(&args);
 
     // `--perf <seconds>`: このプロセス自身の RSS と CPU を測る (`perf.rs`)｡
     let perf = perf::arm(&args, &startup).unwrap_or_else(|message| {
@@ -231,6 +214,27 @@ fn main() {
             cx.activate(true);
             perf::start(cx, perf);
         });
+}
+
+/// #146: `--fixture <path>` はアカウントではなくファイルからウィンドウを
+/// 埋める｡ウィンドウが開く前に解決するので､fixture が無かったり壊れていたり
+/// したときは､説明の無い空のウィンドウとしてではなく､打ち込んだ端末の上で
+/// 失敗する｡
+fn startup_from(args: &[String]) -> ui::Startup {
+    match fetch_post_arg(args, "--fixture") {
+        FetchPostArg::Absent => ui::Startup::Live,
+        FetchPostArg::Value(path) => match fixture::load(std::path::Path::new(path)) {
+            Ok(loaded) => ui::Startup::Fixture(Box::new(loaded)),
+            Err(error) => {
+                eprintln!("--fixture: {error:#}");
+                std::process::exit(1);
+            }
+        },
+        FetchPostArg::MissingValue => {
+            eprintln!("--fixture requires a path to a fixture JSON file.");
+            std::process::exit(1);
+        }
+    }
 }
 
 /// ウィンドウが一枚も存在しないうちに登録するキーバインド (#38, #58, #188, #282)｡
