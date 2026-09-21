@@ -3614,22 +3614,6 @@ mod tests {
         });
     }
 
-    /// fixture の window はロック中でも描き続け､live の window は upstream
-    /// どおり止まる — fork した gpui の patch が読むスイッチを `main` が
-    /// これで決める｡fixture 側が false に戻ると､ロック中に立てた fixture の
-    /// capture は真っ黒に戻る｡
-    #[test]
-    fn only_a_fixture_window_keeps_drawing_while_occluded() {
-        assert!(
-            Startup::Fixture(Box::new(fixture_with(&["1"], &[]))).draws_while_occluded(),
-            "a fixture window exists to be captured, locked screen or not"
-        );
-        assert!(
-            !Startup::Live.draws_while_occluded(),
-            "a live window keeps upstream's power-saving behavior"
-        );
-    }
-
     // --- #175: 手動 scroll ---
 
     /// 40 件で開き､1 フレーム描いて timeline の bounds を返す｡ホイールの

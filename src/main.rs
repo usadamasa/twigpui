@@ -33,6 +33,8 @@ mod cache;
 mod compose;
 mod config;
 mod fixture;
+#[cfg(feature = "headless-shot")]
+mod headless_shot;
 mod image_cache;
 mod like;
 mod log;
@@ -121,6 +123,12 @@ fn main() {
     if std::env::args().any(|arg| arg == "--usage") {
         std::process::exit(usage_only(&config, &paths));
     }
+
+    // #221: `--png <path>` は window を開かずに `--fixture` を描いて PNG へ
+    // 書き､そこでプロセスを終える｡画面がロックされていても撮れる唯一の
+    // 経路で､`headless-shot` feature の裏にある理由はモジュール doc に｡
+    #[cfg(feature = "headless-shot")]
+    headless_shot::run_if_asked(&args, &config, &paths);
 
     // #146: `--fixture <path>` はアカウントではなくファイルからウィンドウを
     // 埋める｡ウィンドウが開く前のここで解決するので､fixture が無かったり

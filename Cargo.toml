@@ -67,6 +67,20 @@ redundant_type_annotations = "deny"
 # 来る — どれもこのコードが信用してよいものではない｡
 arithmetic_side_effects = "deny"
 
+# `--png` で fixture を window 無しに PNG へ描く経路 (#221, `src/headless_shot.rs`)｡
+#
+# 既定では立てない｡この経路が使う `HeadlessAppContext` と
+# `current_headless_renderer` は gpui の `test-support` の内側にあり､それを素の
+# `cargo build --release` に入れると `TestPlatform` ごと本番のバイナリへ載る｡
+# dev-dependency では届かない — bin の `main` から呼ぶので､テストではない
+# ビルドで feature を立てるしかない｡
+#
+# feature の裏のコードは既定の `cargo clippy --all-targets` が見ないので､
+# CI の clippy は `--features headless-shot` を付けて呼ぶ
+# (`.github/workflows/ci.yaml`)｡
+[features]
+headless-shot = ["gpui/test-support", "gpui_platform/test-support"]
+
 [dependencies]
 anyhow = "1.0.104"
 # PKCE の verifier/challenge 用の URL-safe でパディング無しの base64 (RFC 7636 §4.1-4.2)｡

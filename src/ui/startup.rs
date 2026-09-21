@@ -35,24 +35,6 @@ pub(crate) enum Startup {
     Fixture(Box<Fixture>),
 }
 
-impl Startup {
-    /// この起動の window が､画面がロックされていても (occluded でも) 描き
-    /// 続けるべきかどうか — fork した gpui の patch (Cargo.toml の
-    /// `[patch.crates-io]`) が読むスイッチの値｡
-    ///
-    /// fixture の window は撮られるためにある｡upstream の gpui はロック中に
-    /// 開いた window を 1 フレームも描かず､capture が真っ黒になる｡live の
-    /// window は入れない: 隠れているあいだ描画を止める upstream の挙動は
-    /// 本番にとって正しい｡
-    ///
-    /// `main` が `open_window` の **前** に `gpui::set_draw_while_occluded`
-    /// へ渡す｡gpui は platform の window を作ってから root view を組むので､
-    /// view の構築中に入れたのでは window 生成時の判定に間に合わない｡
-    pub(crate) fn draws_while_occluded(&self) -> bool {
-        matches!(self, Self::Fixture(_))
-    }
-}
-
 /// この起動が持って立ち上がる window state (#267)｡
 ///
 /// fixture は state ファイルを読まない (`window_state_file` が `None`) ので､

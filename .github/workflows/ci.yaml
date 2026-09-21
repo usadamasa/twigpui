@@ -195,8 +195,12 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
+      # `--features headless-shot` (#221): `--png` の経路は feature の裏に
+      # あり (Cargo.toml を見よ)､素の `--all-targets` はそこを 1 行も
+      # コンパイルしない｡付けないと､本体の変更に追随できていない経路が
+      # 緑のまま残る｡
       - name: Run clippy
-        run: cargo clippy --locked --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets --features headless-shot -- -D warnings
 
       # #48: 構造メトリクス｡ゲートにはせず run summary へ報告する｡既存の
       # コードは設定する価値のあるどの閾値もすでに超えているし､初日から
