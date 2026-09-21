@@ -55,6 +55,9 @@ cleanshot-capture window --app twigpui --out ./tmp/shot.png
 撮ったら `Read` で開く。撮り方の詳細と、別のウィンドウが写るときの対処は
 `cleanshot-capture` スキルに従う。
 
+**画面がロックされているならこの手順は使えない** (真っ黒になる)。下の
+「画面がロックされているときは window を開かずに PNG へ描く」へ。
+
 ### dev ビルドと本番ビルドの見分け (#169)
 
 `cargo run` は debug ビルドなので dev プロファイルで動き、ウィンドウタイトルは
@@ -86,26 +89,41 @@ cleanshot-capture window --app twigpui --title "twigpui (dev)" --out ./tmp/shot.
 **アバターは非同期に届いて隣の行を組み直す**ので、画像まで揃った画面が要るなら
 一度撮って確かめ、まだ来ていなければ撮り直す。
 
-### 画面がロックされていても `--fixture` は撮れる (#220)
+### 画面がロックされているときは window を開かずに PNG へ描く (#220, #221)
 
-`--fixture` の window は画面ロック中に起動しても描く。gpui を fork の patch 版から
-取っていて (`Cargo.toml` の `[patch.crates-io]`)、fixture 起動だけが
-`gpui::set_draw_while_occluded` を入れるからだ。離席中に Claude が見た目を確かめる
-ための仕組みで、撮り方は上の手順と同じ。fork をやめる条件は #221、upstream への報告は
-zed-industries/zed#63217。
+ロック中は OS が CVDisplayLink の生成を拒み (-6661)、gpui は occluded な window の
+display link を張らない。だから **ロック中に立てた window はどれも 1 フレームも描かない** —
+`cargo run` も `.app` も、撮れば真っ黒になる。fork の `gpui::set_draw_while_occluded` が
+fixture の window だけ描かせていたが、`gpui-pre` への移行 (#221) でその口は無くなった。
 
-**素の `cargo run` と `.app` はロック中に立てると真っ黒になる。** upstream の gpui は
-occluded な window の display link を張らず、ロック中は OS が CVDisplayLink の生成を
-拒む (-6661) ので、ロック中に開いた window は 1 フレームも持たない。本番の見た目を
-撮るならロック前に立てる。ロック前に描いた最後のフレームはロック中も撮れる。
+代わりに **window を開かずに PNG へ描く**:
 
-**撮ったら真っ黒だったとき**は、描画の regression と決めつける前に
-`cleanshot-capture area --x 0 --y 0 --width 4 --height 4 --out ./tmp/probe.png` を
-1 回叩く。ロック中なら「ロックを解除してから撮り直してください」と返る。
-それが出て、かつ fixture 起動なのに黒いなら、patch が外れた
-(`[patch.crates-io]` が消えた、`Startup::draws_while_occluded` が false に戻った —
-`only_a_fixture_window_keeps_drawing_while_occluded` が守っている) のを疑う。
-Ghostty のようなロック中も自前で描くアプリが写ることは対照にならない。
+```sh
+# 既定は本番の window と同じ 429px 幅
+cargo run --features headless-shot -- --fixture fixtures/timeline.json --png ./tmp/shot.png
+
+# 560px (Wide) も撮れる
+cargo run --features headless-shot -- --fixture fixtures/timeline.json --png ./tmp/wide.png --width 560
+```
+
+撮れたら `Read` で開く。本物の CoreText と Metal で描くので、色・フォント・
+字の詰まり方はそのまま見られる。`cleanshot-capture` も画面収録の許可も要らない。
+
+`--features headless-shot` が要るのは、この経路が使う gpui の `test-support` を
+本番のバイナリへ入れないためで、理由は `src/headless_shot.rs` のモジュール doc にある。
+feature の組み合わせは `cargo test` と同じなので、ビルドは使い回される。
+
+本物の window と違うところが 4 つある:
+
+| 違い | 中身 |
+| --- | --- |
+| 解像度 | 指定した幅の **2 倍のピクセル** (429px → 858x1640 の PNG)。TestWindow の scale factor が 2.0 |
+| 透過 | **写らない**。後ろに何も無いので `"translucent": true` でも不透明に描かれる |
+| 高さ | 820px 固定。下に隠れる行を見たいなら fixture のコピーでその行を先頭へ寄せる |
+| stderr | 毎回 `WARN could not set the window level: ... no raw handle` が出る。TestWindow は raw handle を持たないだけで、異常ではない |
+
+**画面が点いていて、透過・メニュー・本物の window chrome を見たいときは、下の
+`cleanshot-capture` 手順のまま。** そちらでしか写らないものがある。
 
 ### 終わらせ方
 
@@ -149,6 +167,8 @@ API が返しえないタイムラインは書けない。**見たいケース�
   引き伸ばされれば帯が傾く。
 - fixture は `XClient` を組まないので、ボタンは描かれるが押しても届く先が無い。
 - `"translucent": true` を書くと fixture のウィンドウが透過で立ち上がる (#267)。
+  **`--png` では写らない** (後ろに何も無いため)。透過の確認は `cleanshot-capture` の
+  `area` を使う下の手順でしかできない。
   fixture は window state ファイルを読まないので、書かなければ常に不透明。
   撮るときは後ろに文字のあるウィンドウを置き、`cleanshot-capture` の `area` で
   座標を指定する。`window` で撮ると背景抜きの alpha になり、透けているかが写らない。
@@ -157,6 +177,10 @@ API が返しえないタイムラインは書けない。**見たいケース�
   (`open` と `osascript` は sandbox で届かない)。Preview は画面の左上に開いて
   fixture の上の行を隠すので、見たい行は fixture のコピーで先頭へ寄せず、
   2 行目以降に置く。`pending` は空にしておく (5 秒後に先頭へ流れ込んで行がずれる)。
+
+- `"float_on_top": true` を書くと fixture のウィンドウが他のアプリより上に留まった状態で
+  立ち上がる (#267)。効いていれば `cleanshot-capture list` から消える (layer 0 しか並ばない)
+  ので、`area` で座標を指定して撮る。stderr に `could not set the window level` が出ないことも見る。
 
 ## 撮れないもの
 

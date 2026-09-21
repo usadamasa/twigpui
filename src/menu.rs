@@ -237,9 +237,9 @@ const SHOW_NEW_POSTS: Shortcut = Shortcut {
 
 /// 先頭に貼り付く follow を切り替える (#22)｡
 ///
-/// ラベルは状態ではなく言明である — このメニュー API から macOS へチェック
-/// マークは渡らないので､どちらへ倒れたかは､リロード完了が使うのと同じバナー
-/// で報告する｡どちらに倒しても何も費やさない: そもそもアプリが poll するか
+/// ラベルは状態ではなく言明で､状態はチェックマーク ([`Checks`]) が言う｡
+/// どちらへ倒れたかは､リロード完了が使うのと同じバナーでも報告する｡
+/// どちらに倒しても何も費やさない: そもそもアプリが poll するか
 /// どうかは `auto_refresh` のスイッチで､こちらではない｡
 const TOGGLE_FOLLOW_NEW_POSTS: Shortcut = Shortcut {
     keystroke: "cmd-shift-f",
@@ -253,8 +253,8 @@ const TOGGLE_FOLLOW_NEW_POSTS: Shortcut = Shortcut {
 ///
 /// 鍵は Stickies の Translucent (⌥⌘T) から借りた｡macOS で「ウィンドウを
 /// 透かす」に既に割り当てられている鍵がそれで､同じ所作に同じ鍵を置く｡
-/// [`TOGGLE_FOLLOW_NEW_POSTS`] と同じくラベルは状態ではなく言明で､どちらへ
-/// 倒れたかはバナーが言う｡
+/// [`TOGGLE_FOLLOW_NEW_POSTS`] と同じくラベルは状態ではなく言明で､状態は
+/// チェックマークとバナーが言う｡
 const TOGGLE_TRANSLUCENT: Shortcut = Shortcut {
     keystroke: "cmd-alt-t",
     context: Some(KEY_CONTEXT),
@@ -267,8 +267,8 @@ const TOGGLE_TRANSLUCENT: Shortcut = Shortcut {
 ///
 /// 鍵は Stickies の Floating Window (⌥⌘F) から借りた — [`TOGGLE_TRANSLUCENT`]
 /// と対で､同じメニューに同じ順で並ぶ｡`cmd-shift-f` (follow) とは
-/// 修飾キーが違う｡level を動かすのは gpui の fork の patch
-/// (`Window::set_floating`) で､upstream の 0.2.2 には無い｡
+/// 修飾キーが違う｡level を動かすのは `window-level` crate で､gpui-pre には
+/// 開いた後に level を動かす口が無い｡
 const TOGGLE_FLOAT_ON_TOP: Shortcut = Shortcut {
     keystroke: "cmd-alt-f",
     context: Some(KEY_CONTEXT),
@@ -411,10 +411,11 @@ pub(crate) fn init(cx: &mut gpui::App) {
 /// (どの timeline が表示中か､list を取得できるか) 次第で変わるので､この
 /// 関数自身は組まない — ウィンドウが開く前の `main` は空の `Vec` を渡し
 /// (まだどの source も無い)､`TimelineView::refresh_source_menu` が状態が
-/// 変わるたびに全体を作り直して渡す｡gpui の `MenuItem` にチェック状態は
-/// 無いので (`derive_action` の項目にラベルで印を刻む理由もこれ)､選び直す
-/// たびにメニュー全体を組み直すしかない｡
-pub(crate) fn menus(sources: Vec<gpui::MenuItem>) -> Vec<gpui::Menu> {
+/// 変わるたびに全体を作り直して渡す｡チェック状態は項目を組むときに決まる
+/// ので､選び直すたびにメニュー全体を組み直すしかない｡
+///
+/// `checks` は切り替え式の項目に付けるチェックマーク｡
+pub(crate) fn menus(sources: Vec<gpui::MenuItem>, checks: Checks) -> Vec<gpui::Menu> {
     vec![
         gpui::Menu {
             name: "twigpui".into(),
@@ -425,10 +426,12 @@ pub(crate) fn menus(sources: Vec<gpui::MenuItem>) -> Vec<gpui::Menu> {
             .into_iter()
             .chain(QUIT.menu_item())
             .collect(),
+            disabled: false,
         },
         gpui::Menu {
             name: "File".into(),
             items: OPEN_COMPOSER.menu_item().into_iter().collect(),
+            disabled: false,
         },
         // #282: どの timeline を表示するかのトップレベルのメニュー — サブ
         // メニューにしなかった理由は `PLAN.md`/設計メモを見よ (主たる
@@ -437,6 +440,7 @@ pub(crate) fn menus(sources: Vec<gpui::MenuItem>) -> Vec<gpui::Menu> {
         gpui::Menu {
             name: "Sources".into(),
             items: sources,
+            disabled: false,
         },
         gpui::Menu {
             name: "View".into(),
@@ -448,12 +452,13 @@ pub(crate) fn menus(sources: Vec<gpui::MenuItem>) -> Vec<gpui::Menu> {
                 // が名指しで除いている｡
                 Some(gpui::MenuItem::action("Sync List…", SyncList)),
                 SHOW_NEW_POSTS.menu_item(),
-                TOGGLE_FOLLOW_NEW_POSTS.menu_item(),
+                TOGGLE_FOLLOW_NEW_POSTS.checked_menu_item(checks.follow_new_posts),
                 SCROLL_TO_TOP.menu_item(),
             ]
             .into_iter()
             .flatten()
             .collect(),
+            disabled: false,
         },
         // この名前は荷重を負っている (#109): gpui の macOS プラットフォーム
         // がメニューを AppKit の `setWindowsMenu_` へ渡すのは､それが厳密に
@@ -469,12 +474,13 @@ pub(crate) fn menus(sources: Vec<gpui::MenuItem>) -> Vec<gpui::Menu> {
                 // #267: 常駐させるウィンドウの居場所と見え方｡Stickies が同じ
                 // メニューに同じ対を置いているので､探す場所もそこになる｡
                 Some(gpui::MenuItem::separator()),
-                TOGGLE_FLOAT_ON_TOP.menu_item(),
-                TOGGLE_TRANSLUCENT.menu_item(),
+                TOGGLE_FLOAT_ON_TOP.checked_menu_item(checks.float_on_top),
+                TOGGLE_TRANSLUCENT.checked_menu_item(checks.translucent),
             ]
             .into_iter()
             .flatten()
             .collect(),
+            disabled: false,
         },
     ]
 }
@@ -490,11 +496,30 @@ impl Shortcut {
     fn menu_item(&self) -> Option<gpui::MenuItem> {
         self.menu_label.map(self.item)
     }
+
+    /// [`Self::menu_item`] にチェックマークを付けたもの｡切り替え式の項目用｡
+    fn checked_menu_item(&self, checked: bool) -> Option<gpui::MenuItem> {
+        self.menu_item().map(|item| item.checked(checked))
+    }
+}
+
+/// 切り替え式のメニュー項目のうち､いま入っているもの｡
+///
+/// 既定はどれも off で､ウィンドウが開く前の `main` がそれを渡す｡開いた後は
+/// `TimelineView::refresh_source_menu` が実際の状態で作り直す｡
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct Checks {
+    /// View > Follow New Posts (#22)
+    pub(crate) follow_new_posts: bool,
+    /// Window > Float on Top (#267)
+    pub(crate) float_on_top: bool,
+    /// Window > Translucent (#267)
+    pub(crate) translucent: bool,
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ALL_SHORTCUTS, BROWSE_CONTEXT, KEY_CONTEXT, menus};
+    use super::{ALL_SHORTCUTS, BROWSE_CONTEXT, Checks, KEY_CONTEXT, menus};
 
     // --- #58: キーボードショートカット ---
 
@@ -577,7 +602,7 @@ mod tests {
 
     /// メニューバーにあるすべてのアクション項目の名前｡サブメニューも含む｡
     fn menu_action_names() -> Vec<String> {
-        menus(Vec::new())
+        menus(Vec::new(), Checks::default())
             .into_iter()
             .flat_map(|menu| menu.items)
             .filter_map(|item| match item {
@@ -696,7 +721,7 @@ mod tests {
         // 働いたまま､メニューだけが静かにただのメニューへ格下げされる｡
         // diff から誰かが気づく類の regression ではない｡
         assert!(
-            menus(Vec::new())
+            menus(Vec::new(), Checks::default())
                 .iter()
                 .any(|menu| menu.name.as_ref() == "Window"),
             "no menu is named \"Window\""
@@ -719,7 +744,7 @@ mod tests {
         // #267: Stickies が Window メニューに置いている対 (Floating Window /
         // Translucent) に倣う｡常駐させるウィンドウの居場所と見え方は､どちらも
         // ウィンドウの属性なので View ではなく Window に入る｡
-        let window = menus(Vec::new())
+        let window = menus(Vec::new(), Checks::default())
             .into_iter()
             .find(|menu| menu.name.as_ref() == "Window")
             .expect("a Window menu");
@@ -735,6 +760,56 @@ mod tests {
             assert!(
                 names.iter().any(|name| name == expected),
                 "{expected} is missing from the Window menu: {names:?}"
+            );
+        }
+    }
+
+    /// メニューバー全体から､チェックの付いた項目の名前を集める｡
+    fn checked_names(checks: Checks) -> Vec<String> {
+        menus(Vec::new(), checks)
+            .into_iter()
+            .flat_map(|menu| menu.items)
+            .filter(gpui::MenuItem::is_checked)
+            .filter_map(|item| match item {
+                gpui::MenuItem::Action { name, .. } => Some(name.to_string()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_toggle_that_is_on_carries_a_checkmark_and_the_others_do_not() {
+        assert!(
+            checked_names(Checks::default()).is_empty(),
+            "nothing is on before the window opens"
+        );
+        for (checks, expected) in [
+            (
+                Checks {
+                    follow_new_posts: true,
+                    ..Checks::default()
+                },
+                "Follow New Posts",
+            ),
+            (
+                Checks {
+                    float_on_top: true,
+                    ..Checks::default()
+                },
+                "Float on Top",
+            ),
+            (
+                Checks {
+                    translucent: true,
+                    ..Checks::default()
+                },
+                "Translucent",
+            ),
+        ] {
+            assert_eq!(
+                checked_names(checks),
+                [expected],
+                "only the toggle that is on may be checked"
             );
         }
     }

@@ -25,11 +25,10 @@
 //! ## 何を出すか
 //!
 //! stdout へ 1 秒に 1 行の TSV (機械が読む)､終わりに stderr とログへ
-//! 要約 (人が読む)｡要約には測定条件 — debug/release､画面ロックの有無､
-//! occluded でも描くか — を添える｡fixture の window は画面ロック中も
-//! 描き続けるので (fork した gpui の patch)､ロック中の数字は本番の idle
-//! と比べられない｡条件を並べて出すのは､その取り違えを後から見つける
-//! ためだ｡
+//! 要約 (人が読む)｡要約には測定条件 — debug/release と画面ロックの有無 —
+//! を添える｡window はロック中に描画を止めるので､`screen locked` の数字は
+//! `screen unlocked` の idle と比べられない｡条件を並べて出すのは､その
+//! 取り違えを後から見つけるためだ｡
 //!
 //! `--fixture` としか組まない｡live の window は起動だけで課金される｡
 //! 測り方と読み方は `runtime-profiling` スキルに､過去の数字は
@@ -140,8 +139,6 @@ pub(crate) fn read(pid: u32) -> Result<Reading> {
 pub(crate) struct Plan {
     /// 何秒 sample を取るか｡
     pub(crate) seconds: u64,
-    /// fixture の window だけ true｡[`Conditions`] に写す｡
-    pub(crate) draws_while_occluded: bool,
 }
 
 /// `--perf <seconds>` を読む｡無ければ `Ok(None)`､値が無いか数でなければ
@@ -169,10 +166,7 @@ pub(crate) fn arm(args: &[String], startup: &Startup) -> Result<Option<Plan>, St
             "--perf only runs with --fixture: a live window bills requests on startup.".to_string(),
         );
     }
-    Ok(Some(Plan {
-        seconds,
-        draws_while_occluded: startup.draws_while_occluded(),
-    }))
+    Ok(Some(Plan { seconds }))
 }
 
 /// 直前の sample からの区間で､CPU を何 % 使ったか (10 倍した整数)｡
@@ -288,21 +282,19 @@ impl fmt::Display for Summary {
     }
 }
 
-/// 数字がどういう状況で取れたか｡数字と一緒に出す — ロック中の fixture の
-/// idle を本番の idle と見比べる取り違えを､後から見つけられるように｡
+/// 数字がどういう状況で取れたか｡数字と一緒に出す — ロック中の idle を
+/// ロック解除中の idle と見比べる取り違えを､後から見つけられるように｡
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Conditions {
     /// `debug` か `release`｡
     pub(crate) build: &'static str,
     /// `locked` / `unlocked`､`ioreg` が答えなければ `unknown`｡
     pub(crate) screen: &'static str,
-    /// fixture の window だけ true｡occluded でも描き続ける｡
-    pub(crate) draws_while_occluded: bool,
 }
 
 impl Conditions {
     /// 今の状況を読む｡`ioreg` を 1 回起こす｡
-    pub(crate) fn observe(draws_while_occluded: bool) -> Self {
+    pub(crate) fn observe() -> Self {
         let screen = match activity::probe() {
             Ok(Activity::Away) => "locked",
             Ok(Activity::Present) => "unlocked",
@@ -315,7 +307,6 @@ impl Conditions {
                 "release"
             },
             screen,
-            draws_while_occluded,
         }
     }
 }
@@ -324,14 +315,8 @@ impl fmt::Display for Conditions {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "perf conditions: build {}, screen {}, draws while occluded: {}",
-            self.build,
-            self.screen,
-            if self.draws_while_occluded {
-                "yes"
-            } else {
-                "no"
-            }
+            "perf conditions: build {}, screen {}",
+            self.build, self.screen
         )
     }
 }
@@ -373,7 +358,7 @@ pub(crate) fn start(cx: &mut App, plan: Option<Plan>) {
             }
             cx.background_executor().timer(INTERVAL).await;
         }
-        let conditions = Conditions::observe(plan.draws_while_occluded);
+        let conditions = Conditions::observe();
         let report = match summarize(&samples) {
             Some(summary) => format!("{conditions}\n{summary}"),
             None => format!("{conditions}\nperf: fewer than two samples, nothing to summarize"),
@@ -382,11 +367,7 @@ pub(crate) fn start(cx: &mut App, plan: Option<Plan>) {
         for line in report.lines() {
             log::info(line);
         }
-        // `Err` はアプリがもう畳まれているときだけで､そのときは終わって
-        // いるのだから､することは無い｡
-        if cx.update(|cx| cx.quit()).is_err() {
-            log::warn("perf: the app was already gone when the run ended");
-        }
+        cx.update(|cx| cx.quit());
     })
     .detach();
 }
@@ -495,13 +476,10 @@ mod tests {
     }
 
     #[test]
-    fn perf_flag_takes_a_number_of_seconds_and_remembers_the_fixture_window() {
+    fn perf_flag_takes_a_number_of_seconds() {
         assert_eq!(
             arm(&args(&["twigpui", "--perf", "60"]), &fixture_startup()),
-            Ok(Some(Plan {
-                seconds: 60,
-                draws_while_occluded: true,
-            }))
+            Ok(Some(Plan { seconds: 60 }))
         );
     }
 
@@ -603,11 +581,10 @@ mod tests {
         let conditions = Conditions {
             build: "debug",
             screen: "locked",
-            draws_while_occluded: true,
         };
         assert_eq!(
             conditions.to_string(),
-            "perf conditions: build debug, screen locked, draws while occluded: yes"
+            "perf conditions: build debug, screen locked"
         );
     }
 }

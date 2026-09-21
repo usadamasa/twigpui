@@ -33,6 +33,8 @@ mod cache;
 mod compose;
 mod config;
 mod fixture;
+#[cfg(feature = "headless-shot")]
+mod headless_shot;
 mod image_cache;
 mod like;
 mod log;
@@ -56,7 +58,7 @@ mod x_api;
 use std::collections::HashSet;
 use std::io::IsTerminal as _;
 
-use gpui::{AppContext as _, Application, TitlebarOptions, WindowBounds, WindowOptions};
+use gpui::{AppContext as _, TitlebarOptions, WindowBounds, WindowOptions};
 
 fn main() {
     let config = match config::Config::from_env() {
@@ -122,24 +124,13 @@ fn main() {
         std::process::exit(usage_only(&config, &paths));
     }
 
-    // #146: `--fixture <path>` はアカウントではなくファイルからウィンドウを
-    // 埋める｡ウィンドウが開く前のここで解決するので､fixture が無かったり
-    // 壊れていたりしたときは､説明の無い空のウィンドウとしてではなく､打ち
-    // 込んだ端末の上で失敗する｡
-    let startup = match fetch_post_arg(&args, "--fixture") {
-        FetchPostArg::Absent => ui::Startup::Live,
-        FetchPostArg::Value(path) => match fixture::load(std::path::Path::new(path)) {
-            Ok(loaded) => ui::Startup::Fixture(Box::new(loaded)),
-            Err(error) => {
-                eprintln!("--fixture: {error:#}");
-                std::process::exit(1);
-            }
-        },
-        FetchPostArg::MissingValue => {
-            eprintln!("--fixture requires a path to a fixture JSON file.");
-            std::process::exit(1);
-        }
-    };
+    // #221: `--png <path>` は window を開かずに `--fixture` を描いて PNG へ
+    // 書き､そこでプロセスを終える｡画面がロックされていても撮れる唯一の
+    // 経路で､`headless-shot` feature の裏にある理由はモジュール doc に｡
+    #[cfg(feature = "headless-shot")]
+    headless_shot::run_if_asked(&args, &config, &paths);
+
+    let startup = startup_from(&args);
 
     // `--perf <seconds>`: このプロセス自身の RSS と CPU を測る (`perf.rs`)｡
     let perf = perf::arm(&args, &startup).unwrap_or_else(|message| {
@@ -158,7 +149,7 @@ fn main() {
 
     // #95: ツールバーが描くアイコン｡gpui は `svg()` のパスをこれを通して
     // 解決するので､これが無いとどのアイコンも何も描かれない｡
-    Application::new()
+    gpui_platform::application()
         .with_assets(assets::Assets)
         .run(move |cx| {
             register_key_bindings(cx);
@@ -172,14 +163,14 @@ fn main() {
             cx.on_action(|_: &menu::Quit, cx| cx.quit());
             // #282: まだどの source も無い — `TimelineView::refresh_source_menu`
             // が起動の終わりに実際の中身で作り直す｡
-            cx.set_menus(menu::menus(Vec::new()));
+            cx.set_menus(menu::menus(Vec::new(), menu::Checks::default()));
             // #139: 最後のウィンドウを閉じるとアプリが終わる｡gpui は独自に
             // プロセスを生かし続ける — もう一枚ウィンドウを頼めるアプリには
             // 正しいが､このアプリには誤りで､`cmd-w` は画面に何も無いまま
             // プロセスを走らせ､`cmd-q` だけがそこへ届く状態を残していた｡
             // 決め打ちせず数えているので､二枚目のウィンドウがあっても最後の
             // 一枚が出るまでは終わらない｡
-            cx.on_window_closed(|cx| {
+            cx.on_window_closed(|cx, _window_id| {
                 if cx.windows().is_empty() {
                     cx.quit();
                 }
@@ -204,12 +195,6 @@ fn main() {
                 ..Default::default()
             };
 
-            // fork した gpui の patch (Cargo.toml の `[patch.crates-io]`):
-            // fixture の window は画面がロックされていても描き続ける｡
-            // `open_window` の前でなければならない理由は
-            // `ui::Startup::draws_while_occluded` を見よ｡
-            gpui::set_draw_while_occluded(startup.draws_while_occluded());
-
             let opened = cx.open_window(options, |window, cx| {
                 let timeline =
                     cx.new(|cx| ui::TimelineView::new(config, paths, startup, window, cx));
@@ -229,6 +214,27 @@ fn main() {
             cx.activate(true);
             perf::start(cx, perf);
         });
+}
+
+/// #146: `--fixture <path>` はアカウントではなくファイルからウィンドウを
+/// 埋める｡ウィンドウが開く前に解決するので､fixture が無かったり壊れていたり
+/// したときは､説明の無い空のウィンドウとしてではなく､打ち込んだ端末の上で
+/// 失敗する｡
+fn startup_from(args: &[String]) -> ui::Startup {
+    match fetch_post_arg(args, "--fixture") {
+        FetchPostArg::Absent => ui::Startup::Live,
+        FetchPostArg::Value(path) => match fixture::load(std::path::Path::new(path)) {
+            Ok(loaded) => ui::Startup::Fixture(Box::new(loaded)),
+            Err(error) => {
+                eprintln!("--fixture: {error:#}");
+                std::process::exit(1);
+            }
+        },
+        FetchPostArg::MissingValue => {
+            eprintln!("--fixture requires a path to a fixture JSON file.");
+            std::process::exit(1);
+        }
+    }
 }
 
 /// ウィンドウが一枚も存在しないうちに登録するキーバインド (#38, #58, #188, #282)｡
@@ -266,7 +272,7 @@ fn startup_banner(version: &str, hash: &str) -> String {
 /// 起動した `.app` (#40) には端末が無い: stderr は誰の目にも触れない先へ
 /// 行くので､そうでなければプロセスは目に見える症状も無く消える｡それこそ
 /// #40 が挙げる「説明の無い空白ウィンドウ」の失敗である｡`gpui` のウィンドウ
-/// ではなく `osascript` を使うのは､これが `Application::new()` の *前* に
+/// ではなく `osascript` を使うのは､これが `gpui_platform::application()` の *前* に
 /// 走るからだ — `gpui` のアラートを吊るす window server への接続はまだ無い
 /// が､`osascript` は普通の macOS アプリであること以上をこのプロセスに
 /// 求めない｡

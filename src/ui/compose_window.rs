@@ -9,8 +9,8 @@
 //! `TimelineView::composer` をそのまま描くだけ｡下書き ([`crate::compose::ComposeState`])
 //! を決して失わないという #14 の約束は､それが動かないことで保たれる｡
 //!
-//! `compose_input` (`gpui_component::input::InputState`) だけは別だ｡
-//! `InputState::new` はカーソルの点滅と blur を渡された window へ束ねる
+//! `compose_input` (`gpui_component::input::TextareaState`) だけは別だ｡
+//! `TextareaState::new` はカーソルの点滅と blur を渡された window へ束ねる
 //! (focus/blur の購読が window 単位のため) ので､timeline の window で
 //! 作ったものを別の window で描いても点滅も blur も届かない｡だから
 //! compose window を開くたびに [`TimelineView::rebind_compose_input`] で
@@ -153,7 +153,7 @@ impl ComposeWindow {
             _timeline_changed: timeline_changed,
             _timeline_released: timeline_released,
         };
-        window.focus(&this.focus_handle);
+        window.focus(&this.focus_handle, cx);
         this
     }
 }
@@ -276,7 +276,7 @@ mod tests {
         );
     }
 
-    /// #282: `rebind_compose_input` が作り直した `InputState` は本物の
+    /// #282: `rebind_compose_input` が作り直した `TextareaState` は本物の
     /// `compose_input` として動く — 既存の下書きを写した状態で開き､打鍵は
     /// `on_compose_input_event` を経て `compose.text()` まで届く｡timeline
     /// のウィンドウで打つことを見ていた `the_bare_keys_type_into_a_focused_composer`
@@ -303,7 +303,7 @@ mod tests {
             assert_eq!(
                 timeline.read(cx).compose_input.read(cx).value().to_string(),
                 "existing",
-                "the rebuilt InputState has to be seeded from the existing draft"
+                "the rebuilt TextareaState has to be seeded from the existing draft"
             );
         });
 

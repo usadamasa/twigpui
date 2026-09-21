@@ -107,6 +107,10 @@ pub(crate) struct Fixture {
     /// 見た目を撮るにはここで宣言する以外に道が無い｡
     #[serde(default)]
     pub translucent: bool,
+    /// 起動直後から他のアプリの窓より上に留めるか (#267)｡
+    /// [`Fixture::translucent`] と同じ理由でここに要る｡
+    #[serde(default)]
+    pub float_on_top: bool,
     /// 起動の終わりに compose window も開くか (#282)｡打鍵を合成できない
     /// `--fixture` の窓では `⌘N` を押せないので､「別ウィンドウで
     /// `compose_input` を描いても panic しない」ことを確かめる手段はこれ

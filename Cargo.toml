@@ -4,6 +4,17 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
+# #267 の Float on Top のために `unsafe` を 1 か所へ閉じ込めた helper
+# (`crates/window-level`)｡本体は `unsafe_code = "forbid"` のままでいられる｡
+#
+# `default-members` に両方を並べてあるので､CLAUDE.md の 3 コマンド
+# (`cargo fmt --check` / `cargo clippy --all-targets -- -D warnings` /
+# `cargo test`) と CI がそのまま helper も見る｡片方だけにすると､helper は
+# 誰にも lint されないまま `unsafe` を抱えることになる｡
+[workspace]
+members = ["crates/window-level"]
+default-members = [".", "crates/window-level"]
+
 # `warn` ではなく `deny` (#47)｡CI は `cargo clippy -- -D warnings` を走らせる
 # ので､ここに並ぶものはどれも手元では通るのに CI ではすでにビルド失敗だった —
 # この非対称は､コードを書いたマシンで分かったはずのことを CI で知る羽目に
@@ -56,6 +67,39 @@ redundant_type_annotations = "deny"
 # 来る — どれもこのコードが信用してよいものではない｡
 arithmetic_side_effects = "deny"
 
+# `--png` で fixture を window 無しに PNG へ描く経路 (#221, `src/headless_shot.rs`)｡
+#
+# 既定では立てない｡この経路が使う `HeadlessAppContext` と
+# `current_headless_renderer` は gpui の `test-support` の内側にあり､それを素の
+# `cargo build --release` に入れると `TestPlatform` ごと本番のバイナリへ載る｡
+# dev-dependency では届かない — bin の `main` から呼ぶので､テストではない
+# ビルドで feature を立てるしかない｡
+#
+# feature の裏のコードは既定の `cargo clippy --all-targets` が見ないので､
+# CI の clippy は `--features headless-shot` を付けて呼ぶ
+# (`.github/workflows/ci.yaml`)｡
+[features]
+headless-shot = ["gpui/test-support", "gpui_platform/test-support"]
+
+# レイアウトと描画をする依存だけ最適化して積む｡`cargo test` の壁時計は
+# 手元 (macOS, 1271 本) で 90.27s から 5.78s になる｡
+#
+# `#[gpui::test]` の animation は `advance_clock` で進むので､`advance_clock(2s)`
+# 1 回がウィンドウを 21 フレーム描き直す｡40 件の fixture の 1 フレームに
+# 未最適化では 350ms (1 行 8.2ms) かかり､これが 11 本のテストだけで 172 秒を占める｡
+# 時間はほぼ全部が taffy のレイアウトと gpui の描画の中にある — 行を空の div に
+# 差し替えると 40 件の draw が 328ms から 3.4ms まで落ちるので､こちらの
+# `render` の組み立てではない｡
+#
+# 効きの内訳: 素が 90.27s､gpui-pre だけ最適化して 20.67s､taffy も足して 5.78s｡
+# この 2 つだけにしてあるので､CI の cold build で余分に最適化されるのもこの 2 つだけ｡
+# `debug-assertions` は dev profile の既定のまま触らない｡
+[profile.dev.package.gpui-pre]
+opt-level = 2
+
+[profile.dev.package.taffy]
+opt-level = 2
+
 [dependencies]
 anyhow = "1.0.104"
 # PKCE の verifier/challenge 用の URL-safe でパディング無しの base64 (RFC 7636 §4.1-4.2)｡
@@ -94,20 +138,35 @@ redact = { version = "0.1.11", features = ["serde"] }
 # `state`)､`rand` の API 全面 (分布､シード､シャッフル補助) ではない｡
 # `getrandom` がちょうどそこを覆うので､`rand` ではなくこちらを使う｡
 getrandom = { version = "0.4.3", features = ["std"] }
-# macos-blade はプリコンパイル済みの Metal シェーダではなく blade 経由で描画
-# するので､ビルドに `xcrun metal` が要らない — あれは Command Line Tools では
+# `gpui-pre` 自身は `font-kit` を optional dependency として宣言しているが
+# (`cargo-shear` の ignored リストに載っている理由もそれ)､それを使う cfg は
+# crate 自身のソースのどこにも無い — 実際に読むのは `gpui_platform` 経由の
+# `gpui_macos` (下) なので､ここでは立てない｡
+#
+# 版を `=` で固定する (下の `gpui_platform` と dev-dependencies も)｡gpui-pre は
+# zed の main の snapshot で､0.3.x の中でも API が変わる｡gpui-component 0.6.4 は
+# `^0.3.5` としか言わないので､固定しないと lock を作り直したときに 0.3.6 を拾い､
+# gpui-component がコンパイルできなくなる (`register_inspector_element` の
+# クロージャの引数が変わった)｡上げるときは gpui-component が通る版と揃える｡
+gpui = { package = "gpui-pre", version = "=0.3.5", default-features = false }
+# runtime_shaders: プリコンパイル済みの Metal シェーダではなく実行時コンパイルで
+# 描画するので､ビルドに `xcrun metal` が要らない — あれは Command Line Tools では
 # なく完全な Xcode に付いてくる｡x11/wayland は Linux 専用で､このプロジェクトは
 # macOS 専用だ｡
-gpui = { version = "0.2.2", default-features = false, features = [
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.5", features = [
     "font-kit",
-    "macos-blade",
+    "runtime_shaders",
 ] }
-gpui-component = "0.5.1"
+gpui-component = "0.6.4"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 sha2 = "0.11.0"
 toml = "1.1.4"
 ureq = { version = "3.4.0", features = ["json"] }
+# #267 の Float on Top｡gpui-pre には window を開いた後に level を動かす口が
+# 無いので､`NSWindow` の level だけを差し替える｡`unsafe` はこの crate の中の
+# 1 か所に閉じてある (crate の doc を見よ)｡
+window-level = { path = "crates/window-level" }
 
 # これを必要とするのは起動の smoke test (#59) だけだ｡`test-support` は
 # `TestAppContext` を引き込む｡そのウィンドウ実装はどこにも描画しないので
@@ -116,33 +175,6 @@ ureq = { version = "3.4.0", features = ["json"] }
 # この経路は `cargo test` がそれまで一度も覆っていなかったところで､#55 が
 # 隠れていた場所だ: 実際に何かが描画されて初めて到達する panic｡
 [dev-dependencies]
-gpui = { version = "0.2.2", default-features = false, features = [
-    "font-kit",
-    "macos-blade",
+gpui = { package = "gpui-pre", version = "=0.3.5", default-features = false, features = [
     "test-support",
 ] }
-
-# gpui は crates.io の 0.2.2 ではなく､同じ commit (69e2130､0.2.2 を publish
-# した元) に 2 commit 足した fork を使う｡差分は 2 機能:
-#
-# - `gpui::set_draw_while_occluded`: on にした window は画面が
-#   ロックされていても (occluded でも) 描き続ける｡upstream は occluded な
-#   window の display link を止め､ロック中は OS が CVDisplayLink の生成を
-#   拒む (-6661) ので､ロック中に開いた window は 1 フレームも描かず､window
-#   capture が真っ黒になる｡`--fixture` だけがこのスイッチを入れる
-#   (`ui::Startup::draws_while_occluded`)｡off が既定で､そのときの挙動は
-#   upstream と同一なので本番の消費電力は変わらない｡
-#   upstream への報告: https://github.com/zed-industries/zed/issues/63217
-# - `Window::set_floating` (#267): 開いた後に window を macOS の floating
-#   level へ出し入れする｡upstream の `WindowKind` は開くときに決めるもので､
-#   しかも macOS では `Floating` が `Normal` と同じ level に置かれるので､
-#   Window メニューの Float on Top を作る口が無い｡
-#
-# fork の branch: https://github.com/usadamasa/zed/tree/gpui-0.2.2-draw-while-occluded
-#
-# `rev` で固定する｡branch 名だと fork を動かした瞬間にビルドが変わる｡
-# gpui を上げるときは､その版を publish した commit の上に同じ patch を
-# 載せ直して rev を差し替える (crates.io の `.cargo_vcs_info.json` が元の
-# commit を持っている)｡
-[patch.crates-io]
-gpui = { git = "https://github.com/usadamasa/zed.git", rev = "21f6531555aec2a464278835427bada94faa1d8a" }

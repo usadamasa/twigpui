@@ -233,7 +233,7 @@ impl TimelineView {
             // より短いとき､折り返す行の高さが列の余りまで伸びる (4 行の
             // fixture で実測 180px の空白)｡basis auto なら高さは中身で決まる｡
             // `ui` の `a_wrapping_row_keeps_its_height_when_the_lane_is_short`｡
-            .flex_grow()
+            .flex_grow_1()
             // #140: `flex_grow` が取るのは *余った* 幅であって､中身より狭く
             // 縮むことは許さない｡flex の子の `min-width` の既定が `auto`
             // だからだ｡そのため長い文が列を行より広く押し広げ､はみ出しは

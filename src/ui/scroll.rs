@@ -9,7 +9,7 @@
 //!
 //! # gpui が入力をどこまで運んでくるか (#175 の「先に確認すること」)
 //!
-//! gpui 0.2.2 の `Div` は `overflow_y_scroll` の要素に自分でホイールの
+//! gpui-pre 0.3.5 の `Div` は `overflow_y_scroll` の要素に自分でホイールの
 //! listener を張り､bubble phase で `offset += delta.pixel_delta(line_height)`
 //! を足す (`elements/div.rs` の `paint_scroll_listener`)｡滑らかにする
 //! 段も､端で跳ねる段も無い — clamp は次の prepaint でされるので､端を
@@ -245,6 +245,22 @@ impl Scroller {
                 self.bounced = false;
             }
             TouchPhase::Ended => self.touching = false,
+            // OS が操作を取り上げた｡指を離したのと同じく touch は終わるが､
+            // 弾ませはしない — `bounced` を上げておくと下の `fling` が
+            // 見送られ､band は `step` の spring でそのまま 0 へ畳まれる｡
+            // gpui の doc が言う「巻き戻して､一度も commit しなかったものと
+            // して扱う」がこれで､次の `Started` が `bounced` を降ろす｡
+            // OS が操作を取り上げた｡gpui の doc は「進行中の操作を巻き戻し､
+            // 一度も commit しなかったものとして扱え」と言う｡だから
+            // この event が運んできた距離は一覧へ置かず､端の弾みも起こさ
+            // ない — 伸びている band は指を離したときと同じ spring で
+            // 畳まれる｡macOS の wheel の経路からこの phase は来ないが､
+            // 来たときの行き先をここで決めてある｡
+            TouchPhase::Cancelled => {
+                self.touching = false;
+                self.placed = Some(offset);
+                return offset;
+            }
             TouchPhase::Moved => {}
         }
         let mut delta = delta;
@@ -500,7 +516,7 @@ impl TimelineView {
         self.glide = None;
         let offset = self.list_scroll.offset();
         let y = f32::from(offset.y);
-        let floor = -f32::from(self.list_scroll.max_offset().height);
+        let floor = -f32::from(self.list_scroll.max_offset().y);
         match event.delta {
             gpui::ScrollDelta::Pixels(delta) => {
                 let next = self
@@ -537,7 +553,7 @@ impl TimelineView {
                 // `Err` はウィンドウが消えたということ｡
                 let Ok(done) = this.update(cx, |this, cx| {
                     let offset = this.list_scroll.offset();
-                    let floor = -f32::from(this.list_scroll.max_offset().height);
+                    let floor = -f32::from(this.list_scroll.max_offset().y);
                     let motion = this.scroller.step(f32::from(offset.y), floor, FRAME_S);
                     this.list_scroll
                         .set_offset(gpui::point(offset.x, px(motion.offset)));
@@ -963,6 +979,20 @@ mod tests {
     // 見た目の px そのものを spring で戻せば､戻る時間は伸びた距離だけで
     // 決まり､どれだけ積み上がっても変わらない｡
 
+    /// 落ち着くまでに `shift` が届いたいちばん大きい値｡今の伸びから数える
+    /// ので､弾みがあれば山が出るし､無ければ出発点のまま縮んでいく｡
+    fn peak_shift(scroller: &mut Scroller) -> Px {
+        let mut peak = scroller.shift();
+        for _ in 0..600 {
+            let motion = scroller.step(0., FLOOR, FRAME_S);
+            peak = peak.max(motion.shift);
+            if motion.done {
+                break;
+            }
+        }
+        peak
+    }
+
     /// 落ち着くまでの 1 フレームごとの `shift` の減り方を集める｡
     fn relax(scroller: &mut Scroller) -> Vec<Px> {
         let mut previous = scroller.shift();
@@ -1052,6 +1082,22 @@ mod tests {
             peak > PULL_LIMIT_PX * 0.9,
             "and must be worth the limit it was given, {peak}"
         );
+    }
+
+    // OS が操作を取り上げた (`Cancelled`) ときは､その event が運んできた
+    // 距離を一覧へ置かず､端の弾みも起こさない｡`Ended` なら同じ余りが一覧を
+    // 端まで飛ばしたうえで band を弾く｡
+    #[test]
+    fn a_cancelled_event_neither_places_its_distance_nor_bounces() {
+        let mut scroller = Scroller::default();
+        let grabbed = scroller.pan(-500., FLOOR, 0., TouchPhase::Started);
+        let placed = scroller.pan(grabbed, FLOOR, 100_000., TouchPhase::Cancelled);
+        assert!(
+            close(placed, grabbed),
+            "a cancelled event must leave the list where it was, {placed} not {grabbed}"
+        );
+        let peak = peak_shift(&mut scroller);
+        assert!(close(peak, 0.), "and must not bounce the band, {peak}");
     }
 
     // 離した瞬間に最高速で走り出すのは指数関数の癖で､目には弾かれたように

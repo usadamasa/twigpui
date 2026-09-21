@@ -421,7 +421,7 @@ impl TimelineView {
                 if succeeded {
                     // #282: 入力欄を空にして窓を閉じるのは compose window
                     // の handle 越し — `compose_input` はその window で
-                    // 作った `InputState` なので (`rebind_compose_input`
+                    // 作った `TextareaState` なので (`rebind_compose_input`
                     // の doc を見よ)､値を空にするにも `Window` が要る｡
                     // 開いたままの理由が無くなった (下書きが空になる) ので､
                     // 閉じてついでに handle を手放す｡

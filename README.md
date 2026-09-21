@@ -30,6 +30,9 @@
   (`fixture-visual-check` スキルを参照)｡
 - `--fixture ... --perf 60` で自分の RSS と CPU を 1 秒ごとに TSV で流し､
   要約を出して終了する (`runtime-profiling` スキル)｡
+- `cargo run --features headless-shot -- --fixture fixtures/timeline.json --png ./tmp/shot.png`
+  で window を開かずに fixture を PNG へ描く｡画面がロックされていても撮れる
+  (`fixture-visual-check` スキルを参照)｡
 
 認証の手段は X でのサインインだけである｡app-only の bearer token は削除した:
 ホームタイムラインを読めず､投稿・repost・引用・いいね・削除もできなかった｡
@@ -50,9 +53,9 @@
 
 ## 必要なもの
 
-`macos-blade` フィーチャを有効にしてあるので､ビルドに `xcrun metal` は要らない｡
-これは Command Line Tools ではなく完全な Xcode に同梱されるものである｡描画は
-代わりに blade を通る｡
+`gpui_platform` の `runtime_shaders` フィーチャを有効にしてあるので､ビルドに
+`xcrun metal` は要らない｡これは Command Line Tools ではなく完全な Xcode に同梱される
+ものである｡描画は代わりに実行時コンパイルを通る｡
 
 
 ## セットアップ

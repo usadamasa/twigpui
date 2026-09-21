@@ -412,12 +412,13 @@ impl TimelineView {
         cx.notify();
     }
 
-    /// `Sources` メニューを今の状態で作り直す (#282)｡macOS のメニューは
-    /// `MenuItem` にチェック状態を持てないので (`menu::menus` の doc)､選択が
-    /// 変わるたびメニュー全体を組み直すほかない｡呼び忘れは鮮度の落ちた
+    /// メニューバーを今の状態で作り直す (#282)｡`Sources` の中身も､切り替え式の
+    /// 項目のチェックマーク ([`menu::Checks`]) も､項目を組むときに決まるので､
+    /// 状態が変わるたびメニュー全体を組み直すほかない｡呼び忘れは鮮度の落ちた
     /// メニューという静かな欠陥になるので､呼ぶ場所をここに列挙する:
     ///
     /// - 起動の終わり ([`TimelineView::finish_startup`])
+    /// - Follow New Posts / Float on Top / Translucent の切り替えの末尾
     /// - この impl の [`Self::toggle_source`] の末尾
     /// - この impl の [`Self::fetch_owned_lists`] の完了 (`owned_lists` を
     ///   代入した直後)
@@ -436,7 +437,12 @@ impl TimelineView {
             offers_list_fetch(self.client.is_some(), self.home_user_id.is_some()),
             self.lists_fetch.is_some(),
         );
-        cx.set_menus(menu::menus(items));
+        let checks = menu::Checks {
+            follow_new_posts: self.follow.is_following(),
+            float_on_top: self.window_state.float_on_top,
+            translucent: self.window_state.translucent,
+        };
+        cx.set_menus(menu::menus(items, checks));
     }
 }
 
@@ -794,6 +800,7 @@ mod tests {
             reposted: Vec::new(),
             selected: None,
             translucent: false,
+            float_on_top: false,
             composer_open: false,
         };
         assert_eq!(

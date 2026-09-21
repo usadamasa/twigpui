@@ -35,24 +35,6 @@ pub(crate) enum Startup {
     Fixture(Box<Fixture>),
 }
 
-impl Startup {
-    /// この起動の window が､画面がロックされていても (occluded でも) 描き
-    /// 続けるべきかどうか — fork した gpui の patch (Cargo.toml の
-    /// `[patch.crates-io]`) が読むスイッチの値｡
-    ///
-    /// fixture の window は撮られるためにある｡upstream の gpui はロック中に
-    /// 開いた window を 1 フレームも描かず､capture が真っ黒になる｡live の
-    /// window は入れない: 隠れているあいだ描画を止める upstream の挙動は
-    /// 本番にとって正しい｡
-    ///
-    /// `main` が `open_window` の **前** に `gpui::set_draw_while_occluded`
-    /// へ渡す｡gpui は platform の window を作ってから root view を組むので､
-    /// view の構築中に入れたのでは window 生成時の判定に間に合わない｡
-    pub(crate) fn draws_while_occluded(&self) -> bool {
-        matches!(self, Self::Fixture(_))
-    }
-}
-
 /// この起動が持って立ち上がる window state (#267)｡
 ///
 /// fixture は state ファイルを読まない (`window_state_file` が `None`) ので､
@@ -66,6 +48,7 @@ fn startup_window_state(
     let mut state = window_state::load_or_default(file);
     if let Startup::Fixture(fixture) = startup {
         state.translucent = fixture.translucent;
+        state.float_on_top = fixture.float_on_top;
     }
     state
 }
@@ -194,7 +177,7 @@ impl TimelineView {
         };
         // #118: 何よりも先に｡最初のフレームから focus の経路に空のものでは
         // なく timeline が乗るようにするため｡
-        window.focus(&this.focus_handle);
+        window.focus(&this.focus_handle, cx);
         this.finish_startup(startup, window, cx);
         this
     }
@@ -226,9 +209,9 @@ impl TimelineView {
     fn compose_input(
         window: &mut Window,
         cx: &mut Context<'_, Self>,
-    ) -> (Entity<InputState>, Subscription) {
+    ) -> (Entity<TextareaState>, Subscription) {
         let input = cx.new(|cx| {
-            InputState::new(window, cx)
+            TextareaState::new(window, cx)
                 .auto_grow(2, 8)
                 .placeholder("What's happening?")
         });
@@ -236,7 +219,7 @@ impl TimelineView {
         (input, subscription)
     }
 
-    /// compose window を開く直前に呼ぶ (#282)｡`InputState::new` はカーソル
+    /// compose window を開く直前に呼ぶ (#282)｡`TextareaState::new` はカーソル
     /// の点滅と blur の購読を渡された window へ束ねる (gpui-component の
     /// 実装を見よ) ので､timeline の window で作った `compose_input` を
     /// 別の window で描いても点滅も blur も届かない｡だから開くたびに
@@ -326,12 +309,13 @@ impl TimelineView {
         };
         self.reload_notice = Some(ReloadNotice::Outcome(outcome.into()));
         self.persist_window_state(cx);
+        self.refresh_source_menu(cx);
         cx.notify();
     }
 
     /// Window メニューの Float on Top (#267)｡[`Self::toggle_translucent`] と
     /// 同じ形: 反転させ､効かせ､言い､覚える｡
-    pub(super) fn toggle_float_on_top(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+    pub(super) fn toggle_float_on_top(&mut self, window: &Window, cx: &mut Context<'_, Self>) {
         self.window_state.float_on_top = !self.window_state.float_on_top;
         self.apply_floating(window);
         let outcome = if self.window_state.float_on_top {
@@ -341,17 +325,25 @@ impl TimelineView {
         };
         self.reload_notice = Some(ReloadNotice::Outcome(outcome.into()));
         self.persist_window_state(cx);
+        self.refresh_source_menu(cx);
         cx.notify();
     }
 
     /// `window_state.float_on_top` を platform の window に伝える (#267)｡
     ///
-    /// `Window::set_floating` は gpui の fork の patch (Cargo.toml の
-    /// `[patch.crates-io]`) にしか無い｡upstream 0.2.2 の `WindowKind` は
-    /// 開くときに決めるもので､macOS では `Floating` も `Normal` と同じ
-    /// level に置かれる — 開いた後に切り替える口はこれだけだ｡
+    /// gpui-pre には window を開いた後に level を動かす口が無いので
+    /// (`WindowKind` は `open_window` のときに決まる)､raw window handle から
+    /// `NSWindow` を辿って level だけを差し替える｡なぜ `WindowKind::Floating`
+    /// で開き直さないのかは [`window_level`] の crate doc に｡
+    ///
+    /// 届かなかったときは 1 行言って続ける｡level は描画にも状態にも関わら
+    /// ないので､失うのは見た目だけだ — テスト platform の window は raw
+    /// handle を返さないので (`HandleError::NotSupported`)､テストからの
+    /// トグルは必ずここを通る｡
     fn apply_floating(&self, window: &Window) {
-        window.set_floating(self.window_state.float_on_top);
+        if let Err(error) = window_level::set_floating(window, self.window_state.float_on_top) {
+            log::warn(&format!("could not set the window level: {error}"));
+        }
     }
 
     /// `window_state.translucent` を platform の window に伝える (#267)｡

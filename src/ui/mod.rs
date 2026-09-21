@@ -6,7 +6,7 @@ use gpui::{
     AnyElement, Context, Div, Entity, FocusHandle, FontWeight, ObjectFit, ScrollHandle,
     SharedString, Stateful, Subscription, Task, Window, div, img, prelude::*, px, rgb, rgba, svg,
 };
-use gpui_component::input::{Input, InputEvent, InputState};
+use gpui_component::input::{InputEvent, Textarea, TextareaState};
 
 use crate::activity::{self, Activity};
 use crate::assets;
@@ -211,7 +211,7 @@ pub(crate) struct TimelineView {
     compose: ComposeState,
     /// composer の本物のテキスト入力ウィジェット (#38)｡`div().on_key_down()`
     /// でやっていた生のキーストローク読みを置き換えたもの: 実体は
-    /// `gpui_component::input::InputState` で､`EntityInputHandler` を
+    /// `gpui_component::input::TextareaState` で､`EntityInputHandler` を
     /// きちんと実装しているため､IME の変換 (日本語､中国語､韓国語)､カーソル
     /// 移動､選択､コピー/ペーストがすべて動く｡ユーザーが実際に見て打ち込む
     /// のはこのバッファであり､上の `compose` がこちらへ追従する｡逆ではない｡
@@ -219,7 +219,7 @@ pub(crate) struct TimelineView {
     /// そこではこれを明示的に消している｡submit 成功時に `compose` だけを
     /// `text.clear()` しても､ウィジェットは古い下書きを表示したままに
     /// なるからである｡
-    compose_input: Entity<InputState>,
+    compose_input: Entity<TextareaState>,
     /// 開いている compose window があればその handle (#282)｡`⌘N` は新しく
     /// 開く代わりにこれを前面へ出す｡窓を閉じても `None` へは戻さない —
     /// 次に開こうとしたとき `WindowHandle::update` が失敗することが
@@ -2297,6 +2297,7 @@ mod tests {
             reposted: Vec::new(),
             selected: None,
             translucent: false,
+            float_on_top: false,
             composer_open: false,
         }
     }
@@ -3614,22 +3615,6 @@ mod tests {
         });
     }
 
-    /// fixture の window はロック中でも描き続け､live の window は upstream
-    /// どおり止まる — fork した gpui の patch が読むスイッチを `main` が
-    /// これで決める｡fixture 側が false に戻ると､ロック中に立てた fixture の
-    /// capture は真っ黒に戻る｡
-    #[test]
-    fn only_a_fixture_window_keeps_drawing_while_occluded() {
-        assert!(
-            Startup::Fixture(Box::new(fixture_with(&["1"], &[]))).draws_while_occluded(),
-            "a fixture window exists to be captured, locked screen or not"
-        );
-        assert!(
-            !Startup::Live.draws_while_occluded(),
-            "a live window keeps upstream's power-saving behavior"
-        );
-    }
-
     // --- #175: 手動 scroll ---
 
     /// 40 件で開き､1 フレーム描いて timeline の bounds を返す｡ホイールの
@@ -4181,8 +4166,9 @@ mod tests {
     }
 
     /// #267: Window メニューの Float on Top も同じ形 — 反転させ､言い､覚える｡
-    /// window の level そのものは gpui の fork の patch が触るので､テスト
-    /// プラットフォームでは no-op｡ここで見えるのは view 側の配線だけだ｡
+    /// window の level そのものは `window-level` crate が触るが､テスト
+    /// platform の window は raw handle を返さないので `Err` に落ちる｡
+    /// ここで見えるのは view 側の配線だけだ｡
     #[gpui::test]
     fn toggling_float_on_top_flips_the_switch_and_reports_itself(cx: &mut gpui::TestAppContext) {
         use gpui::AppContext as _;
@@ -4209,6 +4195,24 @@ mod tests {
                 );
             });
         });
+    }
+
+    /// #267: `Root` が window 全体に塗る背景は透明のまま｡
+    ///
+    /// gpui-component 0.6 の `Root` は `colors.background` ではなく
+    /// `tokens.background` を読む｡`colors` だけを透明にして `tokens` を写し
+    /// 忘れると､不透明な地が塗られて透過が効かなくなる (gpui-pre への移行で
+    /// 実際に起きた)｡
+    #[gpui::test]
+    fn the_root_paints_a_transparent_background(cx: &mut gpui::TestAppContext) {
+        let (_window, _timeline) = fixture_window(cx, fixture_with(&["1"], &[]));
+
+        let background = cx.update(|cx| gpui_component::theme::Theme::global(cx).tokens.background);
+        assert!(
+            background.color.a <= f32::EPSILON,
+            "the Root's background token must stay transparent, got alpha {}",
+            background.color.a
+        );
     }
 
     /// #182 に遡って: ステータスバーの 2 つの区画は接触しない｡

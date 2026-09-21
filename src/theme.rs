@@ -400,6 +400,10 @@ pub(crate) fn sync_gpui_component_theme(theme: Theme, window: &mut Window, cx: &
     colors.primary_foreground = gpui::rgb(theme.button_label).into();
     colors.ring = gpui::rgb(theme.accent).into();
     colors.danger = gpui::rgb(theme.danger).into();
+    // gpui-component 0.6 の `Root` と入力欄は `colors` ではなく `tokens` を読む｡
+    // `tokens` は `change` の時点で作られるので､上の書き換えを写し直す｡
+    // 写さないと `Root` が不透明な背景を塗り､透過 (#267) が効かない｡
+    colors.tokens = colors.colors.into();
 }
 
 impl std::fmt::Display for ThemeMode {

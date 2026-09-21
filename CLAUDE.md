@@ -45,6 +45,8 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
+CI の clippy はこれに `--features headless-shot` を足して feature の裏 (`src/headless_shot.rs`) も見る。
+
 `cargo run -- --fetch-only` でウィンドウを開かずに取得結果を標準出力へ流せる。
 
 テストが large (子プロセス・`thread::sleep`・ネットワーク) になると
@@ -54,10 +56,11 @@ cargo test
 
 ## 実装上の制約
 
-- **`macos-blade` 必須**: gpui の既定ビルドは `xcrun metal` を要求し、これは Command Line
-  Tools には含まれない。`Cargo.toml` は `default-features = false` + `macos-blade` で
-  ビルドしているので、この指定を外さない。同時に x11 / wayland も落ちるため Linux 向けには
-  ビルドできない (CI が macOS ランナーのみなのはこのため)。
+- **`runtime_shaders` 必須**: gpui の既定ビルドは `xcrun metal` を要求し、これは Command Line
+  Tools には含まれない。`Cargo.toml` は `gpui_platform` (`gpui-pre-platform`) の `runtime_shaders` を
+  立てていて、shader を実行時にコンパイルするので build script が `xcrun metal` を呼ばない。
+  この指定を外さない。`gpui` 側は `default-features = false` で x11 / wayland を落としているため
+  Linux 向けにはビルドできない (CI が macOS ランナーのみなのはこのため)。
 - **`cargo` は sandbox の外で動かす**: `.claude/settings.json` の
   `sandbox.excludedCommands` に `cargo *` を置いている。この指定を外すと `cargo fetch` が
   crate の展開途中で止まり、`cargo run` はウィンドウを開けない。sandbox 由来の失敗を
@@ -72,6 +75,8 @@ cargo test
   溜まったらまとめて消す。
 - **lint はすべて `deny`**: `unsafe_code` は forbid。`warn` に下げると手元で通って CI だけが
   落ちるので、**レベルを下げて回避しない**。バイナリクレートなので公開項目は `pub(crate)`。
+  例外は `crates/window-level` — `unsafe` を 1 か所に閉じ込めるための独立 crate で、
+  そこだけ forbid の外にある (理由は下の「gpui は crates.io の `gpui-pre`」を参照)。
   clippy に弾かれたときの書き直し方は `rust-lint-gauntlet` スキルに従う。
 - **ファイルサイズは CI が落とす**: `scripts/code-metrics.sh --check` が
   実装行数を一律の上限 (600 行) と突き合わせる。超えたら分割する。
@@ -103,8 +108,9 @@ cargo test
   `debug_bounds` が実際の bounds を返すので、間隔・位置・重なりはテストで押さえられる。
   `VisualTestContext::simulate_click` は hit test も通るため、クリックの経路も書ける。
   一方で色・フォント・字の詰まり方は `Scene` から先の話で、テストからは見えない。
-  そちらは `cargo run -- --fixture` で課金なしの決定的な画面を出して撮る。
-  手順は `fixture-visual-check` スキルに従う。
+  そちらは `cargo run -- --fixture` で課金なしの決定的な画面を出して撮るか、
+  `cargo run --features headless-shot -- --fixture ... --png` で window を開かずに
+  PNG へ描く (画面がロックされていても撮れる)。手順は `fixture-visual-check` スキルに従う。
 - **dev と本番は別インストール**: debug ビルド (`cargo run`) は `twigpui-dev` の
   XDG ディレクトリと callback port 8734、release ビルドは `twigpui` と 8733 を使う
   (`src/profile.rs`)。ディレクトリ名・ポート・ウィンドウタイトルを足したり変えたり
@@ -118,14 +124,16 @@ cargo test
   読み書きできない。認証情報が要るときは環境変数を export してもらう。
   `.env` は cwd で効くのでプロファイルを跨ぐ。dev 専用の設定は
   `~/.config/twigpui-dev/config.toml` に置く。
-- **gpui は fork の patch 版**: Cargo.toml の `[patch.crates-io]` が
-  `usadamasa/zed` の branch `gpui-0.2.2-draw-while-occluded` (0.2.2 を publish した
-  commit + 2 commit) を `rev` で指す。差分は 2 機能。`gpui::set_draw_while_occluded` は
-  `--fixture` の window を画面ロック中でも描き続けさせる (upstream はロック中に開いた
-  window を 1 フレームも描かず、window capture が真っ黒になる。upstream への報告は
-  zed-industries/zed#63217)。off が既定で本番は upstream と同一挙動。
-  `Window::set_floating` は開いた後に window を floating level へ出し入れする
-  (Window メニューの Float on Top、#267。upstream の `WindowKind` は開くときに決めるもので、
-  macOS では `Floating` も `Normal` と同じ level に置かれる)。gpui を上げるときは
-  その版を publish した commit の上に同じ patch を載せ直して `rev` を差し替える。
-  git 依存なので初回ビルドは zed の repo を丸ごと clone する (時間がかかる)。
+- **gpui は crates.io の `gpui-pre`**: crates.io の `gpui` は 0.2.2 で止まっており、
+  upstream の snapshot は `gpui-pre` の名前で公開されている (`Cargo.toml` は
+  `package = "gpui-pre"` で `use gpui::` を保っている)。fork や `[patch.crates-io]` は
+  無い。`gpui-component` も `gpui-pre` に依存するので、gpui-pre を上げるときは
+  `gpui-component` が要求する版と揃える (#278)。
+  ロック中の capture (旧 `gpui::set_draw_while_occluded`) の代わりは
+  `--features headless-shot -- --png` (上の「寸法は assert できる」を参照。#221)。
+  upstream への報告 zed-industries/zed#63217 は open のまま — gpui-pre でも occluded な
+  window の display link は張られない。
+  Float on Top (#267、Window メニュー) は upstream に開いた後で level を動かす口が無いため、
+  `crates/window-level` が raw-window-handle から `NSWindow::setLevel` を直接呼ぶ。
+  `unsafe` はこの crate の 1 か所だけに閉じ込めてあり、本体は `unsafe_code = "forbid"` の
+  ままでいられる (理由は crate doc を見よ)。

@@ -12,14 +12,14 @@ impl TimelineView {
     /// のではなくそもそもこの写しが在る理由は､`compose_input` フィールドの
     /// doc を見よ｡`PressEnter`/`Focus`/`Blur` はこの view に要るものを何も
     /// 運ばない: 複数行モードではウィジェット自身の中ですでに Enter が改行に
-    /// なる (`InputState::enter`) ので､ここでの `PressEnter` は submit では
+    /// なる (`TextareaState::enter`) ので､ここでの `PressEnter` は submit では
     /// なく素の scroll-into-view でしか発火しない｡
     // `Context::subscribe` のコールバックの境界は `&Entity<T2>` ではなく
     // `Entity<T2>` を値で要求する — こちら側で変えられるものは無い｡
     #[allow(clippy::needless_pass_by_value)]
     pub(super) fn on_compose_input_event(
         &mut self,
-        input: Entity<InputState>,
+        input: Entity<TextareaState>,
         event: &InputEvent,
         cx: &mut Context<'_, Self>,
     ) {
@@ -129,7 +129,7 @@ impl TimelineView {
             .child(
                 div()
                     .addressable("compose-input")
-                    .child(Input::new(&self.compose_input).disabled(is_submitting)),
+                    .child(Textarea::new(&self.compose_input).disabled(is_submitting)),
             )
             // #16: "Quote" が設定していれば quote の対象 —
             // `composer_quote_card` の doc を見よ｡
