@@ -81,6 +81,25 @@ arithmetic_side_effects = "deny"
 [features]
 headless-shot = ["gpui/test-support", "gpui_platform/test-support"]
 
+# レイアウトと描画をする依存だけ最適化して積む｡`cargo test` の壁時計は
+# 手元 (macOS, 1271 本) で 90.27s から 5.78s になる｡
+#
+# `#[gpui::test]` の animation は `advance_clock` で進むので､`advance_clock(2s)`
+# 1 回がウィンドウを 21 フレーム描き直す｡40 件の fixture の 1 フレームに
+# 未最適化では 350ms (1 行 8.2ms) かかり､これが 11 本のテストだけで 172 秒を占める｡
+# 時間はほぼ全部が taffy のレイアウトと gpui の描画の中にある — 行を空の div に
+# 差し替えると 40 件の draw が 328ms から 3.4ms まで落ちるので､こちらの
+# `render` の組み立てではない｡
+#
+# 効きの内訳: 素が 90.27s､gpui-pre だけ最適化して 20.67s､taffy も足して 5.78s｡
+# この 2 つだけにしてあるので､CI の cold build で余分に最適化されるのもこの 2 つだけ｡
+# `debug-assertions` は dev profile の既定のまま触らない｡
+[profile.dev.package.gpui-pre]
+opt-level = 2
+
+[profile.dev.package.taffy]
+opt-level = 2
+
 [dependencies]
 anyhow = "1.0.104"
 # PKCE の verifier/challenge 用の URL-safe でパディング無しの base64 (RFC 7636 §4.1-4.2)｡
