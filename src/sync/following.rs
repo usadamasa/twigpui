@@ -28,15 +28,12 @@ use serde::{Deserialize, Serialize};
 
 use super::api::ListSyncApi;
 use crate::paths::Paths;
+use crate::x_api::USER_PAGE_SIZE;
 use crate::x_api::model::User;
 
 /// 先頭読みが頼む最小のページ｡`max_results=5` が通ることは 2026-09-22 に
 /// 実測した｡1〜4 は未計測なので､増えた分がそれより少なくてもここまでは読む｡
 const HEAD_PAGE_MIN: u32 = 5;
-
-/// 先頭読みが頼む最大のページ｡spec の上限で､全件読みの `USER_PAGE_SIZE` と
-/// 同じ値｡
-const HEAD_PAGE_MAX: u32 = 100;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Follow {
@@ -179,7 +176,10 @@ fn head(
     let wanted = delta.saturating_add(1);
     let page_size = u32::try_from(wanted)
         .unwrap_or(u32::MAX)
-        .clamp(HEAD_PAGE_MIN, HEAD_PAGE_MAX);
+        .clamp(HEAD_PAGE_MIN, USER_PAGE_SIZE);
+    // ponytail: ページが満杯で返る前提｡X が凍結済みなどを落として短いページを
+    // 返すと､先頭に届く前にここで尽きて全件読みへ落ちる (誤りではなく費用)｡
+    // 実際に起きたら 1 ページ余分に許す｡
     let pages = wanted.div_ceil(u64::from(page_size));
     let known: std::collections::HashSet<&str> = ledger
         .follows
