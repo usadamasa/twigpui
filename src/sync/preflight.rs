@@ -3,7 +3,7 @@
 use anyhow::Result;
 
 use super::api::ListSyncApi;
-use super::{load_plan, load_state, mirror, report, save_plan, save_state};
+use super::{load_state, mirror, report, save_plan, save_state};
 use crate::paths::Paths;
 
 /// 最適化の probe が失敗しても､残高と rate limit 以外は通常の diff に戻す｡
@@ -75,23 +75,7 @@ pub(super) fn dry_run(
             count.unwrap_or_default()
         ));
     }
-    let mirror = mirror::load(paths);
-    let mirrored = mirror.as_ref().is_some_and(|mirror| mirror.usable(list_id));
-    let members = mirror
-        .as_ref()
-        .and_then(|mirror| mirror.members_total(list_id))
-        .or(load_plan(&paths.sync_plan_file())?
-            .filter(|plan| plan.list_id == list_id)
-            .map(|plan| plan.members_total));
-    eprintln!(
-        "{}",
-        read_note(
-            count,
-            members,
-            mirrored,
-            paths.profile().sync_seed_usernames().map(<[&str]>::len)
-        )
-    );
+    eprintln!("{}", note_before_reading(paths, list_id, count));
     // ミラーだけが新しくなった失敗を､古い count で完了扱いしない｡
     state.following_count = None;
     save_state(&paths.sync_state_file(), &state)?;
@@ -103,6 +87,27 @@ pub(super) fn dry_run(
         "{}\n\nnothing was changed. Re-run with --apply to send these.",
         report(&plan)
     ))
+}
+
+/// 読む前に出す見込み｡members の件数は台帳からだけ取る｡
+///
+/// plan の `members_total` には戻らない (#289): #176 より前の plan は
+/// `#[serde(default)]` で 0 と読まれ､それは「空の list」ではなく「不明」だ｡
+/// #288 以降､plan は台帳と一緒に作られるので､台帳が無いのに plan だけが
+/// あるのはその古い plan のときだけ — つまり fallback に届く値は信用できない
+/// ものしか無い｡
+fn note_before_reading(paths: &Paths, list_id: &str, count: Option<u64>) -> String {
+    let mirror = mirror::load(paths);
+    let mirrored = mirror.as_ref().is_some_and(|mirror| mirror.usable(list_id));
+    let members = mirror
+        .as_ref()
+        .and_then(|mirror| mirror.members_total(list_id));
+    read_note(
+        count,
+        members,
+        mirrored,
+        paths.profile().sync_seed_usernames().map(<[&str]>::len),
+    )
 }
 
 /// 価格を固定せず､読み取り件数と resource の種類だけを説明する｡
@@ -145,6 +150,23 @@ mod tests {
         for note in [text, mirrored, unknown] {
             assert!(!note.contains('$'));
         }
+    }
+
+    #[test]
+    fn a_plan_without_a_mirror_leaves_the_member_count_unknown() {
+        // #289 の追記: #176 より前の plan は `members_total` が 0 と読まれる｡
+        // 台帳が無いときにそれへ戻ると "about 0 accounts" と出て､高い側の
+        // 最悪ケースを読む前に見せる意味が無くなる｡
+        use crate::sync::api::fake::Scratch;
+        let scratch = Scratch::new("note-legacy-plan");
+        std::fs::write(
+            scratch.paths().sync_plan_file(),
+            r#"{"list_id":"7","created_at":0,"entries":[]}"#,
+        )
+        .unwrap();
+        let text = note_before_reading(scratch.paths(), "7", Some(2340));
+        assert!(text.contains("about unknown accounts, Users"), "{text}");
+        assert!(!text.contains("about 0"), "{text}");
     }
 
     #[test]
