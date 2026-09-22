@@ -150,14 +150,19 @@ impl XClient {
     ///
     /// `follows.read` が要る｡#163 が `SCOPES` に足したもので､それ以前に認可
     /// されたセッションはここで 403 になる｡
+    ///
+    /// `page_size` は全件読みなら [`USER_PAGE_SIZE`]､#289 の先頭読みなら
+    /// 増えた分に合わせた小さい値｡新しく follow した順に返る (2026-09-22 の
+    /// 実測､`x-api-endpoints`) ので､先頭だけ読めば新しい follow が取れる｡
     pub(crate) fn following(
         &self,
         paths: &Paths,
         user_id: &str,
+        page_size: u32,
         pagination_token: Option<&str>,
         now: i64,
     ) -> Result<(Vec<User>, Option<String>)> {
-        let url = following_url(user_id, pagination_token);
+        let url = following_url(user_id, page_size, pagination_token);
         let body = self.get(paths, Endpoint::Following, &url, now)?;
         parse_user_page(&body, "following")
     }

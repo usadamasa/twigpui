@@ -55,6 +55,7 @@ use crate::x_api::model::User;
 
 mod api;
 mod auto;
+mod following;
 mod mirror;
 mod preflight;
 mod run;
@@ -225,11 +226,11 @@ fn entry(user: &User, action: Action) -> PlanEntry {
 
 /// dry-run の report: plan が何をするか､そして再実行なら既に何をしたか｡
 ///
-/// 価格は意図的に載せていない｡`x-api-budget` は read 側を実測値として
-/// 記録している (他人の post は $0.005/resource､自分のものは $0.001) が､
-/// `/2/lists/:id/members` にも write のどちらにも実測が無いので､ここに
-/// 数字を出せば docs を事実として言い直すだけになる｡件数はこの crate が
-/// 実際に知っていることだ｡
+/// 価格は意図的に載せていない｡`x-api-budget` は read 側と addition を
+/// 実測値として記録している (following は $0.001/resource､members は
+/// $0.010､add は $0.010/request) が､removal には実測が無いし､単価は X が
+/// 改定する｡数字は `x-api-budget` の pricing.md に置き､ここは件数だけ —
+/// それがこの crate が実際に知っていることだ｡
 pub(crate) fn report(plan: &Plan) -> String {
     let adds = plan.pending_count(Action::Add);
     let removals = plan.pending_count(Action::Remove);

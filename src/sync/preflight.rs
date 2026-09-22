@@ -79,7 +79,7 @@ pub(super) fn dry_run(
     // ミラーだけが新しくなった失敗を､古い count で完了扱いしない｡
     state.following_count = None;
     save_state(&paths.sync_state_file(), &state)?;
-    let plan = super::run::plan_sync(paths, client, user_id, list_id, now)?;
+    let plan = super::run::plan_sync(paths, client, user_id, list_id, count, now)?;
     save_plan(&paths.sync_plan_file(), &plan)?;
     state.following_count = count;
     save_state(&paths.sync_state_file(), &state)?;
