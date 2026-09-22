@@ -119,6 +119,7 @@ GET /2/users/{id}/tweets?max_results=5&expansions=bogus
 
 | エンドポイント | 上限 |
 | --- | --- |
+| `GET /2/users/{id}/following` | 10000 |
 | `GET /2/tweets?ids=` | 5000 |
 | `GET /2/users/{id}/tweets` | 900 |
 | `GET /2/users/{id}/timelines/reverse_chronological` | 180 |
@@ -149,15 +150,14 @@ probe の 401 はたいていアクセストークンの失効で、`cargo run -
 ## スコープと到達範囲
 
 committed scope は `src/oauth/pkce.rs` の `SCOPES`:
-`tweet.read users.read tweet.write like.write offline.access`。
-この scope で届く GET は spec 上 26 本 (scope を明示する GET のみを数えた場合)。
-到達可否は `reference/endpoints.md` にある。
+`tweet.read users.read tweet.write like.write list.read list.write follows.read offline.access`
+(#163 で `list.read` `list.write` `follows.read` が入った)。
+2026-08-23 の到達確認は `follows.read` `list.read` の無い頃の token で行ったもので、
+その表は `reference/endpoints.md` にある。
 
-**`GET /2/users/{id}/following` は届かない。** `follows.read` が要る。
-手元の live token がこの scope を持っていることがあるが、それは過去の再認可の名残で、
-committed code は要求していない。**次に認証フローを回した時点で消える。**
-`offline.access` によるリフレッシュは元の scope を保つので、消えるのは
-リフレッシュ時ではなく再認可時。`/following` に依存するコードや probe は、そのときに落ちる。
+`GET /2/users/{id}/following` は `follows.read` を要求するので、#163 より前に認可した session では
+403 になる。`sync::missing_scope` が read の前にそれを弾く。`offline.access` によるリフレッシュは
+元の scope を保つので、scope が増えるのは再認可したときだけ。
 
 ## 挙動を確かめるときは書き捨ての Rust を書く
 

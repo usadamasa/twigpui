@@ -5,13 +5,14 @@
 両者が食い違うところは実測を採る (理由は `../SKILL.md` の冒頭)。
 **実測と書いていない数値は spec が出典**で、そこは検証されていない。
 
-committed scope: `tweet.read users.read tweet.write like.write offline.access`
-(`src/oauth/pkce.rs` の `SCOPES`)。
+committed scope (2026-09-22 現在):
+`tweet.read users.read tweet.write like.write list.read list.write follows.read offline.access`
+(`src/oauth/pkce.rs` の `SCOPES`。`list.read` `list.write` `follows.read` は #163 で入った)。
 
-計測に使ったトークンは committed scope に加えて `follows.read` を持っていた
+2026-08-23 の計測に使ったトークンは #163 より前のもので、
+`tweet.read users.read tweet.write like.write offline.access` に加えて `follows.read` を持っていた
 (#157 の調査中に一度だけ再認可した名残)。本表のどのエンドポイントも
-`follows.read` を要求しないので結果には影響しないが、
-「committed scope ちょうどで撃った」わけではない。
+`follows.read` を要求しないので結果には影響しない。
 
 ## アプリが使っている 11 本 (`src/rate_limit.rs` の `Endpoint`)
 
@@ -31,6 +32,7 @@ URL の組み立ては `src/x_api/client/urls.rs` の各 builder が正本。
 | `DeleteLike` | `DELETE /2/users/{id}/likes/{tweet_id}` | + `like.write` | 未計測 |
 | `DeletePost` | `DELETE /2/tweets/{id}` | + `tweet.write` | 未計測 |
 | `OwnedLists` | `GET /2/users/{id}/owned_lists` | `tweet.read` `users.read` `list.read` | **15** |
+| `Following` | `GET /2/users/{id}/following` | `tweet.read` `users.read` `follows.read` | **10000** |
 
 `OwnedLists` は 2026-08-24 にアプリのボタンから実測 (#164、2 リクエスト)。
 `max_results=100` で 13 本が 1 ページで返り、`data[]` の各要素は `id` と `name` だけ
@@ -52,6 +54,28 @@ repost の 2 本は 2026-09-04 に dev profile のトークンで実測 (#266、
 
 残りの書き込み系は実アカウントを変更するため意図的に計測していない。
 必要になったら投稿内容とクリーンアップをユーザーに確認してから撃つ。
+
+### `GET /2/users/{id}/following` は新しく follow した順に返る (2026-09-22 実測)
+
+#289 の前提確認。release のトークンで 2 リクエスト撃った (生データは `./tmp/probes/` に残した)。
+
+| リクエスト | 結果 |
+| --- | --- |
+| `GET /2/users/me?user.fields=public_metrics` | 200、`following_count` 2341、`x-rate-limit-limit: 75` |
+| `GET /2/users/5685672/following?max_results=5&user.fields=name,username` | 200、`result_count` 5、`meta.next_token` あり、`x-rate-limit-limit: 10000` |
+
+**順序。** `following_count` は 09-21 の 2340 から 2341 へ 1 増えていた。先頭の 1 件
+(`1608672893701091330`) は 09-21 の plan にも members の台帳にも無く、これがその 1 人。残り 4 件は
+09-21 の plan の Add 順の先頭 2 件 (`899199205004107776` `64646416`) と、台帳の初期 member 2 件
+(`1472916839076610048` `232067714`) で、09-21 時点の並びがそのまま保たれている。
+つまり新しく follow した順で返り、既存の並びは動かない。根拠は 1 件の follow による 1 標本。
+v1.1 の `friends/list` と同じ挙動で、v2 の docs には記載が無い。
+アプリはこれを前提に先頭だけ読むが、検算が外れれば全件読みへ戻る (`x-api-budget`)。
+
+**`max_results=5` は通る。** 下限は 5 以下 (1〜4 は未計測)。
+
+**費用。** `/users/me` は同じ UTC 日にアプリが既に読んでいたので $0 (同一 endpoint の同日 dedup、
+`x-api-budget` の pricing.md 実測ログ 6)。following 5 件で約 $0.005。
 
 ### `BearerToken` を受け付けないもの (spec 由来・未計測)
 
@@ -105,22 +129,20 @@ repost の 2 本は 2026-09-04 に dev profile のトークンで実測 (#266、
 
 ### 届かないもの
 
-`GET /2/users/{id}/following` と `GET /2/users/{id}/followers` は `follows.read` を要求する。
-committed scope には無い。ブックマークは `bookmark.read`、リストは `list.read`、
-いいね一覧は `like.read` で、いずれも同様に届かない。
-
-手元の live token が `follows.read` を持っていることがある。
-これは #157 の調査中に反証された仮説のもとで一度だけ再認可した名残で、
-committed code は要求していない。**次に認証フローを回した時点で消える。**
+ブックマークは `bookmark.read`、いいね一覧は `like.read` を要求し、committed scope には無いので届かない。
+`GET /2/users/{id}/following` `GET /2/users/{id}/followers` (`follows.read`) と list 系 (`list.read`) は
+#163 で scope が入り、それ以降に認可した session なら届く。#163 より前の session は 403 になり、
+`sync::missing_scope` が read の前に弾く。
 
 ## `max_results` の下限は 3 通りある
 
-これが一番踏みやすい。**下の表はほとんどが spec 由来**で、実測は 2 か所しかない。
+これが一番踏みやすい。**下の表はほとんどが spec 由来**で、実測は 3 か所しかない。
 
 | 下限 | エンドポイント | 出典 |
 | --- | --- | --- |
 | 1 | `timelines/reverse_chronological` | **実測** (`max_results=1` が 200) |
 | 1 | `retweeted_by` `retweets` `users/search` `affiliates` | spec |
+| 1 | `users/{id}/following` | spec (**5 が通ることは実測**、1〜4 は未計測) |
 | 5 | `users/{id}/tweets` | **実測** (`max_results=4` が 400、本文が「5 と 100 の間」) |
 | 5 | `users/{id}/mentions` | spec (5 が通ることは確認、4 は未計測) |
 | 10 | `search/recent` `quote_tweets` `communities/search` | spec (10 が通ることは確認、9 は未計測) |
