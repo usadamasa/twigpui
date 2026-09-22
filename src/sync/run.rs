@@ -479,8 +479,10 @@ fn run(
     let settled = super::state::settle(state, outcome.as_ref().ok(), now, spacing);
     save_state(&state_path, &settled.state)?;
 
-    let finished = plan.is_complete() || (!request.prune && plan.pending_count(Action::Add) == 0);
-    if matches!(outcome, Ok(Outcome::Applied { .. })) && finished {
+    // `is_complete` であって「addition を送り切った」ではない (#230): `--prune`
+    // 無しで残った removal は支払い済みの diff で､`--apply --prune` が送る元は
+    // このファイルだ｡`auto::apply` と同じ規則｡
+    if matches!(outcome, Ok(Outcome::Applied { .. })) && plan.is_complete() {
         // 再開すべきものは残っておらず､置いたままにすると次の --apply に
         // 残務があるように見えてしまう｡
         std::fs::remove_file(&plan_path)
@@ -1279,10 +1281,10 @@ mod tests {
     }
 
     #[test]
-    fn a_run_without_prune_is_finished_once_every_addition_landed() {
-        // CLI は removal を送るよう求められていないので､残った removal は
-        // 残務ではない — plan ファイルは消える｡loop の側の規則は違う
-        // (`auto::apply` を見よ)｡
+    fn a_run_without_prune_keeps_the_plan_while_removals_are_unsent() {
+        // #230: removal は支払い済みの diff だ｡`--apply` が addition を
+        // 流し切ったあとも plan は残り､`--apply --prune` がそこから送る —
+        // loop 側 (`auto::apply`) と同じ規則｡消せば両側を読み直す払いに戻る｡
         let scratch = Scratch::new("run-adds-only");
         save_plan(
             &scratch.paths().sync_plan_file(),
@@ -1301,6 +1303,42 @@ mod tests {
         )
         .unwrap();
 
+        let kept = load_plan(&scratch.paths().sync_plan_file())
+            .unwrap()
+            .expect("the plan with an unsent removal stays on file");
+        assert_eq!(kept.pending_count(Action::Remove), 1);
+        assert_eq!(kept.pending_count(Action::Add), 0);
+
+        // 2 回目の `--apply` は何も送らず､plan もまだ消さない｡
+        let client = FakeApi::new();
+        run(
+            scratch.paths(),
+            &client,
+            "me",
+            "7",
+            request(true, false),
+            21_600,
+        )
+        .unwrap();
+        assert!(client.calls().is_empty());
+        assert!(
+            load_plan(&scratch.paths().sync_plan_file())
+                .unwrap()
+                .is_some()
+        );
+
+        // `--prune` が removal を送り切ると完了し､そこで消える｡
+        let client = FakeApi::new().writes(vec![Ok(())]);
+        run(
+            scratch.paths(),
+            &client,
+            "me",
+            "7",
+            request(true, true),
+            21_600,
+        )
+        .unwrap();
+        assert_eq!(client.calls(), [Call::Remove("8".to_string())]);
         assert_eq!(load_plan(&scratch.paths().sync_plan_file()).unwrap(), None);
     }
 
