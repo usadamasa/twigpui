@@ -1,8 +1,7 @@
 //! 読み手が頼んだ書き込み (#241): like､repost､delete､post､sign-in､
 //! そしてブラウザを開くこと｡ブラウザ以外はどれも API のクレジットを使う｡
 
-// 列挙ではなく glob にしているのは [`crate::ui::render`] と
-// [`crate::ui::auto_refresh`] に合わせたもの｡
+// 列挙ではなく glob にしているのは [`crate::ui::render`] に合わせたもの｡
 use crate::ui::lane;
 use crate::ui::*;
 

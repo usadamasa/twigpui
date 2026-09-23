@@ -27,11 +27,13 @@ pub(crate) mod compose_window;
 mod composer;
 mod countdown;
 mod fade;
+mod follow;
 // #188: `main` がキーバインドを登録するので､ここだけ crate へ開く｡
 pub(crate) mod image_viewer;
 mod lane;
 mod layout;
 mod list_sync;
+mod pending;
 mod post_row;
 mod reload_policy;
 mod render;
@@ -52,9 +54,11 @@ mod toast;
 // 隣のファイルから届かせるためだけに広げると､「クレート内のどこからでも
 // 触ってよい」という意味になり､それはファイルを分割した目的と
 // 正反対になる｡
-use auto_refresh::{FollowMode, Pending, Situation, pending_after_poll};
+use auto_refresh::Situation;
 use fade::Fade;
+use follow::FollowMode;
 use list_sync::{SyncOff, SyncStatus, SyncTrigger};
+use pending::{Pending, pending_after_poll};
 use reload_policy::{
     CooldownTick, at_the_post_cap, cooldown_label, cooldown_tick, newly_arrived, offers_load_older,
     partial_failure_label, preserved_scroll_target, reload_failure_outcome, reload_gate,
@@ -270,7 +274,7 @@ pub(crate) struct TimelineView {
     /// 経ってから X が取得を断ったと言うことだ｡片方がもう片方を上書きしては
     /// ならない｡
     ///
-    /// 設定するのは [`auto_refresh::TimelineView::apply_poll`] で一度だけ｡
+    /// 設定するのは [`pending::TimelineView::apply_poll`] で一度だけ｡
     /// ループはその直後に終わるので二度は通らない｡消えるのは
     /// [`Self::start_auto_refresh`] が新しいループを始めるとき — つまり
     /// サインインし直したときだ｡
@@ -386,7 +390,7 @@ pub(crate) struct TimelineView {
     pending: Option<Pending>,
     /// 読み手が最上部にいると分かった poll が､新しい post をそのまま画面へ
     /// 流し込んでよいかどうか (#22) — 誰がいつ設定するのかは
-    /// [`auto_refresh::follows`] と [`FollowMode`] を見よ｡
+    /// [`follow::follows`] と [`FollowMode`] を見よ｡
     follow: FollowMode,
     /// glide を生かしておく (#22) — follow が上へ post を差し込んだあと､
     /// scroll の offset を最上部へ戻していくフレームタイマーである｡専用の

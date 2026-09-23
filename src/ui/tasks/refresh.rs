@@ -2,8 +2,7 @@
 //! 見えている timeline に足りない画像を `pbs.twimg.com` から落とす｡
 //! どれも API のクレジットは使わない｡
 
-// 列挙ではなく glob にしているのは [`crate::ui::render`] と
-// [`crate::ui::auto_refresh`] に合わせたもの｡
+// 列挙ではなく glob にしているのは [`crate::ui::render`] に合わせたもの｡
 use crate::ui::*;
 
 impl TimelineView {

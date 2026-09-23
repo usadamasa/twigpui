@@ -31,7 +31,7 @@
 //! 出すことで､[`sync_confirm_label`] はそのためにあり､クリック 1 回で
 //! 始まらず [`super::sync_row`] のダイアログを通るのもそのためだ｡
 
-// [`super::render`] や [`super::auto_refresh`] のような `use super::*`
+// [`super::render`] のような `use super::*`
 // ではなく書き下す: このモジュールが名指しする `ui` の import は､clippy
 // の `wildcard_imports` が列挙できる程度に少なく､だから glob を通さない｡
 use chrono::DateTime;
