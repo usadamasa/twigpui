@@ -49,7 +49,7 @@ use serde::{Deserialize, Serialize};
 
 // `use super::*` ではなく書き下している｡理由は [`super::list_sync`] と同じ｡
 use super::{
-    Context, ReloadNotice, ReloadTrigger, Startup, TimelineState, TimelineView, lane, log, oauth,
+    Context, ReloadNotice, ReloadTrigger, Startup, TimelineState, TimelineView, log, oauth,
     source_picker_menu,
 };
 use crate::cache::{self, TimelineSource};
@@ -299,8 +299,8 @@ impl TimelineView {
     /// の reload や "Load older" (その結果が誤った source の下に着地して
     /// しまう)､ページングカーソル (複数選択では意味を持たない — §3.6)､
     /// poll のバッファ (`clear_pending` の doc)､開いているスレッド､そして
-    /// スクロール位置｡そのうえでキャッシュ済みの分だけ即座に再合成して
-    /// 画面へ出し (off にした分は消え､on にした分は載る)､一度も取得して
+    /// スクロール位置｡そのうえでキャッシュ済みの分だけ background で再合成
+    /// して画面へ出し (off にした分は消え､on にした分は載る)､一度も取得して
     /// いない source だけを reload する — 画面は空にせず
     /// `reloading` フラグとスピナーだけで示す｡
     ///
@@ -349,16 +349,19 @@ impl TimelineView {
         }
 
         if let Some(user_id) = self.home_user_id.clone() {
-            let composed = lane::load_composite_timeline(&self.paths, &self.sources, &user_id);
-            self.item_provenance = composed.provenance;
-            self.state = TimelineState::Loaded(composed.items);
-            cx.notify();
+            // #302: 合成は background で行う｡着地するまでの 1 frame ほどは
+            // 前の lane が残る｡slot を置き換えるので､続けて toggle すれば
+            // 前の合成は cancel される｡`refresh_images` は `land_composed`
+            // が `state` を差し替えた後で呼ぶ (#120)｡
+            let (request, compose) = self.begin_recompose(user_id.clone(), cx);
+            self.recompose = Some(cx.spawn(async move |this, cx| {
+                let composed = compose.await;
+                let _ = this.update(cx, |this, cx| this.land_composed(&request, composed, cx));
+            }));
             self.fill_missing_sources(&user_id, ReloadTrigger::UserAction, cx);
         }
         // #43: off にしたぶんを二度と poll しないよう必ず再起動する｡
         self.start_auto_refresh(cx);
-        // `state` を差し替えた後で｡理由は `start` と同じ (#120)｡
-        self.refresh_images(cx);
         // #282: 選択が変わったので Sources メニューの ✓ も作り直す｡
         self.refresh_source_menu(cx);
         cx.notify();

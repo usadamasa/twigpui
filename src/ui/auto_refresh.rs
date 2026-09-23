@@ -57,9 +57,12 @@ use super::{
 const BUSY_RECHECK_SECONDS: i64 = 5;
 
 /// 終わった 1 回のポーリングのあと､ループが続くか終わるか (#239)｡
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Poll {
     Continue,
+    /// 取得できた｡ループは background で合成してから
+    /// [`TimelineView::land_poll`] へ渡し､そのあと続ける (#302)｡
+    Compose(lane::Recompose),
     /// 繰り返しても同じ答えしか返らない拒否だった｡[`halting_reason`] を見よ｡
     Halt,
 }
@@ -330,8 +333,19 @@ impl TimelineView {
                         else {
                             return;
                         };
-                        if poll == Poll::Halt {
-                            return;
+                        match poll {
+                            Poll::Continue => {}
+                            Poll::Halt => return,
+                            // #302: parse と合成は main thread の外で行う｡
+                            Poll::Compose(request) => {
+                                let composed =
+                                    request.spawn(cx.background_executor(), paths.clone()).await;
+                                let landed = this
+                                    .update(cx, |this, cx| this.land_poll(&request, composed, cx));
+                                if landed.is_err() {
+                                    return;
+                                }
+                            }
                         }
                         now.saturating_add(i64::from(interval_seconds))
                     }

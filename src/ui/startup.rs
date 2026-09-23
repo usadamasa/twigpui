@@ -106,6 +106,7 @@ impl TimelineView {
             home_username: None,
             sources,
             item_provenance: HashMap::new(),
+            recompose: None,
             owned_lists,
             lists_fetch: None,
             selection_file,

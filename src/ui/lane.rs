@@ -10,8 +10,9 @@
 use std::collections::HashMap;
 
 use anyhow::Result;
+use gpui::{App, BackgroundExecutor, Context, Task};
 
-use super::source_picker;
+use super::{TimelineState, TimelineView, source_picker};
 use crate::cache::{self, MeEntry, Side, TimelineSource, splice};
 use crate::paths::Paths;
 use crate::x_api::{ListSummary, TimelineItem, XClient};
@@ -61,6 +62,65 @@ pub(super) fn load_composite_timeline(
     compose_with_provenance(per_source)
 }
 
+/// 合成を始めたときの材料 (#302)｡
+///
+/// source ごとのキャッシュは 1 本で数百 KB あり､選んだ本数ぶん parse する
+/// ので､合成は main thread ではなく background executor で行う｡呼び出し元は
+/// `this.update` を 2 段に割る｡第 1 段で完了時点の `this.sources` をこれに
+/// 捕獲して合成を始め､第 2 段では [`Self::is_current`] で集合がまだ同じか
+/// 確かめてから着地させる｡合成の間に toggle されたら､古い集合の lane は
+/// 捨てる — 集合を変えた toggle が自分で組み直す｡
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Recompose {
+    pub sources: Vec<TimelineSource>,
+    pub user_id: String,
+}
+
+impl Recompose {
+    /// `sources` のキャッシュを background executor で読んで合成する｡
+    pub(super) fn spawn(&self, executor: &BackgroundExecutor, paths: Paths) -> Task<Composed> {
+        let (sources, user_id) = (self.sources.clone(), self.user_id.clone());
+        executor.spawn(async move { load_composite_timeline(&paths, &sources, &user_id) })
+    }
+
+    /// 合成を始めてから `sources` が動いていないか｡
+    pub(super) fn is_current(&self, sources: &[TimelineSource]) -> bool {
+        self.sources == sources
+    }
+}
+
+impl TimelineView {
+    /// 今の `sources` の合成を background で始める (#302 の第 1 段)｡返す
+    /// [`Recompose`] は､第 2 段で着地してよいかを照らし合わせる材料｡
+    pub(super) fn begin_recompose(&self, user_id: String, cx: &App) -> (Recompose, Task<Composed>) {
+        let request = Recompose {
+            sources: self.sources.clone(),
+            user_id,
+        };
+        let task = request.spawn(cx.background_executor(), self.paths.clone());
+        (request, task)
+    }
+
+    /// 着地した合成を画面へ出す (#302 の第 2 段)｡`sources` が合成を始めた
+    /// ときと違えば何もせず `false` を返す｡`refresh_images` は `state` を
+    /// 差し替えた後で呼ぶ (#120: 前に呼ぶと出ていく側の行の画像を取る)｡
+    pub(super) fn land_composed(
+        &mut self,
+        request: &Recompose,
+        composed: Composed,
+        cx: &mut Context<'_, Self>,
+    ) -> bool {
+        if !request.is_current(&self.sources) {
+            return false;
+        }
+        self.item_provenance = composed.provenance;
+        self.state = TimelineState::Loaded(composed.items);
+        self.refresh_images(cx);
+        cx.notify();
+        true
+    }
+}
+
 /// per-source の `(source, items)` の組から [`Composed`] を作る (#43)｡
 /// ディスクには触れない — `load_composite_timeline` から核だけを切り出した
 /// もので、fixture (`TimelineView::show_fixture`) がメモリ上のデータから
@@ -88,13 +148,12 @@ pub(super) fn compose_with_provenance(
 /// ファイルが無い source にも post が入っていない source にも安全な no-op
 /// なので、全部回すのが最短かつ正しい。ネットワークには触れない。
 ///
-/// 再合成はここでは行わない: 呼び出し側が spawn 時に
-/// 捕獲した `sources` ではなく、`update` クロージャの中で完了時点の
-/// `this.sources` を使って `load_composite_timeline` を呼ぶこと —
-/// `reload_sources` の完了ハンドラと同じ理由で、削除が
-/// 飛んでいる間にトグルされても古い集合でレーンを組み直さないようにする。
-/// キャッシュから消す側は捕獲した `sources` のままでよい — 余分に回しても
-/// 上のno-opの理由により安全。
+/// 再合成はここでは行わない: 呼び出し側が完了ハンドラの第 1 段で完了時点の
+/// `this.sources` を [`Recompose`] に捕獲して合成を始め、第 2 段で集合が
+/// まだ同じか確かめてから着地させること — `reload_sources` の完了ハンドラと
+/// 同じ理由で、削除や合成が飛んでいる間にトグルされても古い集合でレーンを
+/// 組み直さないようにする。キャッシュから消す側は spawn 時に捕獲した
+/// `sources` のままでよい — 余分に回しても上のno-opの理由により安全。
 pub(super) fn forget_post_everywhere(
     paths: &Paths,
     sources: &[TimelineSource],
@@ -191,8 +250,8 @@ pub(super) fn reload_all(
                 successes = successes.saturating_add(1);
                 next_token = reloaded.next_token;
                 me = Some(reloaded.me);
-                // `items` は使わない: 呼び出し側は完了時点の `sources` で
-                // `load_composite_timeline` を通して読み直す。ここでの
+                // `items` は使わない: 呼び出し側は完了時点の `sources` を
+                // `Recompose` に捕獲し、background で読み直す。ここでの
                 // アキュムレータには使えない。
                 let _ = reloaded.items;
             }

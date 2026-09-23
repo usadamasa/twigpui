@@ -163,8 +163,13 @@ pub(crate) struct TimelineView {
     /// `lane::load_composite_timeline` が合成のたびに作り直す表示専用の
     /// 派生値で､削除の真実の情報源にはしない — [`Self::confirm_delete`] は
     /// これを見ず `sources` を全部回す｡`sources.len() == 1` のときは
-    /// 描画側が出自を出さないので中身を読まない｡
+    /// 描画側が出自を出さないので中身を読まない｡合成は background で行い
+    /// (#302)､着地の時点で `sources` が合成を始めたときと同じ場合だけ
+    /// ここへ書く — [`lane::Recompose`] を見よ｡
     item_provenance: HashMap<String, cache::TimelineSource>,
+    /// toggle が始めた background の合成 (#302)｡代入し直すと前の合成は
+    /// cancel されるので､続けて toggle しても着地するのは最後の集合だけ｡
+    recompose: Option<Task<()>>,
     /// picker が名前を挙げられる list (#164)｡cache か直近の fetch から来る｡
     /// fetch ボタンが一度押されるまでは空｡
     owned_lists: Vec<crate::x_api::ListSummary>,

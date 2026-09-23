@@ -5,6 +5,7 @@
 
 use gpui::SharedString;
 
+use super::lane;
 use crate::cache;
 use crate::oauth;
 use crate::thread::ThreadChain;
@@ -129,17 +130,18 @@ pub(super) enum ReloadTrigger {
 /// タプルではなくローカルな enum にしてあるのは､`Home` が解決済みの
 /// [`cache::MeEntry`] を運ぶからで､純粋な cache hit のときでも `/me` への
 /// 二度目の往復なしに header と `home_user_id` が埋まる｡#43 で `sources`
-/// (複数) 対応にした際、post 一覧は `me.id` が要るので `update` クロージャの
-/// 側で `lane::load_composite_timeline` から合成する形に変わった — ここでは
-/// `me` だけを運ぶ｡#33 までは三つ目の variant があった — `SingleUser`､
-/// app-only の bearer token が解決した先の形である｡
+/// (複数) 対応にした際、post 一覧は `me.id` が要るので `me` と組にして
+/// 運ぶ｡#302 で合成も背景側へ移したので、`update` クロージャは出来上がった
+/// [`lane::Composed`] を置くだけになった｡#33 までは三つ目の variant があった
+/// — `SingleUser`､app-only の bearer token が解決した先の形である｡
 pub(super) enum StartOutcome {
     NotAuthenticated {
         session_notice: Option<String>,
     },
     Home {
         credential: oauth::Credential,
-        me: Option<cache::MeEntry>,
+        /// キャッシュ済みの `/me` と､それで合成した起動時の lane｡
+        me: Option<(cache::MeEntry, lane::Composed)>,
         session_notice: Option<String>,
     },
 }
