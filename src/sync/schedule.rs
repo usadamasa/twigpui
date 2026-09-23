@@ -122,9 +122,15 @@ pub(crate) enum Outcome {
         members_total: usize,
         held: bool,
     },
-    /// plan の write を 1 batch 送り出した｡`remaining` は loop がまだ
-    /// 送ってよいもの — [`sendable`] なので保留された removal は数えない｡
+    /// plan の write を送り出した — loop は 1 tick に 1 件 (#231)､CLI の
+    /// `--apply` は plan を丸ごと｡`remaining` は loop がまだ送ってよいもの
+    /// — [`sendable`] なので保留された removal は数えない｡
     Applied { sent: usize, remaining: usize },
+    /// この tick の 1 件を X が 400 で拒んだ (#254)｡entry には印が付いて
+    /// おり､`remaining` はそれを除いた残りだ｡request は飛んでいるので
+    /// [`super::state::settle`] は届いた write と同じように間を置き､
+    /// 連続回数を数える｡
+    Rejected { remaining: usize },
     /// write が拒否された — 送る前に追跡している window によってか､
     /// X から 429 で｡disk 上の plan は catch-up がどこまで進んだかを正確に
     /// 記録する: `sent` はこの batch のうち refusal の前に届いた件数､
@@ -211,11 +217,14 @@ pub(crate) fn notice(outcome: &Outcome) -> Option<String> {
         } if *adds > 0 || *removals > 0 => {
             Some(format!("List sync: {adds} to add, {removals} to remove."))
         }
+        // 件数は言わない: loop は 1 tick に 1 件なので (#231)､最後の
+        // tick の `sent` は 2,000 件の catch-up でも 1 だ｡
         Outcome::Applied { sent, remaining: 0 } if *sent > 0 => {
-            Some(format!("List sync: {sent} change(s) applied."))
+            Some("List sync: caught up — every change is applied.".to_string())
         }
         Outcome::Diffed { .. }
         | Outcome::Applied { .. }
+        | Outcome::Rejected { .. }
         | Outcome::Idle { .. }
         | Outcome::RateLimited { .. } => None,
     }
@@ -645,6 +654,7 @@ mod tests {
             blocked_until: Some(5_000),
             paused_until: None,
             refusals: 1,
+            ..crate::sync::SyncState::default()
         };
         let situation = Situation {
             last_diff_at: last_diff_for(true, refused.last_diff_at),
@@ -666,6 +676,7 @@ mod tests {
             blocked_until: Some(22_600),
             paused_until: None,
             refusals: 0,
+            ..crate::sync::SyncState::default()
         };
         assert_eq!(blocked_for(true, &failed), None);
         let situation = Situation {
@@ -684,6 +695,7 @@ mod tests {
             blocked_until: Some(22_600),
             paused_until: None,
             refusals: 0,
+            ..crate::sync::SyncState::default()
         };
         assert_eq!(blocked_for(false, &failed), Some(22_600));
     }
@@ -697,6 +709,7 @@ mod tests {
             blocked_until: Some(22_600),
             paused_until: None,
             refusals: 4,
+            ..crate::sync::SyncState::default()
         };
         assert_eq!(blocked_for(true, &refused), Some(22_600));
     }
@@ -759,6 +772,7 @@ mod tests {
             blocked_until: None,
             paused_until: Some(1_090),
             refusals: 0,
+            ..crate::sync::SyncState::default()
         };
         assert_eq!(paused_for(false, &paced), Some(1_090));
         assert_eq!(paused_for(true, &paced), None);
@@ -870,13 +884,28 @@ mod tests {
     }
 
     #[test]
-    fn the_batch_that_finishes_the_catch_up_reports_it() {
+    fn the_write_that_finishes_the_catch_up_reports_it_without_a_count() {
+        // loop は 1 tick に 1 件なので､最後の tick の `sent` は何千件の
+        // catch-up でも 1 だ｡「1 change applied」は嘘になる｡
         let text = notice(&Outcome::Applied {
-            sent: 12,
+            sent: 1,
             remaining: 0,
         })
         .unwrap();
-        assert!(text.contains("12"), "{text}");
+        assert!(text.contains("caught up"), "{text}");
+        assert!(!text.contains('1'), "{text}");
+    }
+
+    #[test]
+    fn a_rejected_write_says_nothing() {
+        // 拒否は log に 1 行ずつ残る (`run::write_one`)｡バナーに出せば
+        // 数千件の catch-up の途中で何度も戻ってくる｡
+        assert_eq!(notice(&Outcome::Rejected { remaining: 40 }), None);
+    }
+
+    #[test]
+    fn a_run_whose_write_was_rejected_is_not_finished() {
+        assert!(!is_finished(Some(&Outcome::Rejected { remaining: 0 })));
     }
 
     #[test]

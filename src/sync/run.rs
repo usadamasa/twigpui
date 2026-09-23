@@ -11,6 +11,7 @@
 use anyhow::{Context as _, Result};
 
 use super::api::ListSyncApi;
+use super::pacing::{Span, WritePacing};
 use super::schedule::Outcome;
 use super::{Action, Plan, load_plan, load_state, plan, report, save_plan, save_state};
 use crate::cache;
@@ -148,26 +149,86 @@ fn apply(
     plan: &mut Plan,
     prune: bool,
     now: i64,
+    gap: Span,
 ) -> (usize, Result<()>) {
-    apply_some(paths, client, plan, prune, now, usize::MAX)
+    apply_some(paths, client, plan, prune, now, usize::MAX, gap)
 }
 
-/// [`apply`] と同じだが､最大 `limit` 件送ったところで返る — background
-/// sync の仕事の単位だ｡実際に通った件数を､batch を止めた失敗があれば
-/// それと **並べて** 返す: この件数があるおかげで `sync::state` は､write が
-/// 届いた直後の refusal と refusal に続く refusal を見分けられる｡
-/// `Result<usize>` では一方を報告するのにもう一方を捨てるしかない｡
+/// 1 件の write の結末｡`Err` は届きも拒まれもしなかったもの — rate limit､
+/// ネットワーク､失効した scope — で､呼び出し側が止まる理由になる｡
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Written {
+    /// `Ok` で返り､plan とミラーに印が付いた｡
+    Landed,
+    /// X が 400 で拒んだ (#254)｡plan に理由が付き､残務から外れた｡
+    Rejected,
+}
+
+/// `user_id` への `action` を 1 件送り､結末を plan に書いて返す｡
 ///
+/// loop の tick はこれを 1 回だけ呼ぶ (#231): 1 tick に 1 件で､間は
+/// `sync::state` が `paused_until` に置く｡CLI の `--apply` は
+/// [`apply_some`] が plan を回すあいだ繰り返し呼ぶ｡
+///
+/// 400 はこの entry への答えだ (#254)｡印を付けて `Rejected` を返す — 印が
+/// 無いと次の tick が同じ entry を先頭に戻し､同じ答えを 6 時間ごとに
+/// 受け取り続ける｡拒否が続くかどうかを数えるのは呼び出し側の仕事で､
+/// tick をまたいで数える loop は `SyncState::rejected_in_a_row` に持つ｡
+pub(super) fn write_one(
+    paths: &Paths,
+    client: &dyn ListSyncApi,
+    plan: &mut Plan,
+    action: Action,
+    user_id: &str,
+    now: i64,
+) -> Result<Written> {
+    let result = match action {
+        Action::Add => client.add_member(paths, &plan.list_id, user_id, now),
+        Action::Remove => client.remove_member(paths, &plan.list_id, user_id, now),
+    };
+    let written = match result {
+        Ok(()) => {
+            plan.mark_applied(user_id, action);
+            Written::Landed
+        }
+        Err(error) => match error.downcast_ref::<crate::x_api::InvalidRequest>() {
+            Some(refusal) => {
+                crate::log::warn(&format!(
+                    "list sync: X rejected the {} of {user_id} ({}); marked in the plan \
+                     and skipped",
+                    match action {
+                        Action::Add => "addition",
+                        Action::Remove => "removal",
+                    },
+                    refusal.detail
+                ));
+                plan.mark_rejected(user_id, action, &refusal.detail);
+                Written::Rejected
+            }
+            None => return Err(error),
+        },
+    };
+    save_progress(paths, plan, user_id, action, written == Written::Landed)?;
+    Ok(written)
+}
+
+/// [`apply`] と同じだが､最大 `limit` 件送ったところで返る｡実際に通った
+/// 件数を､送るのを止めた失敗があればそれと **並べて** 返す: この件数が
+/// あるおかげで `sync::state` は､write が届いた直後の refusal と refusal
+/// に続く refusal を見分けられる｡`Result<usize>` では一方を報告するのに
+/// もう一方を捨てるしかない｡
+///
+/// #231 からは CLI の `--apply` だけがこれを回す｡loop は 1 tick に 1 件
+/// ([`write_one`]) で､間と batch と cooldown は `sync::state` が数える｡
 /// CLI に上限は要らない: `--apply` は終わらせることが仕事の前景コマンドだ｡
-/// loop には要る｡rate limit とは無関係の二つの理由による (追跡している
-/// window が既に自力で止めるからだ): 2,000 件の request を送る tick は
-/// その間ずっと background executor を占有し､途中できれいに落とせない｡
-/// それに addition をすべて送ってから最初の removal に行くので､ひどく
-/// 古びた list では stale な member が消える何時間も前に addition だけが
-/// 見えてしまう｡
+/// batch も cooldown も置かないのは､端末の前にいる人が始めたものだからで､
+/// 機械らしく見えないようにする相手がいない｡write と write の `gap` だけは
+/// 置く — 同じ秒に全件を投げるのは #197 のロックの直前にしていた形だ｡
 ///
-/// removal を交互に混ぜるのはその二つ目の理由による — `limit` は addition
-/// に先に使い切らず､両方の action に振り分ける｡
+/// removal を交互に混ぜるのは､addition をすべて送ってから最初の removal に
+/// 行くと､ひどく古びた list では stale な member が消える何時間も前に
+/// addition だけが見えてしまうからだ — `limit` は addition に先に使い
+/// 切らず､両方の action に振り分ける｡
 ///
 /// write と write のあいだの間は [`super::api::ListSyncApi::pause_between_writes`]
 /// に頼む｡本番はそこで眠り､テストは渡された長さを記録するだけなので､
@@ -179,6 +240,7 @@ pub(super) fn apply_some(
     prune: bool,
     now: i64,
     limit: usize,
+    gap: Span,
 ) -> (usize, Result<()>) {
     let mut sent = 0usize;
     let mut attempted = 0usize;
@@ -187,60 +249,30 @@ pub(super) fn apply_some(
     let batch = super::schedule::next_batch(plan, prune, limit);
     let batch_size = batch.len();
     for (action, user_id) in batch {
-        // batch の中を散らす｡これが無いと batch は同じ秒のうちに全件を
-        // 投げる — #197 のロックの直前にしていた形｡1 件目の前には置かない｡
-        // tick は既に batch と batch の間を待って来ている｡
-        //
-        // 数えるのは届いた件数ではなく試した件数だ｡拒まれた entry を数に
-        // 入れないと､その次の request が間を置かずに飛ぶ｡
+        // 1 件目の前には置かない｡数えるのは届いた件数ではなく試した件数だ｡
+        // 拒まれた entry を数に入れないと､その次の request が間を置かずに
+        // 飛ぶ｡
         if attempted > 0 {
-            let gap = super::state::write_gap(crate::rate_limit::random_jitter_fraction());
+            let seconds = gap.draw(crate::rate_limit::random_jitter_fraction());
             // 眠る前に書く (#231)｡行のタイムスタンプと待つ秒数が sleep を
             // 挟むので､次の 1 回はログだけで間が本当に空いたかを読める｡
-            // batch サマリだけでは 1 件ずつ送ったのか同じ秒に投げたのかが
-            // 見分けられなかった｡
             crate::log::info(&format!(
-                "list sync: waiting {}s before write {} of {batch_size}",
-                gap.as_secs(),
+                "list sync: waiting {seconds}s before write {} of {batch_size}",
                 attempted.saturating_add(1)
             ));
-            client.pause_between_writes(gap);
+            client.pause_between_writes(std::time::Duration::from_secs(u64::from(seconds)));
         }
         attempted = attempted.saturating_add(1);
-        let result = match action {
-            Action::Add => client.add_member(paths, &plan.list_id, &user_id, now),
-            Action::Remove => client.remove_member(paths, &plan.list_id, &user_id, now),
-        };
-        let landed = result.is_ok();
-        match result {
-            Ok(()) => {
-                plan.mark_applied(&user_id, action);
+        match write_one(paths, client, plan, action, &user_id, now) {
+            Ok(Written::Landed) => {
                 sent = sent.saturating_add(1);
                 rejected_in_a_row = 0;
             }
-            // 400 はこの entry への答えだ (#254)｡印を付けて次へ進む — 印が
-            // 無いと次の tick が同じ entry を先頭に戻し､同じ答えを 6 時間
-            // ごとに受け取り続ける｡
-            Err(error) => match error.downcast_ref::<crate::x_api::InvalidRequest>() {
-                Some(refusal) => {
-                    crate::log::warn(&format!(
-                        "list sync: X rejected the {} of {user_id} ({}); marked in the plan \
-                         and skipped",
-                        match action {
-                            Action::Add => "addition",
-                            Action::Remove => "removal",
-                        },
-                        refusal.detail
-                    ));
-                    plan.mark_rejected(&user_id, action, &refusal.detail);
-                    rejected = rejected.saturating_add(1);
-                    rejected_in_a_row = rejected_in_a_row.saturating_add(1);
-                }
-                None => return (sent, Err(error)),
-            },
-        }
-        if let Err(error) = save_progress(paths, plan, &user_id, action, landed) {
-            return (sent, Err(error));
+            Ok(Written::Rejected) => {
+                rejected = rejected.saturating_add(1);
+                rejected_in_a_row = rejected_in_a_row.saturating_add(1);
+            }
+            Err(error) => return (sent, Err(error)),
         }
         if rejected_in_a_row >= REJECTIONS_IN_A_ROW_LIMIT {
             return (
@@ -278,12 +310,14 @@ fn save_progress(paths: &Paths, plan: &Plan, id: &str, action: Action, landed: b
     Ok(())
 }
 
-/// 連続してこの件数の write が 400 で拒まれたら apply を止める (#254)｡
+/// 連続してこの件数の write が 400 で拒まれたら送るのを止める (#254)｡
 ///
 /// 拒否 1 件は entry の問題だが､続けざまなら list や request の形そのものが
 /// 拒まれている可能性のほうが高い｡上限の無い `--apply` はこれが無いと
-/// plan を丸ごと撃ち切る — 1 request ずつ課金されながら｡
-const REJECTIONS_IN_A_ROW_LIMIT: u32 = 3;
+/// plan を丸ごと撃ち切る — 1 request ずつ課金されながら｡loop は tick を
+/// またいで `SyncState::rejected_in_a_row` で数え､届いたら interval 丸ごと
+/// 退く (`state::settle`)｡
+pub(super) const REJECTIONS_IN_A_ROW_LIMIT: u32 = 3;
 
 /// `--sync-list` が何をするよう求められたか｡
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -357,6 +391,7 @@ pub(crate) fn run_cli(config: &Config, paths: &Paths, request: Request) -> i32 {
         &list_id,
         request,
         config.sync_interval_seconds,
+        config.sync_write_pacing,
     ) {
         Ok(report) => {
             println!("{report}");
@@ -399,6 +434,7 @@ fn run(
     list_id: &str,
     request: Request,
     interval_seconds: u32,
+    writes: WritePacing,
 ) -> Result<String> {
     let plan_path = paths.sync_plan_file();
     let now = oauth::unix_now();
@@ -446,16 +482,12 @@ fn run(
     // `x-api-budget` の「押す前に最悪ケースを出す」と同じ規則｡
     let pending = super::schedule::sendable(&plan, request.prune);
     if pending > 0 {
+        let gap = writes.gap_seconds;
         let worst_minutes = pending
-            .saturating_mul(
-                usize::try_from(
-                    super::state::WRITE_GAP_FLOOR_SECONDS + super::state::WRITE_GAP_SPREAD_SECONDS,
-                )
-                .unwrap_or(0),
-            )
+            .saturating_mul(usize::try_from(gap.max).unwrap_or(0))
             .saturating_div(60);
         eprintln!(
-            "note: sending {pending} write(s), pausing 3-20s between each so the run does not \
+            "note: sending {pending} write(s), pausing {gap}s between each so the run does not \
              look like a script. Worst case about {worst_minutes} minute(s)."
         );
     }
@@ -471,15 +503,17 @@ fn run(
         );
     }
 
-    let (sent, result) = apply(paths, client, &mut plan, request.prune, now);
+    let (sent, result) = apply(
+        paths,
+        client,
+        &mut plan,
+        request.prune,
+        now,
+        writes.gap_seconds,
+    );
     let remaining = super::schedule::sendable(&plan, request.prune);
     let outcome = super::schedule::apply_outcome(sent, remaining, result);
-    let spacing = super::state::Spacing {
-        interval_seconds,
-        apply_pause_seconds: super::state::apply_pause_seconds(
-            crate::rate_limit::random_jitter_fraction(),
-        ),
-    };
+    let spacing = super::state::spacing_for(interval_seconds, writes);
     let settled = super::state::settle(state, outcome.as_ref().ok(), now, spacing);
     save_state(&state_path, &settled.state)?;
 
@@ -517,6 +551,9 @@ mod tests {
     use super::super::api::fake::{Call, FakeApi, Scratch, page, rate_limited, rejected, user};
     use super::*;
     use crate::sync::{Action, PlanEntry};
+
+    /// テストの CLI apply が write のあいだに置く範囲｡本番の既定と同じ｡
+    pub(super) const GAP: Span = WritePacing::DEFAULT.gap_seconds;
 
     /// 未適用の entry だけを持つ plan｡`members_total` は removal を測る
     /// 分母なので､prune の判定が絡むテストが自分で上書きする｡
@@ -725,7 +762,7 @@ mod tests {
         let client = FakeApi::new().writes(vec![Ok(()), Ok(())]);
         let mut plan = plan_of("7", &["1", "2", "3"], &[]);
 
-        let (sent, result) = apply_some(scratch.paths(), &client, &mut plan, false, 0, 2);
+        let (sent, result) = apply_some(scratch.paths(), &client, &mut plan, false, 0, 2, GAP);
 
         assert_eq!(sent, 2);
         assert!(result.is_ok(), "{result:?}");
@@ -742,7 +779,7 @@ mod tests {
         let client = FakeApi::new().writes(vec![Ok(()), Ok(()), Ok(()), Ok(())]);
         let mut plan = plan_of("7", &["1", "2"], &["8", "9"]);
 
-        let (_, result) = apply_some(scratch.paths(), &client, &mut plan, true, 0, 4);
+        let (_, result) = apply_some(scratch.paths(), &client, &mut plan, true, 0, 4, GAP);
         assert!(result.is_ok(), "{result:?}");
 
         assert_eq!(
@@ -762,7 +799,7 @@ mod tests {
         let client = FakeApi::new().writes(vec![Ok(())]);
         let mut plan = plan_of("7", &["1"], &["8"]);
 
-        let (sent, _) = apply_some(scratch.paths(), &client, &mut plan, false, 0, usize::MAX);
+        let (sent, _) = apply_some(scratch.paths(), &client, &mut plan, false, 0, usize::MAX, GAP);
 
         assert_eq!(sent, 1);
         assert_eq!(client.calls(), [Call::Add("1".to_string())]);
@@ -776,7 +813,7 @@ mod tests {
         let client = FakeApi::new().writes(vec![Ok(()), Err(rate_limited(9_000, true))]);
         let mut plan = plan_of("7", &["1", "2", "3"], &[]);
 
-        let (sent, result) = apply_some(scratch.paths(), &client, &mut plan, false, 0, usize::MAX);
+        let (sent, result) = apply_some(scratch.paths(), &client, &mut plan, false, 0, usize::MAX, GAP);
 
         assert_eq!(sent, 1);
         assert!(result.is_err(), "the refusal must come back");
@@ -798,7 +835,7 @@ mod tests {
             FakeApi::new().writes(vec![Err(rejected("The user_id is not valid.")), Ok(())]);
         let mut plan = plan_of("7", &["1", "2"], &[]);
 
-        let (sent, result) = apply_some(scratch.paths(), &client, &mut plan, false, 0, usize::MAX);
+        let (sent, result) = apply_some(scratch.paths(), &client, &mut plan, false, 0, usize::MAX, GAP);
 
         assert!(result.is_ok(), "{result:?}");
         assert_eq!(sent, 1);
@@ -828,7 +865,7 @@ mod tests {
         let client = FakeApi::new().writes(vec![Err(rejected("no")), Ok(())]);
         let mut plan = plan_of("7", &["1", "2"], &[]);
 
-        let (_, result) = apply_some(scratch.paths(), &client, &mut plan, false, 0, usize::MAX);
+        let (_, result) = apply_some(scratch.paths(), &client, &mut plan, false, 0, usize::MAX, GAP);
 
         assert!(result.is_ok(), "{result:?}");
         assert_eq!(client.pauses().len(), 1, "2 attempts take 1 gap");
@@ -843,7 +880,7 @@ mod tests {
         let client = FakeApi::new().writes(vec![Err(rejected("no")), Err(rejected("no"))]);
         let mut plan = plan_of("7", &["1", "2", "3"], &[]);
 
-        let (sent, result) = apply_some(scratch.paths(), &client, &mut plan, false, 0, 2);
+        let (sent, result) = apply_some(scratch.paths(), &client, &mut plan, false, 0, 2, GAP);
 
         assert_eq!(sent, 0);
         let error = result.unwrap_err().to_string();
@@ -868,7 +905,7 @@ mod tests {
         ]);
         let mut plan = plan_of("7", &["1", "2", "3", "4", "5"], &[]);
 
-        let (sent, result) = apply_some(scratch.paths(), &client, &mut plan, false, 0, usize::MAX);
+        let (sent, result) = apply_some(scratch.paths(), &client, &mut plan, false, 0, usize::MAX, GAP);
 
         assert_eq!(sent, 1);
         assert!(result.is_err(), "the run must stop at the third rejection");
@@ -885,19 +922,92 @@ mod tests {
         let client = FakeApi::new().writes(vec![Ok(()), Ok(()), Ok(())]);
         let mut plan = plan_of("7", &["1", "2", "3"], &[]);
 
-        let (_, result) = apply_some(scratch.paths(), &client, &mut plan, false, 0, usize::MAX);
+        let (_, result) = apply_some(scratch.paths(), &client, &mut plan, false, 0, usize::MAX, GAP);
         assert!(result.is_ok(), "{result:?}");
 
         let pauses = client.pauses();
         assert_eq!(pauses.len(), 2, "3 writes take 2 gaps: {pauses:?}");
-        let floor = super::super::state::WRITE_GAP_FLOOR_SECONDS;
-        let ceiling = floor + super::super::state::WRITE_GAP_SPREAD_SECONDS;
         for gap in pauses {
             assert!(
-                (floor..=ceiling).contains(&gap.as_secs()),
-                "the gap must stay inside the configured spread: {gap:?}"
+                (u64::from(GAP.min)..=u64::from(GAP.max)).contains(&gap.as_secs()),
+                "the gap must stay inside the configured span: {gap:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_fixed_gap_is_honoured_to_the_second() {
+        // 範囲が config から来る (#231) ので､固定の範囲は固定の間になる｡
+        let scratch = Scratch::new("apply-fixed-gap");
+        let client = FakeApi::new().writes(vec![Ok(()), Ok(())]);
+        let mut plan = plan_of("7", &["1", "2"], &[]);
+
+        let (_, result) = apply_some(
+            scratch.paths(),
+            &client,
+            &mut plan,
+            false,
+            0,
+            usize::MAX,
+            Span::new(9, 9),
+        );
+        assert!(result.is_ok(), "{result:?}");
+
+        assert_eq!(client.pauses(), [std::time::Duration::from_secs(9)]);
+    }
+
+    // --- write_one: loop の 1 tick が送る 1 件 (#231) ---
+
+    #[test]
+    fn a_write_that_lands_is_marked_on_disk_and_reported_as_landed() {
+        let scratch = Scratch::new("write-one-landed");
+        let client = FakeApi::new().writes(vec![Ok(())]);
+        let mut plan = plan_of("7", &["1", "2"], &[]);
+
+        let written = write_one(scratch.paths(), &client, &mut plan, Action::Add, "1", 0).unwrap();
+
+        assert_eq!(written, Written::Landed);
+        assert_eq!(client.calls(), [Call::Add("1".to_string())]);
+        let on_file = load_plan(&scratch.paths().sync_plan_file())
+            .unwrap()
+            .unwrap();
+        assert_eq!(applied_ids(&on_file), ["1"]);
+    }
+
+    #[test]
+    fn a_write_the_api_rejects_is_marked_and_reported_as_rejected() {
+        let scratch = Scratch::new("write-one-rejected");
+        let client = FakeApi::new().writes(vec![Err(rejected("The user_id is not valid."))]);
+        let mut plan = plan_of("7", &["1"], &[]);
+
+        let written = write_one(scratch.paths(), &client, &mut plan, Action::Add, "1", 0).unwrap();
+
+        assert_eq!(written, Written::Rejected);
+        let on_file = load_plan(&scratch.paths().sync_plan_file())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            on_file.entries[0].rejected.as_deref(),
+            Some("The user_id is not valid.")
+        );
+    }
+
+    #[test]
+    fn a_refused_write_comes_back_as_the_error_with_nothing_marked() {
+        let scratch = Scratch::new("write-one-refused");
+        let client = FakeApi::new().writes(vec![Err(rate_limited(9_000, true))]);
+        let mut plan = plan_of("7", &["1"], &[]);
+
+        let error = write_one(scratch.paths(), &client, &mut plan, Action::Add, "1", 0).unwrap_err();
+
+        assert!(
+            error
+                .downcast_ref::<crate::rate_limit::RateLimited>()
+                .is_some(),
+            "{error:#}"
+        );
+        assert!(!plan.entries[0].applied);
+        assert!(plan.entries[0].rejected.is_none());
     }
 
     #[test]
@@ -906,7 +1016,7 @@ mod tests {
         let client = FakeApi::new().writes(vec![Ok(()), Ok(()), Ok(())]);
         let mut plan = plan_of("7", &["1", "2"], &["8"]);
 
-        let (sent, result) = apply(scratch.paths(), &client, &mut plan, true, 0);
+        let (sent, result) = apply(scratch.paths(), &client, &mut plan, true, 0, GAP);
 
         assert_eq!(sent, 3);
         assert!(result.is_ok(), "{result:?}");
@@ -936,6 +1046,7 @@ mod tests {
             "7",
             request(false, false),
             21_600,
+            WritePacing::DEFAULT,
         )
         .unwrap();
         assert!(client.calls().is_empty());
@@ -969,6 +1080,7 @@ mod tests {
             "7",
             request(false, false),
             21_600,
+            WritePacing::DEFAULT,
         )
         .unwrap();
         assert!(without.contains("sync_members.json"), "{without}");
@@ -985,6 +1097,7 @@ mod tests {
             "7",
             request(false, false),
             21_600,
+            WritePacing::DEFAULT,
         )
         .unwrap();
         assert!(!with.contains("--reread first"), "{with}");
@@ -1013,6 +1126,7 @@ mod tests {
             "7",
             request(false, false),
             21_600,
+            WritePacing::DEFAULT,
         )
         .unwrap();
         assert!(
@@ -1033,6 +1147,7 @@ mod tests {
                 ..request(false, false)
             },
             21_600,
+            WritePacing::DEFAULT,
         )
         .unwrap();
         assert_eq!(
@@ -1060,7 +1175,7 @@ mod tests {
             reread: true,
             ..request(false, false)
         };
-        run(scratch.paths(), &client, "me", "7", request, 21_600).unwrap();
+        run(scratch.paths(), &client, "me", "7", request, 21_600, WritePacing::DEFAULT).unwrap();
         assert!(client.calls().contains(&Call::Following(None)));
         assert!(client.calls().contains(&Call::Members(None)));
         let saved = load_plan(&scratch.paths().sync_plan_file())
@@ -1102,6 +1217,7 @@ mod tests {
             "7",
             request(false, false),
             21_600,
+            WritePacing::DEFAULT,
         )
         .unwrap();
         assert!(text.contains("1 to add, 0 to remove"), "{text}");
@@ -1138,7 +1254,8 @@ mod tests {
                 "me",
                 "7",
                 request(false, false),
-                21_600
+                21_600,
+                WritePacing::DEFAULT,
             )
             .is_err()
         );
@@ -1152,6 +1269,7 @@ mod tests {
             "7",
             request(false, false),
             21_600,
+            WritePacing::DEFAULT,
         )
         .unwrap();
         assert_eq!(
@@ -1186,6 +1304,7 @@ mod tests {
                 "7",
                 request(false, false),
                 21_600,
+                WritePacing::DEFAULT,
             )
             .unwrap();
             assert!(client.calls().contains(&Call::Following(None)));
@@ -1206,6 +1325,7 @@ mod tests {
             "7",
             request(false, false),
             21_600,
+            WritePacing::DEFAULT,
         )
         .unwrap();
 
@@ -1230,6 +1350,7 @@ mod tests {
             "7",
             request(true, false),
             21_600,
+            WritePacing::DEFAULT,
         )
         .unwrap_err()
         .to_string();
@@ -1256,6 +1377,7 @@ mod tests {
             "7",
             request(true, false),
             21_600,
+            WritePacing::DEFAULT,
         )
         .unwrap_err()
         .to_string();
@@ -1285,6 +1407,7 @@ mod tests {
             "7",
             request(true, false),
             21_600,
+            WritePacing::DEFAULT,
         )
         .unwrap();
 
@@ -1312,6 +1435,7 @@ mod tests {
             "7",
             request(true, false),
             21_600,
+            WritePacing::DEFAULT,
         )
         .unwrap_err()
         .to_string();
@@ -1351,6 +1475,7 @@ mod tests {
             "7",
             request(true, false),
             21_600,
+            WritePacing::DEFAULT,
         )
         .unwrap();
 
@@ -1369,6 +1494,7 @@ mod tests {
             "7",
             request(true, false),
             21_600,
+            WritePacing::DEFAULT,
         )
         .unwrap();
         assert!(client.calls().is_empty());
@@ -1387,6 +1513,7 @@ mod tests {
             "7",
             request(true, true),
             21_600,
+            WritePacing::DEFAULT,
         )
         .unwrap();
         assert_eq!(client.calls(), [Call::Remove("8".to_string())]);
@@ -1423,7 +1550,7 @@ mod tests {
             auto_sync_list: false,
             sync_interval_seconds: 21_600,
             sync_prune_limit_percent: 10,
-            sync_writes_per_batch: 5,
+            sync_write_pacing: WritePacing::DEFAULT,
             auto_refresh: false,
             auto_refresh_interval_seconds: 300,
             follow_new_posts: false,

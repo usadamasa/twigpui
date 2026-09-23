@@ -1,4 +1,5 @@
 #[cfg(test)]
+use super::tests::GAP;
 use super::*;
 use crate::sync::api::fake::{Call, FakeApi, Scratch, page, rate_limited, rejected};
 
@@ -131,7 +132,7 @@ fn successful_writes_update_the_mirror_and_the_next_diff_is_empty() {
     write_mirror(scratch.paths(), "7", 100);
     let mut plan = tests::plan_of("7", &["1"], &["2"]);
     let client = FakeApi::new().writes(vec![Ok(()), Ok(())]);
-    let (sent, result) = apply_some(scratch.paths(), &client, &mut plan, true, 101, 5);
+    let (sent, result) = apply_some(scratch.paths(), &client, &mut plan, true, 101, 5, GAP);
     result.unwrap();
     assert_eq!(sent, 2);
     let saved = saved_members(scratch.paths());
@@ -159,7 +160,7 @@ fn rejected_or_failed_writes_leave_the_mirror_intact() {
         let original = saved_members(scratch.paths());
         let mut plan = tests::plan_of("7", &["1"], &[]);
         let client = FakeApi::new().writes(vec![Err(error)]);
-        let (sent, _) = apply_some(scratch.paths(), &client, &mut plan, false, 101, 5);
+        let (sent, _) = apply_some(scratch.paths(), &client, &mut plan, false, 101, 5, GAP);
         assert_eq!(sent, 0);
         assert_eq!(saved_members(scratch.paths()), original);
     }
@@ -170,7 +171,7 @@ fn legacy_and_other_list_plans_do_not_create_or_change_a_mirror() {
     let scratch = Scratch::new("mirror-legacy");
     let mut plan = tests::plan_of("7", &["1"], &[]);
     let client = FakeApi::new().writes(vec![Ok(())]);
-    apply_some(scratch.paths(), &client, &mut plan, false, 100, 5)
+    apply_some(scratch.paths(), &client, &mut plan, false, 100, 5, GAP)
         .1
         .unwrap();
     assert!(!scratch.paths().sync_members_file().exists());
@@ -178,7 +179,7 @@ fn legacy_and_other_list_plans_do_not_create_or_change_a_mirror() {
     let original = saved_members(scratch.paths());
     let mut plan = tests::plan_of("7", &["2"], &[]);
     let client = FakeApi::new().writes(vec![Ok(())]);
-    apply_some(scratch.paths(), &client, &mut plan, false, 101, 5)
+    apply_some(scratch.paths(), &client, &mut plan, false, 101, 5, GAP)
         .1
         .unwrap();
     assert_eq!(saved_members(scratch.paths()), original);
@@ -196,7 +197,7 @@ fn a_mirror_save_failure_stops_after_recording_the_landed_write() {
     std::fs::set_permissions(&path, permissions).unwrap();
     let mut plan = tests::plan_of("7", &["1", "3"], &[]);
     let client = FakeApi::new().writes(vec![Ok(()), Ok(())]);
-    let (sent, result) = apply_some(scratch.paths(), &client, &mut plan, false, 101, 5);
+    let (sent, result) = apply_some(scratch.paths(), &client, &mut plan, false, 101, 5, GAP);
     assert_eq!(sent, 1);
     assert!(
         result
@@ -218,7 +219,7 @@ fn adding_an_existing_member_does_not_duplicate_it() {
     write_mirror(scratch.paths(), "7", 100);
     let mut plan = tests::plan_of("7", &["2"], &[]);
     let client = FakeApi::new().writes(vec![Ok(())]);
-    apply_some(scratch.paths(), &client, &mut plan, false, 101, 5)
+    apply_some(scratch.paths(), &client, &mut plan, false, 101, 5, GAP)
         .1
         .unwrap();
     assert_eq!(

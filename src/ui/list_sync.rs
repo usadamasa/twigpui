@@ -254,11 +254,14 @@ pub(super) fn status_of(tick: &sync::Tick, now: i64) -> SyncStatus {
         Ok(sync::Outcome::Idle { pending, .. }) if *pending > 0 && tick.state.is_blocked(now) => {
             refused(*pending)
         }
+        // 拒否された write (#254) も進捗だ: entry は残務から外れ､ループは
+        // 次の write までの間を置いて戻ってくる｡
         Ok(
             sync::Outcome::Idle { pending, .. }
             | sync::Outcome::Applied {
                 remaining: pending, ..
-            },
+            }
+            | sync::Outcome::Rejected { remaining: pending },
         ) => SyncStatus::Idle {
             until: tick.wake_at,
             pending: *pending,
@@ -386,9 +389,11 @@ impl TimelineView {
         let paths = self.paths.clone();
         let interval = self.config.sync_interval_seconds;
         let prune_limit = self.config.sync_prune_limit_percent;
-        let writes_per_batch = self.config.sync_writes_per_batch;
+        let writes = self.config.sync_write_pacing;
+        // 3 つの範囲を起動の行に残す (#231): 効いているかを log で読む
+        // とき､この行が「そのときの設定」の記録になる｡
         log::info(&format!(
-            "list sync started for {list_id} ({trigger:?}), interval {interval}s"
+            "list sync started for {list_id} ({trigger:?}), interval {interval}s, writes: {writes}"
         ));
         self.show_sync(SyncStatus::Working, cx);
 
@@ -432,7 +437,7 @@ impl TimelineView {
                         });
                         let pacing = sync::Pacing {
                             interval_seconds: interval,
-                            writes_per_batch,
+                            writes,
                             forced,
                         };
                         // tick は失敗も含め自分の結果を自分でログに出す｡
@@ -762,6 +767,18 @@ mod tests {
     }
 
     #[test]
+    fn a_rejected_write_reports_what_is_left_like_any_other_progress() {
+        let rejected = tick(Ok(sync::Outcome::Rejected { remaining: 339 }), 1_014);
+        assert_eq!(
+            status_of(&rejected, 1_000),
+            SyncStatus::Idle {
+                until: 1_014,
+                pending: 339
+            }
+        );
+    }
+
+    #[test]
     fn an_idle_tick_carries_its_pending_count_into_the_status() {
         let idle = tick(
             Ok(sync::Outcome::Idle {
@@ -798,6 +815,7 @@ mod tests {
             blocked_until: Some(4_600),
             paused_until: None,
             refusals: 3,
+            ..sync::SyncState::default()
         };
         assert_eq!(
             status_of(&refused, 1_000),
@@ -827,6 +845,7 @@ mod tests {
             blocked_until: Some(4_600),
             paused_until: None,
             refusals: 2,
+            ..sync::SyncState::default()
         };
         assert_eq!(
             status_of(&idle, 1_060),

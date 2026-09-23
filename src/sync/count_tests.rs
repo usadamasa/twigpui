@@ -27,7 +27,7 @@ fn check(paths: &Paths, api: &FakeApi, forced: bool) -> Tick {
         "7",
         Pacing {
             interval_seconds: INTERVAL,
-            writes_per_batch: 5,
+            writes: crate::sync::WritePacing::DEFAULT,
             forced,
         },
         10,
@@ -219,7 +219,7 @@ fn a_refreshed_mirror_after_a_failed_follow_read_cannot_skip_the_retry() {
         "7",
         Pacing {
             interval_seconds: INTERVAL,
-            writes_per_batch: 5,
+            writes: crate::sync::WritePacing::DEFAULT,
             forced: false,
         },
         10,
