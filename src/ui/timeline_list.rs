@@ -10,7 +10,7 @@
 //!
 //! # なぜ facade か
 //!
-//! [`super::scroll`] のばねと rubber band､[`super::auto_refresh`] の glide は
+//! [`super::scroll`] のばねと rubber band､[`super::follow`] の glide は
 //! **絶対 px** の offset と floor (`-max_offset`) で動く｡`ListState` は
 //! 位置を `(item_ix, offset_in_item)` で持つが､全行の高さが分かって
 //! いれば px との往復は一意に決まる — `scroll_px_offset_for_scrollbar` /

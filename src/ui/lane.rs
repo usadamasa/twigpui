@@ -4,8 +4,8 @@
 //! 合成はここでメモリ上だけで行う: `cache::splice` を id 重複除去のために
 //! fold するだけで、新しい dedupe/sort ロジックは要らない｡
 //!
-//! N-source の reload もここに置く。`auto_refresh.rs` (実装の天井 800 行に
-//! 対して余裕 22 行) と `tasks/fetch.rs` (余裕 97 行) を太らせないためだ。
+//! N-source の reload もここに置く。source の集合を順に回す処理は、reload・
+//! poll・起動のどの呼び出し元にも属さず、この合成と同じ集合を相手にするからだ。
 
 use std::collections::HashMap;
 

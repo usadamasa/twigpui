@@ -1,9 +1,8 @@
 //! timeline を埋める読み取り (#241): 起動､reload､"Load older"､
 //! "Show thread"｡どれも API のクレジットを使う｡
 
-// 列挙ではなく glob にしているのは [`crate::ui::render`] と
-// [`crate::ui::auto_refresh`] に合わせたもの｡`ui` が import しているものの
-// ほとんどに手を伸ばす｡
+// 列挙ではなく glob にしているのは [`crate::ui::render`] に合わせたもの｡
+// `ui` が import しているもののほとんどに手を伸ばす｡
 use crate::ui::lane;
 use crate::ui::*;
 

@@ -13,14 +13,14 @@
 //! scroll がその数をどう減らすか､濃さとラベルがどう進むか — 続いて
 //! `impl TimelineView` が､それを画面に置きタイマーで進める｡
 //!
-//! 何を差し出すかはここでは決めない｡pending のバッファも glide も
-//! [`super::auto_refresh`] のもので､押したときに起きること
+//! 何を差し出すかはここでは決めない｡pending のバッファは
+//! [`super::pending`]､glide は [`super::follow`] のもので､押したときに起きること
 //! ([`TimelineView::reveal_new_posts`]) はどちらの経路でもあちらの
 //! [`TimelineView::start_glide`] を呼ぶだけ｡ここは見せ方と､2 つの経路
 //! のうちどちらを呼ぶかの分岐を持つ｡
 
-use super::auto_refresh::pending_label;
 use super::fade::{FADE_STEP_MILLIS, Fade, fade_occupies, fade_opacity, fade_settled, next_fade};
+use super::pending::pending_label;
 use super::render::Addressable as _;
 use super::{
     AnyElement, Context, Duration, FontWeight, InteractiveElement as _, IntoElement as _,
@@ -31,7 +31,7 @@ use super::{
 /// 読み手にまだ届いていない新着の数 (#206)｡toast が言う件数｡
 ///
 /// 出所は 2 つで､足して 1 つの数にする｡`pending` は pill の後ろで待つ
-/// バッファの件数 ([`super::auto_refresh::Pending::count`])､`unseen` は
+/// バッファの件数 ([`super::pending::Pending::count`])､`unseen` は
 /// follow が流し込んだ行のうち glide がまだ視界へ降ろしていない数
 /// ([`unseen_after_scroll`])｡前者は画面にある timeline を基準に数えた
 /// ものなので､後者と重なることは無い — follow が流し込んだ行は画面に
