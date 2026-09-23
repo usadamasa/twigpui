@@ -706,7 +706,10 @@ mod tests {
             tick.outcome
         );
         assert_eq!(tick.state.rejected_in_a_row, 1);
-        assert!(!tick.state.is_blocked(NOW), "one 400 is not a reason to stop");
+        assert!(
+            !tick.state.is_blocked(NOW),
+            "one 400 is not a reason to stop"
+        );
         let on_file = load_plan(&scratch.paths().sync_plan_file())
             .unwrap()
             .unwrap();

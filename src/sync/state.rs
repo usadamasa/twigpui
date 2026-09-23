@@ -250,6 +250,7 @@ pub(crate) fn settle(
             if *sent > 0 {
                 next.refusals = 0;
             }
+            next.landed_since_refusal = 0;
             let until = if *opaque {
                 next.refusals = next.refusals.saturating_add(1);
                 now.saturating_add(opaque_backoff_seconds(next.refusals))
@@ -259,23 +260,30 @@ pub(crate) fn settle(
             next.blocked_until = Some(until);
             until
         }
+        Some(Outcome::Applied { sent: 0, .. }) => now,
         Some(Outcome::Applied { sent, remaining }) => {
-            if *sent > 0 {
-                next.refusals = 0;
-                next.blocked_until = None;
-            }
-            if *remaining > 0 {
-                let until = now.saturating_add(spacing.cooldown_seconds);
-                next.paused_until = Some(until);
+            next.refusals = 0;
+            next.blocked_until = None;
+            next.rejected_in_a_row = 0;
+            next.landed_since_refusal = next
+                .landed_since_refusal
+                .saturating_add(u64::try_from(*sent).unwrap_or(u64::MAX));
+            pace(&mut next, *sent, *remaining, now, spacing)
+        }
+        Some(Outcome::Rejected { remaining }) => {
+            next.rejected_in_a_row = next.rejected_in_a_row.saturating_add(1);
+            if next.rejected_in_a_row >= super::run::REJECTIONS_IN_A_ROW_LIMIT {
+                next.rejected_in_a_row = 0;
+                let until = now.saturating_add(i64::from(spacing.interval_seconds));
+                next.blocked_until = Some(until);
                 until
             } else {
-                next.paused_until = None;
-                now
+                pace(&mut next, 1, *remaining, now, spacing)
             }
         }
-        Some(Outcome::Rejected { .. }) => now,
         Some(Outcome::Diffed { .. }) => {
             next.paused_until = None;
+            next.batch_left = 0;
             now
         }
     };
@@ -283,6 +291,40 @@ pub(crate) fn settle(
         state: next,
         wake_at,
     }
+}
+
+/// `attempts` 件の request を送ったあとの batch の進みと､次の write まで
+/// の間｡[`settle`] の届いた側と拒まれた側が共有する｡
+///
+/// `batch_left` が 0 なら､この request が新しい batch を開いたということ
+/// なので､先に [`Spacing::batch_writes`] で埋める｡0 件の batch は 1 件と
+/// 読む: config が 0 を拒むので本番では起きないが､ファイル由来の値で
+/// write が永久に「batch の途中」に留まってはならない｡
+fn pace(
+    next: &mut SyncState,
+    attempts: usize,
+    remaining: usize,
+    now: i64,
+    spacing: Spacing,
+) -> i64 {
+    if next.batch_left == 0 {
+        next.batch_left = spacing.batch_writes.max(1);
+    }
+    next.batch_left = next
+        .batch_left
+        .saturating_sub(u32::try_from(attempts).unwrap_or(u32::MAX));
+    if remaining == 0 {
+        next.paused_until = None;
+        return now;
+    }
+    let wait = if next.batch_left == 0 {
+        spacing.cooldown_seconds
+    } else {
+        spacing.gap_seconds
+    };
+    let until = now.saturating_add(wait);
+    next.paused_until = Some(until);
+    until
 }
 
 /// `path` から state を読み戻す｡

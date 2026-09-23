@@ -242,6 +242,25 @@ pub(super) fn apply_some(
     limit: usize,
     gap: Span,
 ) -> (usize, Result<()>) {
+    // 届いた件数は plan から数える｡それが真実の置き場で､途中で止まった
+    // 理由が何であれ (ミラーの保存に失敗した write も) 印は付いている｡
+    let applied = |plan: &Plan| plan.entries.iter().filter(|entry| entry.applied).count();
+    let before = applied(plan);
+    let result = send_batch(paths, client, plan, prune, now, limit, gap);
+    (applied(plan).saturating_sub(before), result)
+}
+
+/// [`apply_some`] の loop 本体｡止まった理由だけを返し､件数は呼び出し側が
+/// plan から数える｡
+fn send_batch(
+    paths: &Paths,
+    client: &dyn ListSyncApi,
+    plan: &mut Plan,
+    prune: bool,
+    now: i64,
+    limit: usize,
+    gap: Span,
+) -> Result<()> {
     let mut sent = 0usize;
     let mut attempted = 0usize;
     let mut rejected = 0usize;
@@ -263,42 +282,34 @@ pub(super) fn apply_some(
             client.pause_between_writes(std::time::Duration::from_secs(u64::from(seconds)));
         }
         attempted = attempted.saturating_add(1);
-        match write_one(paths, client, plan, action, &user_id, now) {
-            Ok(Written::Landed) => {
+        match write_one(paths, client, plan, action, &user_id, now)? {
+            Written::Landed => {
                 sent = sent.saturating_add(1);
                 rejected_in_a_row = 0;
             }
-            Ok(Written::Rejected) => {
+            Written::Rejected => {
                 rejected = rejected.saturating_add(1);
                 rejected_in_a_row = rejected_in_a_row.saturating_add(1);
             }
-            Err(error) => return (sent, Err(error)),
         }
         if rejected_in_a_row >= REJECTIONS_IN_A_ROW_LIMIT {
-            return (
-                sent,
-                Err(anyhow::anyhow!(
-                    "{rejected_in_a_row} writes in a row were rejected by X — stopping in case \
-                     the list or the request itself is what is being rejected. The plan on file \
-                     marks them; the next run continues past them"
-                )),
+            anyhow::bail!(
+                "{rejected_in_a_row} writes in a row were rejected by X — stopping in case \
+                 the list or the request itself is what is being rejected. The plan on file \
+                 marks them; the next run continues past them"
             );
         }
     }
     // 拒否だけの batch は entry の問題と list や credential の問題を
-    // 見分けられない｡tick の失敗として返し interval 分退く — 印は付いて
-    // いるので次の batch は先へ進み､list 全体が拒まれていても支出は
-    // interval あたり 1 batch で頭打ちになる｡
+    // 見分けられない｡失敗として返す — 印は付いているので次の実行は先へ
+    // 進む｡
     if sent == 0 && rejected > 0 {
-        return (
-            sent,
-            Err(anyhow::anyhow!(
-                "every write in this batch ({rejected}) was rejected by X; the plan on file marks \
-                 them and the next run continues past them"
-            )),
+        anyhow::bail!(
+            "every write in this batch ({rejected}) was rejected by X; the plan on file marks \
+             them and the next run continues past them"
         );
     }
-    (sent, Ok(()))
+    Ok(())
 }
 
 /// plan の送信済み印を先に保存し､成功時だけミラーにも反映する｡
@@ -799,7 +810,15 @@ mod tests {
         let client = FakeApi::new().writes(vec![Ok(())]);
         let mut plan = plan_of("7", &["1"], &["8"]);
 
-        let (sent, _) = apply_some(scratch.paths(), &client, &mut plan, false, 0, usize::MAX, GAP);
+        let (sent, _) = apply_some(
+            scratch.paths(),
+            &client,
+            &mut plan,
+            false,
+            0,
+            usize::MAX,
+            GAP,
+        );
 
         assert_eq!(sent, 1);
         assert_eq!(client.calls(), [Call::Add("1".to_string())]);
@@ -813,7 +832,15 @@ mod tests {
         let client = FakeApi::new().writes(vec![Ok(()), Err(rate_limited(9_000, true))]);
         let mut plan = plan_of("7", &["1", "2", "3"], &[]);
 
-        let (sent, result) = apply_some(scratch.paths(), &client, &mut plan, false, 0, usize::MAX, GAP);
+        let (sent, result) = apply_some(
+            scratch.paths(),
+            &client,
+            &mut plan,
+            false,
+            0,
+            usize::MAX,
+            GAP,
+        );
 
         assert_eq!(sent, 1);
         assert!(result.is_err(), "the refusal must come back");
@@ -835,7 +862,15 @@ mod tests {
             FakeApi::new().writes(vec![Err(rejected("The user_id is not valid.")), Ok(())]);
         let mut plan = plan_of("7", &["1", "2"], &[]);
 
-        let (sent, result) = apply_some(scratch.paths(), &client, &mut plan, false, 0, usize::MAX, GAP);
+        let (sent, result) = apply_some(
+            scratch.paths(),
+            &client,
+            &mut plan,
+            false,
+            0,
+            usize::MAX,
+            GAP,
+        );
 
         assert!(result.is_ok(), "{result:?}");
         assert_eq!(sent, 1);
@@ -865,7 +900,15 @@ mod tests {
         let client = FakeApi::new().writes(vec![Err(rejected("no")), Ok(())]);
         let mut plan = plan_of("7", &["1", "2"], &[]);
 
-        let (_, result) = apply_some(scratch.paths(), &client, &mut plan, false, 0, usize::MAX, GAP);
+        let (_, result) = apply_some(
+            scratch.paths(),
+            &client,
+            &mut plan,
+            false,
+            0,
+            usize::MAX,
+            GAP,
+        );
 
         assert!(result.is_ok(), "{result:?}");
         assert_eq!(client.pauses().len(), 1, "2 attempts take 1 gap");
@@ -905,7 +948,15 @@ mod tests {
         ]);
         let mut plan = plan_of("7", &["1", "2", "3", "4", "5"], &[]);
 
-        let (sent, result) = apply_some(scratch.paths(), &client, &mut plan, false, 0, usize::MAX, GAP);
+        let (sent, result) = apply_some(
+            scratch.paths(),
+            &client,
+            &mut plan,
+            false,
+            0,
+            usize::MAX,
+            GAP,
+        );
 
         assert_eq!(sent, 1);
         assert!(result.is_err(), "the run must stop at the third rejection");
@@ -922,7 +973,15 @@ mod tests {
         let client = FakeApi::new().writes(vec![Ok(()), Ok(()), Ok(())]);
         let mut plan = plan_of("7", &["1", "2", "3"], &[]);
 
-        let (_, result) = apply_some(scratch.paths(), &client, &mut plan, false, 0, usize::MAX, GAP);
+        let (_, result) = apply_some(
+            scratch.paths(),
+            &client,
+            &mut plan,
+            false,
+            0,
+            usize::MAX,
+            GAP,
+        );
         assert!(result.is_ok(), "{result:?}");
 
         let pauses = client.pauses();
@@ -998,7 +1057,8 @@ mod tests {
         let client = FakeApi::new().writes(vec![Err(rate_limited(9_000, true))]);
         let mut plan = plan_of("7", &["1"], &[]);
 
-        let error = write_one(scratch.paths(), &client, &mut plan, Action::Add, "1", 0).unwrap_err();
+        let error =
+            write_one(scratch.paths(), &client, &mut plan, Action::Add, "1", 0).unwrap_err();
 
         assert!(
             error
@@ -1175,7 +1235,16 @@ mod tests {
             reread: true,
             ..request(false, false)
         };
-        run(scratch.paths(), &client, "me", "7", request, 21_600, WritePacing::DEFAULT).unwrap();
+        run(
+            scratch.paths(),
+            &client,
+            "me",
+            "7",
+            request,
+            21_600,
+            WritePacing::DEFAULT,
+        )
+        .unwrap();
         assert!(client.calls().contains(&Call::Following(None)));
         assert!(client.calls().contains(&Call::Members(None)));
         let saved = load_plan(&scratch.paths().sync_plan_file())

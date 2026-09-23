@@ -37,22 +37,44 @@ impl Span {
     }
 
     /// `"3-20"` を読む｡片側だけ､数でないもの､`min > max` は拒む｡
+    ///
+    /// 単独の数を `n-n` と読まないのは意図してのこと: `sync_writes_per_batch = 2`
+    /// の癖で打った `"2"` を固定値として黙って通せば､範囲を書いたつもりの
+    /// 人に固定の周期を渡すことになる｡固定にしたければ `"2-2"` と書く｡
     pub(crate) fn parse(raw: &str) -> Result<Self> {
-        let _ = raw;
-        bail!("unimplemented")
+        let Some((min, max)) = raw.split_once('-') else {
+            bail!("expected a range written as min-max, got {raw:?}");
+        };
+        let number = |side: &str| {
+            side.trim()
+                .parse::<u32>()
+                .with_context(|| format!("expected a range written as min-max, got {raw:?}"))
+        };
+        let span = Self::new(number(min)?, number(max)?);
+        if span.min > span.max {
+            bail!("the range {raw:?} runs backwards: min must not exceed max");
+        }
+        Ok(span)
     }
 
     /// `fraction` が指す 1 点: 0.0 で `min`､1.0 で `max`｡`fraction` は
     /// `0.0..=1.0` へ丸めるので､供給源が何を返しても範囲を出ない｡
     pub(crate) fn draw(self, fraction: f64) -> u32 {
-        let _ = fraction;
-        self.min
+        let fraction = fraction.clamp(0.0, 1.0);
+        // 幅は u32 なので f64 が正確に表せる｡積はそれより小さいため､
+        // 切り捨てが落とすのは小数部だけで､結果は幅を超えない｡
+        #[allow(
+            clippy::cast_precision_loss,
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss
+        )]
+        let extra = (f64::from(self.max.saturating_sub(self.min)) * fraction) as u32;
+        self.min.saturating_add(extra)
     }
 
     /// `self` が `bounds` の中に収まっているか｡
     fn within(self, bounds: Self) -> bool {
-        let _ = bounds;
-        true
+        self.min >= bounds.min && self.max <= bounds.max
     }
 }
 
@@ -106,8 +128,33 @@ impl WritePacing {
         batch: Option<String>,
         cooldown: Option<String>,
     ) -> Result<Self> {
-        let _ = (&var, gap, batch, cooldown);
-        Ok(Self::DEFAULT)
+        let seconds = Span::new(1, u32::MAX);
+        Ok(Self {
+            gap_seconds: resolve_span(
+                "X_SYNC_WRITE_GAP_SECONDS",
+                "sync_write_gap_seconds",
+                &var,
+                gap,
+                Self::DEFAULT.gap_seconds,
+                seconds,
+            )?,
+            batch_writes: resolve_span(
+                "X_SYNC_BATCH_WRITES",
+                "sync_batch_writes",
+                &var,
+                batch,
+                Self::DEFAULT.batch_writes,
+                Span::new(1, MAX_BATCH_WRITES),
+            )?,
+            cooldown_seconds: resolve_span(
+                "X_SYNC_COOLDOWN_SECONDS",
+                "sync_cooldown_seconds",
+                &var,
+                cooldown,
+                Self::DEFAULT.cooldown_seconds,
+                seconds,
+            )?,
+        })
     }
 }
 
@@ -131,8 +178,21 @@ fn resolve_span(
     default: Span,
     bounds: Span,
 ) -> Result<Span> {
-    let _ = (key, file_key, var, file_value, bounds);
-    Ok(default)
+    // 空の env は「素通し」: shell に置き去りにされた `X_...=` は値ではない｡
+    let (raw, source) = match var(key).filter(|value| !value.trim().is_empty()) {
+        Some(raw) => (raw, key),
+        None => match file_value {
+            Some(raw) => (raw, file_key),
+            None => return Ok(default),
+        },
+    };
+    let file_source = format!("{file_key} in config.toml");
+    let source = if source == key { key } else { &file_source };
+    let span = Span::parse(&raw).with_context(|| format!("{source} is not a valid range"))?;
+    if !span.within(bounds) {
+        bail!("{source} must stay within {bounds}, got {span}");
+    }
+    Ok(span)
 }
 
 #[cfg(test)]
@@ -281,14 +341,9 @@ mod tests {
     #[test]
     fn a_batch_of_zero_is_rejected() {
         // 0 は "off" ではない — off は `auto_sync_list` の役目だ｡
-        let error = WritePacing::resolve(
-            vars(&[("X_SYNC_BATCH_WRITES", "0-3")]),
-            None,
-            None,
-            None,
-        )
-        .unwrap_err()
-        .to_string();
+        let error = WritePacing::resolve(vars(&[("X_SYNC_BATCH_WRITES", "0-3")]), None, None, None)
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("X_SYNC_BATCH_WRITES"), "{error}");
         assert!(error.contains("1-20"), "{error}");
     }
@@ -298,7 +353,10 @@ mod tests {
         let error = WritePacing::resolve(vars(&[]), None, Some("1-21".to_string()), None)
             .unwrap_err()
             .to_string();
-        assert!(error.contains("sync_batch_writes in config.toml"), "{error}");
+        assert!(
+            error.contains("sync_batch_writes in config.toml"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -310,12 +368,8 @@ mod tests {
     #[test]
     fn a_zero_second_gap_or_cooldown_is_rejected() {
         // 0 秒の間は #197 の直前の形 — 同じ秒に全件 — そのもの｡
-        assert!(
-            WritePacing::resolve(vars(&[]), Some("0-20".to_string()), None, None).is_err()
-        );
-        assert!(
-            WritePacing::resolve(vars(&[]), None, None, Some("0-300".to_string())).is_err()
-        );
+        assert!(WritePacing::resolve(vars(&[]), Some("0-20".to_string()), None, None).is_err());
+        assert!(WritePacing::resolve(vars(&[]), None, None, Some("0-300".to_string())).is_err());
     }
 
     #[test]

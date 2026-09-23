@@ -361,6 +361,8 @@ impl Config {
                  X_OAUTH_CLIENT_ID) instead."
             );
         }
+        // `file` を部分的に動かす前に｡拒む理由は関数の doc にある｡
+        let sync_write_pacing = resolve_write_pacing(&var, &file)?;
 
         let oauth_client_id = var("X_OAUTH_CLIENT_ID")
             .map(|c| c.trim().to_string())
@@ -435,22 +437,6 @@ impl Config {
         let sync_interval_seconds = resolve_sync_interval(&var, file.sync_interval_seconds)?;
         let sync_prune_limit_percent =
             resolve_sync_prune_limit(&var, file.sync_prune_limit_percent)?;
-        // #231 で範囲になった｡古いキーを黙って無視すれば､調整したつもりの
-        // 歩調が既定に戻る — `bearer_token` と同じく拒む｡
-        if var("X_SYNC_WRITES_PER_BATCH").is_some() || file.sync_writes_per_batch.is_some() {
-            bail!(
-                "X_SYNC_WRITES_PER_BATCH / sync_writes_per_batch was replaced by three ranges: \
-                 X_SYNC_WRITE_GAP_SECONDS, X_SYNC_BATCH_WRITES and X_SYNC_COOLDOWN_SECONDS \
-                 (sync_write_gap_seconds, sync_batch_writes, sync_cooldown_seconds in \
-                 config.toml), each written as \"min-max\". Remove the old key."
-            );
-        }
-        let sync_write_pacing = crate::sync::WritePacing::resolve(
-            &var,
-            file.sync_write_gap_seconds,
-            file.sync_batch_writes,
-            file.sync_cooldown_seconds,
-        )?;
 
         let auto_refresh = resolve_switch("X_AUTO_REFRESH", &var, file.auto_refresh, true)?;
         let follow_new_posts =
@@ -626,6 +612,30 @@ fn resolve_sync_prune_limit(
         .with_context(|| {
             format!("{source} must be at most 100 (a share of the list, in percent), got {percent}")
         })
+}
+
+/// 書き込みの歩調 (#231) を解決する｡範囲の読み方と境界は `sync::pacing` が
+/// 持ち､ここは #231 より前の `sync_writes_per_batch` を拒むだけだ: 範囲に
+/// なった今､古いキーを黙って無視すれば調整したつもりの歩調が既定に戻る —
+/// `bearer_token` と同じく､抱えたままの設定は起動の失敗にする｡
+fn resolve_write_pacing(
+    var: impl Fn(&str) -> Option<String>,
+    file: &FileSettings,
+) -> Result<crate::sync::WritePacing> {
+    if var("X_SYNC_WRITES_PER_BATCH").is_some() || file.sync_writes_per_batch.is_some() {
+        bail!(
+            "X_SYNC_WRITES_PER_BATCH / sync_writes_per_batch was replaced by three ranges: \
+             X_SYNC_WRITE_GAP_SECONDS, X_SYNC_BATCH_WRITES and X_SYNC_COOLDOWN_SECONDS \
+             (sync_write_gap_seconds, sync_batch_writes, sync_cooldown_seconds in \
+             config.toml), each written as \"min-max\". Remove the old key."
+        );
+    }
+    crate::sync::WritePacing::resolve(
+        &var,
+        file.sync_write_gap_seconds.clone(),
+        file.sync_batch_writes.clone(),
+        file.sync_cooldown_seconds.clone(),
+    )
 }
 
 /// `auto_refresh_interval_seconds` を解決する (#21): env > file >
@@ -1782,6 +1792,7 @@ mod tests {
 
     #[test]
     fn resolve_wires_each_range_from_the_file_and_lets_the_env_win() {
+        use crate::sync::pacing::Span;
         let file = FileSettings {
             sync_write_gap_seconds: Some("5-30".to_string()),
             sync_batch_writes: Some("2-4".to_string()),
@@ -1796,7 +1807,6 @@ mod tests {
             file,
         )
         .unwrap();
-        use crate::sync::pacing::Span;
         assert_eq!(config.sync_write_pacing.gap_seconds, Span::new(5, 30));
         assert_eq!(config.sync_write_pacing.batch_writes, Span::new(1, 1));
         assert_eq!(
