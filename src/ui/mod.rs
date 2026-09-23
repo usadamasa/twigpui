@@ -44,6 +44,7 @@ mod startup;
 mod state;
 mod sync_row;
 mod tasks;
+mod timeline_list;
 mod toast;
 
 // `ui` の兄弟ではなく子モジュールにする (#126): 子モジュールは親の
