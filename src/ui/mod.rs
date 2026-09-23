@@ -163,8 +163,13 @@ pub(crate) struct TimelineView {
     /// `lane::load_composite_timeline` が合成のたびに作り直す表示専用の
     /// 派生値で､削除の真実の情報源にはしない — [`Self::confirm_delete`] は
     /// これを見ず `sources` を全部回す｡`sources.len() == 1` のときは
-    /// 描画側が出自を出さないので中身を読まない｡
+    /// 描画側が出自を出さないので中身を読まない｡合成は background で行い
+    /// (#302)､着地の時点で `sources` が合成を始めたときと同じ場合だけ
+    /// ここへ書く — [`lane::Recompose`] を見よ｡
     item_provenance: HashMap<String, cache::TimelineSource>,
+    /// toggle が始めた background の合成 (#302)｡代入し直すと前の合成は
+    /// cancel されるので､続けて toggle しても着地するのは最後の集合だけ｡
+    recompose: Option<Task<()>>,
     /// picker が名前を挙げられる list (#164)｡cache か直近の fetch から来る｡
     /// fetch ボタンが一度押されるまでは空｡
     owned_lists: Vec<crate::x_api::ListSummary>,
@@ -4450,7 +4455,7 @@ mod tests {
 
     /// `ids` を Home のキャッシュ済み timeline として smoke 用のディレクトリ
     /// へ書く (`cache_list` の Home 版)｡#43 のトグルは Home を含めた集合を
-    /// 都度再合成するので､Home にもキャッシュが無いと `missing_sources` が
+    /// 都度再合成するので､Home にもキャッシュが無いと `fill_missing_sources` が
     /// 埋めようとして client 無しの reload に落ち (`NotAuthenticated`)、
     /// 複数 source を行き来するテストが成立しない｡
     fn cache_home(ids: &[&str]) {
@@ -4488,6 +4493,22 @@ mod tests {
             0,
         )
         .unwrap();
+    }
+
+    /// `ids` を `source` のキャッシュ済み timeline として `paths` の下へ書く
+    /// (#302)｡`cache_home` / `cache_list` と違い smoke 用の共有ディレクトリを
+    /// 使わないので､隣のテストが同じファイルを書き換えても結果が揺れない｡
+    fn cache_under(
+        paths: &crate::paths::Paths,
+        source: &crate::cache::TimelineSource,
+        ids: &[&str],
+    ) {
+        paths.ensure_dirs().unwrap();
+        let items: Vec<TimelineItem> = ids
+            .iter()
+            .map(|id| item_with(id, "someone", None))
+            .collect();
+        crate::cache::save_primary_timeline(paths, source, "5685672", &items, 0).unwrap();
     }
 
     /// 下のクリックのテスト用に､描画済みのウィンドウとその visual context｡
@@ -5453,6 +5474,120 @@ mod tests {
                 // 非空 invariant: 唯一の source は外せない｡
                 assert_eq!(view.sources, vec![crate::cache::TimelineSource::Home]);
                 assert_eq!(shown_ids(view), ["2", "1"]);
+            });
+        });
+    }
+
+    // --- #302: 合成を main thread から降ろす ---
+
+    /// #302: 成功した poll はその場でキャッシュを読まない｡source ごとの
+    /// JSON を parse して合成すると main thread が止まるので､`apply_poll`
+    /// は合成を始める材料だけを返し､合成は background で行う｡キャッシュに
+    /// 新着を置いても `apply_poll` の直後には画面にも pill にも出ていない
+    /// ことで､ここでディスクを読んでいないことを確かめる｡
+    #[gpui::test]
+    fn a_finished_poll_does_not_read_the_cache_on_the_main_thread(cx: &mut gpui::TestAppContext) {
+        let paths = scratch_paths("poll-reads-no-cache");
+        cache_under(
+            &paths,
+            &crate::cache::TimelineSource::Home,
+            &["3", "2", "1"],
+        );
+        crate::cache::save_me(&paths, "5685672", "usadamasa", 0).unwrap();
+        let me = crate::cache::cached_me(&paths, 0)
+            .unwrap()
+            .expect("the entry was just saved");
+        let (_window, timeline) = window_with(
+            cx,
+            smoke_config(),
+            paths,
+            Startup::Fixture(Box::new(fixture_with(&["2", "1"], &[]))),
+        );
+
+        cx.update(|cx| {
+            timeline.update(cx, |view, cx| {
+                let outcome = super::lane::ReloadOutcome {
+                    successes: 1,
+                    failures: 0,
+                    next_token: None,
+                    me,
+                };
+                assert_ne!(view.apply_poll(Ok(outcome), cx), Poll::Halt);
+                assert!(
+                    view.pending.is_none(),
+                    "the poll must hand the compose to the background, not read the cache itself"
+                );
+                assert_eq!(shown_ids(view), ["2", "1"]);
+            });
+        });
+    }
+
+    /// #302: 合成は background で走り､着地したときに `sources` が合成を
+    /// 始めたときと違っていれば捨てる｡削除の完了は toggle に cancel され
+    /// ないので､その合成は toggle の後に着地しうる｡ここでは toggle の合成が
+    /// 飛んでいる間に `sources` を書き換えて同じ形を作る｡
+    #[gpui::test]
+    fn a_compose_that_lands_after_the_sources_moved_is_dropped(cx: &mut gpui::TestAppContext) {
+        let paths = scratch_paths("stale-compose-dropped");
+        let list = crate::cache::TimelineSource::List("9302".to_string());
+        cache_under(&paths, &list, &["32", "31"]);
+        let (_window, timeline) = window_with(
+            cx,
+            smoke_config(),
+            paths,
+            Startup::Fixture(Box::new(fixture_with_lists(&["1"], &[("9302", "Rust")]))),
+        );
+
+        cx.update(|cx| {
+            timeline.update(cx, |view, cx| {
+                // sources: Home, 9302 — この集合の合成が飛ぶ｡
+                view.toggle_source(&list, cx);
+                // 着地より前に集合が動く｡
+                view.sources = vec![list.clone()];
+            });
+        });
+        cx.run_until_parked();
+
+        cx.update(|cx| {
+            timeline.update(cx, |view, _cx| {
+                assert_eq!(
+                    shown_ids(view),
+                    ["1"],
+                    "a lane composed for [Home, 9302] must not land once the sources are [9302]"
+                );
+            });
+        });
+    }
+
+    /// #302: 続けて 2 回 toggle したら､残るのは最後の選択の合成だ｡前の
+    /// 合成は slot を置き換えられて cancel されるか､着地しても集合の不一致で
+    /// 捨てられる｡どちらでも画面は最後の `sources` を映す｡
+    #[gpui::test]
+    fn back_to_back_toggles_land_the_last_selection(cx: &mut gpui::TestAppContext) {
+        let paths = scratch_paths("back-to-back-toggles");
+        let first = crate::cache::TimelineSource::List("9303".to_string());
+        cache_under(&paths, &first, &["42", "41"]);
+        let (_window, timeline) = window_with(
+            cx,
+            smoke_config(),
+            paths,
+            Startup::Fixture(Box::new(fixture_with_lists(&["1"], &[("9303", "Rust")]))),
+        );
+
+        cx.update(|cx| {
+            timeline.update(cx, |view, cx| {
+                // sources: Home, 9303
+                view.toggle_source(&first, cx);
+                // sources: 9303
+                view.toggle_source(&crate::cache::TimelineSource::Home, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        cx.update(|cx| {
+            timeline.update(cx, |view, _cx| {
+                assert_eq!(view.sources, vec![first.clone()]);
+                assert_eq!(shown_ids(view), ["42", "41"]);
             });
         });
     }

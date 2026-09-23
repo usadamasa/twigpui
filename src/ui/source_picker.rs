@@ -49,7 +49,7 @@ use serde::{Deserialize, Serialize};
 
 // `use super::*` ではなく書き下している｡理由は [`super::list_sync`] と同じ｡
 use super::{
-    Context, ReloadNotice, ReloadTrigger, Startup, TimelineState, TimelineView, lane, log, oauth,
+    Context, ReloadNotice, ReloadTrigger, Startup, TimelineState, TimelineView, log, oauth,
     source_picker_menu,
 };
 use crate::cache::{self, TimelineSource};
@@ -299,8 +299,8 @@ impl TimelineView {
     /// の reload や "Load older" (その結果が誤った source の下に着地して
     /// しまう)､ページングカーソル (複数選択では意味を持たない — §3.6)､
     /// poll のバッファ (`clear_pending` の doc)､開いているスレッド､そして
-    /// スクロール位置｡そのうえでキャッシュ済みの分だけ即座に再合成して
-    /// 画面へ出し (off にした分は消え､on にした分は載る)､一度も取得して
+    /// スクロール位置｡そのうえでキャッシュ済みの分だけ background で再合成
+    /// して画面へ出し (off にした分は消え､on にした分は載る)､一度も取得して
     /// いない source だけを reload する — 画面は空にせず
     /// `reloading` フラグとスピナーだけで示す｡
     ///
@@ -308,7 +308,8 @@ impl TimelineView {
     /// ループは開始時点の `sources` を
     /// 捕まえており､再起動しないと off にした source を poll し続けて
     /// しまう — #43 の完了条件「オフのソースが API リクエストを消費
-    /// しない」への違反になる｡
+    /// しない」への違反になる｡前のループは即座に止め､新しいループは
+    /// 合成が着地して欠けた source の reload を出した後で始める (#302)｡
     pub(super) fn toggle_source(&mut self, target: &TimelineSource, cx: &mut Context<'_, Self>) {
         if switch_waits_for_startup(&self.state, self.client.is_some()) {
             return;
@@ -349,16 +350,32 @@ impl TimelineView {
         }
 
         if let Some(user_id) = self.home_user_id.clone() {
-            let composed = lane::load_composite_timeline(&self.paths, &self.sources, &user_id);
-            self.item_provenance = composed.provenance;
-            self.state = TimelineState::Loaded(composed.items);
-            cx.notify();
-            self.fill_missing_sources(&user_id, ReloadTrigger::UserAction, cx);
+            // #43: off にした source を合成の間も poll しないよう､前の
+            // ループはここで止める｡再起動は下の着地の後｡
+            self.auto_refresh = None;
+            self.refresh_situation = None;
+            // #302: 合成は background で行う｡キャッシュの parse と合成が
+            // 終わるまで前の lane が残る｡slot を置き換えるので､続けて
+            // toggle すれば前の合成は cancel される｡
+            let (request, compose) = self.begin_recompose(user_id, cx);
+            self.recompose = Some(cx.spawn(async move |this, cx| {
+                let composed = compose.await;
+                let _ = this.update(cx, |this, cx| {
+                    // 着地が捨てられたなら､集合を変えた側が組み直す｡
+                    let Some(missing) = this.land_composed(&request, composed, cx) else {
+                        return;
+                    };
+                    // `state` を差し替えた後で (元の順序)｡
+                    this.fill_missing_sources(missing, ReloadTrigger::UserAction, cx);
+                    // fill が `last_reload_at` を立てた後で始める｡先に
+                    // 始めると､欠けた source の reload の横で poll を買う｡
+                    this.start_auto_refresh(cx);
+                });
+            }));
+        } else {
+            // #43: off にしたぶんを二度と poll しないよう必ず再起動する｡
+            self.start_auto_refresh(cx);
         }
-        // #43: off にしたぶんを二度と poll しないよう必ず再起動する｡
-        self.start_auto_refresh(cx);
-        // `state` を差し替えた後で｡理由は `start` と同じ (#120)｡
-        self.refresh_images(cx);
         // #282: 選択が変わったので Sources メニューの ✓ も作り直す｡
         self.refresh_source_menu(cx);
         cx.notify();

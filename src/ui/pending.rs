@@ -132,7 +132,28 @@ impl TimelineView {
         self.home_user_id = Some(outcome.me.id.clone());
         self.home_username = Some(outcome.me.username);
 
-        let composed = lane::load_composite_timeline(&self.paths, &self.sources, &outcome.me.id);
+        // #302: キャッシュはここでは読まない｡source ごとの parse と合成は
+        // ループが background で行い､[`Self::land_poll`] へ渡す｡
+        Poll::Compose(lane::Recompose {
+            sources: self.sources.clone(),
+            user_id: outcome.me.id,
+        })
+    }
+
+    /// background で合成し終えた poll の timeline を届ける (#302 の第 2 段)｡
+    ///
+    /// 合成の間に `sources` が動いていたら何もしない｡動かすのは toggle で､
+    /// toggle はこのループごと作り直して自分で組み直す｡届け方は
+    /// [`Self::apply_poll`] の doc のとおり静かで､`state` は触らない｡
+    pub(super) fn land_poll(
+        &mut self,
+        request: &lane::Recompose,
+        composed: lane::Composed,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if !request.is_current(&self.sources) {
+            return;
+        }
         self.item_provenance = composed.provenance;
 
         let displayed: Vec<&str> = match &self.state {
@@ -140,11 +161,10 @@ impl TimelineView {
             _ => Vec::new(),
         };
         let Some(pending) = pending_after_poll(&displayed, composed.items) else {
-            // 新着無し｡notice すら出さない — このメソッドの doc を見よ｡
-            return Poll::Continue;
+            // 新着無し｡notice すら出さない — `apply_poll` の doc を見よ｡
+            return;
         };
         self.present_poll(pending, cx);
-        Poll::Continue
     }
 
     /// ポーリングの新着 post が画面上で何になるか (#21, #22): 流し込みか､

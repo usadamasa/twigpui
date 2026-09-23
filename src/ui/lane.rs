@@ -10,8 +10,9 @@
 use std::collections::HashMap;
 
 use anyhow::Result;
+use gpui::{App, BackgroundExecutor, Context, Task};
 
-use super::source_picker;
+use super::{TimelineState, TimelineView, source_picker};
 use crate::cache::{self, MeEntry, Side, TimelineSource, splice};
 use crate::paths::Paths;
 use crate::x_api::{ListSummary, TimelineItem, XClient};
@@ -37,6 +38,11 @@ pub(super) fn compose(per_source: Vec<Vec<TimelineItem>>) -> Vec<TimelineItem> {
 pub(super) struct Composed {
     pub items: Vec<TimelineItem>,
     pub provenance: HashMap<String, TimelineSource>,
+    /// 使えるキャッシュが無かった source (#43 の「on にする」規則)｡
+    /// ファイルが無い場合も読めなかった場合も含む — 読めないキャッシュを
+    /// 数えないと､壊れたファイルは reload を起こさずに居座る｡合成が読んだ
+    /// 結果から拾うので､同じファイルを main thread で読み直さずに済む (#302)｡
+    pub missing: Vec<TimelineSource>,
 }
 
 /// `sources` のキャッシュ済み timeline を読み、合成する (#43)｡1 つもキャッシュが
@@ -46,19 +52,85 @@ pub(super) fn load_composite_timeline(
     sources: &[TimelineSource],
     user_id: &str,
 ) -> Composed {
+    let mut missing = Vec::new();
     let per_source = sources
         .iter()
         .map(|source| {
-            let items = cache::load_primary_timeline(paths, source, user_id)
-                .unwrap_or_else(|error| {
+            let items =
+                cache::load_primary_timeline(paths, source, user_id).unwrap_or_else(|error| {
                     crate::log::warn(&format!("could not read the cached timeline: {error:#}"));
                     None
-                })
-                .unwrap_or_default();
-            (source.clone(), items)
+                });
+            if items.is_none() {
+                missing.push(source.clone());
+            }
+            (source.clone(), items.unwrap_or_default())
         })
         .collect();
-    compose_with_provenance(per_source)
+    Composed {
+        missing,
+        ..compose_with_provenance(per_source)
+    }
+}
+
+/// 合成を始めたときの材料 (#302)｡
+///
+/// source ごとのキャッシュは 1 本で数百 KB あり､選んだ本数ぶん parse する
+/// ので､合成は main thread ではなく background executor で行う｡呼び出し元は
+/// `this.update` を 2 段に割る｡第 1 段で完了時点の `this.sources` をこれに
+/// 捕獲して合成を始め､第 2 段では [`Self::is_current`] で集合がまだ同じか
+/// 確かめてから着地させる｡合成の間に toggle されたら､古い集合の lane は
+/// 捨てる — 集合を変えた toggle が自分で組み直す｡
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Recompose {
+    pub sources: Vec<TimelineSource>,
+    pub user_id: String,
+}
+
+impl Recompose {
+    /// `sources` のキャッシュを background executor で読んで合成する｡
+    pub(super) fn spawn(&self, executor: &BackgroundExecutor, paths: Paths) -> Task<Composed> {
+        let (sources, user_id) = (self.sources.clone(), self.user_id.clone());
+        executor.spawn(async move { load_composite_timeline(&paths, &sources, &user_id) })
+    }
+
+    /// 合成を始めてから `sources` が動いていないか｡
+    pub(super) fn is_current(&self, sources: &[TimelineSource]) -> bool {
+        self.sources == sources
+    }
+}
+
+impl TimelineView {
+    /// 今の `sources` の合成を background で始める (#302 の第 1 段)｡返す
+    /// [`Recompose`] は､第 2 段で着地してよいかを照らし合わせる材料｡
+    pub(super) fn begin_recompose(&self, user_id: String, cx: &App) -> (Recompose, Task<Composed>) {
+        let request = Recompose {
+            sources: self.sources.clone(),
+            user_id,
+        };
+        let task = request.spawn(cx.background_executor(), self.paths.clone());
+        (request, task)
+    }
+
+    /// 着地した合成を画面へ出す (#302 の第 2 段)｡`sources` が合成を始めた
+    /// ときと違えば何もせず `None` を返す｡着地したら､キャッシュの欠けた
+    /// source ([`Composed::missing`]) を返す｡`refresh_images` は `state` を
+    /// 差し替えた後で呼ぶ (#120: 前に呼ぶと出ていく側の行の画像を取る)｡
+    pub(super) fn land_composed(
+        &mut self,
+        request: &Recompose,
+        composed: Composed,
+        cx: &mut Context<'_, Self>,
+    ) -> Option<Vec<TimelineSource>> {
+        if !request.is_current(&self.sources) {
+            return None;
+        }
+        self.item_provenance = composed.provenance;
+        self.state = TimelineState::Loaded(composed.items);
+        self.refresh_images(cx);
+        cx.notify();
+        Some(composed.missing)
+    }
 }
 
 /// per-source の `(source, items)` の組から [`Composed`] を作る (#43)｡
@@ -77,7 +149,12 @@ pub(super) fn compose_with_provenance(
         }
     }
     let items = compose(per_source.into_iter().map(|(_, items)| items).collect());
-    Composed { items, provenance }
+    // メモリ上のデータには欠けたキャッシュという概念が無い｡
+    Composed {
+        items,
+        provenance,
+        missing: Vec::new(),
+    }
 }
 
 /// `sources` の全キャッシュから `post_id` を消す
@@ -88,13 +165,12 @@ pub(super) fn compose_with_provenance(
 /// ファイルが無い source にも post が入っていない source にも安全な no-op
 /// なので、全部回すのが最短かつ正しい。ネットワークには触れない。
 ///
-/// 再合成はここでは行わない: 呼び出し側が spawn 時に
-/// 捕獲した `sources` ではなく、`update` クロージャの中で完了時点の
-/// `this.sources` を使って `load_composite_timeline` を呼ぶこと —
-/// `reload_sources` の完了ハンドラと同じ理由で、削除が
-/// 飛んでいる間にトグルされても古い集合でレーンを組み直さないようにする。
-/// キャッシュから消す側は捕獲した `sources` のままでよい — 余分に回しても
-/// 上のno-opの理由により安全。
+/// 再合成はここでは行わない: 呼び出し側が完了ハンドラの第 1 段で完了時点の
+/// `this.sources` を [`Recompose`] に捕獲して合成を始め、第 2 段で集合が
+/// まだ同じか確かめてから着地させること — `reload_sources` の完了ハンドラと
+/// 同じ理由で、削除や合成が飛んでいる間にトグルされても古い集合でレーンを
+/// 組み直さないようにする。キャッシュから消す側は spawn 時に捕獲した
+/// `sources` のままでよい — 余分に回しても上のno-opの理由により安全。
 pub(super) fn forget_post_everywhere(
     paths: &Paths,
     sources: &[TimelineSource],
@@ -131,25 +207,6 @@ pub(super) fn provenance_label(
                 .map_or_else(|| id.clone(), source_picker::segment_label),
         ),
     }
-}
-
-/// `sources` のうち、まだ一度もキャッシュされていないものだけを返す (#43 の
-/// 「on にする」規則、起動時にも使う)｡
-pub(super) fn missing_sources(
-    paths: &Paths,
-    sources: &[TimelineSource],
-    user_id: &str,
-) -> Vec<TimelineSource> {
-    sources
-        .iter()
-        .filter(|source| {
-            cache::load_primary_timeline(paths, source, user_id)
-                .ok()
-                .flatten()
-                .is_none()
-        })
-        .cloned()
-        .collect()
 }
 
 /// N-source reload が使ったもの: 成功・失敗の本数、`sources.len() == 1` の
@@ -191,8 +248,8 @@ pub(super) fn reload_all(
                 successes = successes.saturating_add(1);
                 next_token = reloaded.next_token;
                 me = Some(reloaded.me);
-                // `items` は使わない: 呼び出し側は完了時点の `sources` で
-                // `load_composite_timeline` を通して読み直す。ここでの
+                // `items` は使わない: 呼び出し側は完了時点の `sources` を
+                // `Recompose` に捕獲し、background で読み直す。ここでの
                 // アキュムレータには使えない。
                 let _ = reloaded.items;
             }
@@ -378,7 +435,10 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
     }
 
-    // --- missing_sources (#43 の「on にする」規則) ---
+    // --- Composed::missing (#43 の「on にする」規則、#302) ---
+    //
+    // 合成が読んだ結果から「使えるキャッシュが無かった source」を拾う｡
+    // 同じファイルを main thread でもう一度 parse しないため｡
 
     #[test]
     fn a_cached_source_is_not_missing() {
@@ -396,7 +456,8 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(missing_sources(&paths, &[list], "me"), Vec::new());
+        let composed = load_composite_timeline(&paths, &[list], "me");
+        assert_eq!(composed.missing, Vec::new());
 
         std::fs::remove_dir_all(&root).unwrap();
     }
@@ -407,11 +468,53 @@ mod tests {
         let paths = test_paths(&root);
         paths.ensure_dirs().unwrap();
 
+        let home = TimelineSource::Home;
         let list = TimelineSource::List("1".to_string());
-        assert_eq!(
-            missing_sources(&paths, std::slice::from_ref(&list), "me"),
-            vec![list]
-        );
+        cache::save_primary_timeline(
+            &paths,
+            &home,
+            "me",
+            &[item("1", "2026-01-01T00:00:01.000Z")],
+            0,
+        )
+        .unwrap();
+
+        let composed = load_composite_timeline(&paths, &[home, list.clone()], "me");
+        assert_eq!(composed.missing, vec![list]);
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    // 読めないファイルも「無い」と数える｡数えないと､壊れたキャッシュは
+    // 空の lane を出すだけで reload を起こさず､そのまま居座る｡
+    #[test]
+    fn a_source_whose_cache_cannot_be_read_is_missing() {
+        let root = temp_root("missing-broken");
+        let paths = test_paths(&root);
+        paths.ensure_dirs().unwrap();
+
+        let list = TimelineSource::List("1".to_string());
+        cache::save_primary_timeline(
+            &paths,
+            &list,
+            "me",
+            &[item("1", "2026-01-01T00:00:01.000Z")],
+            0,
+        )
+        .unwrap();
+        // 書いたばかりの 1 本 (この root の下にはそれしか無い) を壊す｡
+        let cache_dir = paths.timeline_file("me");
+        let cache_dir = cache_dir.parent().unwrap();
+        for entry in std::fs::read_dir(cache_dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_some_and(|ext| ext == "json") {
+                std::fs::write(&path, "{ not json").unwrap();
+            }
+        }
+
+        let composed = load_composite_timeline(&paths, std::slice::from_ref(&list), "me");
+        assert!(composed.items.is_empty());
+        assert_eq!(composed.missing, vec![list]);
 
         std::fs::remove_dir_all(&root).unwrap();
     }
