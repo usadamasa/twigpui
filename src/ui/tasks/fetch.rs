@@ -103,7 +103,11 @@ impl TimelineView {
                                 this.item_provenance = composed.provenance;
                                 this.state = TimelineState::Loaded(composed.items);
                                 cx.notify();
-                                this.fill_missing_sources(&me.id, ReloadTrigger::Polling, cx);
+                                this.fill_missing_sources(
+                                    composed.missing,
+                                    ReloadTrigger::Polling,
+                                    cx,
+                                );
                             }
                             // `/me` が未解決なら合成のしようが無いので通常の
                             // reload へ落ちる — 上の `Some` 分岐と同じ理由｡
@@ -154,6 +158,10 @@ impl TimelineView {
     /// 選択中の source のうちキャッシュの無いものだけを reload する (#43)｡
     /// 起動時とトグル時の両方から呼ぶ｡1 つも欠けていなければ何も起きない｡
     ///
+    /// `missing` は直前の合成が拾った [`lane::Composed::missing`] — 合成が
+    /// 読んだ結果を使い､同じキャッシュを main thread で読み直さない (#302)｡
+    /// 呼ぶのは合成した lane を `state` へ置いた後｡
+    ///
     /// client が無ければ (fixture､サインアウト済み) 何もしない: 取りに
     /// 行けないものを `reload_sources` へ渡すと `NotAuthenticated` へ落ちて､
     /// 直前にキャッシュから組んだレーンが消える｡CI の
@@ -161,14 +169,13 @@ impl TimelineView {
     /// 無い新しい環境でこれを踏んだ｡
     pub(in crate::ui) fn fill_missing_sources(
         &mut self,
-        user_id: &str,
+        missing: Vec<cache::TimelineSource>,
         trigger: ReloadTrigger,
         cx: &mut Context<'_, Self>,
     ) {
         if self.client.is_none() {
             return;
         }
-        let missing = lane::missing_sources(&self.paths, &self.sources, user_id);
         if !missing.is_empty() {
             self.reload_sources(missing, trigger, cx);
         }
@@ -268,7 +275,6 @@ impl TimelineView {
                 this.refresh_usage(cx);
                 this.refresh_reposted_ids(cx);
                 this.refresh_liked_ids(cx);
-                this.reloading = false;
                 let landing = match result {
                     Ok(outcome) => {
                         // `outcome.me` は常に解決済み (`ReloadOutcome` の
@@ -284,6 +290,7 @@ impl TimelineView {
                         Some((request, compose, (outcome.failures, outcome.successes)))
                     }
                     Err(error) => {
+                        this.reloading = false;
                         this.apply_reload_failure(&error, cx);
                         // `state` を差し替えた後で (#120)｡`start` を見よ｡
                         this.refresh_images(cx);
@@ -301,8 +308,12 @@ impl TimelineView {
             };
             let composed = compose.await;
             let _ = this.update(cx, |this, cx| {
+                // spinner は新しい lane が出るまで回す｡合成にかかる時間も
+                // reload の待ち時間のうち｡guard で捨てるときも止める｡
+                this.reloading = false;
                 // toggle は `self.fetch` ごと cancel するので普段は一致する｡
                 if !request.is_current(&this.sources) {
+                    cx.notify();
                     return;
                 }
                 this.keep_the_reader_in_place(&composed.items);

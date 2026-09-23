@@ -4455,7 +4455,7 @@ mod tests {
 
     /// `ids` を Home のキャッシュ済み timeline として smoke 用のディレクトリ
     /// へ書く (`cache_list` の Home 版)｡#43 のトグルは Home を含めた集合を
-    /// 都度再合成するので､Home にもキャッシュが無いと `missing_sources` が
+    /// 都度再合成するので､Home にもキャッシュが無いと `fill_missing_sources` が
     /// 埋めようとして client 無しの reload に落ち (`NotAuthenticated`)、
     /// 複数 source を行き来するテストが成立しない｡
     fn cache_home(ids: &[&str]) {

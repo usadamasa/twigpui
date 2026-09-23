@@ -38,6 +38,11 @@ pub(super) fn compose(per_source: Vec<Vec<TimelineItem>>) -> Vec<TimelineItem> {
 pub(super) struct Composed {
     pub items: Vec<TimelineItem>,
     pub provenance: HashMap<String, TimelineSource>,
+    /// 使えるキャッシュが無かった source (#43 の「on にする」規則)｡
+    /// ファイルが無い場合も読めなかった場合も含む — 読めないキャッシュを
+    /// 数えないと､壊れたファイルは reload を起こさずに居座る｡合成が読んだ
+    /// 結果から拾うので､同じファイルを main thread で読み直さずに済む (#302)｡
+    pub missing: Vec<TimelineSource>,
 }
 
 /// `sources` のキャッシュ済み timeline を読み、合成する (#43)｡1 つもキャッシュが
@@ -47,19 +52,25 @@ pub(super) fn load_composite_timeline(
     sources: &[TimelineSource],
     user_id: &str,
 ) -> Composed {
+    let mut missing = Vec::new();
     let per_source = sources
         .iter()
         .map(|source| {
-            let items = cache::load_primary_timeline(paths, source, user_id)
-                .unwrap_or_else(|error| {
+            let items =
+                cache::load_primary_timeline(paths, source, user_id).unwrap_or_else(|error| {
                     crate::log::warn(&format!("could not read the cached timeline: {error:#}"));
                     None
-                })
-                .unwrap_or_default();
-            (source.clone(), items)
+                });
+            if items.is_none() {
+                missing.push(source.clone());
+            }
+            (source.clone(), items.unwrap_or_default())
         })
         .collect();
-    compose_with_provenance(per_source)
+    Composed {
+        missing,
+        ..compose_with_provenance(per_source)
+    }
 }
 
 /// 合成を始めたときの材料 (#302)｡
@@ -102,22 +113,23 @@ impl TimelineView {
     }
 
     /// 着地した合成を画面へ出す (#302 の第 2 段)｡`sources` が合成を始めた
-    /// ときと違えば何もせず `false` を返す｡`refresh_images` は `state` を
+    /// ときと違えば何もせず `None` を返す｡着地したら､キャッシュの欠けた
+    /// source ([`Composed::missing`]) を返す｡`refresh_images` は `state` を
     /// 差し替えた後で呼ぶ (#120: 前に呼ぶと出ていく側の行の画像を取る)｡
     pub(super) fn land_composed(
         &mut self,
         request: &Recompose,
         composed: Composed,
         cx: &mut Context<'_, Self>,
-    ) -> bool {
+    ) -> Option<Vec<TimelineSource>> {
         if !request.is_current(&self.sources) {
-            return false;
+            return None;
         }
         self.item_provenance = composed.provenance;
         self.state = TimelineState::Loaded(composed.items);
         self.refresh_images(cx);
         cx.notify();
-        true
+        Some(composed.missing)
     }
 }
 
@@ -137,7 +149,12 @@ pub(super) fn compose_with_provenance(
         }
     }
     let items = compose(per_source.into_iter().map(|(_, items)| items).collect());
-    Composed { items, provenance }
+    // メモリ上のデータには欠けたキャッシュという概念が無い｡
+    Composed {
+        items,
+        provenance,
+        missing: Vec::new(),
+    }
 }
 
 /// `sources` の全キャッシュから `post_id` を消す
@@ -190,25 +207,6 @@ pub(super) fn provenance_label(
                 .map_or_else(|| id.clone(), source_picker::segment_label),
         ),
     }
-}
-
-/// `sources` のうち、まだ一度もキャッシュされていないものだけを返す (#43 の
-/// 「on にする」規則、起動時にも使う)｡
-pub(super) fn missing_sources(
-    paths: &Paths,
-    sources: &[TimelineSource],
-    user_id: &str,
-) -> Vec<TimelineSource> {
-    sources
-        .iter()
-        .filter(|source| {
-            cache::load_primary_timeline(paths, source, user_id)
-                .ok()
-                .flatten()
-                .is_none()
-        })
-        .cloned()
-        .collect()
 }
 
 /// N-source reload が使ったもの: 成功・失敗の本数、`sources.len() == 1` の

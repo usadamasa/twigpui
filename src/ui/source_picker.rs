@@ -308,7 +308,8 @@ impl TimelineView {
     /// ループは開始時点の `sources` を
     /// 捕まえており､再起動しないと off にした source を poll し続けて
     /// しまう — #43 の完了条件「オフのソースが API リクエストを消費
-    /// しない」への違反になる｡
+    /// しない」への違反になる｡前のループは即座に止め､新しいループは
+    /// 合成が着地して欠けた source の reload を出した後で始める (#302)｡
     pub(super) fn toggle_source(&mut self, target: &TimelineSource, cx: &mut Context<'_, Self>) {
         if switch_waits_for_startup(&self.state, self.client.is_some()) {
             return;
@@ -349,19 +350,32 @@ impl TimelineView {
         }
 
         if let Some(user_id) = self.home_user_id.clone() {
-            // #302: 合成は background で行う｡着地するまでの 1 frame ほどは
-            // 前の lane が残る｡slot を置き換えるので､続けて toggle すれば
-            // 前の合成は cancel される｡`refresh_images` は `land_composed`
-            // が `state` を差し替えた後で呼ぶ (#120)｡
-            let (request, compose) = self.begin_recompose(user_id.clone(), cx);
+            // #43: off にした source を合成の間も poll しないよう､前の
+            // ループはここで止める｡再起動は下の着地の後｡
+            self.auto_refresh = None;
+            self.refresh_situation = None;
+            // #302: 合成は background で行う｡キャッシュの parse と合成が
+            // 終わるまで前の lane が残る｡slot を置き換えるので､続けて
+            // toggle すれば前の合成は cancel される｡
+            let (request, compose) = self.begin_recompose(user_id, cx);
             self.recompose = Some(cx.spawn(async move |this, cx| {
                 let composed = compose.await;
-                let _ = this.update(cx, |this, cx| this.land_composed(&request, composed, cx));
+                let _ = this.update(cx, |this, cx| {
+                    // 着地が捨てられたなら､集合を変えた側が組み直す｡
+                    let Some(missing) = this.land_composed(&request, composed, cx) else {
+                        return;
+                    };
+                    // `state` を差し替えた後で (元の順序)｡
+                    this.fill_missing_sources(missing, ReloadTrigger::UserAction, cx);
+                    // fill が `last_reload_at` を立てた後で始める｡先に
+                    // 始めると､欠けた source の reload の横で poll を買う｡
+                    this.start_auto_refresh(cx);
+                });
             }));
-            self.fill_missing_sources(&user_id, ReloadTrigger::UserAction, cx);
+        } else {
+            // #43: off にしたぶんを二度と poll しないよう必ず再起動する｡
+            self.start_auto_refresh(cx);
         }
-        // #43: off にしたぶんを二度と poll しないよう必ず再起動する｡
-        self.start_auto_refresh(cx);
         // #282: 選択が変わったので Sources メニューの ✓ も作り直す｡
         self.refresh_source_menu(cx);
         cx.notify();
