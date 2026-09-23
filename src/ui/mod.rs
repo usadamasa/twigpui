@@ -4,8 +4,7 @@ use std::time::Duration;
 
 use gpui::{
     AnyElement, Context, Div, Entity, FocusHandle, FontWeight, ObjectFit, RetainAllImageCache,
-    ScrollHandle, SharedString, Stateful, Subscription, Task, Window, div, img, prelude::*, px,
-    rgb, rgba, svg,
+    SharedString, Stateful, Subscription, Task, Window, div, img, prelude::*, px, rgb, rgba, svg,
 };
 use gpui_component::input::{InputEvent, Textarea, TextareaState};
 
@@ -44,6 +43,7 @@ mod startup;
 mod state;
 mod sync_row;
 mod tasks;
+mod timeline_list;
 mod toast;
 
 // `ui` の兄弟ではなく子モジュールにする (#126): 子モジュールは親の
@@ -514,12 +514,13 @@ pub(crate) struct TimelineView {
     /// 出る｡`None` が普通の場合である — open に成功すればアプリには言う
     /// ことが何も無い｡
     open_failure: Option<String>,
-    /// timeline の一覧のスクロール位置 (#22)｡
+    /// timeline の一覧のスクロール位置 (#22) と､viewport に入る行だけを
+    /// 組む `ListState` (#301)｡
     ///
     /// reload が一覧を置き換える前に読み､あとで読み手を元いた行へ戻すのに
     /// 使う: そうしないと､スクロール済みの一覧へ post を差し込んだときに
     /// すべてが読み手の下へずり下がる｡
-    list_scroll: ScrollHandle,
+    list_scroll: timeline_list::TimelineList,
     /// `j` / `k` で読み進めている行の post id (#148)｡まだ誰も選んで
     /// いなければ `None`｡
     ///
@@ -4021,10 +4022,9 @@ mod tests {
 
     /// #22: 何も無い画面へ follow したとき — 空の List､入れたばかりの
     /// インストール — は､glide を仕掛けずに最上部へ着く｡位置を保つべき行が
-    /// 無いので､補正はリストの末尾を越えた index を指してしまう｡gpui は解決
-    /// できない anchor を保持して prepaint のたびに再試行するため､後の
-    /// "Load older" でリストがその index を越えて伸びると､目に見える理由も
-    /// 無く読み手の下でビューポートが飛ぶことになる｡
+    /// 無いので､補正はリストの末尾を越えた index を指してしまう｡
+    /// `ListState::scroll_to` はそれを末尾に clamp するので (#301)､読み手は
+    /// 最新ではなく一番古い行を見ることになる｡
     #[gpui::test]
     fn following_onto_an_empty_timeline_snaps_without_a_glide(cx: &mut gpui::TestAppContext) {
         let (_window, timeline) = fixture_window(cx, fixture_with(&[], &[]));
@@ -4999,6 +4999,10 @@ mod tests {
         for n in 0..20 {
             let mut item = filler.clone();
             item.id = format!("92000000000000001{n:02}");
+            // #301: 水増しは末尾に沈める｡`created_at` 無しの item は合成で
+            // 末尾へ回るので､測る行は viewport の中に残る — 画面の外の行は
+            // もう組まれない｡
+            item.created_at = None;
             long.items.push(item);
         }
 
