@@ -21,12 +21,13 @@
 //! そのまま残っていて､それが「これは純粋な移動だった」の確認になっている
 //! — #126 が使ったのと同じ証拠だ｡
 //!
-//! # 3 つのファイル (#241)
+//! # 4 つのファイル (#241)
 //!
 //! 1 ファイルだった `tasks.rs` を､何のために金を使うかで割った｡
 //!
-//! - [`fetch`]: timeline を埋める読み取り — 起動､reload､"Load older"､
-//!   "Show thread"｡
+//! - [`fetch`]: timeline を埋める読み取り — 起動､reload､"Load older"｡
+//! - [`thread`]: reply の親の chain を読む "Show thread"｡timeline の
+//!   `state` には触れない (#302 で `fetch` から分けた)｡
 //! - [`act`]: 読み手が頼んだ書き込み — like､repost､delete､post､
 //!   sign-in､そしてブラウザを開くこと｡
 //! - [`refresh`]: 手元の更新 — usage と like/repost の記録をディスクから
@@ -44,3 +45,4 @@
 mod act;
 mod fetch;
 mod refresh;
+mod thread;

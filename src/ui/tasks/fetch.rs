@@ -1,5 +1,5 @@
-//! timeline を埋める読み取り (#241): 起動､reload､"Load older"､
-//! "Show thread"｡どれも API のクレジットを使う｡
+//! timeline を埋める読み取り (#241): 起動､reload､"Load older"｡どれも
+//! API のクレジットを使う｡"Show thread" は [`super::thread`] にある｡
 
 // 列挙ではなく glob にしているのは [`crate::ui::render`] に合わせたもの｡
 // `ui` が import しているもののほとんどに手を伸ばす｡
@@ -551,59 +551,5 @@ impl TimelineView {
         }));
 
         cx.notify();
-    }
-
-    /// 一つの reply のために "Show thread" のクレジットを使う (#12): 親の
-    /// chain を辿り (取得済みならキャッシュから､でなければネットワーク
-    /// から､最大 `thread::MAX_THREAD_DEPTH` リクエスト)､結果を描画する｡
-    /// client 無しでは何もしない — その状態で toggle は出ないが､
-    /// [`Self::reload`] の流儀に合わせてここでも守る｡
-    ///
-    /// `reply_post_id` は展開される側の reply (キャッシュ/状態のキー);
-    /// `first_parent_id` はその直接の親の id — ただで判明している
-    /// `TimelineItem::replied_to` の `post_id` — で､そこから辿り始める｡
-    pub(in crate::ui) fn show_thread(
-        &mut self,
-        reply_post_id: String,
-        first_parent_id: String,
-        cx: &mut Context<'_, Self>,
-    ) {
-        let Some(client) = self.client.clone() else {
-            return;
-        };
-
-        self.threads
-            .insert(reply_post_id.clone(), ThreadFetchState::Loading);
-        cx.notify();
-
-        let paths = self.paths.clone();
-        let key = reply_post_id.clone();
-        let fetch_key = reply_post_id.clone();
-        let task = cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move {
-                    cache::fetch_thread(
-                        &paths,
-                        &client,
-                        &reply_post_id,
-                        &first_parent_id,
-                        oauth::unix_now(),
-                    )
-                })
-                .await;
-
-            let _ = this.update(cx, |this, cx| {
-                this.refresh_usage(cx);
-                let state = match result {
-                    Ok(chain) => ThreadFetchState::Loaded(chain),
-                    Err(error) => ThreadFetchState::Failed(format!("{error:#}").into()),
-                };
-                this.threads.insert(key.clone(), state);
-                this.thread_fetches.remove(&key);
-                cx.notify();
-            });
-        });
-        self.thread_fetches.insert(fetch_key, task);
     }
 }
