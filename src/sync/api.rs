@@ -6,10 +6,11 @@
 //! `XClient` 側は既存のメソッドへ委譲するだけで判断を 1 つも持たない —
 //! transport はフィクスチャ JSON を通した `x_api::client` のテストが見ている｡
 //!
-//! 待ちも trait に載せてある｡[`super::run::apply_some`] は 2 件目以降の
-//! write の前に 3〜20 秒待つので､これが無ければ batch を 2 件流すテストは
-//! suite をその分だけ止める｡fake は渡された [`Duration`] を記録して
-//! すぐ返る｡
+//! 待ちも trait に載せてある｡CLI の [`super::run::apply_some`] は 2 件目
+//! 以降の write の前に `sync_write_gap_seconds` (既定 3〜20 秒) 待つので､
+//! これが無ければ 2 件流すテストは suite をその分だけ止める｡fake は渡された
+//! [`Duration`] を記録してすぐ返る｡loop の tick はここで眠らない (#231):
+//! 間は `sync::state` が `paused_until` に置き､loop がそれを待つ｡
 
 use anyhow::Result;
 use std::time::Duration;
