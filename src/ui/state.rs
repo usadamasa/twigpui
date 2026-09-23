@@ -61,6 +61,17 @@ pub(super) enum Cooldown {
     ApiRateLimit,
 }
 
+/// image cache が今の timeline に追いついているか｡bool にしないのは
+/// `TimelineView` の bool が clippy の `struct_excessive_bools` の上限に
+/// 達しているため｡
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ImageCacheSync {
+    /// 前回刈ってから timeline は変わっていない｡
+    Fresh,
+    /// timeline が変わり､次の `render` で刈る｡
+    Stale,
+}
+
 /// 直近の reload の試みについての一時的な通知｡`state` から独立に保つ理由は
 /// #54 の `session_notice` フィールドとまったく同じである (その doc を見よ):
 /// リクエストを阻んだ cooldown も､走ったあとの失敗も､*リクエスト* に今何が

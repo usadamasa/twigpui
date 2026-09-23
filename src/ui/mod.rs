@@ -3,8 +3,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use gpui::{
-    AnyElement, Context, Div, Entity, FocusHandle, FontWeight, ObjectFit, ScrollHandle,
-    SharedString, Stateful, Subscription, Task, Window, div, img, prelude::*, px, rgb, rgba, svg,
+    AnyElement, Context, Div, Entity, FocusHandle, FontWeight, ObjectFit, RetainAllImageCache,
+    ScrollHandle, SharedString, Stateful, Subscription, Task, Window, div, img, prelude::*, px,
+    rgb, rgba, svg,
 };
 use gpui_component::input::{InputEvent, Textarea, TextareaState};
 
@@ -72,7 +73,10 @@ use render::{
 };
 use render::{RowCounts, row_counts};
 pub(crate) use startup::Startup;
-use state::{Cooldown, ReloadNotice, ReloadTrigger, StartOutcome, ThreadFetchState, TimelineState};
+use state::{
+    Cooldown, ImageCacheSync, ReloadNotice, ReloadTrigger, StartOutcome, ThreadFetchState,
+    TimelineState,
+};
 use toast::Toast;
 
 use crate::menu::{
@@ -475,6 +479,15 @@ pub(crate) struct TimelineView {
     /// ので､クリックした先の viewer が「開けない」を言うにはこちらが要る｡
     /// `refresh_media` が取れたら remove する｡
     media_failed: HashSet<String>,
+    /// 行と viewer が `img` に渡す､デコード済み画像の置き場｡渡さないと
+    /// gpui は App 全体の asset cache に入れ､`remove_asset` を呼ぶまで
+    /// 手放さない｡timeline の 500 件の窓から外れた URL の画像は
+    /// `prune_images` がここから消す｡
+    image_cache: Entity<RetainAllImageCache>,
+    /// timeline が変わってから `prune_images` がまだ走っていなければ
+    /// `Stale`｡`remove` は `&mut Window` が要るので､`refresh_images` は
+    /// 印を付けるだけにして `render` の頭で刈る｡
+    images_sync: ImageCacheSync,
     /// 進行中のアバターのダウンロードを生かしておく (#64)｡行ごとに一つでは
     /// なく､一つの task が見えている timeline 全体を辿る; 代入し直す
     /// (reload) とまだダウンロード中のものは取り消されるが､次の呼び出しが
@@ -2586,6 +2599,70 @@ mod tests {
                     "a url that resolved successfully lands in media_paths"
                 );
             });
+        });
+    }
+
+    /// 500 件の窓から外れた post のデコード済み画像は image cache に残らない｡
+    /// 残ると poll のたびに新しい画像が積まれ､プロセスが生きている間
+    /// メモリが増えつづける｡
+    #[gpui::test]
+    fn images_that_left_the_window_leave_the_image_cache(cx: &mut gpui::TestAppContext) {
+        let fixture = Fixture {
+            items: vec![
+                item_with_media("2", &[("media/e.png", 100, 100)]),
+                item_with_media("1", &[("media/f.png", 100, 100)]),
+            ],
+            ..fixture_with(&[], &[])
+        };
+        let (window, timeline) = fixture_window(cx, fixture);
+        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+
+        // cache の鍵はパスの hash なので､同じファイルを別の綴りで 2 枚にする｡
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let first = root.join("assets/AppIcon.png");
+        let second = root.join("assets/../assets/AppIcon.png");
+        cx.update(|cx| {
+            timeline.update(cx, |view, cx| {
+                view.media_paths.insert("media/e.png".to_string(), first);
+                view.media_paths.insert("media/f.png".to_string(), second);
+                cx.notify();
+            });
+        });
+        for _ in 0..2 {
+            draw_until_parked(&mut visual, cx);
+        }
+        cx.update(|cx| {
+            let cached = timeline.read(cx).image_cache.read(cx).len();
+            assert_eq!(cached, 2, "both drawn images are in the cache");
+        });
+
+        cx.update(|cx| {
+            timeline.update(cx, |view, cx| {
+                view.state =
+                    TimelineState::Loaded(vec![item_with_media("1", &[("media/f.png", 100, 100)])]);
+                view.refresh_images(cx);
+                cx.notify();
+            });
+        });
+        for _ in 0..2 {
+            draw_until_parked(&mut visual, cx);
+        }
+        cx.update(|cx| {
+            let view = timeline.read(cx);
+            assert_eq!(
+                view.image_cache.read(cx).len(),
+                1,
+                "the image of a post that left the window leaves the cache"
+            );
+            assert_eq!(
+                view.media_paths.len(),
+                1,
+                "only the remaining url is indexed"
+            );
+            assert!(
+                !view.media_paths.contains_key("media/e.png"),
+                "the url that left the window is dropped from media_paths"
+            );
         });
     }
 

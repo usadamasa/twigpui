@@ -156,6 +156,7 @@ impl TimelineView {
     /// `refresh_liked_ids`) は代わりにディスクから読み､順序に依存しない｡
     /// それがこれを見落としやすくしていた｡
     pub(in crate::ui) fn refresh_images(&mut self, cx: &mut Context<'_, Self>) {
+        self.images_sync = ImageCacheSync::Stale;
         self.refresh_avatars(cx);
         self.refresh_media(cx);
     }
