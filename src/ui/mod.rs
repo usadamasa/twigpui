@@ -4,8 +4,7 @@ use std::time::Duration;
 
 use gpui::{
     AnyElement, Context, Div, Entity, FocusHandle, FontWeight, ObjectFit, RetainAllImageCache,
-    ScrollHandle, SharedString, Stateful, Subscription, Task, Window, div, img, prelude::*, px,
-    rgb, rgba, svg,
+    SharedString, Stateful, Subscription, Task, Window, div, img, prelude::*, px, rgb, rgba, svg,
 };
 use gpui_component::input::{InputEvent, Textarea, TextareaState};
 
@@ -515,12 +514,13 @@ pub(crate) struct TimelineView {
     /// 出る｡`None` が普通の場合である — open に成功すればアプリには言う
     /// ことが何も無い｡
     open_failure: Option<String>,
-    /// timeline の一覧のスクロール位置 (#22)｡
+    /// timeline の一覧のスクロール位置 (#22) と､viewport に入る行だけを
+    /// 組む `ListState` (#301)｡
     ///
     /// reload が一覧を置き換える前に読み､あとで読み手を元いた行へ戻すのに
     /// 使う: そうしないと､スクロール済みの一覧へ post を差し込んだときに
     /// すべてが読み手の下へずり下がる｡
-    list_scroll: ScrollHandle,
+    list_scroll: timeline_list::TimelineList,
     /// `j` / `k` で読み進めている行の post id (#148)｡まだ誰も選んで
     /// いなければ `None`｡
     ///
@@ -5000,6 +5000,10 @@ mod tests {
         for n in 0..20 {
             let mut item = filler.clone();
             item.id = format!("92000000000000001{n:02}");
+            // #301: 水増しは末尾に沈める｡`created_at` 無しの item は合成で
+            // 末尾へ回るので､測る行は viewport の中に残る — 画面の外の行は
+            // もう組まれない｡
+            item.created_at = None;
             long.items.push(item);
         }
 

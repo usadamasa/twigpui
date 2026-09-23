@@ -342,15 +342,14 @@ impl TimelineView {
     /// [`preserved_scroll_target`] に委ね､断られたら何もしない — 読み手
     /// は先頭にいて､何も無いところの上へ新着が来るのは望みどおりの
     /// ふるまいだ｡
-    fn keep_the_reader_in_place(&self, incoming: &[TimelineItem]) {
+    fn keep_the_reader_in_place(&mut self, incoming: &[TimelineItem]) {
         let TimelineState::Loaded(previous) = &self.state else {
             return;
         };
         let previous_ids: Vec<&str> = previous.iter().map(|item| item.id.as_str()).collect();
         let new_ids: Vec<&str> = incoming.iter().map(|item| item.id.as_str()).collect();
-        if let Some(target) =
-            preserved_scroll_target(&previous_ids, &new_ids, self.list_scroll.top_item())
-        {
+        let target = preserved_scroll_target(&previous_ids, &new_ids, self.list_scroll.top_item());
+        if let Some(target) = target {
             self.list_scroll.scroll_to_top_of_item(target);
         }
     }

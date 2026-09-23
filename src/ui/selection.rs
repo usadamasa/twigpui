@@ -396,21 +396,20 @@ mod tests {
 
     #[gpui::test]
     fn the_selected_row_is_pulled_into_the_viewport(cx: &mut gpui::TestAppContext) {
-        // `debug_bounds` は画面の外に置かれた行にも答えるので､「収まって
-        // いる」を assert できる｡
         let ids: Vec<String> = (1..=30).map(|n| n.to_string()).collect();
         let shown: Vec<&str> = ids.iter().map(String::as_str).collect();
         let (window, timeline) = fixture_window(cx, fixture_with(&shown, &[]));
         let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
         draw_until_parked(&mut visual, cx);
 
-        // 前提: 16 行目はまだ画面の下にある｡収まっていればこのテストは
-        // 何も見ていない｡
+        // 前提: 16 行目はまだ画面の下にある｡#301 から画面の外の行は組まれ
+        // ないので､一度も描いていない名前に `debug_bounds` が `None` を
+        // 答えることが「まだ下にある」の印になる｡収まっていればこの
+        // テストは何も見ていない｡
         let viewport = laid_out(&mut visual, "timeline");
-        let before = laid_out(&mut visual, "post-row-16");
         assert!(
-            before.bottom() > viewport.bottom(),
-            "the fixture has to be taller than the window: {before:?} in {viewport:?}"
+            visual.debug_bounds("post-row-16").is_none(),
+            "the fixture has to be taller than the window"
         );
 
         // 最初の 1 打は「進む」ではなく「今そこにある行を選ぶ」ので､

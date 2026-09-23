@@ -173,7 +173,7 @@ impl TimelineView {
             delete_failures: HashMap::new(),
             open_task: None,
             open_failure: None,
-            list_scroll: ScrollHandle::new(),
+            list_scroll: timeline_list::TimelineList::new(),
             selected: None,
             focus_handle: cx.focus_handle(),
         };

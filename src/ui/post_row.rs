@@ -351,6 +351,11 @@ impl TimelineView {
 
         div()
             .addressable(format!("post-row-{}", item.id))
+            // #301: `gpui::list` は行を root として測る (`layout_as_root`)｡
+            // 親の `align-items: stretch` に伸ばしてもらえないので､幅は
+            // 自分で list いっぱいに取る｡無いと中身の幅に縮み､`justify_between`
+            // の delete が open の隣に戻る｡
+            .w_full()
             .flex()
             .flex_col()
             .border_l(SELECTION_MARK_WIDTH)

@@ -11,22 +11,16 @@ impl TimelineView {
     fn body(&self, bg_alpha: u8, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let theme = self.theme;
 
-        // `overflow_y_scroll` は StatefulInteractiveElement 側にあるので､
-        // スクロールさせるには要素に先に id が要る｡
+        // #301: scroll するのは中の `gpui::list` で､この div は viewport の
+        // 枠 (テストが `timeline` の名で bounds を読む) と band のずれ｡
         let content = div()
             .addressable("timeline")
             .flex()
             .flex_col()
             .flex_1()
-            .overflow_y_scroll()
-            // #22: そもそもスクロール位置を読めるようにしているのがこの
-            // ハンドルだ｡これが無ければリロードはビューポートを*ピクセル*の
-            // 位置に留めることしかできず､上に行が挿入された後ではそこは
-            // 間違った場所になる｡
-            .track_scroll(&self.list_scroll)
             // #175: 端を越えて引いたぶんだけ一覧をずらす — 最上部では
-            // 下へ､末尾では上へ｡offset は gpui が prepaint で clamp する
-            // ので､端の向こうは offset ではなく位置で見せるしかない｡
+            // 下へ､末尾では上へ｡offset は list が clamp するので､端の
+            // 向こうは offset ではなく位置で見せるしかない｡
             .relative()
             .top(px(self.scroller.shift()));
 
@@ -66,39 +60,27 @@ impl TimelineView {
             TimelineState::Loaded(items) if items.is_empty() => {
                 content.child(notice("No posts were returned.", theme.text_muted))
             }
-            TimelineState::Loaded(items) => {
-                // `.children(items.iter().map(...))` ではなく素のループにして
-                // ある｡`post_row` は (#12 の "Show thread" のクリック
-                // ハンドラのために) `cx` を要求するし､`.map` が呼ぶ `FnMut`
-                // クロージャは､自分が捕捉した `cx` から借りた値を返り値の要素へ
-                // 逃がせない｡
-                let mut rows: Vec<AnyElement> = Vec::with_capacity(items.len());
-                for item in items {
-                    rows.push(self.post_row(item, bg_alpha, cx));
-                }
-                content
-                    .children(rows)
-                    // #11: 再開に使う `meta.next_token` をレスポンスが実際に
-                    // 運んできて初めて出す｡しかも取得するページの分だけ上限の
-                    // 下に余地があるあいだだけだ｡
-                    .when(
-                        offers_load_older(
-                            self.next_page_token.as_deref(),
-                            &self.state,
-                            self.sources.len() == 1,
-                        ),
-                        |list| list.child(load_older_row(theme, cx)),
-                    )
-                    .when(at_the_post_cap(&self.state), |list| {
-                        list.child(notice(
-                            format!(
-                                "Showing the most recent {} posts — that is as far back as \
-                                 twigpui keeps.",
-                                cache::MAX_CACHED_POSTS
-                            ),
-                            theme.text_muted,
-                        ))
-                    })
+            TimelineState::Loaded(_) => {
+                // #301: 全件を積まない｡`gpui::list` が viewport に入る index
+                // だけを求めてくる｡行を組む閉包は `self` を借りられないので
+                // `cx.processor` で entity から戻る — 呼ばれるのは `render`
+                // が返した後の prepaint なので lease は空いている｡"Load
+                // older" と上限の notice は list の末尾の行 (`list_row`)｡
+                // `ListState` は `render` の頭の `sync_list` が追いつかせて
+                // ある｡
+                let row = cx.processor(
+                    move |this: &mut Self,
+                          ix: usize,
+                          _window: &mut Window,
+                          cx: &mut Context<'_, Self>| {
+                        this.list_row(ix, bg_alpha, cx)
+                    },
+                );
+                content.child(
+                    gpui::list(self.list_scroll.state(), row)
+                        .flex_1()
+                        .size_full(),
+                )
             }
         };
 
@@ -123,7 +105,7 @@ impl TimelineView {
 /// リストの後ろに足す "Load older" の行 (#11)｡見た目は [`notice`] と同じだが
 /// クリックできる — `cache::splice` 経由で､すでに表示されているものの*後ろ*へ
 /// post を足すのであって､通常のリロードのように前へマージすることはない｡
-fn load_older_row(theme: Theme, cx: &mut Context<'_, TimelineView>) -> impl IntoElement {
+pub(super) fn load_older_row(theme: Theme, cx: &mut Context<'_, TimelineView>) -> impl IntoElement {
     div()
         .addressable("load-older")
         .px_4()
@@ -239,6 +221,9 @@ impl Render for TimelineView {
         if self.images_sync == ImageCacheSync::Stale {
             self.prune_images(window, cx);
         }
+        // #301: 一覧の中身を `ListState` に追いつかせる｡`body` が list を組む
+        // 前に — `sync_list` の doc を見る｡
+        self.sync_list();
         // #214: footer の文言はウィンドウの幅で選ぶ｡`status_bar` へ渡す｡
         let density = countdown::density(window.viewport_size().width);
         // #267: 背景の不透明度も 1 回決めて､本体と両方の帯へ渡す｡行の中に
