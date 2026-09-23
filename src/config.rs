@@ -252,11 +252,6 @@ struct FileSettings {
     /// キー名を挙げて拒めるようにするためだ｡
     #[serde(default)]
     sync_prune_limit_percent: Option<u32>,
-    /// #231 より前の書き込みの歩調｡[`Config::resolve`] が､これをまだ抱えて
-    /// いるファイルを拒めるようにするためだけに置いてある — 黙って無視すれば
-    /// 調整したつもりの歩調が既定に戻る｡`bearer_token` と同じ扱い｡
-    #[serde(default)]
-    sync_writes_per_batch: Option<u32>,
     /// 秘密ではない｡`post_resource_price` と同じ理由だ｡`"3-20"` の形の
     /// 文字列で､[`Config::resolve`] ではなく `sync::pacing` が読む｡
     #[serde(default)]
@@ -361,7 +356,7 @@ impl Config {
                  X_OAUTH_CLIENT_ID) instead."
             );
         }
-        // `file` を部分的に動かす前に｡拒む理由は関数の doc にある｡
+        // `file` を部分的に動かす前に借りる｡
         let sync_write_pacing = resolve_write_pacing(&var, &file)?;
 
         let oauth_client_id = var("X_OAUTH_CLIENT_ID")
@@ -615,21 +610,12 @@ fn resolve_sync_prune_limit(
 }
 
 /// 書き込みの歩調 (#231) を解決する｡範囲の読み方と境界は `sync::pacing` が
-/// 持ち､ここは #231 より前の `sync_writes_per_batch` を拒むだけだ: 範囲に
-/// なった今､古いキーを黙って無視すれば調整したつもりの歩調が既定に戻る —
-/// `bearer_token` と同じく､抱えたままの設定は起動の失敗にする｡
+/// 持ち､ここは 3 つのキーをまとめて渡すだけだ｡#231 より前の
+/// `sync_writes_per_batch` は他の未知のキーと同じく黙って無視する｡
 fn resolve_write_pacing(
     var: impl Fn(&str) -> Option<String>,
     file: &FileSettings,
 ) -> Result<crate::sync::WritePacing> {
-    if var("X_SYNC_WRITES_PER_BATCH").is_some() || file.sync_writes_per_batch.is_some() {
-        bail!(
-            "X_SYNC_WRITES_PER_BATCH / sync_writes_per_batch was replaced by three ranges: \
-             X_SYNC_WRITE_GAP_SECONDS, X_SYNC_BATCH_WRITES and X_SYNC_COOLDOWN_SECONDS \
-             (sync_write_gap_seconds, sync_batch_writes, sync_cooldown_seconds in \
-             config.toml), each written as \"min-max\". Remove the old key."
-        );
-    }
     crate::sync::WritePacing::resolve(
         &var,
         file.sync_write_gap_seconds.clone(),
@@ -1778,7 +1764,7 @@ mod tests {
 
     // --- #231: 書き込みの歩調 (3 つの範囲､env > file > default) ---
     // 範囲の読み方と境界は `sync::pacing` 自身のテストが押さえる｡ここで
-    // 見るのは Config への配線と､古いキーの拒否だけだ｡
+    // 見るのは Config への配線だけだ｡
 
     #[test]
     fn the_write_pacing_defaults_to_the_pacing_module_default() {
@@ -1830,28 +1816,19 @@ mod tests {
     }
 
     #[test]
-    fn the_pre_231_write_pace_key_is_rejected_and_points_at_the_ranges() {
-        // 黙って無視すれば､調整したつもりの歩調が既定に戻る｡
-        let file = FileSettings {
-            sync_writes_per_batch: Some(2),
-            ..FileSettings::default()
-        };
-        let error = Config::resolve(vars(&[("X_OAUTH_CLIENT_ID", "client-123")]), file)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("sync_writes_per_batch"), "{error}");
-        assert!(error.contains("sync_batch_writes"), "{error}");
-
-        let error = Config::resolve(
+    fn the_pre_231_write_pace_key_is_ignored_like_any_unknown_key() {
+        // `FileSettings` は `deny_unknown_fields` を使わない (struct の doc を
+        // 見よ)｡消えたキーも同じ扱いで､起動を止めない｡
+        let file: FileSettings = toml::from_str("sync_writes_per_batch = 2").unwrap();
+        let config = Config::resolve(
             vars(&[
                 ("X_OAUTH_CLIENT_ID", "client-123"),
                 ("X_SYNC_WRITES_PER_BATCH", "2"),
             ]),
-            FileSettings::default(),
+            file,
         )
-        .unwrap_err()
-        .to_string();
-        assert!(error.contains("X_SYNC_BATCH_WRITES"), "{error}");
+        .unwrap();
+        assert_eq!(config.sync_write_pacing, crate::sync::WritePacing::DEFAULT);
     }
 
     // --- #176: sync_prune_limit_percent (env > file > 10, 最大 100) ---

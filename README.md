@@ -135,7 +135,7 @@ export し直すのを覚えていなくても効くようにしたいなら､`
 | `X_SYNC_PRUNE_LIMIT_PERCENT` | いいえ | `10` | バックグラウンド同期が 1 回の diff で削除できるメンバーの上限 (パーセント)｡超えた分の削除は保留し､`--sync-list --apply --prune` での確認に回す; `100` で上限を外す — `config.toml` では `sync_prune_limit_percent` (#176) |
 | `X_SYNC_WRITE_GAP_SECONDS` | いいえ | `3-20` | バックグラウンド同期がリストへの書き込みと書き込みの間に置く秒数の範囲 (#231)｡`"min-max"` の形で､書き込みごとに引き直す｡`min` は 1 以上 — `config.toml` では `sync_write_gap_seconds` |
 | `X_SYNC_BATCH_WRITES` | いいえ | `1-3` | cooldown を挟まずに続けて送る書き込み数の範囲 (#231)｡`1`–`20`; 上限は X が文書化した書き込みウィンドウ (15 分あたり 300) を 1 分へならした値である｡バッチごとに引き直す — `config.toml` では `sync_batch_writes` |
-| `X_SYNC_COOLDOWN_SECONDS` | いいえ | `90-300` | バッチを送り切ったあと次のバッチまで休む秒数の範囲 (#231)｡バッチごとに引き直す｡既定の 3 つで持続レートはおよそ 0.6 件/分｡既定値での実行が拒否を出さないと分かってから変える — `config.toml` では `sync_cooldown_seconds`｡#231 より前の `X_SYNC_WRITES_PER_BATCH` / `sync_writes_per_batch` は拒否する |
+| `X_SYNC_COOLDOWN_SECONDS` | いいえ | `90-300` | バッチを送り切ったあと次のバッチまで休む秒数の範囲 (#231)｡バッチごとに引き直す｡既定の 3 つで持続レートはおよそ 0.6 件/分｡既定値での実行が拒否を出さないと分かってから変える — `config.toml` では `sync_cooldown_seconds` |
 | `X_AUTO_REFRESH` | いいえ | `true` | ウィンドウが開いている間､新しい投稿をタイムラインにポーリングする — `config.toml` では `auto_refresh` (#21)｡`false` なら､アプリはクリックしていないものを一切送らない |
 | `X_AUTO_REFRESH_INTERVAL_SECONDS` | いいえ | `180` (3 分) | 自動更新がポーリングの間に待つ時間｡`X_MIN_FETCH_INTERVAL_SECONDS` を下回る値は拒否する — `config.toml` では `auto_refresh_interval_seconds` |
 | `X_FOLLOW_NEW_POSTS` | いいえ | `true` | 先頭にいるとき､ポーリングで届いた新しい投稿がひとりでに画面へ流れ込むようにする (#22) — `config.toml` では `follow_new_posts`｡表示だけの話で､何をいつ取得するかは変えない｡実行中は View → Follow New Posts (`⌘⇧F`) で切り替える |
