@@ -3,7 +3,7 @@
 //! [`super::schedule`] が tick の内容を決め､[`super::state`] がその結果を
 //! 覚え､この module があいだで実行する｡分割は `run.rs` と同じ理由による
 //! もので､判断は純粋関数として隣にある — [`super::schedule::next_step`]､
-//! [`super::schedule::next_batch`]､[`super::schedule::apply_outcome`]､
+//! [`super::schedule::next_write`]､[`super::schedule::apply_outcome`]､
 //! [`super::state::settle`]｡
 //!
 //! ここの分岐はどれも request かファイルだが､request の相手は
@@ -383,7 +383,7 @@ fn log_outcome(outcome: &Result<Outcome>, before: SyncState, settled: &state::Se
             // 上限に届いた tick は settle が 0 に戻しているので､届いた
             // ことは block の有無で言う｡
             if state.is_blocked(now) {
-                super::run::REJECTIONS_IN_A_ROW_LIMIT
+                state::REJECTIONS_IN_A_ROW_LIMIT
             } else {
                 state.rejected_in_a_row
             },

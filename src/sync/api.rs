@@ -6,11 +6,11 @@
 //! `XClient` 側は既存のメソッドへ委譲するだけで判断を 1 つも持たない —
 //! transport はフィクスチャ JSON を通した `x_api::client` のテストが見ている｡
 //!
-//! 待ちも trait に載せてある｡CLI の [`super::run::apply_some`] は 2 件目
-//! 以降の write の前に `sync_write_gap_seconds` (既定 3〜20 秒) 待つので､
-//! これが無ければ 2 件流すテストは suite をその分だけ止める｡fake は渡された
-//! [`Duration`] を記録してすぐ返る｡loop の tick はここで眠らない (#231):
-//! 間は `sync::state` が `paused_until` に置き､loop がそれを待つ｡
+//! 待ちも trait に載せてある｡CLI の `--sync-list --apply` は tick と tick の
+//! あいだ — gap か cooldown､既定で 3〜300 秒 — をここで眠るので､これが
+//! 無ければ 2 件流すテストは suite をその分だけ止める｡fake は渡された
+//! [`Duration`] を記録してすぐ返る｡window の loop はここで眠らない (#231):
+//! 間は `sync::state` が `paused_until` に置き､loop の timer がそれを待つ｡
 
 use anyhow::Result;
 use std::time::Duration;
@@ -77,8 +77,8 @@ pub(crate) trait ListSyncApi {
     /// `user_id` を list から外す｡
     fn remove_member(&self, paths: &Paths, list_id: &str, user_id: &str, now: i64) -> Result<()>;
 
-    /// batch の中で write と write のあいだに置く間｡長さは
-    /// [`super::state::write_gap`] が引き､ここは待つだけだ｡
+    /// CLI の `--apply` が tick と tick のあいだに置く間｡長さは tick が
+    /// `SyncState::paused_until` に置いたもので､ここは待つだけだ｡
     ///
     /// 既定が実際に眠るので本番の経路はこれを実装しない｡テストは上書きして
     /// 記録する｡

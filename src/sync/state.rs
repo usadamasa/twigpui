@@ -54,7 +54,7 @@
 //!
 //! X が 400 で拒んだ entry (#254) は印を付けて次へ進む｡ただし続けざまなら
 //! list や request の形そのものが拒まれている方が疑わしいので､
-//! [`SyncState::rejected_in_a_row`] が `run::REJECTIONS_IN_A_ROW_LIMIT` に
+//! [`SyncState::rejected_in_a_row`] が [`REJECTIONS_IN_A_ROW_LIMIT`] に
 //! 届いたら interval 丸ごと退く — list 全体が拒まれていても支出は interval
 //! あたりその件数で頭打ちになる｡
 
@@ -62,6 +62,14 @@ use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
 
 use super::schedule::Outcome;
+
+/// 連続してこの件数の write が 400 で拒まれたら interval 丸ごと退く (#254)｡
+///
+/// 拒否 1 件は entry の問題だが､続けざまなら list や request の形そのものが
+/// 拒まれている可能性のほうが高い｡これが無いと 2,000 件の plan を丸ごと
+/// 撃ち切る — 1 request ずつ課金されながら｡[`SyncState::rejected_in_a_row`]
+/// が tick をまたいで数える｡
+pub(crate) const REJECTIONS_IN_A_ROW_LIMIT: u32 = 3;
 
 /// opaque な refusal 1 回で後退する上限: 6 時間｡1 日下がったままの上限が
 /// 96 回ではなく 4 回の request で済むだけ長く､明けた上限に同じ 6 時間の
@@ -112,7 +120,7 @@ pub(crate) struct SyncState {
     #[serde(default)]
     pub batch_left: u32,
     /// あいだに write が 1 件も届いていない 400 の連続回数 (#254)｡
-    /// `run::REJECTIONS_IN_A_ROW_LIMIT` で interval 丸ごと退く｡
+    /// [`REJECTIONS_IN_A_ROW_LIMIT`] で interval 丸ごと退く｡
     #[serde(default)]
     pub rejected_in_a_row: u32,
     /// 最後の refusal から届いた write の件数 (#231)｡ペース配分が効いて
@@ -221,7 +229,7 @@ pub(crate) struct Settled {
 ///
 /// 400 で拒まれた write (#254) も request は飛んでいるので batch を同じ
 /// ように進める — 数えないと次の request が間を置かずに飛ぶ｡連続回数が
-/// `run::REJECTIONS_IN_A_ROW_LIMIT` に届いたら､代わりに interval 丸ごと
+/// [`REJECTIONS_IN_A_ROW_LIMIT`] に届いたら､代わりに interval 丸ごと
 /// `blocked_until` に置いて連続回数を戻す｡
 ///
 /// diff は見つけたものを流し切るためにすぐ戻ってくる｡そのとき前の plan が
@@ -272,7 +280,7 @@ pub(crate) fn settle(
         }
         Some(Outcome::Rejected { remaining }) => {
             next.rejected_in_a_row = next.rejected_in_a_row.saturating_add(1);
-            if next.rejected_in_a_row >= super::run::REJECTIONS_IN_A_ROW_LIMIT {
+            if next.rejected_in_a_row >= REJECTIONS_IN_A_ROW_LIMIT {
                 next.rejected_in_a_row = 0;
                 let until = now.saturating_add(i64::from(spacing.interval_seconds));
                 next.blocked_until = Some(until);
@@ -676,7 +684,7 @@ mod tests {
         // そのものが拒まれている方が疑わしい｡interval あたり 3 request で
         // 頭打ちにする｡
         let state = SyncState {
-            rejected_in_a_row: crate::sync::run::REJECTIONS_IN_A_ROW_LIMIT - 1,
+            rejected_in_a_row: REJECTIONS_IN_A_ROW_LIMIT - 1,
             ..calm()
         };
         let outcome = Outcome::Rejected { remaining: 2_155 };

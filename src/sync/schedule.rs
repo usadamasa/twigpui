@@ -302,8 +302,7 @@ pub(crate) fn is_finished(outcome: Option<&Outcome>) -> bool {
     matches!(outcome, Some(Outcome::Idle { pending: 0, .. }))
 }
 
-/// loop が次に送るべき `limit` 件の entry｡addition と removal から交互に
-/// 取る｡
+/// tick が次に送る 1 件 (#231)｡addition と removal を交互に取る｡
 ///
 /// addition を全部送ってから removal ではなく交互なのは､ひどく古びた
 /// list の catch-up が何時間もかかるからだ: add を先に送れば､最初の
@@ -311,47 +310,12 @@ pub(crate) fn is_finished(outcome: Option<&Outcome>) -> bool {
 /// 途中で中断した実行は list を正解に近づけるどころか､あるべき大きさより
 /// 確実に大きいまま残す｡
 ///
-/// `prune` が false なら removal は丸ごと落とす — それが CLI の既定で､
-/// 二つの経路が分かれる唯一の場所がこの関数だ｡
+/// 1 tick に 1 件なので「交互」は plan の印から読む: 片付いた (届いたか
+/// 拒まれた) removal が addition より少ないあいだは removal の番だ｡片側が
+/// 尽きればもう片側を続け､`prune` が false なら removal は見ない｡
 ///
-/// `plan` を借りずに所有権のある id を返すのは､呼び出し側が進めながら
-/// entry に適用済みの印を付けるからだ｡
-pub(crate) fn next_batch(
-    plan: &super::Plan,
-    prune: bool,
-    limit: usize,
-) -> Vec<(super::Action, String)> {
-    let mut adds = plan.pending(super::Action::Add);
-    let mut removals = plan.pending(super::Action::Remove);
-    let mut batch = Vec::new();
-    while batch.len() < limit {
-        let add = adds.next();
-        let removal = if prune { removals.next() } else { None };
-        if add.is_none() && removal.is_none() {
-            break;
-        }
-        if let Some(entry) = add {
-            batch.push((super::Action::Add, entry.user_id.clone()));
-        }
-        if batch.len() >= limit {
-            break;
-        }
-        if let Some(entry) = removal {
-            batch.push((super::Action::Remove, entry.user_id.clone()));
-        }
-    }
-    batch
-}
-
-/// loop が次に送る 1 件 (#231)｡[`next_batch`] と同じく addition と removal
-/// を交互に取るが､1 tick に 1 件なので「交互」は plan の印から読む: 片付いた
-/// (届いたか拒まれた) removal が addition より少ないあいだは removal の番だ｡
-/// 片側が尽きればもう片側を続け､`prune` が false なら removal は見ない｡
-///
-/// `next_batch(plan, prune, 1)` では代われない: あちらは addition から
-/// 取り始めて上限 1 で止まるので､addition が尽きるまで removal に届かず､
-/// [`next_batch`] の doc が名指しする「stale な member が消える何時間も前に
-/// addition だけが見える」形にそのままなる｡
+/// `plan` を借りずに所有権のある id を返すのは､呼び出し側が entry に
+/// 印を付けるからだ｡
 pub(crate) fn next_write(plan: &super::Plan, prune: bool) -> Option<(super::Action, String)> {
     let settled = |action| {
         plan.entries
@@ -455,19 +419,6 @@ mod tests {
                 .chain(removals.iter().map(|id| entry(id, Action::Remove)))
                 .collect(),
         }
-    }
-
-    /// batch を `+id` / `-id` の簡潔な文字列にしたもの｡交互になっている
-    /// 様子が tuple の vec に埋もれず assertion 上で読めるようにだ｡
-    fn batch(plan: &Plan, prune: bool, limit: usize) -> String {
-        next_batch(plan, prune, limit)
-            .iter()
-            .map(|(action, user_id)| match action {
-                Action::Add => format!("+{user_id}"),
-                Action::Remove => format!("-{user_id}"),
-            })
-            .collect::<Vec<_>>()
-            .join(" ")
     }
 
     /// 落ち着いた loop: diff は走り済み､残件も block も pause も無い｡
@@ -979,71 +930,6 @@ mod tests {
         );
     }
 
-    // --- next_batch ---
-
-    #[test]
-    fn a_batch_alternates_additions_and_removals() {
-        // 何時間もかけて追いつく list は､まず最終的な大きさまで膨らんで
-        // から stale な member を落とすのではなく､その間ずっと正解に
-        // 近づいていくべきだ｡
-        let plan = plan_of(&["1", "2"], &["3", "4"]);
-        assert_eq!(batch(&plan, true, 10), "+1 -3 +2 -4");
-    }
-
-    #[test]
-    fn a_batch_stops_at_the_limit_mid_pair() {
-        // limit が奇数のときが､交互送信が黙って request を 1 回余分に
-        // 送りかねない場合だ｡
-        let plan = plan_of(&["1", "2"], &["3", "4"]);
-        assert_eq!(batch(&plan, true, 3), "+1 -3 +2");
-    }
-
-    #[test]
-    fn a_batch_carries_on_with_whichever_side_still_has_entries() {
-        let plan = plan_of(&["1", "2", "3"], &["9"]);
-        assert_eq!(batch(&plan, true, 10), "+1 -9 +2 +3");
-    }
-
-    #[test]
-    fn removals_alone_still_fill_a_batch() {
-        let plan = plan_of(&[], &["7", "8"]);
-        assert_eq!(batch(&plan, true, 10), "-7 -8");
-    }
-
-    #[test]
-    fn without_prune_a_batch_is_additions_only() {
-        // CLI の既定｡removal は plan に載ったまま送られない｡
-        let plan = plan_of(&["1", "2"], &["3", "4"]);
-        assert_eq!(batch(&plan, false, 10), "+1 +2");
-    }
-
-    #[test]
-    fn without_prune_removals_do_not_eat_into_the_limit() {
-        // 交互送信が招くバグ: 飛ばした removal を `limit` の 1 件として
-        // 数えてしまい､上限付きの batch が求められた addition の半分しか
-        // 送らなくなる｡
-        let plan = plan_of(&["1", "2"], &["3", "4"]);
-        assert_eq!(batch(&plan, false, 2), "+1 +2");
-    }
-
-    #[test]
-    fn an_already_applied_entry_is_never_in_a_batch() {
-        // 再開した apply が安く済む理由: plan ファイルが通ったものを
-        // 覚えており､送り直せば何も変えないのに write を 1 回使うことに
-        // なる｡
-        let mut plan = plan_of(&["1", "2"], &["3"]);
-        plan.mark_applied("1", Action::Add);
-        assert_eq!(batch(&plan, true, 10), "+2 -3");
-    }
-
-    #[test]
-    fn a_fully_applied_plan_yields_an_empty_batch() {
-        let mut plan = plan_of(&["1"], &["3"]);
-        plan.mark_applied("1", Action::Add);
-        plan.mark_applied("3", Action::Remove);
-        assert_eq!(batch(&plan, true, 10), "");
-    }
-
     // --- next_write: 1 tick 1 件でも交互 (#231) ---
 
     /// 印を付けながら [`next_write`] を引き切り､送った順を `+id -id` で返す｡
@@ -1061,9 +947,9 @@ mod tests {
 
     #[test]
     fn one_write_at_a_time_still_alternates_additions_and_removals() {
-        // `next_batch(plan, prune, 1)` なら "+1 +2 -3 -4" になる — 上限 1 は
-        // addition を取った時点で止まるので､removal は addition が尽きる
-        // まで回ってこない｡
+        // 何時間もかけて追いつく list は､まず最終的な大きさまで膨らんで
+        // から stale な member を落とすのではなく､その間ずっと正解に
+        // 近づいていくべきだ｡先頭から取るだけなら "+1 +2 -3 -4" になる｡
         let plan = plan_of(&["1", "2"], &["3", "4"]);
         assert_eq!(drain(plan, true), "+1 -3 +2 -4");
     }
@@ -1097,15 +983,13 @@ mod tests {
 
     #[test]
     fn a_fully_settled_plan_has_no_next_write() {
-        let mut plan = plan_of(&["1"], &[]);
+        // 再開した apply が安く済む理由: plan ファイルが通ったものを
+        // 覚えており､送り直せば何も変えないのに write を 1 回使うことに
+        // なる｡
+        let mut plan = plan_of(&["1"], &["3"]);
         plan.mark_applied("1", Action::Add);
+        plan.mark_applied("3", Action::Remove);
         assert_eq!(next_write(&plan, true), None);
-    }
-
-    #[test]
-    fn a_zero_limit_sends_nothing() {
-        let plan = plan_of(&["1"], &["3"]);
-        assert_eq!(batch(&plan, true, 0), "");
     }
 
     #[test]
