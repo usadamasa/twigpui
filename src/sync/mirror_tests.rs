@@ -19,7 +19,7 @@ fn fresh_mirror_replaces_the_member_read() {
     let scratch = Scratch::new("mirror-fresh");
     write_mirror(scratch.paths(), "7", 100);
     let client = FakeApi::new().following(vec![Ok(page(&[("2", "bob")], None))]);
-    let plan = plan_sync(scratch.paths(), &client, "me", "7", 101).unwrap();
+    let plan = plan_sync(scratch.paths(), &client, "me", "7", None, 101).unwrap();
     assert!(plan.is_complete());
     assert_eq!(plan.members_total, 1);
     assert_eq!(client.calls(), [Call::Following(None)]);
@@ -34,7 +34,7 @@ fn absent_mirror_saves_every_member_page_before_the_follow_read() {
             Ok(page(&[("3", "carol")], None)),
         ])
         .following(vec![Err(anyhow::anyhow!("following unavailable"))]);
-    assert!(plan_sync(scratch.paths(), &client, "me", "7", 100).is_err());
+    assert!(plan_sync(scratch.paths(), &client, "me", "7", None, 100).is_err());
     let saved = saved_members(scratch.paths());
     assert_eq!(saved["version"], 1);
     assert_eq!(saved["list_id"], "7");
@@ -57,7 +57,7 @@ fn a_mirror_for_another_list_requires_a_full_member_read() {
     let client = FakeApi::new()
         .members(vec![Ok(page(&[("3", "carol")], None))])
         .following(vec![Ok(page(&[], None))]);
-    let plan = plan_sync(scratch.paths(), &client, "me", "7", 3_000_000).unwrap();
+    let plan = plan_sync(scratch.paths(), &client, "me", "7", None, 3_000_000).unwrap();
     assert_eq!(plan.members_total, 1);
     assert!(client.calls().contains(&Call::Members(None)));
     let saved = saved_members(scratch.paths());
@@ -74,7 +74,7 @@ fn age_alone_never_buys_a_member_read() {
         let scratch = Scratch::new(&format!("mirror-{label}"));
         write_mirror(scratch.paths(), "7", read_at);
         let client = FakeApi::new().following(vec![Ok(page(&[("2", "bob")], None))]);
-        let plan = plan_sync(scratch.paths(), &client, "me", "7", 3_000_000).unwrap();
+        let plan = plan_sync(scratch.paths(), &client, "me", "7", None, 3_000_000).unwrap();
         assert!(plan.is_complete(), "{label}");
         assert_eq!(client.calls(), [Call::Following(None)], "{label}");
         assert_eq!(
@@ -99,7 +99,7 @@ fn corrupt_or_unknown_version_mirrors_are_replaced() {
         let client = FakeApi::new()
             .members(vec![Ok(page(&[], None))])
             .following(vec![Ok(page(&[], None))]);
-        plan_sync(scratch.paths(), &client, "me", "7", 100).unwrap();
+        plan_sync(scratch.paths(), &client, "me", "7", None, 100).unwrap();
         assert!(client.calls().contains(&Call::Members(None)));
         assert_eq!(saved_members(scratch.paths())["version"], 1);
     }
@@ -115,7 +115,7 @@ fn partial_member_read_does_not_replace_the_old_mirror_or_read_following() {
         Ok(page(&[("3", "carol")], Some("next"))),
         Err(anyhow::anyhow!("402")),
     ]);
-    assert!(plan_sync(scratch.paths(), &client, "me", "7", 3_000_000).is_err());
+    assert!(plan_sync(scratch.paths(), &client, "me", "7", None, 3_000_000).is_err());
     assert_eq!(saved_members(scratch.paths()), original);
     assert!(
         !client
@@ -141,7 +141,7 @@ fn successful_writes_update_the_mirror_and_the_next_diff_is_empty() {
         serde_json::json!([{"id":"1","username":"user1"}])
     );
     let client = FakeApi::new().following(vec![Ok(page(&[("1", "user1")], None))]);
-    let next = plan_sync(scratch.paths(), &client, "me", "7", 102).unwrap();
+    let next = plan_sync(scratch.paths(), &client, "me", "7", None, 102).unwrap();
     assert!(next.is_complete());
     assert_eq!(client.calls(), [Call::Following(None)]);
 }

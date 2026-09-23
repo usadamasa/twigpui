@@ -275,7 +275,7 @@ fn diff(
     // members の更新後に following が失敗しても､古い count では省略しない｡
     state.following_count = None;
     save_state(&paths.sync_state_file(), state)?;
-    let plan = super::run::plan_sync(paths, client, user_id, list_id, now)?;
+    let plan = super::run::plan_sync(paths, client, user_id, list_id, count, now)?;
     let adds = plan.pending_count(Action::Add);
     let removals = plan.pending_count(Action::Remove);
     let prune_limit_percent = options.prune_limit_percent;

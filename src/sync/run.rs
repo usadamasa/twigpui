@@ -36,7 +36,7 @@ use crate::x_api::model::User;
 ///
 /// `fetch_page` が継ぎ目だ｡呼び出し側は [`super::api::ListSyncApi`] の
 /// ページ取得を渡し､テストは仕込んだページの列を渡す｡
-fn read_all(
+pub(super) fn read_all(
     what: &str,
     mut fetch_page: impl FnMut(Option<&str>) -> Result<(Vec<User>, Option<String>)>,
 ) -> Result<Vec<User>> {
@@ -56,14 +56,16 @@ fn read_all(
     anyhow::bail!("the {what} did not finish paging after {MAX_PAGES} pages — nothing was changed")
 }
 
-/// members のミラーと following の全件から diff を作る｡
+/// members のミラーと following の台帳から diff を作る｡
 /// ミラーが無効なら先に members を全件取得し､保存してから following を読む｡
+/// following は台帳と `count` (今回の probe) で済むなら先頭だけ読む (#289)｡
 /// X への write は行わず､[`apply`] が消費する plan を返す｡
 pub(super) fn plan_sync(
     paths: &Paths,
     client: &dyn ListSyncApi,
     user_id: &str,
     list_id: &str,
+    count: Option<u64>,
     now: i64,
 ) -> Result<Plan> {
     let members = super::mirror::members(paths, list_id, now, || {
@@ -72,8 +74,10 @@ pub(super) fn plan_sync(
         })
     })?;
     let following = match paths.profile().sync_seed_usernames() {
-        None => read_all("follow list", |cursor| {
-            client.following_page(paths, user_id, cursor, now)
+        None => super::following::read(paths, client, user_id, count, now, || {
+            read_all("follow list", |cursor| {
+                client.following_page(paths, user_id, cursor, now)
+            })
         })?,
         Some(usernames) => seed_users(paths, client, usernames, now)?,
     };
@@ -479,8 +483,10 @@ fn run(
     let settled = super::state::settle(state, outcome.as_ref().ok(), now, spacing);
     save_state(&state_path, &settled.state)?;
 
-    let finished = plan.is_complete() || (!request.prune && plan.pending_count(Action::Add) == 0);
-    if matches!(outcome, Ok(Outcome::Applied { .. })) && finished {
+    // `is_complete` であって「addition を送り切った」ではない (#230): `--prune`
+    // 無しで残った removal は支払い済みの diff で､`--apply --prune` が送る元は
+    // このファイルだ｡`auto::apply` と同じ規則｡
+    if matches!(outcome, Ok(Outcome::Applied { .. })) && plan.is_complete() {
         // 再開すべきものは残っておらず､置いたままにすると次の --apply に
         // 残務があるように見えてしまう｡
         std::fs::remove_file(&plan_path)
@@ -611,7 +617,7 @@ mod tests {
             ])
             .members(vec![Ok(page(&[("2", "bob"), ("3", "carol")], None))]);
 
-        let plan = plan_sync(scratch.paths(), &client, "me", "7", 100).unwrap();
+        let plan = plan_sync(scratch.paths(), &client, "me", "7", None, 100).unwrap();
 
         assert_eq!(plan.pending_count(Action::Add), 1);
         assert_eq!(plan.pending_count(Action::Remove), 1);
@@ -633,7 +639,7 @@ mod tests {
             .members(vec![Ok(page(&[("2", "bob")], None))])
             .following(vec![Err(anyhow::anyhow!("the API said 401"))]);
 
-        let error = plan_sync(scratch.paths(), &client, "me", "7", 100)
+        let error = plan_sync(scratch.paths(), &client, "me", "7", None, 100)
             .unwrap_err()
             .to_string();
 
@@ -655,7 +661,7 @@ mod tests {
             ])
             .members(vec![Ok(page(&[], None))]);
 
-        let plan = plan_sync(scratch.paths(), &client, "me", "7", 100).unwrap();
+        let plan = plan_sync(scratch.paths(), &client, "me", "7", None, 100).unwrap();
 
         assert_eq!(plan.pending_count(Action::Add), 4);
         assert!(
@@ -682,8 +688,8 @@ mod tests {
             ])
             .members(vec![Ok(page(&[], None)), Ok(page(&[], None))]);
 
-        plan_sync(scratch.paths(), &client, "me", "7", 100).unwrap();
-        let again = plan_sync(scratch.paths(), &client, "me", "7", 100).unwrap();
+        plan_sync(scratch.paths(), &client, "me", "7", None, 100).unwrap();
+        let again = plan_sync(scratch.paths(), &client, "me", "7", None, 100).unwrap();
 
         assert_eq!(again.pending_count(Action::Add), 4);
         assert_eq!(
@@ -704,7 +710,7 @@ mod tests {
             .members(vec![Ok(page(&[], None))])
             .lookups(vec![Err(anyhow::anyhow!("the API said 404"))]);
 
-        let error = plan_sync(scratch.paths(), &client, "me", "7", 100)
+        let error = plan_sync(scratch.paths(), &client, "me", "7", None, 100)
             .unwrap_err()
             .to_string();
 
@@ -1064,6 +1070,53 @@ mod tests {
     }
 
     #[test]
+    fn a_dry_run_with_a_follow_ledger_reads_only_the_head_of_the_follow_list() {
+        // #289: probe が 1 増えていれば､全件ではなく先頭の小さいページだけを
+        // 買い､新しい follow だけが plan に載る｡
+        let scratch = Scratch::new("cli-follow-head");
+        std::fs::write(
+            scratch.paths().sync_members_file(),
+            r#"{"version":1,"list_id":"7","read_at":100,"members":[{"id":"3","username":"c"}]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            scratch.paths().sync_following_file(),
+            r#"{"version":1,"user_id":"me","count":1,"read_at":100,"follows":[{"id":"3","username":"c"}]}"#,
+        )
+        .unwrap();
+        save_state(
+            &scratch.paths().sync_state_file(),
+            &super::super::SyncState {
+                following_count: Some(1),
+                ..super::super::SyncState::default()
+            },
+        )
+        .unwrap();
+        let client = FakeApi::new()
+            .counts(vec![Ok(2)])
+            .heads(vec![Ok(page(&[("9", "new"), ("3", "c")], None))]);
+        let text = run(
+            scratch.paths(),
+            &client,
+            "me",
+            "7",
+            request(false, false),
+            21_600,
+        )
+        .unwrap();
+        assert!(text.contains("1 to add, 0 to remove"), "{text}");
+        assert!(text.contains("@new"), "{text}");
+        assert_eq!(
+            client.calls(),
+            [Call::FollowingCount, Call::FollowingHead(5, None)]
+        );
+        assert_eq!(
+            load_state(&scratch.paths().sync_state_file()).following_count,
+            Some(2)
+        );
+    }
+
+    #[test]
     fn cli_retries_a_diff_whose_member_refresh_succeeded_but_follow_read_failed() {
         let scratch = Scratch::new("cli-count-retry");
         save_state(
@@ -1279,10 +1332,10 @@ mod tests {
     }
 
     #[test]
-    fn a_run_without_prune_is_finished_once_every_addition_landed() {
-        // CLI は removal を送るよう求められていないので､残った removal は
-        // 残務ではない — plan ファイルは消える｡loop の側の規則は違う
-        // (`auto::apply` を見よ)｡
+    fn a_run_without_prune_keeps_the_plan_while_removals_are_unsent() {
+        // #230: removal は支払い済みの diff だ｡`--apply` が addition を
+        // 流し切ったあとも plan は残り､`--apply --prune` がそこから送る —
+        // loop 側 (`auto::apply`) と同じ規則｡消せば両側を読み直す払いに戻る｡
         let scratch = Scratch::new("run-adds-only");
         save_plan(
             &scratch.paths().sync_plan_file(),
@@ -1301,6 +1354,42 @@ mod tests {
         )
         .unwrap();
 
+        let kept = load_plan(&scratch.paths().sync_plan_file())
+            .unwrap()
+            .expect("the plan with an unsent removal stays on file");
+        assert_eq!(kept.pending_count(Action::Remove), 1);
+        assert_eq!(kept.pending_count(Action::Add), 0);
+
+        // 2 回目の `--apply` は何も送らず､plan もまだ消さない｡
+        let client = FakeApi::new();
+        run(
+            scratch.paths(),
+            &client,
+            "me",
+            "7",
+            request(true, false),
+            21_600,
+        )
+        .unwrap();
+        assert!(client.calls().is_empty());
+        assert!(
+            load_plan(&scratch.paths().sync_plan_file())
+                .unwrap()
+                .is_some()
+        );
+
+        // `--prune` が removal を送り切ると完了し､そこで消える｡
+        let client = FakeApi::new().writes(vec![Ok(())]);
+        run(
+            scratch.paths(),
+            &client,
+            "me",
+            "7",
+            request(true, true),
+            21_600,
+        )
+        .unwrap();
+        assert_eq!(client.calls(), [Call::Remove("8".to_string())]);
         assert_eq!(load_plan(&scratch.paths().sync_plan_file()).unwrap(), None);
     }
 

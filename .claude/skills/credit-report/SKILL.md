@@ -53,9 +53,9 @@ scripts/credit-report.sh --state-dir "$PWD/tmp/credit-YYYY-MM-DD" --purchase 'YY
   購入前の残高切れで、印にはしない。ユーザーの記憶している時刻と食い違ったらログの側を信じる。
 - **write の件数は失敗したリクエストを含む。** `usage.json` は HTTP の結果を見ずに 1 件と数える。
   スクリプトはログの `<endpoint>: HTTP 4xx` の行数を引いて内訳に出す。
-- **差額は単価の載っていない write の分。** いいね・リポスト・List メンバーの追加は
-  `x-api-budget` の `reference/pricing.md` に単価が無い。差額を件数で割った値は目安で、
-  裏取りは Developer Console でしかできない。
+- **差額は単価の載っていない write の分。** いいね・リポスト・List メンバーの削除は
+  `x-api-budget` の `reference/pricing.md` に単価が無い (追加は 2026-09-21 に $0.010 / request と実測済み)。
+  差額を件数で割った値は目安で、裏取りは Developer Console でしかできない。
 - **`Posts の件数が合わない` で止まったら集計を疑う。** posts 種別の endpoint の `today` の和は
   dedup の id 数と一致する (`usage::record_response` が dedup 後の数を足すため)。
   食い違うのは `usage.json` が壊れているか、数え方が変わったとき。

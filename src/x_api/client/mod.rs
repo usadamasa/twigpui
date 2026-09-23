@@ -29,6 +29,7 @@ mod urls;
 
 pub(crate) use status::{Denial, Denied, InvalidRequest, PaymentRequired};
 use status::{check_status, is_retryable_status, log_429};
+pub(crate) use urls::USER_PAGE_SIZE;
 
 const API_BASE: &str = "https://api.x.com/2";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
