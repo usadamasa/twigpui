@@ -101,10 +101,7 @@ impl TimelineView {
             return;
         };
         let mut wanted: Vec<String> = Vec::new();
-        for url in items
-            .iter()
-            .filter_map(|item| item.author_avatar_url.as_deref())
-        {
+        for url in avatar_urls(items) {
             if !self.avatar_paths.contains_key(url) && !wanted.iter().any(|seen| seen == url) {
                 wanted.push(url.to_string());
             }
@@ -156,6 +153,7 @@ impl TimelineView {
     /// `refresh_liked_ids`) は代わりにディスクから読み､順序に依存しない｡
     /// それがこれを見落としやすくしていた｡
     pub(in crate::ui) fn refresh_images(&mut self, cx: &mut Context<'_, Self>) {
+        self.images_sync = ImageCacheSync::Stale;
         self.refresh_avatars(cx);
         self.refresh_media(cx);
     }
@@ -166,27 +164,15 @@ impl TimelineView {
     /// 各サムネイルは着いたそばから現れ､失敗は欠けたままにするので枠は
     /// 残り､次の reload が取り直す｡
     ///
-    /// 添付 media は avatar より大きいが同じ経路で届き
-    /// (`pbs.twimg.com`､API の quota も credit も無い)､共有の画像
-    /// キャッシュ自身のサイズ上限で抑えられている｡
+    /// 添付 media は avatar より大きいが同じ経路で届く (`pbs.twimg.com`､
+    /// API の quota も credit も無い)｡`image_cache` の上限は 1 ファイルの
+    /// 大きさだけで､ディスク上の合計は抑えていない｡
     fn refresh_media(&mut self, cx: &mut Context<'_, Self>) {
         let TimelineState::Loaded(items) = &self.state else {
             return;
         };
         let mut wanted: Vec<String> = Vec::new();
-        for url in items
-            .iter()
-            // #123: quote された post の画像も､行自身のものと同じ経路で
-            // 落ちてくる｡これが無いとカードは永久に埋まらない空の枠を
-            // 描くことになり､それが置き換えたテキストだけのカードより
-            // 悪い｡
-            .flat_map(|item| {
-                item.media
-                    .iter()
-                    .chain(item.quoted.iter().flat_map(|quoted| quoted.media.iter()))
-            })
-            .map(|media| media.url.as_str())
-        {
+        for url in media_urls(items) {
             if !self.media_paths.contains_key(url) && !wanted.iter().any(|seen| seen == url) {
                 wanted.push(url.to_string());
             }
@@ -224,4 +210,72 @@ impl TimelineView {
             }
         }));
     }
+
+    /// timeline がもう参照しない avatar と media を index から落とし､
+    /// デコード済みの画像も `image_cache` から手放す｡デコード済み画像の
+    /// 寿命は timeline の 500 件の窓と同じになる｡
+    ///
+    /// `render` の頭で呼ぶ｡`RetainAllImageCache::remove` は atlas の tile を
+    /// 返すのに `&mut Window` が要る｡listener の中では current window が
+    /// `App.windows` から借り出されていて､`drop_image(_, None)` はその
+    /// window の atlas を取りこぼす｡`Loaded` でない間は `Stale` のまま待つ｡
+    pub(in crate::ui) fn prune_images(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        let TimelineState::Loaded(items) = &self.state else {
+            return;
+        };
+        self.images_sync = ImageCacheSync::Fresh;
+        let avatars: HashSet<&str> = avatar_urls(items).collect();
+        let media: HashSet<&str> = media_urls(items).collect();
+
+        let mut dropped: Vec<PathBuf> = self
+            .avatar_paths
+            .extract_if(|url, _| !avatars.contains(url.as_str()))
+            .map(|(_, path)| path)
+            .collect();
+        dropped.extend(
+            self.media_paths
+                .extract_if(|url, _| !media.contains(url.as_str()))
+                .map(|(_, path)| path),
+        );
+        self.media_failed.retain(|url| media.contains(url.as_str()));
+        if dropped.is_empty() {
+            return;
+        }
+
+        self.image_cache.update(cx, |cache, cx| {
+            for path in &dropped {
+                cache.remove(&gpui::Resource::from(path.clone()), window, cx);
+            }
+        });
+        log::write(
+            log::Level::Debug,
+            &format!(
+                "pruned {} images; {} left in the image cache",
+                dropped.len(),
+                self.image_cache.read(cx).len()
+            ),
+        );
+    }
+}
+
+/// timeline の行が描く avatar の URL｡取得 (`refresh_avatars`) と刈り取り
+/// (`prune_images`) が同じ集合を見るよう 1 か所にまとめる｡
+fn avatar_urls(items: &[TimelineItem]) -> impl Iterator<Item = &str> {
+    items
+        .iter()
+        .filter_map(|item| item.author_avatar_url.as_deref())
+}
+
+/// timeline の行が描く media の URL｡[`avatar_urls`] と同じ理由で 1 か所に置く｡
+fn media_urls(items: &[TimelineItem]) -> impl Iterator<Item = &str> {
+    items
+        .iter()
+        // #123: quote された post の画像も行自身のものと同じ経路で落とす｡
+        // 無いとカードは永久に埋まらない空の枠を描く｡
+        .flat_map(|item| {
+            item.media
+                .iter()
+                .chain(item.quoted.iter().flat_map(|quoted| quoted.media.iter()))
+        })
+        .map(|media| media.url.as_str())
 }

@@ -139,6 +139,7 @@ impl TimelineView {
             Some(path) => frame
                 .child(
                     img(path.clone())
+                        .image_cache(&self.image_cache)
                         .addressable(format!("media-image-{}", media.url))
                         .w(size.width)
                         .h(size.height)
@@ -195,6 +196,7 @@ impl TimelineView {
 
         match cached {
             Some(path) => img(path.clone())
+                .image_cache(&self.image_cache)
                 .size(AVATAR_SIZE)
                 .flex_shrink_0()
                 .rounded(theme::AVATAR_RADIUS)

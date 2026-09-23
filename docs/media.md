@@ -56,3 +56,22 @@ Retina ディスプレイではぼやける｡そこで twigpui は代わりに 
 アバターキャッシュを失っても､著者ごとに 1 回ダウンロードし直すだけで他には
 何も起きない — これは cache であって state ではない｡
 
+## デコード済み画像の寿命
+
+ディスクの cache とは別に､描いた画像はデコード済みの bitmap としてプロセスの中にも
+残る｡gpui の `img` は cache を渡さないと App 全体の asset cache に入れ､
+`remove_asset` を呼ぶまで手放さない｡twigpui はそこへ入れず､`TimelineView` が持つ
+`RetainAllImageCache` を行と viewer の `img` に渡す｡
+
+**寿命は timeline の 500 件の窓と同じ｡** timeline が変わるたび (poll､reload､source の
+切り替え､delete)､`Loaded` の post が参照しない URL を `avatar_paths` / `media_paths` /
+`media_failed` から落とし､そのとき cache からも消す｡auto-refresh が 3 分ごとに 10〜20 件を
+運ぶので､これが無いと描いた画像がすべて (アバターは 400×400､写真は取得したままの大きさで
+最大 1200px 程度､BGRA で 1 枚 4 MB 前後) 起動からずっと積み上がり､数時間で GB 単位になって
+スクロールまで重くなる｡刈るのは `render` の頭で､
+`refresh_images` はフラグを立てるだけ — cache から消すには `&mut Window` が要り､
+listener の中では現在の window が `App.windows` から外れていて取りこぼすため｡
+
+viewer は timeline と同じ cache を使う｡同じ写真を二度デコードせず､timeline の窓から
+外れれば一緒に消える｡
+

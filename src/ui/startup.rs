@@ -164,6 +164,8 @@ impl TimelineView {
             avatar_paths: HashMap::new(),
             media_paths: HashMap::new(),
             media_failed: HashSet::new(),
+            image_cache: RetainAllImageCache::new(cx),
+            images_sync: ImageCacheSync::Fresh,
             avatar_fetch: None,
             media_fetch: None,
             pending_delete: None,

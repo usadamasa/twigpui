@@ -234,6 +234,11 @@ impl Render for TimelineView {
         // #282: 報告カプセルの寿命も同じ理由で描画の頭に置く —
         // `expire_outcome` の doc を見る｡
         self.expire_outcome(cx);
+        // 窓から外れた画像を手放す｡`&mut Window` が要るのでここで刈る —
+        // `prune_images` の doc を見る｡
+        if self.images_sync == ImageCacheSync::Stale {
+            self.prune_images(window, cx);
+        }
         // #214: footer の文言はウィンドウの幅で選ぶ｡`status_bar` へ渡す｡
         let density = countdown::density(window.viewport_size().width);
         // #267: 背景の不透明度も 1 回決めて､本体と両方の帯へ渡す｡行の中に
