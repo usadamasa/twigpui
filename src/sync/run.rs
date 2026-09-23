@@ -11,8 +11,9 @@
 use anyhow::{Context as _, Result};
 
 use super::api::ListSyncApi;
+use super::pacing::WritePacing;
 use super::schedule::Outcome;
-use super::{Action, Plan, load_plan, load_state, plan, report, save_plan, save_state};
+use super::{Action, Plan, load_plan, plan, report, save_plan};
 use crate::cache;
 use crate::config::Config;
 use crate::oauth;
@@ -59,7 +60,7 @@ pub(super) fn read_all(
 /// members のミラーと following の台帳から diff を作る｡
 /// ミラーが無効なら先に members を全件取得し､保存してから following を読む｡
 /// following は台帳と `count` (今回の probe) で済むなら先頭だけ読む (#289)｡
-/// X への write は行わず､[`apply`] が消費する plan を返す｡
+/// X への write は行わず､tick ([`write_one`]) が消費する plan を返す｡
 pub(super) fn plan_sync(
     paths: &Paths,
     client: &dyn ListSyncApi,
@@ -124,149 +125,66 @@ fn seed_users(
         .collect()
 }
 
-/// `plan` の残り entry を適用し､届くたびに印を付けて永続化する (#163)｡
-///
-/// 最後に一度ではなく entry ごとに保存する: plan ファイルの意義はまさに､
-/// 途中で中断した apply — rate limit､crash､`^C` — がどちらの側も読み直さず､
-/// 既に通ったものを再送もせずに再開できることにある｡最後に一度だけ保存
-/// したのでは､再開が必要とする情報をちょうど失う｡
-///
-/// `prune` が門番をするのは removal だけだ｡addition こそミラーの目的で
-/// あって､誰かが手で list に入れたアカウントを消すことは #163 が未決の
-/// ままにした部分なので､求められない限り起きない｡
-///
-/// 最初の失敗で止めてそれを返し､disk 上の plan には届いたものがすべて
-/// 反映される｡エラーを越えて続ければ､受け付けられないと今しがた証明した
-/// credential や list に対して write を使い続けることになる｡
-///
-/// 例外は 400 だ (#254): それは送った entry への答えなので､entry に印を
-/// 付けて次へ進む｡ただし続けざまなら list や request の形そのものが
-/// 拒まれている方が疑わしいので､[`REJECTIONS_IN_A_ROW_LIMIT`] で止める｡
-fn apply(
-    paths: &Paths,
-    client: &dyn ListSyncApi,
-    plan: &mut Plan,
-    prune: bool,
-    now: i64,
-) -> (usize, Result<()>) {
-    apply_some(paths, client, plan, prune, now, usize::MAX)
+/// 1 件の write の結末｡`Err` は届きも拒まれもしなかったもの — rate limit､
+/// ネットワーク､失効した scope — で､呼び出し側が止まる理由になる｡
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Written {
+    /// `Ok` で返り､plan とミラーに印が付いた｡
+    Landed,
+    /// X が 400 で拒んだ (#254)｡plan に理由が付き､残務から外れた｡
+    Rejected,
 }
 
-/// [`apply`] と同じだが､最大 `limit` 件送ったところで返る — background
-/// sync の仕事の単位だ｡実際に通った件数を､batch を止めた失敗があれば
-/// それと **並べて** 返す: この件数があるおかげで `sync::state` は､write が
-/// 届いた直後の refusal と refusal に続く refusal を見分けられる｡
-/// `Result<usize>` では一方を報告するのにもう一方を捨てるしかない｡
+/// `user_id` への `action` を 1 件送り､結末を plan に書いて返す (#163)｡
 ///
-/// CLI に上限は要らない: `--apply` は終わらせることが仕事の前景コマンドだ｡
-/// loop には要る｡rate limit とは無関係の二つの理由による (追跡している
-/// window が既に自力で止めるからだ): 2,000 件の request を送る tick は
-/// その間ずっと background executor を占有し､途中できれいに落とせない｡
-/// それに addition をすべて送ってから最初の removal に行くので､ひどく
-/// 古びた list では stale な member が消える何時間も前に addition だけが
-/// 見えてしまう｡
+/// 1 tick に 1 件 (#231): `super::auto::apply` がこれを 1 回だけ呼び､
+/// 間は `sync::state` が `paused_until` に置く｡CLI の `--apply` も同じ
+/// tick を回す ([`run`]) ので､送る経路はこれ 1 本だ｡
 ///
-/// removal を交互に混ぜるのはその二つ目の理由による — `limit` は addition
-/// に先に使い切らず､両方の action に振り分ける｡
+/// 届くたびに印を付けて永続化する: plan ファイルの意義はまさに､途中で
+/// 中断した apply — rate limit､crash､`^C` — がどちらの側も読み直さず､
+/// 既に通ったものを再送もせずに再開できることにある｡
 ///
-/// write と write のあいだの間は [`super::api::ListSyncApi::pause_between_writes`]
-/// に頼む｡本番はそこで眠り､テストは渡された長さを記録するだけなので､
-/// 「1 件目の前には待たない」を suite を止めずに確かめられる｡
-pub(super) fn apply_some(
+/// 400 はこの entry への答えだ (#254)｡印を付けて `Rejected` を返す — 印が
+/// 無いと次の tick が同じ entry を先頭に戻し､同じ答えを 6 時間ごとに
+/// 受け取り続ける｡拒否が続くかどうかは `SyncState::rejected_in_a_row` が
+/// tick をまたいで数える｡
+pub(super) fn write_one(
     paths: &Paths,
     client: &dyn ListSyncApi,
     plan: &mut Plan,
-    prune: bool,
+    action: Action,
+    user_id: &str,
     now: i64,
-    limit: usize,
-) -> (usize, Result<()>) {
-    let mut sent = 0usize;
-    let mut attempted = 0usize;
-    let mut rejected = 0usize;
-    let mut rejected_in_a_row = 0u32;
-    let batch = super::schedule::next_batch(plan, prune, limit);
-    let batch_size = batch.len();
-    for (action, user_id) in batch {
-        // batch の中を散らす｡これが無いと batch は同じ秒のうちに全件を
-        // 投げる — #197 のロックの直前にしていた形｡1 件目の前には置かない｡
-        // tick は既に batch と batch の間を待って来ている｡
-        //
-        // 数えるのは届いた件数ではなく試した件数だ｡拒まれた entry を数に
-        // 入れないと､その次の request が間を置かずに飛ぶ｡
-        if attempted > 0 {
-            let gap = super::state::write_gap(crate::rate_limit::random_jitter_fraction());
-            // 眠る前に書く (#231)｡行のタイムスタンプと待つ秒数が sleep を
-            // 挟むので､次の 1 回はログだけで間が本当に空いたかを読める｡
-            // batch サマリだけでは 1 件ずつ送ったのか同じ秒に投げたのかが
-            // 見分けられなかった｡
-            crate::log::info(&format!(
-                "list sync: waiting {}s before write {} of {batch_size}",
-                gap.as_secs(),
-                attempted.saturating_add(1)
-            ));
-            client.pause_between_writes(gap);
+) -> Result<Written> {
+    let result = match action {
+        Action::Add => client.add_member(paths, &plan.list_id, user_id, now),
+        Action::Remove => client.remove_member(paths, &plan.list_id, user_id, now),
+    };
+    let written = match result {
+        Ok(()) => {
+            plan.mark_applied(user_id, action);
+            Written::Landed
         }
-        attempted = attempted.saturating_add(1);
-        let result = match action {
-            Action::Add => client.add_member(paths, &plan.list_id, &user_id, now),
-            Action::Remove => client.remove_member(paths, &plan.list_id, &user_id, now),
-        };
-        let landed = result.is_ok();
-        match result {
-            Ok(()) => {
-                plan.mark_applied(&user_id, action);
-                sent = sent.saturating_add(1);
-                rejected_in_a_row = 0;
+        Err(error) => match error.downcast_ref::<crate::x_api::InvalidRequest>() {
+            Some(refusal) => {
+                crate::log::warn(&format!(
+                    "list sync: X rejected the {} of {user_id} ({}); marked in the plan \
+                     and skipped",
+                    match action {
+                        Action::Add => "addition",
+                        Action::Remove => "removal",
+                    },
+                    refusal.detail
+                ));
+                plan.mark_rejected(user_id, action, &refusal.detail);
+                Written::Rejected
             }
-            // 400 はこの entry への答えだ (#254)｡印を付けて次へ進む — 印が
-            // 無いと次の tick が同じ entry を先頭に戻し､同じ答えを 6 時間
-            // ごとに受け取り続ける｡
-            Err(error) => match error.downcast_ref::<crate::x_api::InvalidRequest>() {
-                Some(refusal) => {
-                    crate::log::warn(&format!(
-                        "list sync: X rejected the {} of {user_id} ({}); marked in the plan \
-                         and skipped",
-                        match action {
-                            Action::Add => "addition",
-                            Action::Remove => "removal",
-                        },
-                        refusal.detail
-                    ));
-                    plan.mark_rejected(&user_id, action, &refusal.detail);
-                    rejected = rejected.saturating_add(1);
-                    rejected_in_a_row = rejected_in_a_row.saturating_add(1);
-                }
-                None => return (sent, Err(error)),
-            },
-        }
-        if let Err(error) = save_progress(paths, plan, &user_id, action, landed) {
-            return (sent, Err(error));
-        }
-        if rejected_in_a_row >= REJECTIONS_IN_A_ROW_LIMIT {
-            return (
-                sent,
-                Err(anyhow::anyhow!(
-                    "{rejected_in_a_row} writes in a row were rejected by X — stopping in case \
-                     the list or the request itself is what is being rejected. The plan on file \
-                     marks them; the next run continues past them"
-                )),
-            );
-        }
-    }
-    // 拒否だけの batch は entry の問題と list や credential の問題を
-    // 見分けられない｡tick の失敗として返し interval 分退く — 印は付いて
-    // いるので次の batch は先へ進み､list 全体が拒まれていても支出は
-    // interval あたり 1 batch で頭打ちになる｡
-    if sent == 0 && rejected > 0 {
-        return (
-            sent,
-            Err(anyhow::anyhow!(
-                "every write in this batch ({rejected}) was rejected by X; the plan on file marks \
-                 them and the next run continues past them"
-            )),
-        );
-    }
-    (sent, Ok(()))
+            None => return Err(error),
+        },
+    };
+    save_progress(paths, plan, user_id, action, written == Written::Landed)?;
+    Ok(written)
 }
 
 /// plan の送信済み印を先に保存し､成功時だけミラーにも反映する｡
@@ -278,20 +196,13 @@ fn save_progress(paths: &Paths, plan: &Plan, id: &str, action: Action, landed: b
     Ok(())
 }
 
-/// 連続してこの件数の write が 400 で拒まれたら apply を止める (#254)｡
-///
-/// 拒否 1 件は entry の問題だが､続けざまなら list や request の形そのものが
-/// 拒まれている可能性のほうが高い｡上限の無い `--apply` はこれが無いと
-/// plan を丸ごと撃ち切る — 1 request ずつ課金されながら｡
-const REJECTIONS_IN_A_ROW_LIMIT: u32 = 3;
-
 /// `--sync-list` が何をするよう求められたか｡
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Request {
     /// plan の write を送る｡指定が無ければ dry-run として､既存 plan と
     /// count を確認し､必要なときだけ読み取って plan と report を作る｡
     pub apply: bool,
-    /// removal も送る｡既定では off — [`apply`] を見よ｡
+    /// removal も送る｡既定では off — [`run`] を見よ｡
     pub prune: bool,
     /// 未送信の plan と count の省略判定を越えて diff を買い直す｡
     pub reread: bool,
@@ -357,6 +268,7 @@ pub(crate) fn run_cli(config: &Config, paths: &Paths, request: Request) -> i32 {
         &list_id,
         request,
         config.sync_interval_seconds,
+        config.sync_write_pacing,
     ) {
         Ok(report) => {
             println!("{report}");
@@ -386,12 +298,18 @@ fn resolve_own_id(paths: &Paths, client: &dyn ListSyncApi) -> Result<String> {
 /// すべて素の拒否になり､下がすべて一つの `Result` になるように切り出して
 /// ある｡
 ///
-/// `--apply` は background sync の記憶 ([`super::SyncState`]) を共有する:
-/// backoff を読み､そう告げたうえで **それでも送る** — 端末の前にいる人が
-/// 上限が明けたか見るために batch を一つ投げてみるのは #197 が持つ最も
-/// 安い実測であり､拒否すればそれを取り上げることになる｡返ってきたものは
-/// 同じ state へ settle されるので､届いた write は loop にとっても連続を
-/// 終わらせるし､refusal はそれを伸ばす｡
+/// `--apply` は background sync と同じ tick ([`super::auto::tick`]) を､
+/// plan を流し切るまで前景で回す (#231)｡歩調 — 1 件ずつ､gap､batch､
+/// cooldown — も記憶 ([`super::SyncState`]) も loop と共有する: bot 判定は
+/// X の側にあり､端末の前に人がいるかどうかを X は知らない｡届いた write は
+/// loop にとっても連続を終わらせるし､refusal はそれを伸ばす｡
+///
+/// loop と違うのは 3 点だけ｡removal は `--prune` の有無で丸ごと決まり
+/// (割合の上限は無い — `sync_prune_limit_percent` の代わりに 100 か 0 を
+/// 渡す)､最初の tick は前の実行が残した間を待たず､plan を流し切るか
+/// 止められたら終わる｡refusal の backoff の途中なら送らずに終わる: 以前は
+/// 上限が明けたか見るために送ってみていたが､それは X から見れば拒否の
+/// 直後にもう 1 件投げる機械の形だ｡
 fn run(
     paths: &Paths,
     client: &dyn ListSyncApi,
@@ -399,6 +317,7 @@ fn run(
     list_id: &str,
     request: Request,
     interval_seconds: u32,
+    writes: WritePacing,
 ) -> Result<String> {
     let plan_path = paths.sync_plan_file();
     let now = oauth::unix_now();
@@ -425,7 +344,7 @@ fn run(
         return super::preflight::dry_run(paths, client, user_id, list_id, request.reread, now);
     }
 
-    let Some(mut plan) = load_plan(&plan_path)? else {
+    let Some(plan) = load_plan(&plan_path)? else {
         anyhow::bail!(
             "no sync plan on file. Run --sync-list without --apply first: the dry-run is \
              what reads both sides and writes the plan this consumes."
@@ -441,70 +360,130 @@ fn run(
         plan.list_id
     );
 
-    // write と write のあいだが揺らぐようになって､CLI の apply は数分から
-    // 時間単位へ移った｡黙って止まって見えるので最悪ケースを先に出す —
-    // `x-api-budget` の「押す前に最悪ケースを出す」と同じ規則｡
+    // 送るものが無ければ tick を回さない: `--prune` 無しで removal だけが
+    // 残った plan (#230) はそのままにし､強制した tick が diff を買いに
+    // 行かないようにする｡
     let pending = super::schedule::sendable(&plan, request.prune);
-    if pending > 0 {
-        let worst_minutes = pending
-            .saturating_mul(
-                usize::try_from(
-                    super::state::WRITE_GAP_FLOOR_SECONDS + super::state::WRITE_GAP_SPREAD_SECONDS,
-                )
-                .unwrap_or(0),
-            )
-            .saturating_div(60);
-        eprintln!(
-            "note: sending {pending} write(s), pausing 3-20s between each so the run does not \
-             look like a script. Worst case about {worst_minutes} minute(s)."
-        );
+    if pending == 0 {
+        return Ok(report(&plan));
     }
+    // 1 件ずつ揺らぐので､CLI の apply は分ではなく時間の単位になる｡黙って
+    // 止まって見えるので最悪ケースを先に出す — `x-api-budget` の「押す前に
+    // 最悪ケースを出す」と同じ規則｡最悪は batch が毎回 1 件で cooldown が
+    // 毎回最長のとき｡
+    let worst_minutes = pending
+        .saturating_mul(usize::try_from(writes.cooldown_seconds.max).unwrap_or(0))
+        .saturating_div(60);
+    eprintln!(
+        "note: sending {pending} write(s) one at a time ({writes}) so the run does not look \
+         like a script. Worst case about {worst_minutes} minute(s)."
+    );
 
-    let state_path = paths.sync_state_file();
-    let state = load_state(&state_path);
-    if state.is_blocked(now) {
-        eprintln!(
-            "note: the background sync is backing off until unix time {} after {} consecutive \
-             refusal(s); sending anyway, and recording what happens for it",
-            state.blocked_until.unwrap_or(now),
-            state.refusals
-        );
-    }
-
-    let (sent, result) = apply(paths, client, &mut plan, request.prune, now);
-    let remaining = super::schedule::sendable(&plan, request.prune);
-    let outcome = super::schedule::apply_outcome(sent, remaining, result);
-    let spacing = super::state::Spacing {
+    let landed = drain(
+        paths,
+        client,
+        user_id,
+        list_id,
+        request.prune,
         interval_seconds,
-        apply_pause_seconds: super::state::apply_pause_seconds(
-            crate::rate_limit::random_jitter_fraction(),
-        ),
-    };
-    let settled = super::state::settle(state, outcome.as_ref().ok(), now, spacing);
-    save_state(&state_path, &settled.state)?;
+        writes,
+    )?;
+    // 流し切った plan は tick が消している (`auto::apply`)｡`--prune` 無しで
+    // removal が残った plan は残る (#230)｡
+    Ok(match load_plan(&plan_path)? {
+        Some(plan) => report(&plan),
+        None => format!("list {list_id}: {landed} write(s) applied, nothing left to send"),
+    })
+}
 
-    // `is_complete` であって「addition を送り切った」ではない (#230): `--prune`
-    // 無しで残った removal は支払い済みの diff で､`--apply --prune` が送る元は
-    // このファイルだ｡`auto::apply` と同じ規則｡
-    if matches!(outcome, Ok(Outcome::Applied { .. })) && plan.is_complete() {
-        // 再開すべきものは残っておらず､置いたままにすると次の --apply に
-        // 残務があるように見えてしまう｡
-        std::fs::remove_file(&plan_path)
-            .with_context(|| format!("could not remove {}", plan_path.display()))?;
-    }
-    match outcome? {
-        Outcome::RateLimited { opaque, .. } => anyhow::bail!(
-            "rate limited after {sent} write(s) landed{}; the plan on file records them. \
-             Backing off until unix time {} (refusal #{}); re-run --apply after that.",
-            if opaque {
-                " — by a cap the x-rate-limit headers do not describe"
-            } else {
-                ""
-            },
-            settled.wake_at,
-            settled.state.refusals
-        ),
-        _ => Ok(report(&plan)),
+/// plan を流し切るか止められるまで tick を回し､届いた件数を返す ([`run`]
+/// の `--apply` の本体)｡
+///
+/// 割合の上限 (#176) は background の規則で､CLI は `prune` が答えだ:
+/// 100 は removal を丸ごと許し､0 は addition だけにする｡最初の tick だけ
+/// 強制して､前の実行が残した間を待たない｡
+fn drain(
+    paths: &Paths,
+    client: &dyn ListSyncApi,
+    user_id: &str,
+    list_id: &str,
+    prune: bool,
+    interval_seconds: u32,
+    writes: WritePacing,
+) -> Result<usize> {
+    let prune_limit_percent = if prune { 100 } else { 0 };
+    let mut now = oauth::unix_now();
+    let mut landed = 0usize;
+    let mut forced = true;
+    loop {
+        let pacing = super::Pacing {
+            interval_seconds,
+            writes,
+            forced,
+        };
+        let tick = super::auto::tick(
+            paths,
+            client,
+            user_id,
+            list_id,
+            pacing,
+            prune_limit_percent,
+            now,
+        );
+        forced = false;
+        let remaining = match tick.outcome? {
+            Outcome::Applied { sent, remaining } => {
+                landed = landed.saturating_add(sent);
+                remaining
+            }
+            Outcome::Rejected { remaining } => remaining,
+            Outcome::Idle { pending, .. } => pending,
+            Outcome::RateLimited { opaque, sent, .. } => anyhow::bail!(
+                "rate limited after {} write(s) landed{}; the plan on file records them. \
+                 Backing off until unix time {} (refusal #{}); re-run --apply after that.",
+                landed.saturating_add(sent),
+                if opaque {
+                    " — by a cap the x-rate-limit headers do not describe"
+                } else {
+                    ""
+                },
+                tick.wake_at,
+                tick.state.refusals
+            ),
+            // `pending > 0` の plan からは起きない｡起きたなら止まる方が安い｡
+            Outcome::Diffed { .. } => {
+                anyhow::bail!("the plan was replaced mid-run; re-run --apply")
+            }
+        };
+        if remaining == 0 {
+            return Ok(landed);
+        }
+        if tick.state.is_blocked(now) {
+            anyhow::bail!(
+                "{landed} write(s) landed; the plan on file records them. The sync is backing \
+                 off until unix time {} ({}); re-run --apply after that.",
+                tick.wake_at,
+                if tick.state.refusals > 0 {
+                    format!("refusal #{}", tick.state.refusals)
+                } else {
+                    format!(
+                        "{} writes in a row were rejected by X, in case the list or the \
+                         request itself is what is being rejected",
+                        super::state::REJECTIONS_IN_A_ROW_LIMIT
+                    )
+                }
+            );
+        }
+        // tick が置いた間 (gap か cooldown) を眠る｡loop は毎分起きて決め直す
+        // が､前景のコマンドは期限まで眠ればよい｡
+        let wait = tick.wake_at.saturating_sub(now);
+        eprintln!("{landed} landed, {remaining} to go; next write in {wait}s");
+        client.pause_between_writes(std::time::Duration::from_secs(
+            u64::try_from(wait).unwrap_or(0),
+        ));
+        // fake の sleep は即座に返るので､時計も期限まで進める｡本物は眠った
+        // あとの `unix_now()` がそれ以上になっている｡
+        now = oauth::unix_now().max(tick.wake_at);
     }
 }
 
@@ -516,7 +495,8 @@ mod mirror_tests;
 mod tests {
     use super::super::api::fake::{Call, FakeApi, Scratch, page, rate_limited, rejected, user};
     use super::*;
-    use crate::sync::{Action, PlanEntry};
+    use crate::sync::pacing::Span;
+    use crate::sync::{Action, PlanEntry, load_state, save_state};
 
     /// 未適用の entry だけを持つ plan｡`members_total` は removal を測る
     /// 分母なので､prune の判定が絡むテストが自分で上書きする｡
@@ -717,33 +697,90 @@ mod tests {
         assert!(error.contains("development sync seed @"), "{error}");
     }
 
-    // --- apply_some: batch 1 回分の write ---
+    // --- write_one: 1 tick が送る 1 件 (#231) ---
 
     #[test]
-    fn a_batch_stops_at_its_limit_and_leaves_the_rest_on_file() {
-        let scratch = Scratch::new("apply-limit");
-        let client = FakeApi::new().writes(vec![Ok(()), Ok(())]);
-        let mut plan = plan_of("7", &["1", "2", "3"], &[]);
+    fn a_write_that_lands_is_marked_on_disk_and_reported_as_landed() {
+        let scratch = Scratch::new("write-one-landed");
+        let client = FakeApi::new().writes(vec![Ok(())]);
+        let mut plan = plan_of("7", &["1", "2"], &[]);
 
-        let (sent, result) = apply_some(scratch.paths(), &client, &mut plan, false, 0, 2);
+        let written = write_one(scratch.paths(), &client, &mut plan, Action::Add, "1", 0).unwrap();
 
-        assert_eq!(sent, 2);
-        assert!(result.is_ok(), "{result:?}");
-        assert_eq!(plan.pending_count(Action::Add), 1);
+        assert_eq!(written, Written::Landed);
+        assert_eq!(client.calls(), [Call::Add("1".to_string())]);
         let on_file = load_plan(&scratch.paths().sync_plan_file())
             .unwrap()
             .unwrap();
-        assert_eq!(applied_ids(&on_file), ["1", "2"]);
+        assert_eq!(applied_ids(&on_file), ["1"]);
     }
 
     #[test]
-    fn additions_and_removals_alternate_so_a_stopped_catch_up_is_not_all_one_sided() {
-        let scratch = Scratch::new("apply-alternate");
-        let client = FakeApi::new().writes(vec![Ok(()), Ok(()), Ok(()), Ok(())]);
-        let mut plan = plan_of("7", &["1", "2"], &["8", "9"]);
+    fn a_write_the_api_rejects_is_marked_and_reported_as_rejected() {
+        let scratch = Scratch::new("write-one-rejected");
+        let client = FakeApi::new().writes(vec![Err(rejected("The user_id is not valid."))]);
+        let mut plan = plan_of("7", &["1"], &[]);
 
-        let (_, result) = apply_some(scratch.paths(), &client, &mut plan, true, 0, 4);
-        assert!(result.is_ok(), "{result:?}");
+        let written = write_one(scratch.paths(), &client, &mut plan, Action::Add, "1", 0).unwrap();
+
+        assert_eq!(written, Written::Rejected);
+        let on_file = load_plan(&scratch.paths().sync_plan_file())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            on_file.entries[0].rejected.as_deref(),
+            Some("The user_id is not valid.")
+        );
+    }
+
+    #[test]
+    fn a_refused_write_comes_back_as_the_error_with_nothing_marked() {
+        let scratch = Scratch::new("write-one-refused");
+        let client = FakeApi::new().writes(vec![Err(rate_limited(9_000, true))]);
+        let mut plan = plan_of("7", &["1"], &[]);
+
+        let error =
+            write_one(scratch.paths(), &client, &mut plan, Action::Add, "1", 0).unwrap_err();
+
+        assert!(
+            error
+                .downcast_ref::<crate::rate_limit::RateLimited>()
+                .is_some(),
+            "{error:#}"
+        );
+        assert!(!plan.entries[0].applied);
+        assert!(plan.entries[0].rejected.is_none());
+    }
+
+    // --- run --apply: loop と同じ tick を前景で回す (#231) ---
+
+    #[test]
+    fn the_cli_apply_paces_writes_exactly_like_the_loop() {
+        // gap 9 秒､batch 2 件､cooldown 50 秒に固定すれば､4 件の間は
+        // gap → cooldown → gap と決まる｡交互も tick と同じ (`next_write`)｡
+        let scratch = Scratch::new("run-paced");
+        save_plan(
+            &scratch.paths().sync_plan_file(),
+            &plan_of("7", &["1", "2"], &["8", "9"]),
+        )
+        .unwrap();
+        let client = FakeApi::new().writes(vec![Ok(()), Ok(()), Ok(()), Ok(())]);
+        let writes = WritePacing {
+            gap_seconds: Span::new(9, 9),
+            batch_writes: Span::new(2, 2),
+            cooldown_seconds: Span::new(50, 50),
+        };
+
+        let report = run(
+            scratch.paths(),
+            &client,
+            "me",
+            "7",
+            request(true, true),
+            21_600,
+            writes,
+        )
+        .unwrap();
 
         assert_eq!(
             client.calls(),
@@ -754,111 +791,24 @@ mod tests {
                 Call::Remove("9".to_string()),
             ]
         );
-    }
-
-    #[test]
-    fn without_prune_the_batch_never_reaches_a_removal() {
-        let scratch = Scratch::new("apply-no-prune");
-        let client = FakeApi::new().writes(vec![Ok(())]);
-        let mut plan = plan_of("7", &["1"], &["8"]);
-
-        let (sent, _) = apply_some(scratch.paths(), &client, &mut plan, false, 0, usize::MAX);
-
-        assert_eq!(sent, 1);
-        assert_eq!(client.calls(), [Call::Add("1".to_string())]);
-        assert_eq!(plan.pending_count(Action::Remove), 1);
-    }
-
-    #[test]
-    fn a_refused_write_stops_the_batch_and_comes_back_beside_what_landed() {
-        // 件数と失敗が並んで返ることが `state::settle` の見分けの拠りどころだ｡
-        let scratch = Scratch::new("apply-refused");
-        let client = FakeApi::new().writes(vec![Ok(()), Err(rate_limited(9_000, true))]);
-        let mut plan = plan_of("7", &["1", "2", "3"], &[]);
-
-        let (sent, result) = apply_some(scratch.paths(), &client, &mut plan, false, 0, usize::MAX);
-
-        assert_eq!(sent, 1);
-        assert!(result.is_err(), "the refusal must come back");
-        assert_eq!(client.calls().len(), 2, "the batch stops at the refusal");
-        // 届いたものは disk に残る｡再開が再送しないのはこれがあるからだ｡
-        let on_file = load_plan(&scratch.paths().sync_plan_file())
-            .unwrap()
-            .unwrap();
-        assert_eq!(applied_ids(&on_file), ["1"]);
-    }
-
-    #[test]
-    fn a_rejected_write_is_skipped_and_the_batch_goes_on() {
-        // #254: 先頭の 1 件が 400 で拒まれると､以前は batch ごと止まって
-        // 6 時間後に同じ entry へ同じ request を送り､1,977 件が永久に
-        // 動かなかった｡拒否は entry の問題なので印を付けて次へ進む｡
-        let scratch = Scratch::new("apply-rejected");
-        let client =
-            FakeApi::new().writes(vec![Err(rejected("The user_id is not valid.")), Ok(())]);
-        let mut plan = plan_of("7", &["1", "2"], &[]);
-
-        let (sent, result) = apply_some(scratch.paths(), &client, &mut plan, false, 0, usize::MAX);
-
-        assert!(result.is_ok(), "{result:?}");
-        assert_eq!(sent, 1);
         assert_eq!(
-            client.calls(),
-            [Call::Add("1".into()), Call::Add("2".into())]
+            client.pauses(),
+            [9, 50, 9].map(std::time::Duration::from_secs)
         );
-        assert_eq!(applied_ids(&plan), ["2"]);
-        assert_eq!(
-            plan.entries[0].rejected.as_deref(),
-            Some("The user_id is not valid.")
-        );
-        // 印は disk にも届く｡次の tick が同じ entry を先頭に戻さないためだ｡
-        let on_file = load_plan(&scratch.paths().sync_plan_file())
-            .unwrap()
-            .unwrap();
-        assert!(on_file.entries[0].rejected.is_some());
-        assert!(on_file.is_complete());
+        assert!(report.contains("4 write(s) applied"), "{report}");
+        assert_eq!(load_plan(&scratch.paths().sync_plan_file()).unwrap(), None);
     }
 
     #[test]
-    fn a_rejection_still_keeps_the_gap_before_the_next_write() {
-        // 拒否を数に入れないと次の request が間を置かずに飛ぶ｡#197 の
-        // 連射をそのまま再現する形なので､間は「送れた数」ではなく
-        // 「試した数」に付ける｡
-        let scratch = Scratch::new("apply-rejected-gap");
-        let client = FakeApi::new().writes(vec![Err(rejected("no")), Ok(())]);
-        let mut plan = plan_of("7", &["1", "2"], &[]);
-
-        let (_, result) = apply_some(scratch.paths(), &client, &mut plan, false, 0, usize::MAX);
-
-        assert!(result.is_ok(), "{result:?}");
-        assert_eq!(client.pauses().len(), 1, "2 attempts take 1 gap");
-    }
-
-    #[test]
-    fn a_batch_that_only_got_rejections_is_an_error() {
-        // 1 件も届かず拒否だけの batch は entry の問題と list や credential
-        // の問題を見分けられない｡tick の失敗として返し､interval 分退く｡
-        // 印は付いているので次の batch は先へ進む｡
-        let scratch = Scratch::new("apply-all-rejected");
-        let client = FakeApi::new().writes(vec![Err(rejected("no")), Err(rejected("no"))]);
-        let mut plan = plan_of("7", &["1", "2", "3"], &[]);
-
-        let (sent, result) = apply_some(scratch.paths(), &client, &mut plan, false, 0, 2);
-
-        assert_eq!(sent, 0);
-        let error = result.unwrap_err().to_string();
-        assert!(error.contains("rejected"), "{error}");
-        assert_eq!(client.calls().len(), 2);
-        assert!(plan.entries[0].rejected.is_some());
-        assert!(plan.entries[1].rejected.is_some());
-        assert!(plan.entries[2].rejected.is_none());
-    }
-
-    #[test]
-    fn three_rejections_in_a_row_stop_an_unlimited_apply() {
-        // CLI の `--apply` は上限無しで回るので､400 が list 全体の問題
-        // だったときに 2,000 件を撃ち切ってしまう｡連続 3 件で止める｡
-        let scratch = Scratch::new("apply-rejected-run");
+    fn three_rejections_in_a_row_stop_the_cli_apply() {
+        // 400 が list 全体の問題だったときに 2,000 件を撃ち切ってはならない｡
+        // loop と同じ規則 (`state::REJECTIONS_IN_A_ROW_LIMIT`) で止まる｡
+        let scratch = Scratch::new("run-rejected");
+        save_plan(
+            &scratch.paths().sync_plan_file(),
+            &plan_of("7", &["1", "2", "3", "4", "5"], &[]),
+        )
+        .unwrap();
         let client = FakeApi::new().writes(vec![
             Ok(()),
             Err(rejected("no")),
@@ -866,51 +816,67 @@ mod tests {
             Err(rejected("no")),
             Ok(()),
         ]);
-        let mut plan = plan_of("7", &["1", "2", "3", "4", "5"], &[]);
 
-        let (sent, result) = apply_some(scratch.paths(), &client, &mut plan, false, 0, usize::MAX);
+        let error = run(
+            scratch.paths(),
+            &client,
+            "me",
+            "7",
+            request(true, false),
+            21_600,
+            WritePacing::DEFAULT,
+        )
+        .unwrap_err()
+        .to_string();
 
-        assert_eq!(sent, 1);
-        assert!(result.is_err(), "the run must stop at the third rejection");
+        assert!(error.contains("3 writes in a row were rejected"), "{error}");
+        assert!(error.contains("1 write(s) landed"), "{error}");
         assert_eq!(client.calls().len(), 4, "entry 5 is never sent");
-        assert!(plan.entries[4].rejected.is_none());
-        assert!(!plan.entries[4].applied);
+        let on_file = load_plan(&scratch.paths().sync_plan_file())
+            .unwrap()
+            .unwrap();
+        assert!(!on_file.entries[4].applied);
+        assert!(on_file.entries[4].rejected.is_none());
+        // loop もこの block を守る｡
+        let state = load_state(&scratch.paths().sync_state_file());
+        assert!(state.blocked_until.is_some(), "{state:?}");
     }
 
     #[test]
-    fn the_batch_pauses_before_every_write_but_the_first() {
-        // tick は batch と batch の間を待って来ているので､1 件目の前に
-        // 待てば batch ごとに二重の間が入る｡
-        let scratch = Scratch::new("apply-pause");
-        let client = FakeApi::new().writes(vec![Ok(()), Ok(()), Ok(())]);
-        let mut plan = plan_of("7", &["1", "2", "3"], &[]);
+    fn a_cli_apply_during_a_refusal_backoff_sends_nothing() {
+        // 以前は「上限が明けたか見るために送ってみる」だったが､X から見れば
+        // 拒否の直後にもう 1 件投げる機械の形だ｡
+        let scratch = Scratch::new("run-backoff");
+        save_plan(
+            &scratch.paths().sync_plan_file(),
+            &plan_of("7", &["1"], &[]),
+        )
+        .unwrap();
+        save_state(
+            &scratch.paths().sync_state_file(),
+            &super::super::SyncState {
+                blocked_until: Some(i64::MAX),
+                refusals: 2,
+                ..super::super::SyncState::default()
+            },
+        )
+        .unwrap();
+        let client = FakeApi::new();
 
-        let (_, result) = apply_some(scratch.paths(), &client, &mut plan, false, 0, usize::MAX);
-        assert!(result.is_ok(), "{result:?}");
+        let error = run(
+            scratch.paths(),
+            &client,
+            "me",
+            "7",
+            request(true, false),
+            21_600,
+            WritePacing::DEFAULT,
+        )
+        .unwrap_err()
+        .to_string();
 
-        let pauses = client.pauses();
-        assert_eq!(pauses.len(), 2, "3 writes take 2 gaps: {pauses:?}");
-        let floor = super::super::state::WRITE_GAP_FLOOR_SECONDS;
-        let ceiling = floor + super::super::state::WRITE_GAP_SPREAD_SECONDS;
-        for gap in pauses {
-            assert!(
-                (floor..=ceiling).contains(&gap.as_secs()),
-                "the gap must stay inside the configured spread: {gap:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn the_unlimited_apply_sends_the_whole_plan() {
-        let scratch = Scratch::new("apply-all");
-        let client = FakeApi::new().writes(vec![Ok(()), Ok(()), Ok(())]);
-        let mut plan = plan_of("7", &["1", "2"], &["8"]);
-
-        let (sent, result) = apply(scratch.paths(), &client, &mut plan, true, 0);
-
-        assert_eq!(sent, 3);
-        assert!(result.is_ok(), "{result:?}");
-        assert!(plan.is_complete());
+        assert!(error.contains("refusal #2"), "{error}");
+        assert!(client.calls().is_empty(), "nothing may be sent");
     }
 
     // --- run: dry-run と apply の入口 ---
@@ -936,6 +902,7 @@ mod tests {
             "7",
             request(false, false),
             21_600,
+            WritePacing::DEFAULT,
         )
         .unwrap();
         assert!(client.calls().is_empty());
@@ -969,6 +936,7 @@ mod tests {
             "7",
             request(false, false),
             21_600,
+            WritePacing::DEFAULT,
         )
         .unwrap();
         assert!(without.contains("sync_members.json"), "{without}");
@@ -985,6 +953,7 @@ mod tests {
             "7",
             request(false, false),
             21_600,
+            WritePacing::DEFAULT,
         )
         .unwrap();
         assert!(!with.contains("--reread first"), "{with}");
@@ -1013,6 +982,7 @@ mod tests {
             "7",
             request(false, false),
             21_600,
+            WritePacing::DEFAULT,
         )
         .unwrap();
         assert!(
@@ -1033,6 +1003,7 @@ mod tests {
                 ..request(false, false)
             },
             21_600,
+            WritePacing::DEFAULT,
         )
         .unwrap();
         assert_eq!(
@@ -1060,7 +1031,16 @@ mod tests {
             reread: true,
             ..request(false, false)
         };
-        run(scratch.paths(), &client, "me", "7", request, 21_600).unwrap();
+        run(
+            scratch.paths(),
+            &client,
+            "me",
+            "7",
+            request,
+            21_600,
+            WritePacing::DEFAULT,
+        )
+        .unwrap();
         assert!(client.calls().contains(&Call::Following(None)));
         assert!(client.calls().contains(&Call::Members(None)));
         let saved = load_plan(&scratch.paths().sync_plan_file())
@@ -1102,6 +1082,7 @@ mod tests {
             "7",
             request(false, false),
             21_600,
+            WritePacing::DEFAULT,
         )
         .unwrap();
         assert!(text.contains("1 to add, 0 to remove"), "{text}");
@@ -1138,7 +1119,8 @@ mod tests {
                 "me",
                 "7",
                 request(false, false),
-                21_600
+                21_600,
+                WritePacing::DEFAULT,
             )
             .is_err()
         );
@@ -1152,6 +1134,7 @@ mod tests {
             "7",
             request(false, false),
             21_600,
+            WritePacing::DEFAULT,
         )
         .unwrap();
         assert_eq!(
@@ -1186,6 +1169,7 @@ mod tests {
                 "7",
                 request(false, false),
                 21_600,
+                WritePacing::DEFAULT,
             )
             .unwrap();
             assert!(client.calls().contains(&Call::Following(None)));
@@ -1206,6 +1190,7 @@ mod tests {
             "7",
             request(false, false),
             21_600,
+            WritePacing::DEFAULT,
         )
         .unwrap();
 
@@ -1230,6 +1215,7 @@ mod tests {
             "7",
             request(true, false),
             21_600,
+            WritePacing::DEFAULT,
         )
         .unwrap_err()
         .to_string();
@@ -1256,6 +1242,7 @@ mod tests {
             "7",
             request(true, false),
             21_600,
+            WritePacing::DEFAULT,
         )
         .unwrap_err()
         .to_string();
@@ -1285,6 +1272,7 @@ mod tests {
             "7",
             request(true, false),
             21_600,
+            WritePacing::DEFAULT,
         )
         .unwrap();
 
@@ -1312,6 +1300,7 @@ mod tests {
             "7",
             request(true, false),
             21_600,
+            WritePacing::DEFAULT,
         )
         .unwrap_err()
         .to_string();
@@ -1351,6 +1340,7 @@ mod tests {
             "7",
             request(true, false),
             21_600,
+            WritePacing::DEFAULT,
         )
         .unwrap();
 
@@ -1369,6 +1359,7 @@ mod tests {
             "7",
             request(true, false),
             21_600,
+            WritePacing::DEFAULT,
         )
         .unwrap();
         assert!(client.calls().is_empty());
@@ -1387,6 +1378,7 @@ mod tests {
             "7",
             request(true, true),
             21_600,
+            WritePacing::DEFAULT,
         )
         .unwrap();
         assert_eq!(client.calls(), [Call::Remove("8".to_string())]);
@@ -1423,7 +1415,7 @@ mod tests {
             auto_sync_list: false,
             sync_interval_seconds: 21_600,
             sync_prune_limit_percent: 10,
-            sync_writes_per_batch: 5,
+            sync_write_pacing: WritePacing::DEFAULT,
             auto_refresh: false,
             auto_refresh_interval_seconds: 300,
             follow_new_posts: false,

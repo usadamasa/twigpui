@@ -2093,7 +2093,7 @@ mod tests {
             auto_sync_list: false,
             sync_interval_seconds: 21_600,
             sync_prune_limit_percent: 10,
-            sync_writes_per_batch: 2,
+            sync_write_pacing: crate::sync::WritePacing::DEFAULT,
             // 同じ理由で off (#21)｡
             auto_refresh: false,
             auto_refresh_interval_seconds: 300,
@@ -5620,7 +5620,7 @@ mod tests {
             auto_sync_list: false,
             sync_interval_seconds: 21_600,
             sync_prune_limit_percent: 10,
-            sync_writes_per_batch: 2,
+            sync_write_pacing: crate::sync::WritePacing::DEFAULT,
             // 同じ理由で off (#21)｡
             auto_refresh: false,
             auto_refresh_interval_seconds: 300,

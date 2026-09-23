@@ -122,9 +122,15 @@ pub(crate) enum Outcome {
         members_total: usize,
         held: bool,
     },
-    /// plan の write を 1 batch 送り出した｡`remaining` は loop がまだ
-    /// 送ってよいもの — [`sendable`] なので保留された removal は数えない｡
+    /// plan の write を送り出した — loop は 1 tick に 1 件 (#231)､CLI の
+    /// `--apply` は plan を丸ごと｡`remaining` は loop がまだ送ってよいもの
+    /// — [`sendable`] なので保留された removal は数えない｡
     Applied { sent: usize, remaining: usize },
+    /// この tick の 1 件を X が 400 で拒んだ (#254)｡entry には印が付いて
+    /// おり､`remaining` はそれを除いた残りだ｡request は飛んでいるので
+    /// [`super::state::settle`] は届いた write と同じように間を置き､
+    /// 連続回数を数える｡
+    Rejected { remaining: usize },
     /// write が拒否された — 送る前に追跡している window によってか､
     /// X から 429 で｡disk 上の plan は catch-up がどこまで進んだかを正確に
     /// 記録する: `sent` はこの batch のうち refusal の前に届いた件数､
@@ -211,11 +217,14 @@ pub(crate) fn notice(outcome: &Outcome) -> Option<String> {
         } if *adds > 0 || *removals > 0 => {
             Some(format!("List sync: {adds} to add, {removals} to remove."))
         }
+        // 件数は言わない: loop は 1 tick に 1 件なので (#231)､最後の
+        // tick の `sent` は 2,000 件の catch-up でも 1 だ｡
         Outcome::Applied { sent, remaining: 0 } if *sent > 0 => {
-            Some(format!("List sync: {sent} change(s) applied."))
+            Some("List sync: caught up — every change is applied.".to_string())
         }
         Outcome::Diffed { .. }
         | Outcome::Applied { .. }
+        | Outcome::Rejected { .. }
         | Outcome::Idle { .. }
         | Outcome::RateLimited { .. } => None,
     }
@@ -293,8 +302,7 @@ pub(crate) fn is_finished(outcome: Option<&Outcome>) -> bool {
     matches!(outcome, Some(Outcome::Idle { pending: 0, .. }))
 }
 
-/// loop が次に送るべき `limit` 件の entry｡addition と removal から交互に
-/// 取る｡
+/// tick が次に送る 1 件 (#231)｡addition と removal を交互に取る｡
 ///
 /// addition を全部送ってから removal ではなく交互なのは､ひどく古びた
 /// list の catch-up が何時間もかかるからだ: add を先に送れば､最初の
@@ -302,36 +310,38 @@ pub(crate) fn is_finished(outcome: Option<&Outcome>) -> bool {
 /// 途中で中断した実行は list を正解に近づけるどころか､あるべき大きさより
 /// 確実に大きいまま残す｡
 ///
-/// `prune` が false なら removal は丸ごと落とす — それが CLI の既定で､
-/// 二つの経路が分かれる唯一の場所がこの関数だ｡
+/// 1 tick に 1 件なので「交互」は plan の印から読む: 片付いた (届いたか
+/// 拒まれた) removal が addition より少ないあいだは removal の番だ｡片側が
+/// 尽きればもう片側を続け､`prune` が false なら removal は見ない｡
 ///
-/// `plan` を借りずに所有権のある id を返すのは､呼び出し側が進めながら
-/// entry に適用済みの印を付けるからだ｡
-pub(crate) fn next_batch(
-    plan: &super::Plan,
-    prune: bool,
-    limit: usize,
-) -> Vec<(super::Action, String)> {
-    let mut adds = plan.pending(super::Action::Add);
-    let mut removals = plan.pending(super::Action::Remove);
-    let mut batch = Vec::new();
-    while batch.len() < limit {
-        let add = adds.next();
-        let removal = if prune { removals.next() } else { None };
-        if add.is_none() && removal.is_none() {
-            break;
+/// `plan` を借りずに所有権のある id を返すのは､呼び出し側が entry に
+/// 印を付けるからだ｡
+pub(crate) fn next_write(plan: &super::Plan, prune: bool) -> Option<(super::Action, String)> {
+    let settled = |action| {
+        plan.entries
+            .iter()
+            .filter(|entry| entry.action == action && entry.is_settled())
+            .count()
+    };
+    let add = plan.pending(super::Action::Add).next();
+    let removal = if prune {
+        plan.pending(super::Action::Remove).next()
+    } else {
+        None
+    };
+    let entry = match (add, removal) {
+        (Some(add), Some(removal)) => {
+            if settled(super::Action::Remove) < settled(super::Action::Add) {
+                removal
+            } else {
+                add
+            }
         }
-        if let Some(entry) = add {
-            batch.push((super::Action::Add, entry.user_id.clone()));
-        }
-        if batch.len() >= limit {
-            break;
-        }
-        if let Some(entry) = removal {
-            batch.push((super::Action::Remove, entry.user_id.clone()));
-        }
-    }
-    batch
+        (Some(add), None) => add,
+        (None, Some(removal)) => removal,
+        (None, None) => return None,
+    };
+    Some((entry.action, entry.user_id.clone()))
 }
 
 /// background sync が `plan` の removal を送ってよいかどうか (#176)｡
@@ -409,19 +419,6 @@ mod tests {
                 .chain(removals.iter().map(|id| entry(id, Action::Remove)))
                 .collect(),
         }
-    }
-
-    /// batch を `+id` / `-id` の簡潔な文字列にしたもの｡交互になっている
-    /// 様子が tuple の vec に埋もれず assertion 上で読めるようにだ｡
-    fn batch(plan: &Plan, prune: bool, limit: usize) -> String {
-        next_batch(plan, prune, limit)
-            .iter()
-            .map(|(action, user_id)| match action {
-                Action::Add => format!("+{user_id}"),
-                Action::Remove => format!("-{user_id}"),
-            })
-            .collect::<Vec<_>>()
-            .join(" ")
     }
 
     /// 落ち着いた loop: diff は走り済み､残件も block も pause も無い｡
@@ -645,6 +642,7 @@ mod tests {
             blocked_until: Some(5_000),
             paused_until: None,
             refusals: 1,
+            ..crate::sync::SyncState::default()
         };
         let situation = Situation {
             last_diff_at: last_diff_for(true, refused.last_diff_at),
@@ -666,6 +664,7 @@ mod tests {
             blocked_until: Some(22_600),
             paused_until: None,
             refusals: 0,
+            ..crate::sync::SyncState::default()
         };
         assert_eq!(blocked_for(true, &failed), None);
         let situation = Situation {
@@ -684,6 +683,7 @@ mod tests {
             blocked_until: Some(22_600),
             paused_until: None,
             refusals: 0,
+            ..crate::sync::SyncState::default()
         };
         assert_eq!(blocked_for(false, &failed), Some(22_600));
     }
@@ -697,6 +697,7 @@ mod tests {
             blocked_until: Some(22_600),
             paused_until: None,
             refusals: 4,
+            ..crate::sync::SyncState::default()
         };
         assert_eq!(blocked_for(true, &refused), Some(22_600));
     }
@@ -759,6 +760,7 @@ mod tests {
             blocked_until: None,
             paused_until: Some(1_090),
             refusals: 0,
+            ..crate::sync::SyncState::default()
         };
         assert_eq!(paused_for(false, &paced), Some(1_090));
         assert_eq!(paused_for(true, &paced), None);
@@ -870,13 +872,28 @@ mod tests {
     }
 
     #[test]
-    fn the_batch_that_finishes_the_catch_up_reports_it() {
+    fn the_write_that_finishes_the_catch_up_reports_it_without_a_count() {
+        // loop は 1 tick に 1 件なので､最後の tick の `sent` は何千件の
+        // catch-up でも 1 だ｡「1 change applied」は嘘になる｡
         let text = notice(&Outcome::Applied {
-            sent: 12,
+            sent: 1,
             remaining: 0,
         })
         .unwrap();
-        assert!(text.contains("12"), "{text}");
+        assert!(text.contains("caught up"), "{text}");
+        assert!(!text.contains('1'), "{text}");
+    }
+
+    #[test]
+    fn a_rejected_write_says_nothing() {
+        // 拒否は log に 1 行ずつ残る (`run::write_one`)｡バナーに出せば
+        // 数千件の catch-up の途中で何度も戻ってくる｡
+        assert_eq!(notice(&Outcome::Rejected { remaining: 40 }), None);
+    }
+
+    #[test]
+    fn a_run_whose_write_was_rejected_is_not_finished() {
+        assert!(!is_finished(Some(&Outcome::Rejected { remaining: 0 })));
     }
 
     #[test]
@@ -913,75 +930,66 @@ mod tests {
         );
     }
 
-    // --- next_batch ---
+    // --- next_write: 1 tick 1 件でも交互 (#231) ---
+
+    /// 印を付けながら [`next_write`] を引き切り､送った順を `+id -id` で返す｡
+    fn drain(mut plan: Plan, prune: bool) -> String {
+        let mut sent = Vec::new();
+        while let Some((action, user_id)) = next_write(&plan, prune) {
+            sent.push(match action {
+                Action::Add => format!("+{user_id}"),
+                Action::Remove => format!("-{user_id}"),
+            });
+            plan.mark_applied(&user_id, action);
+        }
+        sent.join(" ")
+    }
 
     #[test]
-    fn a_batch_alternates_additions_and_removals() {
+    fn one_write_at_a_time_still_alternates_additions_and_removals() {
         // 何時間もかけて追いつく list は､まず最終的な大きさまで膨らんで
         // から stale な member を落とすのではなく､その間ずっと正解に
-        // 近づいていくべきだ｡
+        // 近づいていくべきだ｡先頭から取るだけなら "+1 +2 -3 -4" になる｡
         let plan = plan_of(&["1", "2"], &["3", "4"]);
-        assert_eq!(batch(&plan, true, 10), "+1 -3 +2 -4");
+        assert_eq!(drain(plan, true), "+1 -3 +2 -4");
     }
 
     #[test]
-    fn a_batch_stops_at_the_limit_mid_pair() {
-        // limit が奇数のときが､交互送信が黙って request を 1 回余分に
-        // 送りかねない場合だ｡
-        let plan = plan_of(&["1", "2"], &["3", "4"]);
-        assert_eq!(batch(&plan, true, 3), "+1 -3 +2");
-    }
-
-    #[test]
-    fn a_batch_carries_on_with_whichever_side_still_has_entries() {
+    fn one_write_at_a_time_carries_on_with_whichever_side_still_has_entries() {
         let plan = plan_of(&["1", "2", "3"], &["9"]);
-        assert_eq!(batch(&plan, true, 10), "+1 -9 +2 +3");
-    }
-
-    #[test]
-    fn removals_alone_still_fill_a_batch() {
+        assert_eq!(drain(plan, true), "+1 -9 +2 +3");
         let plan = plan_of(&[], &["7", "8"]);
-        assert_eq!(batch(&plan, true, 10), "-7 -8");
+        assert_eq!(drain(plan, true), "-7 -8");
     }
 
     #[test]
-    fn without_prune_a_batch_is_additions_only() {
-        // CLI の既定｡removal は plan に載ったまま送られない｡
+    fn without_prune_one_write_at_a_time_never_picks_a_removal() {
         let plan = plan_of(&["1", "2"], &["3", "4"]);
-        assert_eq!(batch(&plan, false, 10), "+1 +2");
+        assert_eq!(drain(plan, false), "+1 +2");
     }
 
     #[test]
-    fn without_prune_removals_do_not_eat_into_the_limit() {
-        // 交互送信が招くバグ: 飛ばした removal を `limit` の 1 件として
-        // 数えてしまい､上限付きの batch が求められた addition の半分しか
-        // 送らなくなる｡
-        let plan = plan_of(&["1", "2"], &["3", "4"]);
-        assert_eq!(batch(&plan, false, 2), "+1 +2");
+    fn a_rejected_entry_counts_as_that_side_having_had_its_turn() {
+        // 拒まれた removal も request は飛んでいる｡数えないと次も removal
+        // の番になり､拒否が続く側に張り付く｡
+        let mut plan = plan_of(&["1", "2"], &["3", "4"]);
+        plan.mark_applied("1", Action::Add);
+        plan.mark_rejected("3", Action::Remove, "no");
+        assert_eq!(
+            next_write(&plan, true),
+            Some((Action::Add, "2".to_string()))
+        );
     }
 
     #[test]
-    fn an_already_applied_entry_is_never_in_a_batch() {
+    fn a_fully_settled_plan_has_no_next_write() {
         // 再開した apply が安く済む理由: plan ファイルが通ったものを
         // 覚えており､送り直せば何も変えないのに write を 1 回使うことに
         // なる｡
-        let mut plan = plan_of(&["1", "2"], &["3"]);
-        plan.mark_applied("1", Action::Add);
-        assert_eq!(batch(&plan, true, 10), "+2 -3");
-    }
-
-    #[test]
-    fn a_fully_applied_plan_yields_an_empty_batch() {
         let mut plan = plan_of(&["1"], &["3"]);
         plan.mark_applied("1", Action::Add);
         plan.mark_applied("3", Action::Remove);
-        assert_eq!(batch(&plan, true, 10), "");
-    }
-
-    #[test]
-    fn a_zero_limit_sends_nothing() {
-        let plan = plan_of(&["1"], &["3"]);
-        assert_eq!(batch(&plan, true, 0), "");
+        assert_eq!(next_write(&plan, true), None);
     }
 
     #[test]

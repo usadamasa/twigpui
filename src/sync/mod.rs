@@ -57,12 +57,14 @@ mod api;
 mod auto;
 mod following;
 mod mirror;
+pub(crate) mod pacing;
 mod preflight;
 mod run;
 mod schedule;
 mod state;
 
 pub(crate) use auto::{Pacing, Tick, tick};
+pub(crate) use pacing::WritePacing;
 pub(crate) use run::{Request, run_cli};
 pub(crate) use schedule::{Outcome, is_finished, notice};
 pub(crate) use state::{SyncState, load_state, save_state};

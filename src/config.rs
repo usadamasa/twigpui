@@ -89,19 +89,17 @@ pub(crate) struct Config {
     /// `100` は上限を off にし､`0` は background sync を追加専用にする｡
     /// CLI に上限がかかることは決して無い｡
     pub sync_prune_limit_percent: u8,
-    /// background sync の 1 batch が送ってよい書き込みの数 (#197)｡
+    /// background sync が list への書き込みをどう散らすか (#197, #231):
+    /// 書き込みの間 (`sync_write_gap_seconds`)､続けて送る件数
+    /// (`sync_batch_writes`)､そのあとの休み (`sync_cooldown_seconds`)｡
+    /// どれも `"min-max"` の範囲で､書き込みごとに引き直す｡なぜ固定値では
+    /// なく範囲なのか､既定の根拠と上げ方は `sync::pacing` を見よ｡
     ///
-    /// batch と batch の間は 90〜300 秒に揺らぐので､持続的な速度はおよそ
-    /// 「この値 ÷ 195 秒」になる｡なぜ間隔が固定値ではなく範囲なのかは
-    /// `sync::state` の module doc を見よ｡
-    ///
-    /// 既定が遅いのは意図的だ: #197 を 24 時間締め出した上限は､およそ 1 分に
-    /// 7 回の書き込みの後に働いた｡その大きさは今も実測されていない｡この
-    /// つまみは実測のもう一方の向きのためにある — しばらく既定で走らせ､拒否が
-    /// 出ないのを見て､上げてログを見る｡どちらに転んでも拒否は事故ではない:
+    /// 3 つのつまみは実測のためにある — しばらく既定で走らせ､拒否が出ない
+    /// のを見て､変えてログを見る｡どちらに転んでも拒否は事故ではない:
     /// `sync::state` の backoff の階段がそれを吸収し､上限が何と言ったかは
-    /// ログが記録する｡1..=[`MAX_SYNC_WRITES_PER_BATCH`]｡
-    pub sync_writes_per_batch: u8,
+    /// ログが記録する｡
+    pub sync_write_pacing: crate::sync::WritePacing,
     /// ウィンドウが動いている間､新しい post を求めて timeline を poll するか
     /// どうか (#21)｡
     ///
@@ -187,25 +185,6 @@ const MIN_SYNC_INTERVAL_SECONDS: u32 = 900;
 /// 誤って留め置く代償は CLI コマンド 1 回､誤って通す代償は list そのものだ｡
 const DEFAULT_SYNC_PRUNE_LIMIT_PERCENT: u8 = 10;
 
-/// 1 batch に 2 件の書き込み: background sync の既定の追いつき速度 (#197)｡
-///
-/// たった一つある実測から選んだ — `POST /2/lists/:id/members` の隠れた上限が
-/// およそ 1 分に 7 回の書き込みの後に働き､24 時間下りたままだった — それを
-/// 踏まない速度であって､それが許す最速の速度ではない｡上げるためにあるのが
-/// `sync_writes_per_batch` で､この既定での走行が拒否を出さないと示してから
-/// 使う｡
-///
-/// 揺らぎを入れた後もこの値を下げていないのは､下げても拒否が止まらなかった
-/// ため｡1 に落としても毎分ちょうど 1 件という規則正しさは残る｡
-const DEFAULT_SYNC_WRITES_PER_BATCH: u8 = 2;
-
-/// `sync_writes_per_batch` が受け付ける最大値: 20 は X の *文書化された*
-/// 書き込みの窓 (15 分で 300 回) を 1 分へならした数｡batch が最短の 90 秒
-/// 間隔で並んでも毎分 8 件ほどにしか届かないので上限としては余裕があるが､
-/// 超えても速くなるのは refusal だけなので残してある — `2` のつもりで
-/// 打った `25` は､バーストではなくキー名を挙げた error になるべき｡
-const MAX_SYNC_WRITES_PER_BATCH: u8 = 20;
-
 /// auto-refresh の poll と poll の間は 3 分 (#21)｡
 ///
 /// timeline が理論上どれだけ新鮮でありうるかではなく､poll が実際に何を課金
@@ -273,10 +252,16 @@ struct FileSettings {
     /// キー名を挙げて拒めるようにするためだ｡
     #[serde(default)]
     sync_prune_limit_percent: Option<u32>,
-    /// 秘密ではない｡`post_resource_price` と同じ理由だ｡`u32` なのは
-    /// `sync_prune_limit_percent` と同じ理由による｡
+    /// 秘密ではない｡`post_resource_price` と同じ理由だ｡`"3-20"` の形の
+    /// 文字列で､[`Config::resolve`] ではなく `sync::pacing` が読む｡
     #[serde(default)]
-    sync_writes_per_batch: Option<u32>,
+    sync_write_gap_seconds: Option<String>,
+    /// 秘密ではない｡`sync_write_gap_seconds` と同じ形｡
+    #[serde(default)]
+    sync_batch_writes: Option<String>,
+    /// 秘密ではない｡`sync_write_gap_seconds` と同じ形｡
+    #[serde(default)]
+    sync_cooldown_seconds: Option<String>,
     /// 秘密ではない｡`post_resource_price` と同じ理由だ｡上の `auto_sync_list` と
     /// 同じく､Finder から起動した `.app` にとって効いてくるのはこのキーで､
     /// そこでは shell の変数は見えない (#40) — そしてこれは､ウィンドウが自ら
@@ -371,6 +356,8 @@ impl Config {
                  X_OAUTH_CLIENT_ID) instead."
             );
         }
+        // `file` を部分的に動かす前に借りる｡
+        let sync_write_pacing = resolve_write_pacing(&var, &file)?;
 
         let oauth_client_id = var("X_OAUTH_CLIENT_ID")
             .map(|c| c.trim().to_string())
@@ -445,8 +432,6 @@ impl Config {
         let sync_interval_seconds = resolve_sync_interval(&var, file.sync_interval_seconds)?;
         let sync_prune_limit_percent =
             resolve_sync_prune_limit(&var, file.sync_prune_limit_percent)?;
-        let sync_writes_per_batch =
-            resolve_sync_writes_per_batch(&var, file.sync_writes_per_batch)?;
 
         let auto_refresh = resolve_switch("X_AUTO_REFRESH", &var, file.auto_refresh, true)?;
         let follow_new_posts =
@@ -472,7 +457,7 @@ impl Config {
             auto_sync_list,
             sync_interval_seconds,
             sync_prune_limit_percent,
-            sync_writes_per_batch,
+            sync_write_pacing,
             auto_refresh,
             auto_refresh_interval_seconds,
             follow_new_posts,
@@ -624,43 +609,19 @@ fn resolve_sync_prune_limit(
         })
 }
 
-/// `sync_writes_per_batch` を解決する (#197): env > file >
-/// [`DEFAULT_SYNC_WRITES_PER_BATCH`]｡0 と
-/// [`MAX_SYNC_WRITES_PER_BATCH`] を超えるものは拒否する｡
-///
-/// 0 は「off」と読まずに拒否する — そのためのスイッチは `auto_sync_list`
-/// であり､ペース 0 は走っていると称しながら plan を決して流し切らない
-/// sync になるからだ｡上限が上限であるのは
-/// [`MAX_SYNC_WRITES_PER_BATCH`] の理由による: それを越えても速くなるのは
-/// refusal だけだ｡
-fn resolve_sync_writes_per_batch(
+/// 書き込みの歩調 (#231) を解決する｡範囲の読み方と境界は `sync::pacing` が
+/// 持ち､ここは 3 つのキーをまとめて渡すだけだ｡#231 より前の
+/// `sync_writes_per_batch` は他の未知のキーと同じく黙って無視する｡
+fn resolve_write_pacing(
     var: impl Fn(&str) -> Option<String>,
-    file_value: Option<u32>,
-) -> Result<u8> {
-    let (writes, source) = match var("X_SYNC_WRITES_PER_BATCH")
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-    {
-        Some(raw) => (
-            raw.parse::<u32>()
-                .with_context(|| format!("X_SYNC_WRITES_PER_BATCH is not a number: {raw:?}"))?,
-            "X_SYNC_WRITES_PER_BATCH",
-        ),
-        None => match file_value {
-            Some(writes) => (writes, "sync_writes_per_batch in config.toml"),
-            None => return Ok(DEFAULT_SYNC_WRITES_PER_BATCH),
-        },
-    };
-
-    u8::try_from(writes)
-        .ok()
-        .filter(|writes| (1..=MAX_SYNC_WRITES_PER_BATCH).contains(writes))
-        .with_context(|| {
-            format!(
-                "{source} must be between 1 and {MAX_SYNC_WRITES_PER_BATCH} (X's documented \
-                 write window is 300 per 15 minutes), got {writes}"
-            )
-        })
+    file: &FileSettings,
+) -> Result<crate::sync::WritePacing> {
+    crate::sync::WritePacing::resolve(
+        &var,
+        file.sync_write_gap_seconds.clone(),
+        file.sync_batch_writes.clone(),
+        file.sync_cooldown_seconds.clone(),
+    )
 }
 
 /// `auto_refresh_interval_seconds` を解決する (#21): env > file >
@@ -1801,121 +1762,73 @@ mod tests {
         assert!(error.contains("is not a number"), "{error}");
     }
 
-    // --- #197: sync_writes_per_batch (env > file > 2, 1..=20) ---
+    // --- #231: 書き込みの歩調 (3 つの範囲､env > file > default) ---
+    // 範囲の読み方と境界は `sync::pacing` 自身のテストが押さえる｡ここで
+    // 見るのは Config への配線だけだ｡
 
     #[test]
-    fn the_write_pace_defaults_to_two_a_batch() {
-        // 実測にもとづく根拠: 隠れた cap が毎分およそ 7 write で作動し､
-        // 24 時間下がったままだった｡既定はそれを踏まない歩調であって､
-        // 許される最速ではない｡
+    fn the_write_pacing_defaults_to_the_pacing_module_default() {
         let config = Config::resolve(
             vars(&[("X_OAUTH_CLIENT_ID", "client-123")]),
             FileSettings::default(),
         )
         .unwrap();
-        assert_eq!(config.sync_writes_per_batch, 2);
+        assert_eq!(config.sync_write_pacing, crate::sync::WritePacing::DEFAULT);
     }
 
     #[test]
-    fn resolve_reads_the_write_pace_from_the_file_when_env_is_unset() {
+    fn resolve_wires_each_range_from_the_file_and_lets_the_env_win() {
+        use crate::sync::pacing::Span;
         let file = FileSettings {
-            sync_writes_per_batch: Some(5),
-            ..FileSettings::default()
-        };
-        let config = Config::resolve(vars(&[("X_OAUTH_CLIENT_ID", "client-123")]), file).unwrap();
-        assert_eq!(config.sync_writes_per_batch, 5);
-    }
-
-    #[test]
-    fn resolve_prefers_the_env_write_pace_over_the_file() {
-        let file = FileSettings {
-            sync_writes_per_batch: Some(5),
+            sync_write_gap_seconds: Some("5-30".to_string()),
+            sync_batch_writes: Some("2-4".to_string()),
+            sync_cooldown_seconds: Some("120-600".to_string()),
             ..FileSettings::default()
         };
         let config = Config::resolve(
             vars(&[
                 ("X_OAUTH_CLIENT_ID", "client-123"),
-                ("X_SYNC_WRITES_PER_BATCH", "10"),
+                ("X_SYNC_BATCH_WRITES", "1-1"),
             ]),
             file,
         )
         .unwrap();
-        assert_eq!(config.sync_writes_per_batch, 10);
-    }
-
-    #[test]
-    fn resolve_rejects_a_write_pace_of_zero() {
-        // 0 は "off" ではない — off は `auto_sync_list` の役目だ｡歩調が
-        // ゼロの sync は､走ると称しながら計画を永久に捌かないことになる｡
-        let error = Config::resolve(
-            vars(&[
-                ("X_OAUTH_CLIENT_ID", "client-123"),
-                ("X_SYNC_WRITES_PER_BATCH", "0"),
-            ]),
-            FileSettings::default(),
-        )
-        .unwrap_err()
-        .to_string();
-        assert!(error.contains("between 1 and 20"), "{error}");
-    }
-
-    #[test]
-    fn resolve_rejects_a_write_pace_past_the_documented_window() {
-        // 20 は 15 分あたり 300 を 1 分へならしたもの — X が文書化している
-        // window だ｡batch が最短間隔で並んでもそこには届かないが､超えても
-        // 速くなるのは refusal だけなので上限として残してある｡
-        let error = Config::resolve(
-            vars(&[
-                ("X_OAUTH_CLIENT_ID", "client-123"),
-                ("X_SYNC_WRITES_PER_BATCH", "21"),
-            ]),
-            FileSettings::default(),
-        )
-        .unwrap_err()
-        .to_string();
-        assert!(error.contains("between 1 and 20"), "{error}");
-    }
-
-    #[test]
-    fn the_documented_window_pace_itself_is_accepted() {
-        let config = Config::resolve(
-            vars(&[
-                ("X_OAUTH_CLIENT_ID", "client-123"),
-                ("X_SYNC_WRITES_PER_BATCH", "20"),
-            ]),
-            FileSettings::default(),
-        )
-        .unwrap();
-        assert_eq!(config.sync_writes_per_batch, 20);
-    }
-
-    #[test]
-    fn a_rejected_write_pace_names_the_file_key_when_that_is_where_it_came_from() {
-        let file = FileSettings {
-            sync_writes_per_batch: Some(120),
-            ..FileSettings::default()
-        };
-        let error = Config::resolve(vars(&[("X_OAUTH_CLIENT_ID", "client-123")]), file)
-            .unwrap_err()
-            .to_string();
-        assert!(
-            error.contains("sync_writes_per_batch in config.toml"),
-            "{error}"
+        assert_eq!(config.sync_write_pacing.gap_seconds, Span::new(5, 30));
+        assert_eq!(config.sync_write_pacing.batch_writes, Span::new(1, 1));
+        assert_eq!(
+            config.sync_write_pacing.cooldown_seconds,
+            Span::new(120, 600)
         );
     }
 
     #[test]
-    fn resolve_rejects_a_non_numeric_write_pace() {
+    fn a_bad_range_fails_the_resolve_rather_than_falling_back() {
         let error = Config::resolve(
             vars(&[
                 ("X_OAUTH_CLIENT_ID", "client-123"),
-                ("X_SYNC_WRITES_PER_BATCH", "fast"),
+                ("X_SYNC_BATCH_WRITES", "0-3"),
             ]),
             FileSettings::default(),
         )
         .unwrap_err()
         .to_string();
-        assert!(error.contains("is not a number"), "{error}");
+        assert!(error.contains("X_SYNC_BATCH_WRITES"), "{error}");
+    }
+
+    #[test]
+    fn the_pre_231_write_pace_key_is_ignored_like_any_unknown_key() {
+        // `FileSettings` は `deny_unknown_fields` を使わない (struct の doc を
+        // 見よ)｡消えたキーも同じ扱いで､起動を止めない｡
+        let file: FileSettings = toml::from_str("sync_writes_per_batch = 2").unwrap();
+        let config = Config::resolve(
+            vars(&[
+                ("X_OAUTH_CLIENT_ID", "client-123"),
+                ("X_SYNC_WRITES_PER_BATCH", "2"),
+            ]),
+            file,
+        )
+        .unwrap();
+        assert_eq!(config.sync_write_pacing, crate::sync::WritePacing::DEFAULT);
     }
 
     // --- #176: sync_prune_limit_percent (env > file > 10, 最大 100) ---

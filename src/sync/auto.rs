@@ -3,7 +3,7 @@
 //! [`super::schedule`] が tick の内容を決め､[`super::state`] がその結果を
 //! 覚え､この module があいだで実行する｡分割は `run.rs` と同じ理由による
 //! もので､判断は純粋関数として隣にある — [`super::schedule::next_step`]､
-//! [`super::schedule::next_batch`]､[`super::schedule::apply_outcome`]､
+//! [`super::schedule::next_write`]､[`super::schedule::apply_outcome`]､
 //! [`super::state::settle`]｡
 //!
 //! ここの分岐はどれも request かファイルだが､request の相手は
@@ -20,17 +20,17 @@
 //! ペースを決め､後者は起動をまたいで残るので､アプリを再起動しても同じ
 //! 答えを買い直さずに済む｡
 //!
-//! `Apply` は [`Pacing::writes_per_batch`] 件の write に制限され､loop は
-//! batch のあいだ `state::apply_pause_seconds` が引いた長さだけ待つ｡この
-//! 二つで持続的な write レートが決まり､その既定値は意図的に低くしてある
-//! — #197 が実測したロックと､それが何のあとに起きたかは [`super::state`] を､
-//! refusal が出ない実行のあとに引き上げるためのつまみは
-//! `config::DEFAULT_SYNC_WRITES_PER_BATCH` を見よ｡
+//! `Apply` は 1 tick に 1 件の write (#231)｡次の write までの間は
+//! [`Pacing::writes`] の 3 つの範囲 — gap､batch の件数､cooldown — から
+//! tick ごとに引き､[`super::state::settle`] が `paused_until` と
+//! `batch_left` に置く｡持続的な write レートはその既定値で決まり､意図して
+//! 低くしてある — #197 が実測したロックと､それが何のあとに起きたかは
+//! [`super::state`] を､既定と引き上げ方は `pacing::WritePacing::DEFAULT`
+//! を見よ｡
 //!
 //! 待ちが固定値ではなく範囲なのは､速度を落としても拒否が止まらなかった
-//! ため｡理由と二つの層は [`super::state`] の module doc を見よ｡揺らぎを
-//! 引くのはこの module で､[`super::state::settle`] は引かれた長さしか
-//! 見ない｡
+//! ため ([`super::pacing`])｡揺らぎを引くのは `state::spacing_for` で､
+//! [`super::state::settle`] は引かれた長さしか見ない｡
 //!
 //! # tick が消してよいもの
 //!
@@ -43,12 +43,18 @@
 //! ここでの `pending` は [`schedule::sendable`] のことなので､送れるものが
 //! 残っていない plan は loop を縛らず､次の diff を期限どおりに来させる｡
 //!
-//! # tick が log に残すもの (#199)
+//! # tick が log に残すもの (#199, #231)
 //!
 //! 何かをした tick と拒否された tick には 1 行ずつ､待っただけの tick には
 //! 何も出さない — loop は毎分起きるので､起床ごとに 1 行出せば同じ文で
 //! ファイルが埋まる｡refusal は毎回 log する｡#198 のあとでは refusal は
 //! 起床ごとではなく backoff ごとに 1 回しか起きないからだ｡
+//!
+//! ペース配分が効いているかは､この行だけで後から読めるようにしてある｡
+//! write の行は batch の残りと次までの秒数を持ち､refusal の行は前の
+//! refusal から何件届いたかを持つ (`SyncState::landed_since_refusal`)｡
+//! 起動の行 (`ui::list_sync`) にはそのときの 3 つの範囲がある｡範囲を
+//! 変えて走らせ､refusal の行の件数と間隔を前と比べれば､それが答えだ｡
 
 use anyhow::Result;
 
@@ -63,11 +69,9 @@ use crate::paths::Paths;
 pub(crate) struct Pacing {
     /// `config.sync_interval_seconds`｡
     pub interval_seconds: u32,
-    /// `config.sync_writes_per_batch` (#197): `Apply` の tick ごとに送る
-    /// write 数で､`state::apply_pause_seconds` が引く間と合わせて持続
-    /// レートになる｡既定値の根拠と､引き上げが実測を伴う意図的な行為で
-    /// ある理由は config 側の定数に置いてある｡
-    pub writes_per_batch: u8,
+    /// `config.sync_write_pacing` (#231): write の間､batch の件数､cooldown
+    /// の範囲｡tick ごとに `state::spacing_for` が引く｡
+    pub writes: super::pacing::WritePacing,
     /// #174 の手動起動: この 1 tick だけ interval と､失敗した tick が
     /// 得た block を落とす｡
     ///
@@ -134,17 +138,12 @@ pub(crate) fn tick(
         &mut state,
         now,
     );
-    // 揺らぎを引くのはここ 1 回きり｡settle は渡された長さしか見ないので
-    // 純粋なままでいられる — `rate_limit::backoff_delay` と同じ継ぎ目｡
-    let spacing = state::Spacing {
-        interval_seconds: pacing.interval_seconds,
-        apply_pause_seconds: state::apply_pause_seconds(crate::rate_limit::random_jitter_fraction()),
-    };
+    let spacing = state::spacing_for(pacing.interval_seconds, pacing.writes);
     let settled = state::settle(state, outcome.as_ref().ok(), now, spacing);
     if let Err(error) = save_state(&state_path, &settled.state) {
         crate::log::error(&format!("list sync: could not save its state: {error:#}"));
     }
-    log_outcome(&outcome, settled.state, settled.wake_at);
+    log_outcome(&outcome, state, &settled, now);
     Tick {
         outcome,
         state: settled.state,
@@ -211,14 +210,7 @@ fn perform(
         // unwrap せずに列挙してあるのは､あとで優先順位を変えてもここが
         // panic に化けないようにするためだ｡
         schedule::Step::Apply => match plan {
-            Some(plan) => apply(
-                paths,
-                client,
-                plan,
-                prune,
-                now,
-                usize::from(pacing.writes_per_batch),
-            ),
+            Some(plan) => apply(paths, client, plan, prune, now),
             None => Ok(Outcome::Idle {
                 until: now,
                 pending: 0,
@@ -298,11 +290,10 @@ fn diff(
     })
 }
 
-/// plan に残っている write を最大 `limit` 件 ([`Pacing::writes_per_batch`])
-/// 送る｡
+/// plan に残っている write を 1 件送る (#231)｡
 ///
 /// `prune` は [`schedule::prune_allowed`] から得た [`perform`] の判定だ｡
-/// false なら batch は addition のみで､`remaining` は未適用の entry すべて
+/// false なら送るのは addition のみで､`remaining` は未適用の entry すべて
 /// ではなく､まだ送ってよいものを数える — `pending` と同じ「残り」の
 /// 読み方なので､保留された removal が残っていても addition を流し切れば
 /// 完了通知が出る｡
@@ -312,9 +303,14 @@ fn apply(
     mut plan: super::Plan,
     prune: bool,
     now: i64,
-    limit: usize,
 ) -> Result<Outcome> {
-    let (sent, result) = super::run::apply_some(paths, client, &mut plan, prune, now, limit);
+    let Some((action, user_id)) = schedule::next_write(&plan, prune) else {
+        return Ok(Outcome::Idle {
+            until: now,
+            pending: 0,
+        });
+    };
+    let written = super::run::write_one(paths, client, &mut plan, action, &user_id, now);
     let remaining = schedule::sendable(&plan, prune);
 
     if plan.is_complete() {
@@ -329,14 +325,40 @@ fn apply(
         let _ = std::fs::remove_file(paths.sync_plan_file());
     }
 
-    schedule::apply_outcome(sent, remaining, result)
+    match written {
+        Ok(super::run::Written::Landed) => Ok(Outcome::Applied { sent: 1, remaining }),
+        Ok(super::run::Written::Rejected) => Ok(Outcome::Rejected { remaining }),
+        Err(error) => schedule::apply_outcome(0, remaining, Err(error)),
+    }
 }
 
-/// tick が log に書く行 (#199)｡待っただけの tick には何も書かない｡
+/// tick が log に書く行 (#199, #231)｡待っただけの tick には何も書かない｡
+///
+/// `before` は settle 前の state で､refusal の行が「前の refusal から
+/// 何件届いたか」を言うのに要る — settle はその数を 0 に戻す｡
 ///
 /// 出ていく途中で `log::redact` が走る — API のエラーは request の URL を
 /// 引用しうる｡
-fn log_outcome(outcome: &Result<Outcome>, state: SyncState, wake_at: i64) {
+fn log_outcome(outcome: &Result<Outcome>, before: SyncState, settled: &state::Settled, now: i64) {
+    let state = settled.state;
+    let wake_at = settled.wake_at;
+    // 次の write までの間を batch の残りと並べて言う｡この 2 つと行の
+    // 時刻で､gap と cooldown が引いたとおりに空いたかを log だけで読める｡
+    let pace = |remaining: usize| {
+        if remaining == 0 {
+            "plan drained".to_string()
+        } else if state.is_blocked(now) {
+            format!("backing off until unix time {wake_at}")
+        } else if state.batch_left == 0 {
+            format!("batch done, cooldown {}s", wake_at.saturating_sub(now))
+        } else {
+            format!(
+                "{} left in this batch, next in {}s",
+                state.batch_left,
+                wake_at.saturating_sub(now)
+            )
+        }
+    };
     match outcome {
         Ok(Outcome::Idle { .. }) => {}
         Ok(Outcome::Diffed {
@@ -350,22 +372,38 @@ fn log_outcome(outcome: &Result<Outcome>, state: SyncState, wake_at: i64) {
             if *held { " (removals held)" } else { "" }
         )),
         Ok(Outcome::Applied { sent, remaining }) => {
-            crate::log::info(&format!("list sync: sent {sent}, {remaining} to go"));
+            crate::log::info(&format!(
+                "list sync: sent {sent}, {remaining} to go; {}; {} landed since the last refusal",
+                pace(*remaining),
+                state.landed_since_refusal
+            ));
         }
+        Ok(Outcome::Rejected { remaining }) => crate::log::warn(&format!(
+            "list sync: write rejected by X ({} in a row), {remaining} to go; {}",
+            // 上限に届いた tick は settle が 0 に戻しているので､届いた
+            // ことは block の有無で言う｡
+            if state.is_blocked(now) {
+                state::REJECTIONS_IN_A_ROW_LIMIT
+            } else {
+                state.rejected_in_a_row
+            },
+            pace(*remaining)
+        )),
         Ok(Outcome::RateLimited {
             opaque,
             sent,
             remaining,
             ..
         }) => crate::log::warn(&format!(
-            "list sync: write refused ({}) after {sent} sent this batch; {remaining} to go; \
-             refusal #{}, retrying at unix time {wake_at}",
+            "list sync: write refused ({}) after {sent} sent this tick; {remaining} to go; \
+             refusal #{}, {} landed since the previous refusal, retrying at unix time {wake_at}",
             if *opaque {
                 "by a cap the headers do not describe"
             } else {
                 "window exhausted"
             },
-            state.refusals
+            state.refusals,
+            before.landed_since_refusal.saturating_add(*sent as u64)
         )),
         Err(error) => crate::log::error(&format!(
             "list sync failed: {error:#}; next attempt at unix time {wake_at}"
@@ -388,10 +426,10 @@ mod tests {
     const PRUNE_LIMIT: u8 = 10;
     const NOW: i64 = 1_800_000_000;
 
-    fn pacing(writes_per_batch: u8, forced: bool) -> Pacing {
+    fn pacing(forced: bool) -> Pacing {
         Pacing {
             interval_seconds: INTERVAL,
-            writes_per_batch,
+            writes: crate::sync::WritePacing::DEFAULT,
             forced,
         }
     }
@@ -442,7 +480,7 @@ mod tests {
             &client,
             "me",
             "7",
-            pacing(5, false),
+            pacing(false),
             PRUNE_LIMIT,
             NOW,
         );
@@ -477,7 +515,7 @@ mod tests {
             &client,
             "me",
             "7",
-            pacing(5, true),
+            pacing(true),
             PRUNE_LIMIT,
             NOW,
         );
@@ -503,7 +541,7 @@ mod tests {
             &client,
             "me",
             "7",
-            pacing(5, false),
+            pacing(false),
             PRUNE_LIMIT,
             NOW,
         );
@@ -539,7 +577,7 @@ mod tests {
             &client,
             "me",
             "7",
-            pacing(5, false),
+            pacing(false),
             PRUNE_LIMIT,
             NOW,
         );
@@ -572,7 +610,7 @@ mod tests {
             &client,
             "me",
             "7",
-            pacing(5, false),
+            pacing(false),
             PRUNE_LIMIT,
             NOW,
         );
@@ -594,21 +632,23 @@ mod tests {
     // --- apply: 流し切りが diff のやり直しに優先する ---
 
     #[test]
-    fn a_plan_on_file_is_sent_a_batch_at_a_time() {
+    fn a_plan_on_file_is_sent_one_write_at_a_time() {
+        // #231: 1 tick に 1 件｡fake には 1 件分しか答えを仕込んでいない
+        // ので､2 件目を送れば落ちる｡
         let scratch = Scratch::new("auto-apply");
         save_plan(
             &scratch.paths().sync_plan_file(),
             &plan_of("7", &["1", "2", "3"], &[], 0),
         )
         .unwrap();
-        let client = FakeApi::new().writes(vec![Ok(()), Ok(())]);
+        let client = FakeApi::new().writes(vec![Ok(())]);
 
         let tick = tick(
             scratch.paths(),
             &client,
             "me",
             "7",
-            pacing(2, false),
+            pacing(false),
             PRUNE_LIMIT,
             NOW,
         );
@@ -617,8 +657,8 @@ mod tests {
             matches!(
                 tick.outcome,
                 Ok(Outcome::Applied {
-                    sent: 2,
-                    remaining: 1
+                    sent: 1,
+                    remaining: 2
                 })
             ),
             "{:?}",
@@ -626,11 +666,106 @@ mod tests {
         );
         assert_eq!(
             client.calls(),
-            [Call::Add("1".to_string()), Call::Add("2".to_string())],
-            "the batch never reaches the read"
+            [Call::Add("1".to_string())],
+            "the write never reaches the read"
         );
-        // 続きがあるので次の batch までの間が state に残る｡
+        assert!(
+            client.pauses().is_empty(),
+            "the tick sleeps nowhere: the gap lives in the state"
+        );
+        // 続きがあるので次の write までの間が state に残る｡
         assert!(tick.state.paused_until.is_some(), "{:?}", tick.state);
+        assert!(tick.wake_at > NOW, "{:?}", tick.state);
+    }
+
+    #[test]
+    fn the_second_tick_of_a_catch_up_sends_a_removal_not_the_next_addition() {
+        // 1 tick 1 件でも交互 (#231): addition を 1 件送った plan の次は
+        // removal だ｡さもないと stale な member が消えるのは addition が
+        // 尽きたあとになる｡
+        let scratch = Scratch::new("auto-alternate");
+        let mut plan = plan_of("7", &["1", "2"], &["8", "9"], 100);
+        plan.mark_applied("1", Action::Add);
+        save_plan(&scratch.paths().sync_plan_file(), &plan).unwrap();
+        let client = FakeApi::new().writes(vec![Ok(())]);
+
+        tick(
+            scratch.paths(),
+            &client,
+            "me",
+            "7",
+            pacing(false),
+            PRUNE_LIMIT,
+            NOW,
+        );
+
+        assert_eq!(client.calls(), [Call::Remove("8".to_string())]);
+    }
+
+    #[test]
+    fn a_rejected_write_is_an_outcome_that_moves_the_plan_on() {
+        // #254 を tick に置き直したもの: 400 は entry への答えなので tick は
+        // 失敗せず､印を付けた entry を残務から外して次へ進む｡
+        let scratch = Scratch::new("auto-rejected");
+        save_plan(
+            &scratch.paths().sync_plan_file(),
+            &plan_of("7", &["1", "2"], &[], 0),
+        )
+        .unwrap();
+        let client = FakeApi::new().writes(vec![Err(super::super::api::fake::rejected("no"))]);
+
+        let tick = tick(
+            scratch.paths(),
+            &client,
+            "me",
+            "7",
+            pacing(false),
+            PRUNE_LIMIT,
+            NOW,
+        );
+
+        assert!(
+            matches!(tick.outcome, Ok(Outcome::Rejected { remaining: 1 })),
+            "{:?}",
+            tick.outcome
+        );
+        assert_eq!(tick.state.rejected_in_a_row, 1);
+        assert!(
+            !tick.state.is_blocked(NOW),
+            "one 400 is not a reason to stop"
+        );
+        let on_file = load_plan(&scratch.paths().sync_plan_file())
+            .unwrap()
+            .unwrap();
+        assert!(on_file.entries[0].rejected.is_some());
+    }
+
+    #[test]
+    fn a_plan_whose_only_write_is_rejected_leaves_no_file_behind() {
+        let scratch = Scratch::new("auto-rejected-done");
+        save_plan(
+            &scratch.paths().sync_plan_file(),
+            &plan_of("7", &["1"], &[], 0),
+        )
+        .unwrap();
+        let client = FakeApi::new().writes(vec![Err(super::super::api::fake::rejected("no"))]);
+
+        let tick = tick(
+            scratch.paths(),
+            &client,
+            "me",
+            "7",
+            pacing(false),
+            PRUNE_LIMIT,
+            NOW,
+        );
+
+        assert!(
+            matches!(tick.outcome, Ok(Outcome::Rejected { remaining: 0 })),
+            "{:?}",
+            tick.outcome
+        );
+        assert_eq!(load_plan(&scratch.paths().sync_plan_file()).unwrap(), None);
     }
 
     #[test]
@@ -649,7 +784,7 @@ mod tests {
             &client,
             "me",
             "7",
-            pacing(5, false),
+            pacing(false),
             PRUNE_LIMIT,
             NOW,
         );
@@ -674,7 +809,7 @@ mod tests {
             &client,
             "me",
             "7",
-            pacing(5, false),
+            pacing(false),
             PRUNE_LIMIT,
             NOW,
         );
@@ -716,7 +851,7 @@ mod tests {
             &client,
             "me",
             "7",
-            pacing(5, false),
+            pacing(false),
             PRUNE_LIMIT,
             NOW,
         );
@@ -752,7 +887,7 @@ mod tests {
             &client,
             "me",
             "7",
-            pacing(5, false),
+            pacing(false),
             PRUNE_LIMIT,
             NOW,
         );
@@ -799,7 +934,7 @@ mod tests {
             &client,
             "me",
             "7",
-            pacing(5, false),
+            pacing(false),
             PRUNE_LIMIT,
             NOW,
         );
