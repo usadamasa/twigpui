@@ -304,7 +304,7 @@ fn apply(
     prune: bool,
     now: i64,
 ) -> Result<Outcome> {
-    let Some((action, user_id)) = schedule::next_batch(&plan, prune, 1).into_iter().next() else {
+    let Some((action, user_id)) = schedule::next_write(&plan, prune) else {
         return Ok(Outcome::Idle {
             until: now,
             pending: 0,
@@ -676,6 +676,30 @@ mod tests {
         // 続きがあるので次の write までの間が state に残る｡
         assert!(tick.state.paused_until.is_some(), "{:?}", tick.state);
         assert!(tick.wake_at > NOW, "{:?}", tick.state);
+    }
+
+    #[test]
+    fn the_second_tick_of_a_catch_up_sends_a_removal_not_the_next_addition() {
+        // 1 tick 1 件でも交互 (#231): addition を 1 件送った plan の次は
+        // removal だ｡さもないと stale な member が消えるのは addition が
+        // 尽きたあとになる｡
+        let scratch = Scratch::new("auto-alternate");
+        let mut plan = plan_of("7", &["1", "2"], &["8", "9"], 100);
+        plan.mark_applied("1", Action::Add);
+        save_plan(&scratch.paths().sync_plan_file(), &plan).unwrap();
+        let client = FakeApi::new().writes(vec![Ok(())]);
+
+        tick(
+            scratch.paths(),
+            &client,
+            "me",
+            "7",
+            pacing(false),
+            PRUNE_LIMIT,
+            NOW,
+        );
+
+        assert_eq!(client.calls(), [Call::Remove("8".to_string())]);
     }
 
     #[test]

@@ -353,8 +353,31 @@ pub(crate) fn next_batch(
 /// [`next_batch`] の doc が名指しする「stale な member が消える何時間も前に
 /// addition だけが見える」形にそのままなる｡
 pub(crate) fn next_write(plan: &super::Plan, prune: bool) -> Option<(super::Action, String)> {
-    let _ = (plan, prune);
-    None
+    let settled = |action| {
+        plan.entries
+            .iter()
+            .filter(|entry| entry.action == action && entry.is_settled())
+            .count()
+    };
+    let add = plan.pending(super::Action::Add).next();
+    let removal = if prune {
+        plan.pending(super::Action::Remove).next()
+    } else {
+        None
+    };
+    let entry = match (add, removal) {
+        (Some(add), Some(removal)) => {
+            if settled(super::Action::Remove) < settled(super::Action::Add) {
+                removal
+            } else {
+                add
+            }
+        }
+        (Some(add), None) => add,
+        (None, Some(removal)) => removal,
+        (None, None) => return None,
+    };
+    Some((entry.action, entry.user_id.clone()))
 }
 
 /// background sync が `plan` の removal を送ってよいかどうか (#176)｡
