@@ -9,11 +9,11 @@
 //!
 //! # gpui が入力をどこまで運んでくるか (#175 の「先に確認すること」)
 //!
-//! gpui-pre 0.3.5 の `Div` は `overflow_y_scroll` の要素に自分でホイールの
-//! listener を張り､bubble phase で `offset += delta.pixel_delta(line_height)`
-//! を足す (`elements/div.rs` の `paint_scroll_listener`)｡滑らかにする
-//! 段も､端で跳ねる段も無い — clamp は次の prepaint でされるので､端を
-//! 越えた入力は黙って捨てられる｡
+//! gpui-pre 0.3.5 の `List` (#301 から timeline はこれ) は自分でホイールの
+//! listener を張り､bubble phase で `delta.pixel_delta(px(20.))` を scroll
+//! top に足す (`elements/list.rs` の `paint`)｡滑らかにする段も､端で跳ねる
+//! 段も無い — その場で両端に clamp するので､端を越えた入力は黙って
+//! 捨てられる｡#301 より前の `Div` の `overflow_y_scroll` も同じ形だった｡
 //!
 //! macOS 側 (`platform/mac/events.rs`) は `hasPreciseScrollingDeltas` で
 //! 2 通りに分ける:
@@ -463,10 +463,10 @@ impl TimelineView {
     /// timeline に重ねてホイールの event を横取りする､見えない canvas
     /// (#175)｡
     ///
-    /// gpui の `Div` は自分のホイール handler を bubble phase に張る
+    /// gpui の `List` は自分のホイール handler を bubble phase に張る
     /// (モジュール doc を見よ)｡これより後に描かれる要素の listener は
     /// capture phase でそれより先に呼ばれるので､ここで
-    /// `stop_propagation` すれば `Div` の handler には届かず､delta が
+    /// `stop_propagation` すれば `List` の handler には届かず､delta が
     /// 二重に足されることはない｡timeline 自身ではなく､band でずれない
     /// 外側の wrapper に `absolute` で重ねる: ずれた要素に張ると､跳ねて
     /// いる最中に露出した端の上ではどの handler にも届かなくなる｡

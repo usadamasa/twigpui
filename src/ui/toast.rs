@@ -43,7 +43,7 @@ pub(super) fn unread_count(pending: Option<usize>, unseen: usize) -> usize {
 /// follow が流し込んだ新着のうち､scroll 位置がまだ viewport の上に残して
 /// いる数 (#206)｡
 ///
-/// `top_item` は `ScrollHandle::logical_scroll_top` の 1 つ目 — viewport の
+/// `top_item` は `TimelineList::logical_scroll_top` の 1 つ目 — viewport の
 /// 上端の下にある行の index｡それより小さい index の行はまるごと上にあり､
 /// 読み手はまだ見ていない｡減る一方で増えない: 一度視界に降りた行を､
 /// 読み手が下へ scroll し直したからといって「新着」に戻さない｡
@@ -381,12 +381,12 @@ impl TimelineView {
 
     /// scroll 位置が動いた (#206)｡follow の countdown をそこまで進める｡
     ///
-    /// glide と読み手のホイールの両方から呼ぶ｡`logical_scroll_top` は直近の
-    /// prepaint の行の bounds と今の offset から数えるので､一覧を置き換えた
-    /// 直後の 1 フレームだけは古い行を基準に答える｡glide は補正の着地を
-    /// 待ってから呼ぶ (`start_glide` の `SETTLE_FRAMES`)｡ホイールはその窓で
-    /// 読み手が握ったときだけ 1 回ずれうるが､握った時点で数は読み手の
-    /// ものなので､そのための仕掛けは置かない｡
+    /// glide と読み手のホイールの両方から呼ぶ｡`logical_scroll_top` は
+    /// `ListState` の index で､一覧を置き換えた直後は次の描画の `sync_list`
+    /// が `reset` と anchor を置くまで古い行を基準に答える (#301)｡glide は
+    /// 補正の着地を待ってから呼ぶ (`start_glide` の `SETTLE_FRAMES`)｡ホイールは
+    /// その窓で読み手が握ったときだけ 1 回ずれうるが､握った時点で数は
+    /// 読み手のものなので､そのための仕掛けは置かない｡
     pub(super) fn note_scroll_position(&mut self) {
         let (top_item, _) = self.list_scroll.logical_scroll_top();
         self.unseen = unseen_after_scroll(self.unseen, top_item);

@@ -4022,10 +4022,9 @@ mod tests {
 
     /// #22: 何も無い画面へ follow したとき — 空の List､入れたばかりの
     /// インストール — は､glide を仕掛けずに最上部へ着く｡位置を保つべき行が
-    /// 無いので､補正はリストの末尾を越えた index を指してしまう｡gpui は解決
-    /// できない anchor を保持して prepaint のたびに再試行するため､後の
-    /// "Load older" でリストがその index を越えて伸びると､目に見える理由も
-    /// 無く読み手の下でビューポートが飛ぶことになる｡
+    /// 無いので､補正はリストの末尾を越えた index を指してしまう｡
+    /// `ListState::scroll_to` はそれを末尾に clamp するので (#301)､読み手は
+    /// 最新ではなく一番古い行を見ることになる｡
     #[gpui::test]
     fn following_onto_an_empty_timeline_snaps_without_a_glide(cx: &mut gpui::TestAppContext) {
         let (_window, timeline) = fixture_window(cx, fixture_with(&[], &[]));

@@ -265,7 +265,7 @@ pub(super) fn pending_label(count: usize) -> String {
 const AT_TOP_TOLERANCE_PX: f32 = 2.0;
 
 /// 読み手が timeline の最上部にいるかどうか (#22)｡
-/// `ScrollHandle::logical_scroll_top` の 2 つ組の答え — viewport の上端の
+/// `TimelineList::logical_scroll_top` の 2 つ組の答え — viewport の上端の
 /// 下にある行の index と､その行のどこまで上端が入り込んでいるか — から
 /// 決める｡
 pub(super) fn at_top(top_item: usize, offset_in_item: gpui::Pixels) -> bool {
@@ -641,10 +641,9 @@ impl TimelineView {
         if nothing_was_kept {
             // どの行も新しい — 空の List が初めて埋まるか､重なりの無い
             // 先頭ページか｡その場に留めるべき行が無いので､下の補正は
-            // リストの末尾より後ろの index を名指しすることになる｡gpui は
-            // 解決できない anchor を *保持* して prepaint のたびに再試行
-            // するし､後の "Load older" がリストをその index より伸ばせば
-            // viewport が読み手の下で飛ぶ｡代わりに glide 無しで最上部に
+            // リストの末尾より後ろの index を名指しすることになる｡
+            // `ListState::scroll_to` はそれを末尾に clamp するので (#301)､
+            // 読み手は一番古い行へ飛ばされる｡代わりに glide 無しで最上部に
             // 着地する: glide は読んでいる行より上の行を見せることであり､
             // ここにはそんな行が無い｡
             self.list_scroll.scroll_to_top_of_item(0);
@@ -663,7 +662,7 @@ impl TimelineView {
     ///
     /// `settle_from` が `Some(before)` なら､歩く距離はこれが呼ばれた時点では
     /// まだそこに無い: [`Self::follow`] の `scroll_to_top_of_item` は次の
-    /// prepaint で着地する｡だからループは最初の数フレームを､offset が
+    /// 描画の頭 (`sync_list`､#301) で着地する｡だからループは最初の数フレームを､offset が
     /// `before` から動くのを待つのに使う｡回数には上限があり､決して着地
     /// しない補正 (空のリスト､描画をやめたウィンドウ) は､ハングではなく
     /// pill がやるのと同じ吸着に落ちる｡
