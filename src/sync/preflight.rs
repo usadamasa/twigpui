@@ -75,7 +75,7 @@ pub(super) fn dry_run(
             count.unwrap_or_default()
         ));
     }
-    eprintln!("{}", note_before_reading(paths, list_id, count));
+    eprintln!("{}", note_before_reading(paths, user_id, list_id, count));
     // ミラーだけが新しくなった失敗を､古い count で完了扱いしない｡
     state.following_count = None;
     save_state(&paths.sync_state_file(), &state)?;
@@ -96,7 +96,7 @@ pub(super) fn dry_run(
 /// #288 以降､plan は台帳と一緒に作られるので､台帳が無いのに plan だけが
 /// あるのはその古い plan のときだけ — つまり fallback に届く値は信用できない
 /// ものしか無い｡
-fn note_before_reading(paths: &Paths, list_id: &str, count: Option<u64>) -> String {
+fn note_before_reading(paths: &Paths, user_id: &str, list_id: &str, count: Option<u64>) -> String {
     let mirror = mirror::load(paths);
     let mirrored = mirror.as_ref().is_some_and(|mirror| mirror.usable(list_id));
     let members = mirror
@@ -104,6 +104,7 @@ fn note_before_reading(paths: &Paths, list_id: &str, count: Option<u64>) -> Stri
         .and_then(|mirror| mirror.members_total(list_id));
     read_note(
         count,
+        super::following::head_estimate(paths, user_id, count),
         members,
         mirrored,
         paths.profile().sync_seed_usernames().map(<[&str]>::len),
@@ -111,14 +112,24 @@ fn note_before_reading(paths: &Paths, list_id: &str, count: Option<u64>) -> Stri
 }
 
 /// 価格を固定せず､読み取り件数と resource の種類だけを説明する｡
+/// `head` は台帳の先頭読みで済む見込みの件数 (#289)｡検算が外れれば
+/// `following` の全件になるので､両方を出す｡
 fn read_note(
     following: Option<u64>,
+    head: Option<u64>,
     members: Option<usize>,
     mirrored: bool,
     seed: Option<usize>,
 ) -> String {
+    let whole = following.map_or_else(|| "unknown".to_string(), |count| count.to_string());
     let following = seed.map_or_else(
-        || format!("the follow list (about {} accounts, Owned Reads)", following.map_or_else(|| "unknown".to_string(), |count| count.to_string())),
+        || match head {
+            Some(head) => format!(
+                "the head of the follow list (about {head} accounts, Owned Reads; the whole \
+                 list of about {whole} only if the ledger does not line up)"
+            ),
+            None => format!("the follow list (about {whole} accounts, Owned Reads)"),
+        },
         |count| format!("the development seed ({count} accounts, cached username lookups, Users on cache miss)"),
     );
     let members = if mirrored {
@@ -138,18 +149,30 @@ mod tests {
 
     #[test]
     fn read_note_names_counts_classes_and_the_mirror_without_prices() {
-        let text = read_note(Some(2340), Some(2000), false, None);
+        let text = read_note(Some(2340), None, Some(2000), false, None);
         assert!(text.contains("2340 accounts, Owned Reads"), "{text}");
         assert!(text.contains("2000 accounts, Users"), "{text}");
         assert!(text.contains("10x the Owned price"), "{text}");
-        let mirrored = read_note(None, Some(2000), true, None);
+        let mirrored = read_note(None, None, Some(2000), true, None);
         assert!(mirrored.contains("unknown"), "{mirrored}");
         assert!(mirrored.contains("local mirror, 0 reads"), "{mirrored}");
-        let unknown = read_note(None, None, false, None);
+        let unknown = read_note(None, None, None, false, None);
         assert_eq!(unknown.matches("unknown").count(), 2);
         for note in [text, mirrored, unknown] {
             assert!(!note.contains('$'));
         }
+    }
+
+    #[test]
+    fn the_note_names_the_head_read_when_the_ledger_can_serve_it() {
+        // #289: 実機で「about 2343 accounts」と出たまま 5 件で済んでいた｡
+        // 先頭読みの見込みと､検算が外れたときの全件の両方を言う｡
+        let text = read_note(Some(2343), Some(6), Some(1085), true, None);
+        assert!(
+            text.contains("head of the follow list (about 6 accounts"),
+            "{text}"
+        );
+        assert!(text.contains("whole list of about 2343"), "{text}");
     }
 
     #[test]
@@ -164,14 +187,14 @@ mod tests {
             r#"{"list_id":"7","created_at":0,"entries":[]}"#,
         )
         .unwrap();
-        let text = note_before_reading(scratch.paths(), "7", Some(2340));
+        let text = note_before_reading(scratch.paths(), "me", "7", Some(2340));
         assert!(text.contains("about unknown accounts, Users"), "{text}");
         assert!(!text.contains("about 0"), "{text}");
     }
 
     #[test]
     fn development_note_names_the_seed_lookup_cost() {
-        let text = read_note(Some(2340), None, false, Some(4));
+        let text = read_note(Some(2340), None, None, false, Some(4));
         assert!(text.contains("development seed (4 accounts"), "{text}");
         assert!(text.contains("Users on cache miss"), "{text}");
         assert!(!text.contains("2340"));

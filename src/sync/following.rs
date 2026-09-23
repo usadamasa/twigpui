@@ -122,6 +122,17 @@ fn load(paths: &Paths) -> Option<Ledger> {
     }
 }
 
+/// 次の [`read`] が先頭読みで済む見込みなら､その件数 (増分 + 1､下限
+/// [`HEAD_PAGE_MIN`])｡台帳が使えなければ `None` で､呼び出し側は全件読みの
+/// 見込みを出す｡CLI の読む前の note のためにある — 検算は読んでからなので､
+/// これは見込みであって約束ではない｡
+pub(super) fn head_estimate(paths: &Paths, user_id: &str, count: Option<u64>) -> Option<u64> {
+    let ledger = load(paths).filter(|ledger| ledger.user_id == user_id)?;
+    ledger.follows.first()?;
+    let delta = count?.checked_sub(ledger.count?)?;
+    Some(delta.saturating_add(1).max(u64::from(HEAD_PAGE_MIN)))
+}
+
 /// `user_id` の follow list｡台帳と `count` (今回の probe) で済むなら先頭だけ
 /// 読み､でなければ `read_all` で全件読んで台帳を作り直す｡
 ///
@@ -443,6 +454,18 @@ mod tests {
         let users = read_with(&scratch, &client, Some(3)).unwrap();
         assert_eq!(ids(&users), ["3", "2", "1"]);
         assert_eq!(client.calls(), [Call::FollowingHead(5, None)]);
+    }
+
+    #[test]
+    fn the_estimate_says_how_much_of_the_head_the_next_read_buys() {
+        let scratch = Scratch::new("follow-estimate");
+        assert_eq!(head_estimate(scratch.paths(), "me", Some(4)), None);
+        write_ledger(scratch.paths(), "me", Some(3), &["3", "2", "1"]);
+        assert_eq!(head_estimate(scratch.paths(), "me", Some(3)), Some(5));
+        assert_eq!(head_estimate(scratch.paths(), "me", Some(10)), Some(8));
+        assert_eq!(head_estimate(scratch.paths(), "me", Some(2)), None);
+        assert_eq!(head_estimate(scratch.paths(), "me", None), None);
+        assert_eq!(head_estimate(scratch.paths(), "you", Some(4)), None);
     }
 
     #[test]
