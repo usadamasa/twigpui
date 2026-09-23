@@ -215,6 +215,7 @@ impl TimelineView {
                                 lane::load_composite_timeline(&this.paths, &this.sources, &user_id);
                             this.item_provenance = composed.provenance;
                             this.state = TimelineState::Loaded(composed.items);
+                            this.refresh_images(cx);
                         }
                         // #21: 削除より前に取られた buffer は削除された
                         // post をまだ持っている｡後から適用すると画面へ
