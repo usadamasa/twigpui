@@ -437,7 +437,10 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
     }
 
-    // --- missing_sources (#43 の「on にする」規則) ---
+    // --- Composed::missing (#43 の「on にする」規則、#302) ---
+    //
+    // 合成が読んだ結果から「使えるキャッシュが無かった source」を拾う｡
+    // 同じファイルを main thread でもう一度 parse しないため｡
 
     #[test]
     fn a_cached_source_is_not_missing() {
@@ -455,7 +458,8 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(missing_sources(&paths, &[list], "me"), Vec::new());
+        let composed = load_composite_timeline(&paths, &[list], "me");
+        assert_eq!(composed.missing, Vec::new());
 
         std::fs::remove_dir_all(&root).unwrap();
     }
@@ -466,11 +470,53 @@ mod tests {
         let paths = test_paths(&root);
         paths.ensure_dirs().unwrap();
 
+        let home = TimelineSource::Home;
         let list = TimelineSource::List("1".to_string());
-        assert_eq!(
-            missing_sources(&paths, std::slice::from_ref(&list), "me"),
-            vec![list]
-        );
+        cache::save_primary_timeline(
+            &paths,
+            &home,
+            "me",
+            &[item("1", "2026-01-01T00:00:01.000Z")],
+            0,
+        )
+        .unwrap();
+
+        let composed = load_composite_timeline(&paths, &[home, list.clone()], "me");
+        assert_eq!(composed.missing, vec![list]);
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    // 読めないファイルも「無い」と数える｡数えないと､壊れたキャッシュは
+    // 空の lane を出すだけで reload を起こさず､そのまま居座る｡
+    #[test]
+    fn a_source_whose_cache_cannot_be_read_is_missing() {
+        let root = temp_root("missing-broken");
+        let paths = test_paths(&root);
+        paths.ensure_dirs().unwrap();
+
+        let list = TimelineSource::List("1".to_string());
+        cache::save_primary_timeline(
+            &paths,
+            &list,
+            "me",
+            &[item("1", "2026-01-01T00:00:01.000Z")],
+            0,
+        )
+        .unwrap();
+        // 書いたばかりの 1 本 (この root の下にはそれしか無い) を壊す｡
+        let cache_dir = paths.timeline_file("me");
+        let cache_dir = cache_dir.parent().unwrap();
+        for entry in std::fs::read_dir(cache_dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_some_and(|ext| ext == "json") {
+                std::fs::write(&path, "{ not json").unwrap();
+            }
+        }
+
+        let composed = load_composite_timeline(&paths, std::slice::from_ref(&list), "me");
+        assert!(composed.items.is_empty());
+        assert_eq!(composed.missing, vec![list]);
 
         std::fs::remove_dir_all(&root).unwrap();
     }
