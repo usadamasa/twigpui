@@ -343,6 +343,20 @@ pub(crate) fn next_batch(
     batch
 }
 
+/// loop が次に送る 1 件 (#231)｡[`next_batch`] と同じく addition と removal
+/// を交互に取るが､1 tick に 1 件なので「交互」は plan の印から読む: 片付いた
+/// (届いたか拒まれた) removal が addition より少ないあいだは removal の番だ｡
+/// 片側が尽きればもう片側を続け､`prune` が false なら removal は見ない｡
+///
+/// `next_batch(plan, prune, 1)` では代われない: あちらは addition から
+/// 取り始めて上限 1 で止まるので､addition が尽きるまで removal に届かず､
+/// [`next_batch`] の doc が名指しする「stale な member が消える何時間も前に
+/// addition だけが見える」形にそのままなる｡
+pub(crate) fn next_write(plan: &super::Plan, prune: bool) -> Option<(super::Action, String)> {
+    let _ = (plan, prune);
+    None
+}
+
 /// background sync が `plan` の removal を送ってよいかどうか (#176)｡
 ///
 /// 上限は list に対する割合だ: plan が diff された相手の `members_total` の
@@ -1005,6 +1019,64 @@ mod tests {
         plan.mark_applied("1", Action::Add);
         plan.mark_applied("3", Action::Remove);
         assert_eq!(batch(&plan, true, 10), "");
+    }
+
+    // --- next_write: 1 tick 1 件でも交互 (#231) ---
+
+    /// 印を付けながら [`next_write`] を引き切り､送った順を `+id -id` で返す｡
+    fn drain(mut plan: Plan, prune: bool) -> String {
+        let mut sent = Vec::new();
+        while let Some((action, user_id)) = next_write(&plan, prune) {
+            sent.push(match action {
+                Action::Add => format!("+{user_id}"),
+                Action::Remove => format!("-{user_id}"),
+            });
+            plan.mark_applied(&user_id, action);
+        }
+        sent.join(" ")
+    }
+
+    #[test]
+    fn one_write_at_a_time_still_alternates_additions_and_removals() {
+        // `next_batch(plan, prune, 1)` なら "+1 +2 -3 -4" になる — 上限 1 は
+        // addition を取った時点で止まるので､removal は addition が尽きる
+        // まで回ってこない｡
+        let plan = plan_of(&["1", "2"], &["3", "4"]);
+        assert_eq!(drain(plan, true), "+1 -3 +2 -4");
+    }
+
+    #[test]
+    fn one_write_at_a_time_carries_on_with_whichever_side_still_has_entries() {
+        let plan = plan_of(&["1", "2", "3"], &["9"]);
+        assert_eq!(drain(plan, true), "+1 -9 +2 +3");
+        let plan = plan_of(&[], &["7", "8"]);
+        assert_eq!(drain(plan, true), "-7 -8");
+    }
+
+    #[test]
+    fn without_prune_one_write_at_a_time_never_picks_a_removal() {
+        let plan = plan_of(&["1", "2"], &["3", "4"]);
+        assert_eq!(drain(plan, false), "+1 +2");
+    }
+
+    #[test]
+    fn a_rejected_entry_counts_as_that_side_having_had_its_turn() {
+        // 拒まれた removal も request は飛んでいる｡数えないと次も removal
+        // の番になり､拒否が続く側に張り付く｡
+        let mut plan = plan_of(&["1", "2"], &["3", "4"]);
+        plan.mark_applied("1", Action::Add);
+        plan.mark_rejected("3", Action::Remove, "no");
+        assert_eq!(
+            next_write(&plan, true),
+            Some((Action::Add, "2".to_string()))
+        );
+    }
+
+    #[test]
+    fn a_fully_settled_plan_has_no_next_write() {
+        let mut plan = plan_of(&["1"], &[]);
+        plan.mark_applied("1", Action::Add);
+        assert_eq!(next_write(&plan, true), None);
     }
 
     #[test]
