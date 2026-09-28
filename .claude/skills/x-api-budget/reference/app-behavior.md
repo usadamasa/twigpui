@@ -38,9 +38,19 @@ diff の前には `/2/users/me?user.fields=public_metrics` でフォロー数を
 GUI の強制実行と CLI の `--reread` は count による省略をしない｡probe の一般的な失敗は
 full diff へ戻し､402 と rate limit / usage cap は後続の read を止める｡
 
-diff はフォロー全件 (Owned Reads) と members の台帳 (`sync_members.json`) から組み立てる｡
+diff はフォロー一覧 (Owned Reads) と members の台帳 (`sync_members.json`) から組み立てる｡
 台帳が使えない場合は members 全件 (Users､Owned の 10 倍の単価) を先に読み､直後に保存する｡
 その後のフォロー取得が失敗しても､取得済みの members は残る｡CLI は全件読みの前に件数と種類を表示する｡
+
+フォロー一覧にも台帳がある (`sync_following.json`､state dir､#289)｡最後の全件読みの一覧を順序つきで､
+そのときの probe の count と一緒に持つ｡台帳がこのアカウントのもので今回の count が台帳の count 以上なら
+先頭だけ読む: `max_results = clamp(増分 + 1, 5, 100)` で､台帳が知っている id に当たるまでページする
+(ページ数は ceil((増分 + 1) / max_results) まで)｡検算が 2 つ通れば — 当たった id が台帳の先頭と同じ､
+かつ 台帳の count + 新規の件数 == 今回の count — 新規 ++ 台帳を following とし､台帳を更新する｡
+検算が外れた､count が減った (unfollow)､台帳が無い､probe が失敗した､のどれかなら従来どおり
+フォロー全件を読んで台帳を作り直す｡endpoint が新しく follow した順に返す実測は
+`x-api-endpoints` の endpoints.md にある｡`--reread` と GUI の強制実行もこの台帳を通る｡
+全件を読み直したいときは `sync_following.json` を消す (members の台帳と同じ)｡
 
 台帳は list の写しではなく､このアプリが list に入れたアカウントの記録｡最初の全件取得を種にして､
 write が成功するたびに更新する｡**古さでは読み直さない｡** members の全件取得は残高が足りなければ
@@ -49,6 +59,7 @@ x.com で手で足したアカウントは台帳に載らないので削除さ�
 足し直されない｡list の実態に合わせ直すには `sync_members.json` を削除して `--sync-list --reread` を実行する｡
 `--reread` 自体は台帳を捨てない｡
 count が変わらない follow / unfollow の入れ替えは､次の count 変化か強制実行まで見逃す｡
+先頭を毎回読んで拾う案は #289 で採らなかった (probe を Owned 1 件のままにするため)｡
 
 #169 以降､その読み取りは **release** ビルドでしか起きない｡debug ビルドは開発用の
 プロファイルで､フォローグラフの読み取りを 4 つの固定スクリーンネーム

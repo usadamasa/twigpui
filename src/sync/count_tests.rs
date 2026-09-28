@@ -27,7 +27,7 @@ fn check(paths: &Paths, api: &FakeApi, forced: bool) -> Tick {
         "7",
         Pacing {
             interval_seconds: INTERVAL,
-            writes_per_batch: 5,
+            writes: crate::sync::WritePacing::DEFAULT,
             forced,
         },
         10,
@@ -75,6 +75,37 @@ fn changed_first_and_forced_counts_run_the_diff_and_store_the_probe() {
         );
         assert_eq!(api.calls(), [Call::FollowingCount, Call::Following(None)]);
     }
+}
+
+#[test]
+fn a_changed_count_with_a_follow_ledger_reads_only_the_head() {
+    // #289: loop 側も同じ台帳を通る｡1 人 follow した tick は先頭の 1 ページで
+    // diff を作り､全件は買わない｡
+    let scratch = Scratch::new("count-follow-head");
+    prepare(scratch.paths(), Some(3), NOW);
+    std::fs::write(
+        scratch.paths().sync_following_file(),
+        r#"{"version":1,"user_id":"me","count":3,"read_at":100,"follows":[
+            {"id":"3","username":"c"},{"id":"2","username":"b"},{"id":"1","username":"a"}]}"#,
+    )
+    .unwrap();
+    let api = FakeApi::new()
+        .counts(vec![Ok(4)])
+        .heads(vec![Ok(page(&[("9", "new"), ("3", "c")], None))]);
+    let tick = check(scratch.paths(), &api, false);
+    assert!(
+        matches!(tick.outcome, Ok(Outcome::Diffed { adds: 4, .. })),
+        "{:?}",
+        tick.outcome
+    );
+    assert_eq!(
+        api.calls(),
+        [Call::FollowingCount, Call::FollowingHead(5, None)]
+    );
+    assert_eq!(
+        load_state(&scratch.paths().sync_state_file()).following_count,
+        Some(4)
+    );
 }
 
 #[test]
@@ -188,7 +219,7 @@ fn a_refreshed_mirror_after_a_failed_follow_read_cannot_skip_the_retry() {
         "7",
         Pacing {
             interval_seconds: INTERVAL,
-            writes_per_batch: 5,
+            writes: crate::sync::WritePacing::DEFAULT,
             forced: false,
         },
         10,

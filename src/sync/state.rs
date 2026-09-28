@@ -35,61 +35,41 @@
 //! # そもそもゆっくり送る
 //!
 //! #197 のロックは 18 分ほどでおよそ 100〜140 件の addition のあとに来た —
-//! 毎分 7 件､1 秒間隔で 20 件ずつの batch で送っていた｡
-//! [`APPLY_PAUSE_SECONDS`] と `sync_writes_per_batch` (既定 2､上限の
-//! 24 時間での回復を実測して以来 config のつまみ) が持続レートを抑える｡
-//! 既定値が上限より下かどうかは分かっていない｡狙いは､それが上限を踏む
-//! 当のものにならないことだ｡きれいに走ったあとにつまみを上げるのが上限の
-//! 大きさを探る公認のやり方で — 答えがどちらでも梯子が吸収する｡
+//! 毎分 7 件､1 秒間隔で 20 件ずつの batch で送っていた｡毎分 1 件まで
+//! 落としても拒否は出続けたので､残る違いは速度ではなく規則正しさだ｡
 //!
-//! # 速度だけでは足りない
+//! そこで write は 1 tick に 1 件にし (#231)､間を 3 つの範囲から引く
+//! ([`super::pacing`]): write と write の gap､cooldown を挟まずに続ける
+//! 件数､batch のあとの cooldown｡どれも tick ごとに引き直す｡batch の
+//! 進み具合は [`SyncState::batch_left`] に残るので､途中で再起動しても
+//! 続きから数える｡持続レートの既定は `pacing::WritePacing::DEFAULT` を
+//! 見よ — 上限より下かどうかは今も分かっていない｡狙いは､それが上限を
+//! 踏む当のものにならないことで､答えがどちらでも上の梯子が吸収する｡
 //!
-//! 毎分 1 件まで落としても拒否は出続けた｡毎分 7 件よりはるかに遅いのに
-//! 止められる以上､残る違いは速度ではなく規則正しさになる｡
+//! 継ぎ目は `rate_limit::backoff_delay` に倣う: [`settle`] は引かれた
+//! 長さ ([`Spacing`]) しか見ず､`getrandom` を触るのは呼び出し側の
+//! `rate_limit::random_jitter_fraction` だけ｡
 //!
-//! そこで間隔を範囲にした｡二層ある｡
+//! # 400 は entry への答え
 //!
-//! - batch と batch のあいだ: [`apply_pause_seconds`] が 90〜300 秒を引く｡
-//! - batch の中: [`write_gap`] が write ごとに 3〜20 秒を引く｡
-//!
-//! どちらも上へしか振れない｡`sync_writes_per_batch` は上限なので､揺らぎが
-//! それより速い瞬間を作ってはならない｡
-//!
-//! 継ぎ目は `rate_limit::backoff_delay` に倣う: 長さを決める関数は純粋で
-//! `f64` を受け取り､`getrandom` を触るのは
-//! `rate_limit::random_jitter_fraction` だけ｡持続レートはおよそ
-//! `writes_per_batch / 195 秒`｡
+//! X が 400 で拒んだ entry (#254) は印を付けて次へ進む｡ただし続けざまなら
+//! list や request の形そのものが拒まれている方が疑わしいので､
+//! [`SyncState::rejected_in_a_row`] が [`REJECTIONS_IN_A_ROW_LIMIT`] に
+//! 届いたら interval 丸ごと退く — list 全体が拒まれていても支出は interval
+//! あたりその件数で頭打ちになる｡
 
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
 
 use super::schedule::Outcome;
 
-/// batch と batch のあいだに待つ長さの下限｡秒｡実際の待ちは
-/// [`apply_pause_seconds`] が batch ごとに引き直す｡
+/// 連続してこの件数の write が 400 で拒まれたら interval 丸ごと退く (#254)｡
 ///
-/// 60 秒から上げた｡毎分ちょうど 1 件でも拒否は出続けたので､#197 の上限
-/// とは別の何かが効いている｡
-pub(crate) const APPLY_PAUSE_SECONDS: i64 = 90;
-
-/// 揺らぎが [`APPLY_PAUSE_SECONDS`] に足しうる最大の秒数｡間は 90〜300 秒に
-/// 散り､平均は 195 秒｡
-///
-/// 幅が下限の 2 倍を超えるのは意図的｡狭い揺らぎは周期を隠さない — 60±5 秒は
-/// 目盛りの粗い 60 秒周期でしかない｡
-pub(crate) const APPLY_PAUSE_SPREAD_SECONDS: i64 = 210;
-
-/// batch の中で write と write のあいだに空ける最小の長さ｡秒｡
-///
-/// これが無いと batch は同じ秒のうちに全件を投げる｡#197 のロックはまさに
-/// その形 — 1 秒間隔で 20 件ずつ — の後に来た｡
-pub(crate) const WRITE_GAP_FLOOR_SECONDS: u64 = 3;
-
-/// 揺らぎがその間に足しうる最大の秒数｡間は 3〜20 秒に散る｡
-///
-/// pause を伸ばすのとは役目が別｡これがあるので `sync_writes_per_batch` を
-/// 上げても一定間隔の連射にはならず､短いひとかたまりと長い沈黙になる｡
-pub(crate) const WRITE_GAP_SPREAD_SECONDS: u64 = 17;
+/// 拒否 1 件は entry の問題だが､続けざまなら list や request の形そのものが
+/// 拒まれている可能性のほうが高い｡これが無いと 2,000 件の plan を丸ごと
+/// 撃ち切る — 1 request ずつ課金されながら｡[`SyncState::rejected_in_a_row`]
+/// が tick をまたいで数える｡
+pub(crate) const REJECTIONS_IN_A_ROW_LIMIT: u32 = 3;
 
 /// opaque な refusal 1 回で後退する上限: 6 時間｡1 日下がったままの上限が
 /// 96 回ではなく 4 回の request で済むだけ長く､明けた上限に同じ 6 時間の
@@ -116,8 +96,8 @@ pub(crate) struct SyncState {
     /// 再起動でも守られるよう永続化してある (#198)｡
     #[serde(default)]
     pub blocked_until: Option<i64>,
-    /// 次の write の batch まで自分に課した間｡[`apply_pause_seconds`] が
-    /// batch ごとに引き直す｡
+    /// 次の write まで自分に課した間 — gap か cooldown｡[`settle`] が write
+    /// ごとに引き直す｡
     ///
     /// これは拒否ではないので `blocked_until` とは分ける｡
     /// `ui::list_sync::status_of` は block を「rate limited」と読むため､
@@ -133,6 +113,21 @@ pub(crate) struct SyncState {
     /// いるときに status bar が出すのがこれだ (#197)｡
     #[serde(default)]
     pub refusals: u32,
+    /// 今の batch であと何件送ったら cooldown に入るか (#231)｡0 は
+    /// 「batch の途中ではない」で､次の write が新しい batch を開く｡
+    /// 永続化するのは `paused_until` と同じ理由: 再起動が batch を
+    /// 引き直せば､cooldown までの件数が伸びる｡
+    #[serde(default)]
+    pub batch_left: u32,
+    /// あいだに write が 1 件も届いていない 400 の連続回数 (#254)｡
+    /// [`REJECTIONS_IN_A_ROW_LIMIT`] で interval 丸ごと退く｡
+    #[serde(default)]
+    pub rejected_in_a_row: u32,
+    /// 最後の refusal から届いた write の件数 (#231)｡ペース配分が効いて
+    /// いるかを log で読むための数で､判断には使わない: refusal の行が
+    /// 「何件通ったあとの拒否か」を言えるのはこれがあるからだ｡
+    #[serde(default)]
+    pub landed_since_refusal: u64,
 }
 
 impl SyncState {
@@ -160,47 +155,38 @@ pub(crate) fn opaque_backoff_seconds(refusals: u32) -> i64 {
         .min(OPAQUE_BACKOFF_CEILING_SECONDS)
 }
 
-/// `span` のうち `fraction` が指す長さ｡`fraction` は `0.0..=1.0` へ丸める｡
-/// 供給源が何を返しても揺らぎが下限を割らないようにするため｡
-fn scaled(span: i64, fraction: f64) -> i64 {
-    let fraction = fraction.clamp(0.0, 1.0);
-    // `span` はこのモジュールの定数 (3 桁) なので f64 が正確に表せる｡
-    // 積も同じ桁に留まるため､切り捨てが落とすのは小数部だけ｡
-    #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
-    let scaled = (span as f64 * fraction) as i64;
-    scaled
-}
-
-/// 続きのある batch のあと､次の batch まで待つ長さ｡秒｡
+/// [`settle`] が待ち時間を決めるのに要る長さ｡
 ///
-/// [`APPLY_PAUSE_SECONDS`] から [`APPLY_PAUSE_SPREAD_SECONDS`] だけ上へ散る｡
-/// 本番では `rate_limit::random_jitter_fraction` が batch ごとに引き直す｡
-pub(crate) fn apply_pause_seconds(jitter_fraction: f64) -> i64 {
-    APPLY_PAUSE_SECONDS.saturating_add(scaled(APPLY_PAUSE_SPREAD_SECONDS, jitter_fraction))
-}
-
-/// batch の中で write と write のあいだに眠る長さ｡
-///
-/// [`WRITE_GAP_FLOOR_SECONDS`] から [`WRITE_GAP_SPREAD_SECONDS`] だけ上へ
-/// 散る｡引き直すのは write ごと｡同じ間を n 回繰り返せば､それもまた一定
-/// 周期になる｡
-pub(crate) fn write_gap(jitter_fraction: f64) -> std::time::Duration {
-    let spread = i64::try_from(WRITE_GAP_SPREAD_SECONDS).unwrap_or(0);
-    let extra = u64::try_from(scaled(spread, jitter_fraction)).unwrap_or(0);
-    std::time::Duration::from_secs(WRITE_GAP_FLOOR_SECONDS.saturating_add(extra))
-}
-
-/// [`settle`] が待ち時間を決めるのに要る 2 つの長さ｡
-///
-/// 引数として並べずに struct にする｡どちらも秒なので､`now` の隣に置くと
+/// 引数として並べずに struct にする｡秒が 3 つ並ぶので､`now` の隣に置くと
 /// 呼び出し側が黙って取り違える — [`super::schedule::Situation`] と同じ理由｡
+/// 範囲から引くのは呼び出し側で (`pacing::Span::draw`)､ここは引かれた
+/// 長さしか見ない｡
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Spacing {
     /// `config.sync_interval_seconds`｡失敗した tick が得る待ちでもある｡
     pub interval_seconds: u32,
-    /// 続きのある batch のあとに待つ長さ｡[`apply_pause_seconds`] が
-    /// 呼び出しごとに引く｡
-    pub apply_pause_seconds: i64,
+    /// batch の途中で次の write まで待つ長さ｡
+    pub gap_seconds: i64,
+    /// batch を送り切ったあと次の batch まで待つ長さ｡
+    pub cooldown_seconds: i64,
+    /// 新しい batch を開くときの件数｡途中の batch には触れない｡
+    pub batch_writes: u32,
+}
+
+/// `writes` の範囲から今回の長さを引いた [`Spacing`]｡揺らぎを引くのは
+/// ここ 1 回きりで､[`settle`] は引かれた長さしか見ない —
+/// `rate_limit::backoff_delay` と同じ継ぎ目｡
+pub(crate) fn spacing_for(interval_seconds: u32, writes: super::pacing::WritePacing) -> Spacing {
+    let roll = crate::rate_limit::random_jitter_fraction;
+    Spacing {
+        interval_seconds,
+        gap_seconds: i64::from(writes.gap_seconds.draw(roll())),
+        cooldown_seconds: i64::from(writes.cooldown_seconds.draw(roll())),
+        // RNG が使えないとき `roll` は 1.0 を返す — 秒ならいちばん長い側
+        // だが､件数ではいちばん多い batch になる｡反転して､失敗時は
+        // いちばん小さい batch にする｡
+        batch_writes: writes.batch_writes.draw(1.0 - roll()),
+    }
 }
 
 /// [`settle`] が残すもの: 永続化する state と､loop が次に起きるべき時刻｡
@@ -233,14 +219,22 @@ pub(crate) struct Settled {
 /// write が届いていた場合 (`sent > 0`) は先に連続回数を戻す: 上限は
 /// 少し前に明らかに開いていたので､これは 5 回目ではなく 1 回目の refusal だ｡
 ///
-/// 何かを送れた batch は両方を消し — 上限が write を受け付けた — plan に
-/// 続きがあれば [`Spacing::apply_pause_seconds`] 後に戻ってくる｡その間は
-/// `paused_until` にも記録する｡`wake_at` は loop の変数でしかないので､
-/// 再起動がそれを飛ばす｡
+/// 届いた write は両方を消し — 上限が write を受け付けた — 400 の連続と
+/// `landed_since_refusal` も動かす｡そのうえで送った件数ぶん batch を進める
+/// ([`SyncState::batch_left`] が 0 なら先に [`Spacing::batch_writes`] で
+/// 開く)｡plan に続きがあれば､batch がまだ残っているなら
+/// [`Spacing::gap_seconds`]､送り切ったなら [`Spacing::cooldown_seconds`]
+/// 後に戻ってくる｡その間は `paused_until` にも記録する｡`wake_at` は loop
+/// の変数でしかないので､再起動がそれを飛ばす｡
+///
+/// 400 で拒まれた write (#254) も request は飛んでいるので batch を同じ
+/// ように進める — 数えないと次の request が間を置かずに飛ぶ｡連続回数が
+/// [`REJECTIONS_IN_A_ROW_LIMIT`] に届いたら､代わりに interval 丸ごと
+/// `blocked_until` に置いて連続回数を戻す｡
 ///
 /// diff は見つけたものを流し切るためにすぐ戻ってくる｡そのとき前の plan が
-/// 残した間は消す｡新しい plan の 1 batch 目が､もう存在しない batch の
-/// あとを待つ理由は無い｡
+/// 残した間と batch の途中は消す｡新しい plan の 1 件目が､もう存在しない
+/// batch のあとを待つ理由は無い｡
 pub(crate) fn settle(
     state: SyncState,
     outcome: Option<&Outcome>,
@@ -264,6 +258,7 @@ pub(crate) fn settle(
             if *sent > 0 {
                 next.refusals = 0;
             }
+            next.landed_since_refusal = 0;
             let until = if *opaque {
                 next.refusals = next.refusals.saturating_add(1);
                 now.saturating_add(opaque_backoff_seconds(next.refusals))
@@ -273,22 +268,30 @@ pub(crate) fn settle(
             next.blocked_until = Some(until);
             until
         }
+        Some(Outcome::Applied { sent: 0, .. }) => now,
         Some(Outcome::Applied { sent, remaining }) => {
-            if *sent > 0 {
-                next.refusals = 0;
-                next.blocked_until = None;
-            }
-            if *remaining > 0 {
-                let until = now.saturating_add(spacing.apply_pause_seconds);
-                next.paused_until = Some(until);
+            next.refusals = 0;
+            next.blocked_until = None;
+            next.rejected_in_a_row = 0;
+            next.landed_since_refusal = next
+                .landed_since_refusal
+                .saturating_add(u64::try_from(*sent).unwrap_or(u64::MAX));
+            pace(&mut next, *sent, *remaining, now, spacing)
+        }
+        Some(Outcome::Rejected { remaining }) => {
+            next.rejected_in_a_row = next.rejected_in_a_row.saturating_add(1);
+            if next.rejected_in_a_row >= REJECTIONS_IN_A_ROW_LIMIT {
+                next.rejected_in_a_row = 0;
+                let until = now.saturating_add(i64::from(spacing.interval_seconds));
+                next.blocked_until = Some(until);
                 until
             } else {
-                next.paused_until = None;
-                now
+                pace(&mut next, 1, *remaining, now, spacing)
             }
         }
         Some(Outcome::Diffed { .. }) => {
             next.paused_until = None;
+            next.batch_left = 0;
             now
         }
     };
@@ -296,6 +299,40 @@ pub(crate) fn settle(
         state: next,
         wake_at,
     }
+}
+
+/// `attempts` 件の request を送ったあとの batch の進みと､次の write まで
+/// の間｡[`settle`] の届いた側と拒まれた側が共有する｡
+///
+/// `batch_left` が 0 なら､この request が新しい batch を開いたということ
+/// なので､先に [`Spacing::batch_writes`] で埋める｡0 件の batch は 1 件と
+/// 読む: config が 0 を拒むので本番では起きないが､ファイル由来の値で
+/// write が永久に「batch の途中」に留まってはならない｡
+fn pace(
+    next: &mut SyncState,
+    attempts: usize,
+    remaining: usize,
+    now: i64,
+    spacing: Spacing,
+) -> i64 {
+    if next.batch_left == 0 {
+        next.batch_left = spacing.batch_writes.max(1);
+    }
+    next.batch_left = next
+        .batch_left
+        .saturating_sub(u32::try_from(attempts).unwrap_or(u32::MAX));
+    if remaining == 0 {
+        next.paused_until = None;
+        return now;
+    }
+    let wait = if next.batch_left == 0 {
+        spacing.cooldown_seconds
+    } else {
+        spacing.gap_seconds
+    };
+    let until = now.saturating_add(wait);
+    next.paused_until = Some(until);
+    until
 }
 
 /// `path` から state を読み戻す｡
@@ -328,12 +365,16 @@ mod tests {
     /// テストが引く「揺らぎの目」｡本番は呼び出しごとに引き直すので､
     /// [`settle`] は待ち時間を渡された長さとしてしか見ない — その一点を
     /// 固定して読みやすくしてある｡
+    const GAP: i64 = 7;
     const PAUSE: i64 = 77;
+    const BATCH: u32 = 3;
 
     fn spacing() -> Spacing {
         Spacing {
             interval_seconds: INTERVAL,
-            apply_pause_seconds: PAUSE,
+            gap_seconds: GAP,
+            cooldown_seconds: PAUSE,
+            batch_writes: BATCH,
         }
     }
 
@@ -342,11 +383,13 @@ mod tests {
     fn calm() -> SyncState {
         SyncState {
             last_diff_at: Some(1_000),
-            following_count: None,
-            blocked_until: None,
-            paused_until: None,
-            refusals: 0,
+            ..SyncState::default()
         }
+    }
+
+    /// 1 tick が送る 1 件が届いた｡
+    fn landed(remaining: usize) -> Outcome {
+        Outcome::Applied { sent: 1, remaining }
     }
 
     fn opaque(sent: usize) -> Outcome {
@@ -505,94 +548,99 @@ mod tests {
         assert_eq!(settle(state, Some(&outcome), 1_000, spacing()).state, state);
     }
 
-    // --- 揺らぎ ---
+    // --- settle: ペース配分 (#231) ---
 
     #[test]
-    fn the_pause_never_falls_below_its_floor() {
-        // 揺らぎは伸ばす側にしかない｡引きの目が悪くても設定より速く
-        // 送ってはならない｡
-        assert_eq!(apply_pause_seconds(0.0), APPLY_PAUSE_SECONDS);
+    fn the_first_write_opens_a_batch_and_waits_a_gap_for_the_next() {
+        // batch の途中ではなかった (`batch_left == 0`) ので､この write が
+        // `Spacing::batch_writes` 件の batch を開き､自分の分を引く｡
+        let settled = settle(calm(), Some(&landed(2_155)), 1_000, spacing());
+        assert_eq!(settled.state.batch_left, BATCH - 1);
+        assert_eq!(settled.wake_at, 1_000 + GAP);
+        assert_eq!(settled.state.paused_until, Some(1_000 + GAP));
     }
 
     #[test]
-    fn the_pause_stretches_to_the_top_of_its_spread() {
-        assert_eq!(
-            apply_pause_seconds(1.0),
-            APPLY_PAUSE_SECONDS + APPLY_PAUSE_SPREAD_SECONDS
-        );
-    }
-
-    #[test]
-    fn a_fraction_outside_zero_to_one_is_clamped_rather_than_trusted() {
-        // 負の目が pause を floor より下へ引くのは､この機能が防ごうと
-        // しているものそのもの｡
-        assert_eq!(apply_pause_seconds(-1.0), APPLY_PAUSE_SECONDS);
-        assert_eq!(
-            apply_pause_seconds(2.0),
-            APPLY_PAUSE_SECONDS + APPLY_PAUSE_SPREAD_SECONDS
-        );
-    }
-
-    #[test]
-    fn the_gap_between_writes_stays_inside_its_range() {
-        assert_eq!(write_gap(0.0).as_secs(), WRITE_GAP_FLOOR_SECONDS);
-        assert_eq!(
-            write_gap(1.0).as_secs(),
-            WRITE_GAP_FLOOR_SECONDS + WRITE_GAP_SPREAD_SECONDS
-        );
-        // 中間の目も範囲の中にある｡幅そのものではなく境界を押さえる｡
-        let middle = write_gap(0.5).as_secs();
-        assert!(
-            (WRITE_GAP_FLOOR_SECONDS..=WRITE_GAP_FLOOR_SECONDS + WRITE_GAP_SPREAD_SECONDS)
-                .contains(&middle),
-            "a mid-range roll left the gap range: {middle}"
-        );
-    }
-
-    // --- settle: ペース配分 ---
-
-    #[test]
-    fn a_batch_with_more_to_send_pauses_before_the_next() {
-        // 1 秒に 20 件ではなく毎分 2 件 — module doc を見よ｡
-        let outcome = Outcome::Applied {
-            sent: 2,
-            remaining: 2_155,
+    fn a_write_inside_a_batch_counts_down_without_redrawing() {
+        // 途中の batch は `Spacing::batch_writes` を見ない — 見れば
+        // 再起動のたびに cooldown までの件数が伸びる｡
+        let state = SyncState {
+            batch_left: 2,
+            ..calm()
         };
-        let settled = settle(calm(), Some(&outcome), 1_000, spacing());
-        assert_eq!(settled.wake_at, 1_000 + PAUSE);
+        let settled = settle(state, Some(&landed(2_155)), 1_000, spacing());
+        assert_eq!(settled.state.batch_left, 1);
+        assert_eq!(settled.wake_at, 1_000 + GAP);
     }
 
     #[test]
-    fn the_pause_is_recorded_so_a_restart_does_not_skip_it() {
+    fn the_last_write_of_a_batch_starts_the_cooldown() {
+        let state = SyncState {
+            batch_left: 1,
+            ..calm()
+        };
+        let settled = settle(state, Some(&landed(2_155)), 1_000, spacing());
+        assert_eq!(settled.state.batch_left, 0);
+        assert_eq!(settled.wake_at, 1_000 + PAUSE);
         // #197 が扱う 20 時間で release build は 8 回起動され､どの起動も
         // 即座に送っていた｡wake_at はループ変数だが､これはファイルに残る｡
-        let outcome = Outcome::Applied {
-            sent: 2,
-            remaining: 2_155,
-        };
-        let settled = settle(calm(), Some(&outcome), 1_000, spacing());
         assert_eq!(settled.state.paused_until, Some(1_000 + PAUSE));
     }
 
     #[test]
-    fn the_batch_that_finishes_the_plan_comes_straight_back() {
+    fn a_batch_of_one_is_a_cooldown_after_every_write() {
+        let spacing = Spacing {
+            batch_writes: 1,
+            ..spacing()
+        };
+        let settled = settle(calm(), Some(&landed(2_155)), 1_000, spacing);
+        assert_eq!(settled.state.batch_left, 0);
+        assert_eq!(settled.wake_at, 1_000 + PAUSE);
+    }
+
+    #[test]
+    fn a_batch_drawn_as_zero_still_sends_one_before_cooling_down() {
+        // config が 0 を拒むので本番では起きないが､ファイル由来の値が
+        // 0 でも write が永久に「batch の途中」に留まってはならない｡
+        let spacing = Spacing {
+            batch_writes: 0,
+            ..spacing()
+        };
+        let settled = settle(calm(), Some(&landed(2_155)), 1_000, spacing);
+        assert_eq!(settled.state.batch_left, 0);
+        assert_eq!(settled.wake_at, 1_000 + PAUSE);
+    }
+
+    #[test]
+    fn the_write_that_finishes_the_plan_comes_straight_back() {
         // ペースを配る相手がもういない｡diff が来るかどうかは次の tick が
         // 決める｡
-        let outcome = Outcome::Applied {
-            sent: 2,
-            remaining: 0,
-        };
-        let settled = settle(calm(), Some(&outcome), 1_000, spacing());
+        let settled = settle(calm(), Some(&landed(0)), 1_000, spacing());
         assert_eq!(settled.wake_at, 1_000);
         assert_eq!(settled.state.paused_until, None);
     }
 
     #[test]
-    fn a_diff_clears_a_pause_the_previous_plan_left_behind() {
-        // 期限切れの pause がファイルに残っていると､次の plan の 1 batch
-        // 目が理由も無く待たされる｡
+    fn a_cli_apply_that_sent_many_at_once_uses_up_the_batch() {
+        // `--apply` は plan を丸ごと 1 回の `Applied` で settle する｡件数
+        // ぶん batch を進めるので､次の loop の write が古い batch の続きを
+        // 数えることはない｡
+        let outcome = Outcome::Applied {
+            sent: 40,
+            remaining: 0,
+        };
+        let settled = settle(calm(), Some(&outcome), 1_000, spacing());
+        assert_eq!(settled.state.batch_left, 0);
+    }
+
+    #[test]
+    fn a_diff_clears_the_pause_and_the_batch_the_previous_plan_left_behind() {
+        // 期限切れの pause がファイルに残っていると､次の plan の 1 件目が
+        // 理由も無く待たされる｡途中の batch も同じで､新しい plan は
+        // 数え直す｡
         let state = SyncState {
             paused_until: Some(1_060),
+            batch_left: 2,
             ..calm()
         };
         let outcome = Outcome::Diffed {
@@ -604,6 +652,70 @@ mod tests {
         let settled = settle(state, Some(&outcome), 1_000, spacing());
         assert_eq!(settled.wake_at, 1_000);
         assert_eq!(settled.state.paused_until, None);
+        assert_eq!(settled.state.batch_left, 0);
+    }
+
+    // --- settle: 400 (#254) ---
+
+    #[test]
+    fn a_rejected_write_still_takes_its_place_in_the_batch() {
+        // request は飛んでいる｡数えないと次の request が間を置かずに飛び､
+        // #197 の連射をそのまま再現する｡
+        let outcome = Outcome::Rejected { remaining: 2_155 };
+        let settled = settle(calm(), Some(&outcome), 1_000, spacing());
+        assert_eq!(settled.state.rejected_in_a_row, 1);
+        assert_eq!(settled.state.batch_left, BATCH - 1);
+        assert_eq!(settled.wake_at, 1_000 + GAP);
+    }
+
+    #[test]
+    fn a_landed_write_ends_a_run_of_rejections() {
+        let state = SyncState {
+            rejected_in_a_row: 2,
+            ..calm()
+        };
+        let settled = settle(state, Some(&landed(2_155)), 1_000, spacing());
+        assert_eq!(settled.state.rejected_in_a_row, 0);
+    }
+
+    #[test]
+    fn the_third_rejection_in_a_row_backs_off_for_a_whole_interval() {
+        // 1 件の 400 は entry の問題だが､続けざまなら list や request の形
+        // そのものが拒まれている方が疑わしい｡interval あたり 3 request で
+        // 頭打ちにする｡
+        let state = SyncState {
+            rejected_in_a_row: REJECTIONS_IN_A_ROW_LIMIT - 1,
+            ..calm()
+        };
+        let outcome = Outcome::Rejected { remaining: 2_155 };
+        let settled = settle(state, Some(&outcome), 1_000, spacing());
+        assert_eq!(settled.state.rejected_in_a_row, 0);
+        assert_eq!(
+            settled.state.blocked_until,
+            Some(1_000 + i64::from(INTERVAL))
+        );
+        assert_eq!(settled.wake_at, 1_000 + i64::from(INTERVAL));
+        // 上限の梯子ではない: rate limit の連続回数には触れない｡
+        assert_eq!(settled.state.refusals, 0);
+    }
+
+    // --- settle: refusal の間に届いた件数 (#231) ---
+
+    #[test]
+    fn landed_writes_are_counted_until_the_next_refusal() {
+        let first = settle(calm(), Some(&landed(10)), 1_000, spacing());
+        let second = settle(first.state, Some(&landed(9)), 1_010, spacing());
+        assert_eq!(second.state.landed_since_refusal, 2);
+
+        let refused = settle(second.state, Some(&opaque(0)), 1_020, spacing());
+        assert_eq!(refused.state.landed_since_refusal, 0);
+    }
+
+    #[test]
+    fn a_rejection_does_not_count_as_a_landed_write() {
+        let outcome = Outcome::Rejected { remaining: 9 };
+        let settled = settle(calm(), Some(&outcome), 1_000, spacing());
+        assert_eq!(settled.state.landed_since_refusal, 0);
     }
 
     // --- settle: idle と失敗 ---
@@ -689,6 +801,9 @@ mod tests {
             blocked_until: Some(1_700_000_900),
             paused_until: Some(1_700_000_077),
             refusals: 3,
+            batch_left: 2,
+            rejected_in_a_row: 1,
+            landed_since_refusal: 57,
         };
         save_state(&path, &written).unwrap();
         assert_eq!(load_state(&path), written);
@@ -727,6 +842,9 @@ mod tests {
         assert_eq!(state.blocked_until, None);
         assert_eq!(state.paused_until, None);
         assert_eq!(state.refusals, 0);
+        assert_eq!(state.batch_left, 0);
+        assert_eq!(state.rejected_in_a_row, 0);
+        assert_eq!(state.landed_since_refusal, 0);
     }
 
     #[test]

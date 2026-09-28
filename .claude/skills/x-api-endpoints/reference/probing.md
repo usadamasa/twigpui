@@ -65,6 +65,10 @@ ureq = { version = "3.4.0", features = ["json"] }
 [workspace]
 ```
 
+バージョンはローカルの registry cache (`~/.cargo/registry/cache/*/`) にあるものへ `=` で固定する。
+2026-09-22 には `ureq =3.1.4` と `serde_json =1.0.148` で `cargo build --offline` が通った。
+cache に無い版を書くと `cargo` が index を引きに行き、sandbox の外でも余計な待ちになる。
+
 `src/main.rs` の要点は 4 つ。
 
 **非 2xx をエラーにしない。** 400 や 403 の本文こそが欲しいデータなので、

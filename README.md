@@ -133,7 +133,9 @@ export し直すのを覚えていなくても効くようにしたいなら､`
 | `X_AUTO_SYNC_LIST` | いいえ | `false` | アプリの実行中､`X_LIST_ID` のメンバーをフォローに追従させつづける — `config.toml` では `auto_sync_list`｡**タイマーで課金する**; 後述 |
 | `X_SYNC_INTERVAL_SECONDS` | いいえ | `21600` (6 時間) | バックグラウンド同期が diff の間に待つ時間｡`900` 未満の値は拒否する — `config.toml` では `sync_interval_seconds` |
 | `X_SYNC_PRUNE_LIMIT_PERCENT` | いいえ | `10` | バックグラウンド同期が 1 回の diff で削除できるメンバーの上限 (パーセント)｡超えた分の削除は保留し､`--sync-list --apply --prune` での確認に回す; `100` で上限を外す — `config.toml` では `sync_prune_limit_percent` (#176) |
-| `X_SYNC_WRITES_PER_BATCH` | いいえ | `2` | 追いつき処理の間にバックグラウンド同期が 1 バッチで送るリスト書き込みの数 (#197)｡`1`–`20`; 上限は X が文書化した書き込みウィンドウ (15 分あたり 300) を 1 分へならした値である｡バッチの間隔は 90〜300 秒に揺らぐので､持続レートはおよそ「この値 ÷ 195 秒」になる｡既定値での実行が拒否を出さないと分かってから上げる — `config.toml` では `sync_writes_per_batch` |
+| `X_SYNC_WRITE_GAP_SECONDS` | いいえ | `3-20` | バックグラウンド同期がリストへの書き込みと書き込みの間に置く秒数の範囲 (#231)｡`"min-max"` の形で､書き込みごとに引き直す｡`min` は 1 以上 — `config.toml` では `sync_write_gap_seconds` |
+| `X_SYNC_BATCH_WRITES` | いいえ | `1-3` | cooldown を挟まずに続けて送る書き込み数の範囲 (#231)｡`1`–`20`; 上限は X が文書化した書き込みウィンドウ (15 分あたり 300) を 1 分へならした値である｡バッチごとに引き直す — `config.toml` では `sync_batch_writes` |
+| `X_SYNC_COOLDOWN_SECONDS` | いいえ | `90-300` | バッチを送り切ったあと次のバッチまで休む秒数の範囲 (#231)｡バッチごとに引き直す｡既定の 3 つで持続レートはおよそ 0.6 件/分｡既定値での実行が拒否を出さないと分かってから変える — `config.toml` では `sync_cooldown_seconds` |
 | `X_AUTO_REFRESH` | いいえ | `true` | ウィンドウが開いている間､新しい投稿をタイムラインにポーリングする — `config.toml` では `auto_refresh` (#21)｡`false` なら､アプリはクリックしていないものを一切送らない |
 | `X_AUTO_REFRESH_INTERVAL_SECONDS` | いいえ | `180` (3 分) | 自動更新がポーリングの間に待つ時間｡`X_MIN_FETCH_INTERVAL_SECONDS` を下回る値は拒否する — `config.toml` では `auto_refresh_interval_seconds` |
 | `X_FOLLOW_NEW_POSTS` | いいえ | `true` | 先頭にいるとき､ポーリングで届いた新しい投稿がひとりでに画面へ流れ込むようにする (#22) — `config.toml` では `follow_new_posts`｡表示だけの話で､何をいつ取得するかは変えない｡実行中は View → Follow New Posts (`⌘⇧F`) で切り替える |
@@ -216,11 +218,19 @@ diff が必要なときはフォロー全件を読み､members はローカル�
 記録が無ければ members も全件読む｡フォローは Owned Reads､members は Users (Owned の 10 倍) として
 件数ごとに課金される｡間隔の既定は 6 時間で､15 分未満は拒否する｡手動同期は count による省略をしない｡
 
-書き込みはまとめて送らずに分散させる: 既定で 1 バッチ 2 件
-(`sync_writes_per_batch`)､バッチの間は 90〜300 秒､バッチ内の書き込みどうしは
-3〜20 秒｡どちらの間隔も毎回引き直し､伸びる側にしか振れない｡持続的には
-およそ 0.6 件/分なので､数千アカウント遅れているリストは追いつくのに数日かかる｡
-View → Sync List… から手で始めた同期はこの間隔を無視する (#248)｡
+書き込みはまとめて送らずに 1 件ずつ分散させる (#231)｡3 つの範囲があり､どれも
+`"min-max"` で設定して毎回引き直す: 書き込みと書き込みの間 (`sync_write_gap_seconds`､
+既定 3〜20 秒)､cooldown を挟まずに続けて送る件数 (`sync_batch_writes`､既定 1〜3 件)､
+バッチのあとの cooldown (`sync_cooldown_seconds`､既定 90〜300 秒)｡人が数件足して手を
+止める形をなぞっている｡既定では持続的におよそ 0.6 件/分なので､数千アカウント遅れている
+リストは追いつくのに数日かかる｡View → Sync List… から手で始めた同期は最初の 1 件だけ
+間を無視する (#248)｡
+
+**効いているかはログで読む｡** 起動の行 `list sync started for … writes: gap 3-20s, batch 1-3,
+cooldown 90-300s` がそのときの設定､書き込みごとの `list sync: sent 1, N to go; 2 left in this
+batch, next in 14s; 57 landed since the last refusal` が実際の間隔､拒否の行
+`list sync: write refused … 57 landed since the previous refusal` が「何件通ったあとで
+止められたか」を持つ｡範囲を変えて走らせ､拒否の行の件数と間隔を前と比べれば､それが答えである｡
 
 X は `x-rate-limit-*` ヘッダーが説明しない上限でリストへの追加を拒否する
 (#193, #197)｡拒否は追いつき処理を失敗させずに一時停止させ､連続した拒否ほど
@@ -233,8 +243,8 @@ X は `x-rate-limit-*` ヘッダーが説明しない上限でリストへの追
 ちょうど再開する｡`$XDG_STATE_HOME/twigpui/sync_state.json` は最後に diff を
 実行した時刻を持つ｡これが再起動時に両方の読み取りを再び払うのを止める｡加えて
 バックオフ — いつまで書き込みを止めるか､連続何回拒否されたか — も持つので､
-再起動が上限へ送り込むこともない｡バッチとバッチの間もここに書かれるので､
-追いつき処理の途中で再起動しても即座に送り直さない｡
+再起動が上限へ送り込むこともない｡次の書き込みまでの間とバッチの残りもここに書かれるので､
+追いつき処理の途中で再起動しても即座に送り直さず､cooldown までの件数も伸びない｡
 
 必要なスコープは `--sync-list` と同じである｡それより前に取ったセッションは､
 画面へのエラーではなくログの 1 行を残してスキップされる — "Re-authorize" を
@@ -305,11 +315,12 @@ dry run はこの状況を検知して同じことを言う｡
 同期が消化するものになる — その削除も含めて｡何も適用されない状態で diff を
 眺めたいなら､先に同期を切ること｡
 
-バックオフも共有する｡バックグラウンド同期が拒否を受けてバックオフしている最中の
-`--apply` (#197) は､その旨を stderr に出して**それでも送る** — 意図した 1
-バッチは､上限が解除されたかを知る最も安い方法である — そして返ってきた結果は
-バックグラウンド同期のためにも記録される: 通った書き込みは連続を終わらせ､拒否は
-連続を伸ばす｡
+歩調もバックオフも共有する (#231)｡`--apply` はバックグラウンド同期と同じ tick を
+計画が尽きるまで前景で回すので､1 件ずつ・同じ gap と batch と cooldown で送る — bot 判定は
+X の側にあり､端末の前に人がいるかどうかを X は知らない｡バックグラウンド同期が拒否を受けて
+バックオフしている最中なら送らずに終わる (拒否の直後にもう 1 件投げるのは機械の形である)｡
+返ってきた結果はバックグラウンド同期のためにも記録される: 通った書き込みは連続を終わらせ､
+拒否は連続を伸ばす｡
 
 どちらの側も､#163 より前のこのアプリが要求していなかったスコープ
 (`follows.read`, `list.write`) を必要とする｡だから既存のセッションは何も使う前に
@@ -460,7 +471,9 @@ daily_post_budget = 500
 auto_sync_list = true
 sync_interval_seconds = 21600
 sync_prune_limit_percent = 10
-sync_writes_per_batch = 2
+sync_write_gap_seconds = "3-20"
+sync_batch_writes = "1-3"
+sync_cooldown_seconds = "90-300"
 auto_refresh = true
 auto_refresh_interval_seconds = 300
 ```

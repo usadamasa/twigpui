@@ -34,7 +34,7 @@ pub(super) const FADE_STEPS: u8 = 6;
 
 /// 1 tick が [`Fade`] を進める長さ (#205)､ミリ秒｡[`FADE_STEPS`] 段で 180ms｡
 ///
-/// `auto_refresh` の glide と同じく background executor の timer で刻む｡
+/// `follow` の glide と同じく background executor の timer で刻む｡
 /// ただし 1 段ずつ数えるので経過時間は読まない｡
 pub(super) const FADE_STEP_MILLIS: u64 = 30;
 

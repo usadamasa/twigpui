@@ -222,11 +222,14 @@ impl ImageViewer {
         self.photos.get(self.index)
     }
 
-    /// いま見せている写真のファイル｡まだ手元に無ければ `None`｡
-    fn path(&self, cx: &App) -> Option<PathBuf> {
+    /// いま見せている写真のファイルと､それを置く timeline の image cache｡
+    /// まだ手元に無ければ `None`｡
+    fn path(&self, cx: &App) -> Option<(PathBuf, Entity<gpui::RetainAllImageCache>)> {
         let photo = self.current()?;
         let timeline = self.timeline.upgrade()?;
-        timeline.read(cx).media_paths.get(&photo.url).cloned()
+        let timeline = timeline.read(cx);
+        let path = timeline.media_paths.get(&photo.url).cloned()?;
+        Some((path, timeline.image_cache.clone()))
     }
 
     /// 画像の代わりに出す文言 (#188)｡画像があれば `None`｡
@@ -288,7 +291,10 @@ impl Render for ImageViewer {
             // 幅と高さを両方与えたうえで `Contain` に吸収させる (#256)｡
             // 片方だけだと gpui が画像の縦横比を layout に持ち込み､枠を
             // 突き抜ける｡
-            Some(path) => img(path)
+            // 行のサムネイルと同じデコード済み画像を使い､timeline の窓から
+            // 外れたときに一緒に手放されるよう､timeline の cache を共有する｡
+            Some((path, cache)) => img(path)
+                .image_cache(&cache)
                 .addressable("image-viewer-image")
                 .size_full()
                 .object_fit(ObjectFit::Contain)

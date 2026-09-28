@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use gpui::{
-    AnyElement, Context, Div, Entity, FocusHandle, FontWeight, ObjectFit, ScrollHandle,
+    AnyElement, Context, Div, Entity, FocusHandle, FontWeight, ObjectFit, RetainAllImageCache,
     SharedString, Stateful, Subscription, Task, Window, div, img, prelude::*, px, rgb, rgba, svg,
 };
 use gpui_component::input::{InputEvent, Textarea, TextareaState};
@@ -27,11 +27,13 @@ pub(crate) mod compose_window;
 mod composer;
 mod countdown;
 mod fade;
+mod follow;
 // #188: `main` がキーバインドを登録するので､ここだけ crate へ開く｡
 pub(crate) mod image_viewer;
 mod lane;
 mod layout;
 mod list_sync;
+mod pending;
 mod post_row;
 mod reload_policy;
 mod render;
@@ -43,6 +45,7 @@ mod startup;
 mod state;
 mod sync_row;
 mod tasks;
+mod timeline_list;
 mod toast;
 
 // `ui` の兄弟ではなく子モジュールにする (#126): 子モジュールは親の
@@ -51,9 +54,11 @@ mod toast;
 // 隣のファイルから届かせるためだけに広げると､「クレート内のどこからでも
 // 触ってよい」という意味になり､それはファイルを分割した目的と
 // 正反対になる｡
-use auto_refresh::{FollowMode, Pending, Situation, pending_after_poll};
+use auto_refresh::Situation;
 use fade::Fade;
+use follow::FollowMode;
 use list_sync::{SyncOff, SyncStatus, SyncTrigger};
+use pending::{Pending, pending_after_poll};
 use reload_policy::{
     CooldownTick, at_the_post_cap, cooldown_label, cooldown_tick, newly_arrived, offers_load_older,
     partial_failure_label, preserved_scroll_target, reload_failure_outcome, reload_gate,
@@ -72,7 +77,10 @@ use render::{
 };
 use render::{RowCounts, row_counts};
 pub(crate) use startup::Startup;
-use state::{Cooldown, ReloadNotice, ReloadTrigger, StartOutcome, ThreadFetchState, TimelineState};
+use state::{
+    Cooldown, ImageCacheSync, ReloadNotice, ReloadTrigger, StartOutcome, ThreadFetchState,
+    TimelineState,
+};
 use toast::Toast;
 
 use crate::menu::{
@@ -155,8 +163,13 @@ pub(crate) struct TimelineView {
     /// `lane::load_composite_timeline` が合成のたびに作り直す表示専用の
     /// 派生値で､削除の真実の情報源にはしない — [`Self::confirm_delete`] は
     /// これを見ず `sources` を全部回す｡`sources.len() == 1` のときは
-    /// 描画側が出自を出さないので中身を読まない｡
+    /// 描画側が出自を出さないので中身を読まない｡合成は background で行い
+    /// (#302)､着地の時点で `sources` が合成を始めたときと同じ場合だけ
+    /// ここへ書く — [`lane::Recompose`] を見よ｡
     item_provenance: HashMap<String, cache::TimelineSource>,
+    /// toggle が始めた background の合成 (#302)｡代入し直すと前の合成は
+    /// cancel されるので､続けて toggle しても着地するのは最後の集合だけ｡
+    recompose: Option<Task<()>>,
     /// picker が名前を挙げられる list (#164)｡cache か直近の fetch から来る｡
     /// fetch ボタンが一度押されるまでは空｡
     owned_lists: Vec<crate::x_api::ListSummary>,
@@ -266,7 +279,7 @@ pub(crate) struct TimelineView {
     /// 経ってから X が取得を断ったと言うことだ｡片方がもう片方を上書きしては
     /// ならない｡
     ///
-    /// 設定するのは [`auto_refresh::TimelineView::apply_poll`] で一度だけ｡
+    /// 設定するのは [`pending::TimelineView::apply_poll`] で一度だけ｡
     /// ループはその直後に終わるので二度は通らない｡消えるのは
     /// [`Self::start_auto_refresh`] が新しいループを始めるとき — つまり
     /// サインインし直したときだ｡
@@ -382,7 +395,7 @@ pub(crate) struct TimelineView {
     pending: Option<Pending>,
     /// 読み手が最上部にいると分かった poll が､新しい post をそのまま画面へ
     /// 流し込んでよいかどうか (#22) — 誰がいつ設定するのかは
-    /// [`auto_refresh::follows`] と [`FollowMode`] を見よ｡
+    /// [`follow::follows`] と [`FollowMode`] を見よ｡
     follow: FollowMode,
     /// glide を生かしておく (#22) — follow が上へ post を差し込んだあと､
     /// scroll の offset を最上部へ戻していくフレームタイマーである｡専用の
@@ -475,6 +488,15 @@ pub(crate) struct TimelineView {
     /// ので､クリックした先の viewer が「開けない」を言うにはこちらが要る｡
     /// `refresh_media` が取れたら remove する｡
     media_failed: HashSet<String>,
+    /// 行と viewer が `img` に渡す､デコード済み画像の置き場｡渡さないと
+    /// gpui は App 全体の asset cache に入れ､`remove_asset` を呼ぶまで
+    /// 手放さない｡timeline の 500 件の窓から外れた URL の画像は
+    /// `prune_images` がここから消す｡
+    image_cache: Entity<RetainAllImageCache>,
+    /// timeline が変わってから `prune_images` がまだ走っていなければ
+    /// `Stale`｡`remove` は `&mut Window` が要るので､`refresh_images` は
+    /// 印を付けるだけにして `render` の頭で刈る｡
+    images_sync: ImageCacheSync,
     /// 進行中のアバターのダウンロードを生かしておく (#64)｡行ごとに一つでは
     /// なく､一つの task が見えている timeline 全体を辿る; 代入し直す
     /// (reload) とまだダウンロード中のものは取り消されるが､次の呼び出しが
@@ -501,12 +523,13 @@ pub(crate) struct TimelineView {
     /// 出る｡`None` が普通の場合である — open に成功すればアプリには言う
     /// ことが何も無い｡
     open_failure: Option<String>,
-    /// timeline の一覧のスクロール位置 (#22)｡
+    /// timeline の一覧のスクロール位置 (#22) と､viewport に入る行だけを
+    /// 組む `ListState` (#301)｡
     ///
     /// reload が一覧を置き換える前に読み､あとで読み手を元いた行へ戻すのに
     /// 使う: そうしないと､スクロール済みの一覧へ post を差し込んだときに
     /// すべてが読み手の下へずり下がる｡
-    list_scroll: ScrollHandle,
+    list_scroll: timeline_list::TimelineList,
     /// `j` / `k` で読み進めている行の post id (#148)｡まだ誰も選んで
     /// いなければ `None`｡
     ///
@@ -2093,7 +2116,7 @@ mod tests {
             auto_sync_list: false,
             sync_interval_seconds: 21_600,
             sync_prune_limit_percent: 10,
-            sync_writes_per_batch: 2,
+            sync_write_pacing: crate::sync::WritePacing::DEFAULT,
             // 同じ理由で off (#21)｡
             auto_refresh: false,
             auto_refresh_interval_seconds: 300,
@@ -2586,6 +2609,70 @@ mod tests {
                     "a url that resolved successfully lands in media_paths"
                 );
             });
+        });
+    }
+
+    /// 500 件の窓から外れた post のデコード済み画像は image cache に残らない｡
+    /// 残ると poll のたびに新しい画像が積まれ､プロセスが生きている間
+    /// メモリが増えつづける｡
+    #[gpui::test]
+    fn images_that_left_the_window_leave_the_image_cache(cx: &mut gpui::TestAppContext) {
+        let fixture = Fixture {
+            items: vec![
+                item_with_media("2", &[("media/e.png", 100, 100)]),
+                item_with_media("1", &[("media/f.png", 100, 100)]),
+            ],
+            ..fixture_with(&[], &[])
+        };
+        let (window, timeline) = fixture_window(cx, fixture);
+        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+
+        // cache の鍵はパスの hash なので､同じファイルを別の綴りで 2 枚にする｡
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let first = root.join("assets/AppIcon.png");
+        let second = root.join("assets/../assets/AppIcon.png");
+        cx.update(|cx| {
+            timeline.update(cx, |view, cx| {
+                view.media_paths.insert("media/e.png".to_string(), first);
+                view.media_paths.insert("media/f.png".to_string(), second);
+                cx.notify();
+            });
+        });
+        for _ in 0..2 {
+            draw_until_parked(&mut visual, cx);
+        }
+        cx.update(|cx| {
+            let cached = timeline.read(cx).image_cache.read(cx).len();
+            assert_eq!(cached, 2, "both drawn images are in the cache");
+        });
+
+        cx.update(|cx| {
+            timeline.update(cx, |view, cx| {
+                view.state =
+                    TimelineState::Loaded(vec![item_with_media("1", &[("media/f.png", 100, 100)])]);
+                view.refresh_images(cx);
+                cx.notify();
+            });
+        });
+        for _ in 0..2 {
+            draw_until_parked(&mut visual, cx);
+        }
+        cx.update(|cx| {
+            let view = timeline.read(cx);
+            assert_eq!(
+                view.image_cache.read(cx).len(),
+                1,
+                "the image of a post that left the window leaves the cache"
+            );
+            assert_eq!(
+                view.media_paths.len(),
+                1,
+                "only the remaining url is indexed"
+            );
+            assert!(
+                !view.media_paths.contains_key("media/e.png"),
+                "the url that left the window is dropped from media_paths"
+            );
         });
     }
 
@@ -3944,10 +4031,9 @@ mod tests {
 
     /// #22: 何も無い画面へ follow したとき — 空の List､入れたばかりの
     /// インストール — は､glide を仕掛けずに最上部へ着く｡位置を保つべき行が
-    /// 無いので､補正はリストの末尾を越えた index を指してしまう｡gpui は解決
-    /// できない anchor を保持して prepaint のたびに再試行するため､後の
-    /// "Load older" でリストがその index を越えて伸びると､目に見える理由も
-    /// 無く読み手の下でビューポートが飛ぶことになる｡
+    /// 無いので､補正はリストの末尾を越えた index を指してしまう｡
+    /// `ListState::scroll_to` はそれを末尾に clamp するので (#301)､読み手は
+    /// 最新ではなく一番古い行を見ることになる｡
     #[gpui::test]
     fn following_onto_an_empty_timeline_snaps_without_a_glide(cx: &mut gpui::TestAppContext) {
         let (_window, timeline) = fixture_window(cx, fixture_with(&[], &[]));
@@ -4369,7 +4455,7 @@ mod tests {
 
     /// `ids` を Home のキャッシュ済み timeline として smoke 用のディレクトリ
     /// へ書く (`cache_list` の Home 版)｡#43 のトグルは Home を含めた集合を
-    /// 都度再合成するので､Home にもキャッシュが無いと `missing_sources` が
+    /// 都度再合成するので､Home にもキャッシュが無いと `fill_missing_sources` が
     /// 埋めようとして client 無しの reload に落ち (`NotAuthenticated`)、
     /// 複数 source を行き来するテストが成立しない｡
     fn cache_home(ids: &[&str]) {
@@ -4407,6 +4493,22 @@ mod tests {
             0,
         )
         .unwrap();
+    }
+
+    /// `ids` を `source` のキャッシュ済み timeline として `paths` の下へ書く
+    /// (#302)｡`cache_home` / `cache_list` と違い smoke 用の共有ディレクトリを
+    /// 使わないので､隣のテストが同じファイルを書き換えても結果が揺れない｡
+    fn cache_under(
+        paths: &crate::paths::Paths,
+        source: &crate::cache::TimelineSource,
+        ids: &[&str],
+    ) {
+        paths.ensure_dirs().unwrap();
+        let items: Vec<TimelineItem> = ids
+            .iter()
+            .map(|id| item_with(id, "someone", None))
+            .collect();
+        crate::cache::save_primary_timeline(paths, source, "5685672", &items, 0).unwrap();
     }
 
     /// 下のクリックのテスト用に､描画済みのウィンドウとその visual context｡
@@ -4922,6 +5024,10 @@ mod tests {
         for n in 0..20 {
             let mut item = filler.clone();
             item.id = format!("92000000000000001{n:02}");
+            // #301: 水増しは末尾に沈める｡`created_at` 無しの item は合成で
+            // 末尾へ回るので､測る行は viewport の中に残る — 画面の外の行は
+            // もう組まれない｡
+            item.created_at = None;
             long.items.push(item);
         }
 
@@ -5372,6 +5478,120 @@ mod tests {
         });
     }
 
+    // --- #302: 合成を main thread から降ろす ---
+
+    /// #302: 成功した poll はその場でキャッシュを読まない｡source ごとの
+    /// JSON を parse して合成すると main thread が止まるので､`apply_poll`
+    /// は合成を始める材料だけを返し､合成は background で行う｡キャッシュに
+    /// 新着を置いても `apply_poll` の直後には画面にも pill にも出ていない
+    /// ことで､ここでディスクを読んでいないことを確かめる｡
+    #[gpui::test]
+    fn a_finished_poll_does_not_read_the_cache_on_the_main_thread(cx: &mut gpui::TestAppContext) {
+        let paths = scratch_paths("poll-reads-no-cache");
+        cache_under(
+            &paths,
+            &crate::cache::TimelineSource::Home,
+            &["3", "2", "1"],
+        );
+        crate::cache::save_me(&paths, "5685672", "usadamasa", 0).unwrap();
+        let me = crate::cache::cached_me(&paths, 0)
+            .unwrap()
+            .expect("the entry was just saved");
+        let (_window, timeline) = window_with(
+            cx,
+            smoke_config(),
+            paths,
+            Startup::Fixture(Box::new(fixture_with(&["2", "1"], &[]))),
+        );
+
+        cx.update(|cx| {
+            timeline.update(cx, |view, cx| {
+                let outcome = super::lane::ReloadOutcome {
+                    successes: 1,
+                    failures: 0,
+                    next_token: None,
+                    me,
+                };
+                assert_ne!(view.apply_poll(Ok(outcome), cx), Poll::Halt);
+                assert!(
+                    view.pending.is_none(),
+                    "the poll must hand the compose to the background, not read the cache itself"
+                );
+                assert_eq!(shown_ids(view), ["2", "1"]);
+            });
+        });
+    }
+
+    /// #302: 合成は background で走り､着地したときに `sources` が合成を
+    /// 始めたときと違っていれば捨てる｡削除の完了は toggle に cancel され
+    /// ないので､その合成は toggle の後に着地しうる｡ここでは toggle の合成が
+    /// 飛んでいる間に `sources` を書き換えて同じ形を作る｡
+    #[gpui::test]
+    fn a_compose_that_lands_after_the_sources_moved_is_dropped(cx: &mut gpui::TestAppContext) {
+        let paths = scratch_paths("stale-compose-dropped");
+        let list = crate::cache::TimelineSource::List("9302".to_string());
+        cache_under(&paths, &list, &["32", "31"]);
+        let (_window, timeline) = window_with(
+            cx,
+            smoke_config(),
+            paths,
+            Startup::Fixture(Box::new(fixture_with_lists(&["1"], &[("9302", "Rust")]))),
+        );
+
+        cx.update(|cx| {
+            timeline.update(cx, |view, cx| {
+                // sources: Home, 9302 — この集合の合成が飛ぶ｡
+                view.toggle_source(&list, cx);
+                // 着地より前に集合が動く｡
+                view.sources = vec![list.clone()];
+            });
+        });
+        cx.run_until_parked();
+
+        cx.update(|cx| {
+            timeline.update(cx, |view, _cx| {
+                assert_eq!(
+                    shown_ids(view),
+                    ["1"],
+                    "a lane composed for [Home, 9302] must not land once the sources are [9302]"
+                );
+            });
+        });
+    }
+
+    /// #302: 続けて 2 回 toggle したら､残るのは最後の選択の合成だ｡前の
+    /// 合成は slot を置き換えられて cancel されるか､着地しても集合の不一致で
+    /// 捨てられる｡どちらでも画面は最後の `sources` を映す｡
+    #[gpui::test]
+    fn back_to_back_toggles_land_the_last_selection(cx: &mut gpui::TestAppContext) {
+        let paths = scratch_paths("back-to-back-toggles");
+        let first = crate::cache::TimelineSource::List("9303".to_string());
+        cache_under(&paths, &first, &["42", "41"]);
+        let (_window, timeline) = window_with(
+            cx,
+            smoke_config(),
+            paths,
+            Startup::Fixture(Box::new(fixture_with_lists(&["1"], &[("9303", "Rust")]))),
+        );
+
+        cx.update(|cx| {
+            timeline.update(cx, |view, cx| {
+                // sources: Home, 9303
+                view.toggle_source(&first, cx);
+                // sources: 9303
+                view.toggle_source(&crate::cache::TimelineSource::Home, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        cx.update(|cx| {
+            timeline.update(cx, |view, _cx| {
+                assert_eq!(view.sources, vec![first.clone()]);
+                assert_eq!(shown_ids(view), ["42", "41"]);
+            });
+        });
+    }
+
     /// sync が止まっているあいだ､ダイアログは支払う道を差し出さない
     /// (#174, #205)｡
     ///
@@ -5620,7 +5840,7 @@ mod tests {
             auto_sync_list: false,
             sync_interval_seconds: 21_600,
             sync_prune_limit_percent: 10,
-            sync_writes_per_batch: 2,
+            sync_write_pacing: crate::sync::WritePacing::DEFAULT,
             // 同じ理由で off (#21)｡
             auto_refresh: false,
             auto_refresh_interval_seconds: 300,

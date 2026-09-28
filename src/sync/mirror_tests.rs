@@ -2,6 +2,26 @@
 use super::*;
 use crate::sync::api::fake::{Call, FakeApi, Scratch, page, rate_limited, rejected};
 
+/// plan を最後まで送る｡loop と CLI が使う `write_one` を `next_write` の
+/// 順で回すだけで､間は置かない — ここで見るのはミラーへの反映だけだ｡
+fn send_all(
+    paths: &Paths,
+    client: &dyn ListSyncApi,
+    plan: &mut Plan,
+    prune: bool,
+    now: i64,
+) -> (usize, Result<()>) {
+    let mut sent = 0usize;
+    while let Some((action, user_id)) = super::super::schedule::next_write(plan, prune) {
+        match write_one(paths, client, plan, action, &user_id, now) {
+            Ok(Written::Landed) => sent = sent.saturating_add(1),
+            Ok(Written::Rejected) => {}
+            Err(error) => return (sent, Err(error)),
+        }
+    }
+    (sent, Ok(()))
+}
+
 fn write_mirror(paths: &Paths, list: &str, read_at: i64) {
     let json = serde_json::json!({
         "version": 1, "list_id": list, "read_at": read_at,
@@ -19,7 +39,7 @@ fn fresh_mirror_replaces_the_member_read() {
     let scratch = Scratch::new("mirror-fresh");
     write_mirror(scratch.paths(), "7", 100);
     let client = FakeApi::new().following(vec![Ok(page(&[("2", "bob")], None))]);
-    let plan = plan_sync(scratch.paths(), &client, "me", "7", 101).unwrap();
+    let plan = plan_sync(scratch.paths(), &client, "me", "7", None, 101).unwrap();
     assert!(plan.is_complete());
     assert_eq!(plan.members_total, 1);
     assert_eq!(client.calls(), [Call::Following(None)]);
@@ -34,7 +54,7 @@ fn absent_mirror_saves_every_member_page_before_the_follow_read() {
             Ok(page(&[("3", "carol")], None)),
         ])
         .following(vec![Err(anyhow::anyhow!("following unavailable"))]);
-    assert!(plan_sync(scratch.paths(), &client, "me", "7", 100).is_err());
+    assert!(plan_sync(scratch.paths(), &client, "me", "7", None, 100).is_err());
     let saved = saved_members(scratch.paths());
     assert_eq!(saved["version"], 1);
     assert_eq!(saved["list_id"], "7");
@@ -57,7 +77,7 @@ fn a_mirror_for_another_list_requires_a_full_member_read() {
     let client = FakeApi::new()
         .members(vec![Ok(page(&[("3", "carol")], None))])
         .following(vec![Ok(page(&[], None))]);
-    let plan = plan_sync(scratch.paths(), &client, "me", "7", 3_000_000).unwrap();
+    let plan = plan_sync(scratch.paths(), &client, "me", "7", None, 3_000_000).unwrap();
     assert_eq!(plan.members_total, 1);
     assert!(client.calls().contains(&Call::Members(None)));
     let saved = saved_members(scratch.paths());
@@ -74,7 +94,7 @@ fn age_alone_never_buys_a_member_read() {
         let scratch = Scratch::new(&format!("mirror-{label}"));
         write_mirror(scratch.paths(), "7", read_at);
         let client = FakeApi::new().following(vec![Ok(page(&[("2", "bob")], None))]);
-        let plan = plan_sync(scratch.paths(), &client, "me", "7", 3_000_000).unwrap();
+        let plan = plan_sync(scratch.paths(), &client, "me", "7", None, 3_000_000).unwrap();
         assert!(plan.is_complete(), "{label}");
         assert_eq!(client.calls(), [Call::Following(None)], "{label}");
         assert_eq!(
@@ -99,7 +119,7 @@ fn corrupt_or_unknown_version_mirrors_are_replaced() {
         let client = FakeApi::new()
             .members(vec![Ok(page(&[], None))])
             .following(vec![Ok(page(&[], None))]);
-        plan_sync(scratch.paths(), &client, "me", "7", 100).unwrap();
+        plan_sync(scratch.paths(), &client, "me", "7", None, 100).unwrap();
         assert!(client.calls().contains(&Call::Members(None)));
         assert_eq!(saved_members(scratch.paths())["version"], 1);
     }
@@ -115,7 +135,7 @@ fn partial_member_read_does_not_replace_the_old_mirror_or_read_following() {
         Ok(page(&[("3", "carol")], Some("next"))),
         Err(anyhow::anyhow!("402")),
     ]);
-    assert!(plan_sync(scratch.paths(), &client, "me", "7", 3_000_000).is_err());
+    assert!(plan_sync(scratch.paths(), &client, "me", "7", None, 3_000_000).is_err());
     assert_eq!(saved_members(scratch.paths()), original);
     assert!(
         !client
@@ -131,7 +151,7 @@ fn successful_writes_update_the_mirror_and_the_next_diff_is_empty() {
     write_mirror(scratch.paths(), "7", 100);
     let mut plan = tests::plan_of("7", &["1"], &["2"]);
     let client = FakeApi::new().writes(vec![Ok(()), Ok(())]);
-    let (sent, result) = apply_some(scratch.paths(), &client, &mut plan, true, 101, 5);
+    let (sent, result) = send_all(scratch.paths(), &client, &mut plan, true, 101);
     result.unwrap();
     assert_eq!(sent, 2);
     let saved = saved_members(scratch.paths());
@@ -141,7 +161,7 @@ fn successful_writes_update_the_mirror_and_the_next_diff_is_empty() {
         serde_json::json!([{"id":"1","username":"user1"}])
     );
     let client = FakeApi::new().following(vec![Ok(page(&[("1", "user1")], None))]);
-    let next = plan_sync(scratch.paths(), &client, "me", "7", 102).unwrap();
+    let next = plan_sync(scratch.paths(), &client, "me", "7", None, 102).unwrap();
     assert!(next.is_complete());
     assert_eq!(client.calls(), [Call::Following(None)]);
 }
@@ -159,7 +179,7 @@ fn rejected_or_failed_writes_leave_the_mirror_intact() {
         let original = saved_members(scratch.paths());
         let mut plan = tests::plan_of("7", &["1"], &[]);
         let client = FakeApi::new().writes(vec![Err(error)]);
-        let (sent, _) = apply_some(scratch.paths(), &client, &mut plan, false, 101, 5);
+        let (sent, _) = send_all(scratch.paths(), &client, &mut plan, false, 101);
         assert_eq!(sent, 0);
         assert_eq!(saved_members(scratch.paths()), original);
     }
@@ -170,7 +190,7 @@ fn legacy_and_other_list_plans_do_not_create_or_change_a_mirror() {
     let scratch = Scratch::new("mirror-legacy");
     let mut plan = tests::plan_of("7", &["1"], &[]);
     let client = FakeApi::new().writes(vec![Ok(())]);
-    apply_some(scratch.paths(), &client, &mut plan, false, 100, 5)
+    send_all(scratch.paths(), &client, &mut plan, false, 100)
         .1
         .unwrap();
     assert!(!scratch.paths().sync_members_file().exists());
@@ -178,7 +198,7 @@ fn legacy_and_other_list_plans_do_not_create_or_change_a_mirror() {
     let original = saved_members(scratch.paths());
     let mut plan = tests::plan_of("7", &["2"], &[]);
     let client = FakeApi::new().writes(vec![Ok(())]);
-    apply_some(scratch.paths(), &client, &mut plan, false, 101, 5)
+    send_all(scratch.paths(), &client, &mut plan, false, 101)
         .1
         .unwrap();
     assert_eq!(saved_members(scratch.paths()), original);
@@ -196,8 +216,11 @@ fn a_mirror_save_failure_stops_after_recording_the_landed_write() {
     std::fs::set_permissions(&path, permissions).unwrap();
     let mut plan = tests::plan_of("7", &["1", "3"], &[]);
     let client = FakeApi::new().writes(vec![Ok(()), Ok(())]);
-    let (sent, result) = apply_some(scratch.paths(), &client, &mut plan, false, 101, 5);
-    assert_eq!(sent, 1);
+    let (sent, result) = send_all(scratch.paths(), &client, &mut plan, false, 101);
+    assert_eq!(
+        sent, 0,
+        "the write landed but its save failed, so it is not counted"
+    );
     assert!(
         result
             .unwrap_err()
@@ -218,7 +241,7 @@ fn adding_an_existing_member_does_not_duplicate_it() {
     write_mirror(scratch.paths(), "7", 100);
     let mut plan = tests::plan_of("7", &["2"], &[]);
     let client = FakeApi::new().writes(vec![Ok(())]);
-    apply_some(scratch.paths(), &client, &mut plan, false, 101, 5)
+    send_all(scratch.paths(), &client, &mut plan, false, 101)
         .1
         .unwrap();
     assert_eq!(

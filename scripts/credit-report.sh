@@ -66,7 +66,7 @@ if ! html="$(cat "${logs[@]}" | jq -R -s -r \
     tweet_by_id: ["posts", 0.005],
     user_lookup: ["users", 0.010], list_members: ["users", 0.010],
     me: ["owned", 0.001], owned_lists: ["owned", 0.001], following: ["owned", 0.001],
-    create_post: ["write", 0.015]
+    create_post: ["write", 0.015], add_list_member: ["write", 0.010]
   } as $price
   | $usage[0] as $u
   | ($u.dedup.posts // error("usage.json に課金済み Posts の記録が無い")) as $posts

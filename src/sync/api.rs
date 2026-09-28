@@ -6,17 +6,18 @@
 //! `XClient` 側は既存のメソッドへ委譲するだけで判断を 1 つも持たない —
 //! transport はフィクスチャ JSON を通した `x_api::client` のテストが見ている｡
 //!
-//! 待ちも trait に載せてある｡[`super::run::apply_some`] は 2 件目以降の
-//! write の前に 3〜20 秒待つので､これが無ければ batch を 2 件流すテストは
-//! suite をその分だけ止める｡fake は渡された [`Duration`] を記録して
-//! すぐ返る｡
+//! 待ちも trait に載せてある｡CLI の `--sync-list --apply` は tick と tick の
+//! あいだ — gap か cooldown､既定で 3〜300 秒 — をここで眠るので､これが
+//! 無ければ 2 件流すテストは suite をその分だけ止める｡fake は渡された
+//! [`Duration`] を記録してすぐ返る｡window の loop はここで眠らない (#231):
+//! 間は `sync::state` が `paused_until` に置き､loop の timer がそれを待つ｡
 
 use anyhow::Result;
 use std::time::Duration;
 
 use crate::paths::Paths;
-use crate::x_api::XClient;
 use crate::x_api::model::User;
+use crate::x_api::{USER_PAGE_SIZE, XClient};
 
 /// list sync が X に対して行う操作｡
 ///
@@ -32,11 +33,25 @@ pub(crate) trait ListSyncApi {
     /// サインイン中のアカウントの現在のフォロー数｡
     fn following_count(&self, paths: &Paths, now: i64) -> Result<u64>;
 
-    /// `user_id` が follow しているアカウントを 1 ページ｡
+    /// `user_id` が follow しているアカウントを 1 ページ (全件読みの
+    /// ページサイズ)｡
     fn following_page(
         &self,
         paths: &Paths,
         user_id: &str,
+        cursor: Option<&str>,
+        now: i64,
+    ) -> Result<(Vec<User>, Option<String>)>;
+
+    /// 同じ read を `page_size` 件で｡#289 の先頭読みが､増えた分に合わせた
+    /// 小さいページを頼むのに使う｡[`Self::following_page`] と分けてあるのは
+    /// テストのため: fake は別の列から答え､記録も別の [`fake::Call`] になる
+    /// ので､全件読みが走ったか先頭だけで済んだかがそのまま assert できる｡
+    fn following_head(
+        &self,
+        paths: &Paths,
+        user_id: &str,
+        page_size: u32,
         cursor: Option<&str>,
         now: i64,
     ) -> Result<(Vec<User>, Option<String>)>;
@@ -62,8 +77,8 @@ pub(crate) trait ListSyncApi {
     /// `user_id` を list から外す｡
     fn remove_member(&self, paths: &Paths, list_id: &str, user_id: &str, now: i64) -> Result<()>;
 
-    /// batch の中で write と write のあいだに置く間｡長さは
-    /// [`super::state::write_gap`] が引き､ここは待つだけだ｡
+    /// CLI の `--apply` が tick と tick のあいだに置く間｡長さは tick が
+    /// `SyncState::paused_until` に置いたもので､ここは待つだけだ｡
     ///
     /// 既定が実際に眠るので本番の経路はこれを実装しない｡テストは上書きして
     /// 記録する｡
@@ -84,7 +99,18 @@ impl ListSyncApi for XClient {
         cursor: Option<&str>,
         now: i64,
     ) -> Result<(Vec<User>, Option<String>)> {
-        self.following(paths, user_id, cursor, now)
+        self.following(paths, user_id, USER_PAGE_SIZE, cursor, now)
+    }
+
+    fn following_head(
+        &self,
+        paths: &Paths,
+        user_id: &str,
+        page_size: u32,
+        cursor: Option<&str>,
+        now: i64,
+    ) -> Result<(Vec<User>, Option<String>)> {
+        self.following(paths, user_id, page_size, cursor, now)
     }
 
     fn list_members_page(
@@ -137,6 +163,8 @@ pub(super) mod fake {
         FollowingCount,
         /// follow list を 1 ページ｡持つのは渡された cursor｡
         Following(Option<String>),
+        /// follow list の先頭を 1 ページ (#289)｡持つのはページサイズと cursor｡
+        FollowingHead(u32, Option<String>),
         /// list の member を 1 ページ｡
         Members(Option<String>),
         /// screen name の解決｡
@@ -160,6 +188,7 @@ pub(super) mod fake {
     pub(crate) struct FakeApi {
         counts: RefCell<Vec<Result<u64>>>,
         following: RefCell<Vec<Page>>,
+        heads: RefCell<Vec<Page>>,
         members: RefCell<Vec<Page>>,
         lookups: RefCell<Vec<Result<String>>>,
         me: RefCell<Vec<Result<User>>>,
@@ -182,6 +211,12 @@ pub(super) mod fake {
         /// follow list の read が返すページを順に｡
         pub(crate) fn following(self, pages: Vec<Page>) -> Self {
             *self.following.borrow_mut() = pages;
+            self
+        }
+
+        /// follow list の先頭読み (#289) が返すページを順に｡
+        pub(crate) fn heads(self, pages: Vec<Page>) -> Self {
+            *self.heads.borrow_mut() = pages;
             self
         }
 
@@ -247,6 +282,20 @@ pub(super) mod fake {
                 .borrow_mut()
                 .push(Call::Following(cursor.map(str::to_string)));
             take(&self.following, "follow page")
+        }
+
+        fn following_head(
+            &self,
+            _paths: &Paths,
+            _user_id: &str,
+            page_size: u32,
+            cursor: Option<&str>,
+            _now: i64,
+        ) -> Page {
+            self.calls
+                .borrow_mut()
+                .push(Call::FollowingHead(page_size, cursor.map(str::to_string)));
+            take(&self.heads, "follow head page")
         }
 
         fn list_members_page(

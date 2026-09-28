@@ -186,7 +186,7 @@ pub(super) fn tweets_by_id_url(ids: &str) -> String {
 /// read がリクエストごとではなく返った resource ごとに課金されるからだ
 /// (`x-api-budget`): 小さいページは何も得をせず､同じアカウントを読むのに
 /// エンドポイントの rate limit をより多く使う｡
-const USER_PAGE_SIZE: u32 = 100;
+pub(crate) const USER_PAGE_SIZE: u32 = 100;
 
 /// 2 つのページ読み取りが要求する `user.fields`｡dry-run の報告がアカウントを
 /// 名指すのに要るものだけだ — ここでアバターや metrics を要求しても､何も
@@ -195,12 +195,21 @@ const SYNC_USER_FIELDS: &[(&str, &str)] = &[("user.fields", "name,username")];
 
 /// `GET /2/users/:id/following` (#163) — このアプリがフォローしている
 /// アカウントの 1 ページ｡
-pub(super) fn following_url(user_id: &str, pagination_token: Option<&str>) -> String {
+///
+/// `page_size` を受けるのは #289 の先頭読みのためだ｡全件読みは
+/// [`USER_PAGE_SIZE`] を渡す｡先頭読みは増えた分だけ小さくする — read は
+/// 返った件数で課金されるので､ここが小さい分だけ安い｡下限の 5 は 2026-09-22
+/// の実測 (`x-api-endpoints`)｡
+pub(super) fn following_url(
+    user_id: &str,
+    page_size: u32,
+    pagination_token: Option<&str>,
+) -> String {
     Url::api(API_BASE)
         .segment("users")
         .segment(user_id)
         .segment("following")
-        .number("max_results", USER_PAGE_SIZE)
+        .number("max_results", page_size)
         .params(SYNC_USER_FIELDS)
         .maybe("pagination_token", pagination_token)
         .build()
@@ -559,7 +568,7 @@ mod tests {
 
     #[test]
     fn builds_the_following_url() {
-        let url = following_url("2244994945", None);
+        let url = following_url("2244994945", USER_PAGE_SIZE, None);
         assert_eq!(
             path_of(&url),
             "https://api.x.com/2/users/2244994945/following"
@@ -569,6 +578,9 @@ mod tests {
         // read は `SYNC_USER_FIELDS` を共有していて､隣のテストがすでに両者は
         // 一致すべきだと言っているからだ｡
         assert_eq!(query_of(&url).first(), Some(&("max_results", "100")));
+        // #289 の先頭読みは増えた分だけ小さいページを頼む｡
+        let head = following_url("2244994945", 5, None);
+        assert_eq!(query_of(&head).first(), Some(&("max_results", "5")));
     }
 
     #[test]
@@ -577,8 +589,8 @@ mod tests {
         // 1 ページ目を永遠に読み直し､diff は終わらない｡
         assert_eq!(
             added(
-                &following_url("2244994945", None),
-                &following_url("2244994945", Some("cursor-abc")),
+                &following_url("2244994945", USER_PAGE_SIZE, None),
+                &following_url("2244994945", USER_PAGE_SIZE, Some("cursor-abc")),
             ),
             vec![("pagination_token", "cursor-abc")]
         );
@@ -600,7 +612,7 @@ mod tests {
         // フィールドを要求すれば､片側のアカウントは､もう片側が埋める報告に
         // 出せなくなる｡
         assert_eq!(
-            query_of(&following_url("2244994945", None)),
+            query_of(&following_url("2244994945", USER_PAGE_SIZE, None)),
             query_of(&list_members_url("2091351590695588200", None))
         );
     }

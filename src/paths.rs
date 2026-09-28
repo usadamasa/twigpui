@@ -147,6 +147,12 @@ impl Paths {
         self.state_dir.join("sync_members.json")
     }
 
+    /// 最後に全件読みした follow list を､API が返した順のまま持つ台帳
+    /// (#289)｡次の diff はこれの先頭に当たるまでしか読まない｡
+    pub(crate) fn sync_following_file(&self) -> PathBuf {
+        self.state_dir.join("sync_following.json")
+    }
+
     /// `state_dir` 配下の､バックグラウンド sync の時計へのパス: 最後に差分
     /// を試みた時刻｡
     ///
@@ -489,7 +495,7 @@ mod tests {
         let user = "2244994945";
         let reply = "1800000000000000003";
         let list = "2091351590695588200";
-        let pairs: [(PathBuf, PathBuf); 22] = [
+        let pairs: [(PathBuf, PathBuf); 23] = [
             (release.owned_lists_file(), dev.owned_lists_file()),
             (release.selection_file(), dev.selection_file()),
             (release.window_state_file(), dev.window_state_file()),
@@ -508,6 +514,7 @@ mod tests {
             (release.sync_plan_file(), dev.sync_plan_file()),
             (release.sync_state_file(), dev.sync_state_file()),
             (release.sync_members_file(), dev.sync_members_file()),
+            (release.sync_following_file(), dev.sync_following_file()),
             (release.me_file(), dev.me_file()),
             (release.thread_file(reply), dev.thread_file(reply)),
             (release.rate_limit_file(), dev.rate_limit_file()),
@@ -670,6 +677,19 @@ mod tests {
         );
         assert_ne!(paths.sync_members_file(), paths.sync_plan_file());
         assert_ne!(paths.sync_members_file(), paths.sync_state_file());
+    }
+
+    #[test]
+    fn sync_following_file_is_under_the_state_dir() {
+        // #289: 失うと follow list の全件読みをまた払う｡
+        let paths = release_paths(vars(&[("HOME", "/home/alice")])).unwrap();
+        assert_eq!(
+            paths.sync_following_file(),
+            PathBuf::from("/home/alice/.local/state/twigpui/sync_following.json")
+        );
+        assert_ne!(paths.sync_following_file(), paths.sync_members_file());
+        assert_ne!(paths.sync_following_file(), paths.sync_plan_file());
+        assert_ne!(paths.sync_following_file(), paths.sync_state_file());
     }
 
     #[test]

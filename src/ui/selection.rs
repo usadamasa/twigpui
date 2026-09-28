@@ -54,9 +54,10 @@ impl TimelineView {
     /// spring と glide を先に手放してから offset を動かす｡握ったままにすると
     /// 次のフレームで取り合いになる｡
     ///
-    /// [`Self::note_scroll_position`] は呼ばない｡`logical_scroll_top` が
-    /// 数えるのは直近の prepaint の bounds なので､ここで読むと 1 フレーム
-    /// 古い位置を答える｡#206 の countdown は次のホイールか glide まで遅れる｡
+    /// [`Self::note_scroll_position`] は呼ばない｡`scroll_to_item` は anchor を
+    /// 積むだけで､置くのは次の描画の頭 (`sync_list`､#301) なので､ここで
+    /// 読むとまだ動く前の位置を答える｡#206 の countdown は次のホイールか
+    /// glide まで遅れる｡
     pub(super) fn select_step(&mut self, delta: isize, cx: &mut Context<'_, Self>) {
         // #205: 手動 sync の確認ダイアログは focus を持たないので
         // `!Input` では黙らない｡覆いの下で一覧が動くのを止めるのはここだけだ｡
@@ -142,8 +143,8 @@ mod tests {
     /// `keys` を打って 1 フレーム描く｡
     ///
     /// `scroll_to_item` は要求を積むだけで､実際に offset が動くのは次の
-    /// prepaint だ (`div.rs` の `scroll_to_active_item`)｡描かずに続けて打つと
-    /// `top_item` が古い bounds を答えるので､1 打ごとに描く｡
+    /// 描画の頭 (`sync_list`､#301) だ｡描かずに続けて打つと `top_item` が
+    /// 動く前の位置を答えるので､1 打ごとに描く｡
     fn press(
         visual: &mut gpui::VisualTestContext,
         cx: &mut gpui::TestAppContext,
@@ -396,21 +397,20 @@ mod tests {
 
     #[gpui::test]
     fn the_selected_row_is_pulled_into_the_viewport(cx: &mut gpui::TestAppContext) {
-        // `debug_bounds` は画面の外に置かれた行にも答えるので､「収まって
-        // いる」を assert できる｡
         let ids: Vec<String> = (1..=30).map(|n| n.to_string()).collect();
         let shown: Vec<&str> = ids.iter().map(String::as_str).collect();
         let (window, timeline) = fixture_window(cx, fixture_with(&shown, &[]));
         let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
         draw_until_parked(&mut visual, cx);
 
-        // 前提: 16 行目はまだ画面の下にある｡収まっていればこのテストは
-        // 何も見ていない｡
+        // 前提: 16 行目はまだ画面の下にある｡#301 から画面の外の行は組まれ
+        // ないので､一度も描いていない名前に `debug_bounds` が `None` を
+        // 答えることが「まだ下にある」の印になる｡収まっていればこの
+        // テストは何も見ていない｡
         let viewport = laid_out(&mut visual, "timeline");
-        let before = laid_out(&mut visual, "post-row-16");
         assert!(
-            before.bottom() > viewport.bottom(),
-            "the fixture has to be taller than the window: {before:?} in {viewport:?}"
+            visual.debug_bounds("post-row-16").is_none(),
+            "the fixture has to be taller than the window"
         );
 
         // 最初の 1 打は「進む」ではなく「今そこにある行を選ぶ」ので､
