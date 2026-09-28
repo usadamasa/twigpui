@@ -119,7 +119,7 @@ chrono-tz = { version = "0.10.4", default-features = false }
 # 臨界減衰 (ζ = 1) の係数が Juckett の `timeExpFreq + expTerm` を
 # `* expTerm` と書き違えていて､dt = 0 で位置が 0 に飛ぶ｡ここが使うのは
 # ちょうどその ζ = 1｡
-charmed-harmonica = "=0.2.3"
+charmed-harmonica = "=0.2.4"
 dotenvy = "0.15.7"
 # OAuth の token を型で秘匿する (#246)｡`Secret<T>` の `Debug` は中身を出さず、
 # 出口は `expose_secret()` だけ — `Deref` も `AsRef` も無いので、うっかり
