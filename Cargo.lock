@@ -860,9 +860,12 @@ dependencies = [
 
 [[package]]
 name = "charmed-harmonica"
-version = "0.2.4"
+version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1eff5397e02166814b24999aa0f47632d991c5f4747351db539b1af762f432fd"
+checksum = "f86f450e48532c8db2f2efc11ed46ce61b11bda6fb61848b1a4022d93838d53b"
+dependencies = [
+ "libm",
+]
 
 [[package]]
 name = "chrono"
