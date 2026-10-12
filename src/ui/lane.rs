@@ -328,7 +328,7 @@ mod tests {
 
     #[test]
     fn no_sources_compose_to_nothing() {
-        assert!(compose(Vec::new()).is_empty());
+        assert_eq!(compose(Vec::new()), [] as [TimelineItem; 0]);
     }
 
     // --- provenance (出自、§3.8) ---
@@ -372,7 +372,7 @@ mod tests {
         paths.ensure_dirs().unwrap();
 
         let composed = load_composite_timeline(&paths, &[TimelineSource::Home], "me");
-        assert!(composed.items.is_empty());
+        assert_eq!(composed.items, [] as [TimelineItem; 0]);
         assert!(composed.provenance.is_empty());
 
         std::fs::remove_dir_all(&root).unwrap();
@@ -513,7 +513,7 @@ mod tests {
         }
 
         let composed = load_composite_timeline(&paths, std::slice::from_ref(&list), "me");
-        assert!(composed.items.is_empty());
+        assert_eq!(composed.items, [] as [TimelineItem; 0]);
         assert_eq!(composed.missing, vec![list]);
 
         std::fs::remove_dir_all(&root).unwrap();

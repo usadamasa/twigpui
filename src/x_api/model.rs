@@ -893,7 +893,7 @@ mod tests {
     fn parses_an_empty_timeline() {
         let response: TimelineResponse =
             serde_json::from_str(r#"{"meta":{"result_count":0}}"#).unwrap();
-        assert!(response.into_items().is_empty());
+        assert_eq!(response.into_items(), [] as [TimelineItem; 0]);
     }
 
     #[test]
@@ -1092,7 +1092,7 @@ mod tests {
         let response: TimelineResponse = serde_json::from_str(QUOTE_WITH_MEDIA_JSON).unwrap();
         let items = response.into_items();
 
-        assert!(items[0].media.is_empty());
+        assert_eq!(items[0].media, [] as [PostMedia; 0]);
     }
 
     #[test]
@@ -1100,7 +1100,10 @@ mod tests {
         let response: TimelineResponse = serde_json::from_str(QUOTE_JSON).unwrap();
         let items = response.into_items();
 
-        assert!(items[0].quoted.as_ref().expect("a quote").media.is_empty());
+        assert_eq!(
+            items[0].quoted.as_ref().expect("a quote").media,
+            [] as [PostMedia; 0]
+        );
     }
 
     #[test]
@@ -1709,7 +1712,7 @@ mod tests {
     #[test]
     fn a_post_with_no_entities_has_no_links() {
         let response: TimelineResponse = serde_json::from_str(LINKS_JSON).unwrap();
-        assert!(response.into_items()[1].links.is_empty());
+        assert_eq!(response.into_items()[1].links, [] as [PostLink; 0]);
     }
 
     #[test]
@@ -1794,7 +1797,7 @@ mod tests {
           ]
         }"#;
         let response: TimelineResponse = serde_json::from_str(json).unwrap();
-        assert!(response.into_items()[0].links.is_empty());
+        assert_eq!(response.into_items()[0].links, [] as [PostLink; 0]);
     }
 
     #[test]
@@ -1925,13 +1928,13 @@ mod tests {
           "includes": { "media": [{ "media_key": "k", "type": "photo" }] }
         }"#;
         let response: TimelineResponse = serde_json::from_str(json).unwrap();
-        assert!(response.into_items()[0].media.is_empty());
+        assert_eq!(response.into_items()[0].media, [] as [PostMedia; 0]);
     }
 
     #[test]
     fn a_post_without_attachments_has_no_media() {
         let response: TimelineResponse = serde_json::from_str(MEDIA_JSON).unwrap();
-        assert!(response.into_items()[1].media.is_empty());
+        assert_eq!(response.into_items()[1].media, [] as [PostMedia; 0]);
     }
 
     #[test]
@@ -1984,7 +1987,7 @@ mod tests {
             r#"{"id":"1","text":"cached","created_at":null,"author_name":"a","author_username":"b"}"#,
         )
         .unwrap();
-        assert!(item.media.is_empty());
+        assert_eq!(item.media, [] as [PostMedia; 0]);
     }
 
     #[test]
@@ -2079,7 +2082,7 @@ mod tests {
             r#"{"id":"1","text":"cached","created_at":null,"author_name":"a","author_username":"b"}"#,
         )
         .unwrap();
-        assert!(item.links.is_empty());
+        assert_eq!(item.links, [] as [PostLink; 0]);
     }
 
     #[test]

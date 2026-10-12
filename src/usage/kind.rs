@@ -181,12 +181,12 @@ mod tests {
     #[test]
     fn is_empty_when_the_response_has_no_data_field() {
         let body = r#"{"meta":{"result_count":0}}"#;
-        assert!(extract_resource_ids(body).is_empty());
+        assert_eq!(extract_resource_ids(body), [] as [String; 0]);
     }
 
     #[test]
     fn is_empty_for_an_unparsable_body() {
-        assert!(extract_resource_ids("not json").is_empty());
+        assert_eq!(extract_resource_ids("not json"), [] as [String; 0]);
     }
 
     #[test]

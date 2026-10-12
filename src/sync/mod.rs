@@ -370,14 +370,14 @@ mod tests {
     fn a_followed_account_missing_from_the_list_is_an_addition() {
         let plan = plan("7", 0, &[user("1", "alice")], &[]);
         assert_eq!(ids(&plan, Action::Add), ["1"]);
-        assert!(ids(&plan, Action::Remove).is_empty());
+        assert_eq!(ids(&plan, Action::Remove), [] as [&str; 0]);
     }
 
     #[test]
     fn a_member_no_longer_followed_is_a_removal() {
         let plan = plan("7", 0, &[], &[user("1", "alice")]);
         assert_eq!(ids(&plan, Action::Remove), ["1"]);
-        assert!(ids(&plan, Action::Add).is_empty());
+        assert_eq!(ids(&plan, Action::Add), [] as [&str; 0]);
     }
 
     #[test]
@@ -385,7 +385,7 @@ mod tests {
         // 再実行では圧倒的に多い場合｡ここに write を使えば､どの sync も
         // list 全体の大きさ分の費用になってしまう｡
         let plan = plan("7", 0, &[user("1", "alice")], &[user("1", "alice")]);
-        assert!(plan.entries.is_empty());
+        assert_eq!(plan.entries, [] as [PlanEntry; 0]);
     }
 
     #[test]
@@ -393,7 +393,7 @@ mod tests {
         // 二つの read のあいだに改名したアカウントは同じアカウントだ｡
         // 名前で照合すれば削除して再追加してしまう｡
         let plan = plan("7", 0, &[user("1", "newname")], &[user("1", "oldname")]);
-        assert!(plan.entries.is_empty());
+        assert_eq!(plan.entries, [] as [PlanEntry; 0]);
     }
 
     #[test]

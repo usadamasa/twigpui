@@ -225,13 +225,16 @@ mod tests {
         let path = write("minimal", SAMPLE);
         let fixture = load(&path).unwrap();
 
-        assert!(fixture.items[0].media.is_empty());
+        assert_eq!(
+            fixture.items[0].media,
+            [] as [crate::x_api::model::PostMedia; 0]
+        );
         assert!(fixture.items[0].quoted.is_none());
         assert!(fixture.items[0].author_avatar_url.is_none());
         // #21 のフィールドが `#[serde(default)]` なのも同じ理由だ: それが
         // できる前に書かれたフィクスチャはすべて読めつづけねばならないし､
         // 記載が無いことは「pending な post は無い」と読むのが正しい｡
-        assert!(fixture.pending.is_empty());
+        assert_eq!(fixture.pending, [] as [TimelineItem; 0]);
 
         std::fs::remove_file(&path).unwrap();
     }

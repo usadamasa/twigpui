@@ -461,7 +461,7 @@ mod tests {
         // list を 1 つも持たないアカウントには `meta.result_count: 0` が返り､
         // `data` キーはまったく無い — `TimelineResponse` が許容するのと同じ形だ｡
         let (lists, next) = parse_list_page(r#"{"meta":{"result_count":0}}"#).unwrap();
-        assert!(lists.is_empty());
+        assert_eq!(lists, [] as [ListSummary; 0]);
         assert!(next.is_none());
     }
 
