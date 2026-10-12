@@ -743,7 +743,7 @@ mod tests {
             load_primary_timeline(&paths, &TimelineSource::Home, "me")
                 .unwrap()
                 .unwrap(),
-            [] as [TimelineItem; 0]
+            Vec::<TimelineItem>::new()
         );
         assert_eq!(ids(&load_timeline(&paths, "me").unwrap().unwrap()), ["1"]);
 
@@ -758,7 +758,7 @@ mod tests {
 
         assert_eq!(
             forget_post(&paths, &TimelineSource::Home, "me", "1", 1).unwrap(),
-            [] as [TimelineItem; 0]
+            Vec::<TimelineItem>::new()
         );
 
         std::fs::remove_dir_all(&root).unwrap();
@@ -898,7 +898,10 @@ mod tests {
     #[test]
     fn splice_fills_an_empty_links_vec_from_the_incoming_copy() {
         let cached_copy = item("1");
-        assert_eq!(cached_copy.links, [] as [crate::x_api::model::PostLink; 0]);
+        assert_eq!(
+            cached_copy.links,
+            Vec::<crate::x_api::model::PostLink>::new()
+        );
         let mut incoming_copy = item("1");
         incoming_copy.links = vec![crate::x_api::PostLink {
             url: "https://example.com".to_string(),

@@ -905,7 +905,7 @@ mod tests {
             WritePacing::DEFAULT,
         )
         .unwrap();
-        assert_eq!(client.calls(), [] as [Call; 0]);
+        assert_eq!(client.calls(), Vec::<Call>::new());
         assert!(text.starts_with(&report(&original)), "{text}");
         assert!(text.contains("2 write(s)"), "{text}");
         assert!(
@@ -957,7 +957,7 @@ mod tests {
         )
         .unwrap();
         assert!(!with.contains("--reread first"), "{with}");
-        assert_eq!(client.calls(), [] as [Call; 0]);
+        assert_eq!(client.calls(), Vec::<Call>::new());
     }
 
     #[test]
@@ -1362,7 +1362,7 @@ mod tests {
             WritePacing::DEFAULT,
         )
         .unwrap();
-        assert_eq!(client.calls(), [] as [Call; 0]);
+        assert_eq!(client.calls(), Vec::<Call>::new());
         assert!(
             load_plan(&scratch.paths().sync_plan_file())
                 .unwrap()

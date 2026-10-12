@@ -227,14 +227,14 @@ mod tests {
 
         assert_eq!(
             fixture.items[0].media,
-            [] as [crate::x_api::model::PostMedia; 0]
+            Vec::<crate::x_api::model::PostMedia>::new()
         );
         assert!(fixture.items[0].quoted.is_none());
         assert!(fixture.items[0].author_avatar_url.is_none());
         // #21 のフィールドが `#[serde(default)]` なのも同じ理由だ: それが
         // できる前に書かれたフィクスチャはすべて読めつづけねばならないし､
         // 記載が無いことは「pending な post は無い」と読むのが正しい｡
-        assert_eq!(fixture.pending, [] as [TimelineItem; 0]);
+        assert_eq!(fixture.pending, Vec::<TimelineItem>::new());
 
         std::fs::remove_file(&path).unwrap();
     }
