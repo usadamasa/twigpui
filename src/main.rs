@@ -869,7 +869,7 @@ mod tests {
     fn missing_ids_is_empty_when_every_requested_id_came_back() {
         let requested = vec!["1".to_string(), "2".to_string()];
         let items = vec![item("1"), item("2")];
-        assert!(missing_ids(&requested, &items).is_empty());
+        assert_eq!(missing_ids(&requested, &items), Vec::<String>::new());
     }
 
     #[test]
