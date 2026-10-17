@@ -27,19 +27,20 @@ env:
   CARGO_BUILD_BUILD_DIR: target
 
 jobs:
-  # 唯一の required check: `needs` のどれかが失敗したときだけ動き､そのとき
-  # 意図的に失敗する｡branch protection は下の全ジョブを追う代わりに､この
+  # 唯一の required check: 毎回動き､`needs` のどれかが失敗かキャンセルされた
+  # ときだけ意図的に失敗する｡branch protection は下の全ジョブを追う代わりに､この
   # 1 つのジョブを指せばよい｡
   ci-status-check:
     runs-on: ubuntu-latest
-    if: failure()
+    if: always()
     timeout-minutes: 10
     needs:
       - test
       - lint
       - dependency-review
     steps:
-      - run: exit 1
+      - if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        run: exit 1
 
   test:
     name: Test
@@ -74,9 +75,9 @@ jobs:
   # 渡す base と head の依存グラフを比べる｡
   #
   # main への push では比べる相手が無いので走らせない｡このジョブは
-  # `ci-status-check` の `needs` に入っているが､skip は failure ではないので
-  # `if: failure()` は false のままで､Test や Lint が落ちたときには変わらず
-  # true になる｡そして skip が起きるのは push の run だけだ — branch
+  # `ci-status-check` の `needs` に入っているが､skip は failure でも cancelled
+  # でもないので失敗の step は動かず､Test や Lint が落ちたときには変わらず
+  # 動く｡そして skip が起きるのは push の run だけだ — branch
   # protection が見るのは pull request と merge queue の run で､そこでは
   # このジョブは今までどおり走る｡ゲートの振る舞いは変わらない｡
   dependency-review:
