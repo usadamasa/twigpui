@@ -68,6 +68,8 @@ fn extension_of(url: &str) -> &str {
     let candidate = url
         .rsplit('/')
         .next()
+        // `?name=small` (#305) のようなクエリは拡張子に含めない｡
+        .map(|name| name.split_once('?').map_or(name, |(name, _)| name))
         .and_then(|name| name.rsplit_once('.'))
         .map(|(_, extension)| extension)
         .unwrap_or_default();
@@ -188,6 +190,18 @@ mod tests {
                 .rsplit_once('.')
                 .map(|(_, extension)| extension),
             Some("png")
+        );
+    }
+
+    #[test]
+    fn the_extension_ignores_the_query_string() {
+        // #305: サムネイルは `?name=small` 付きで取る｡クエリまで拡張子に
+        // 含めると `img` へ落ち､cache のファイルが見分けられなくなる｡
+        assert_eq!(
+            cache_key("https://pbs.twimg.com/media/GabcXYZ.jpg?name=small")
+                .rsplit_once('.')
+                .map(|(_, extension)| extension),
+            Some("jpg")
         );
     }
 

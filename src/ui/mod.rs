@@ -479,15 +479,18 @@ pub(crate) struct TimelineView {
     /// に自分を引ける｡無いことは「まだダウンロードしていない」を意味し､
     /// プレースホルダが描かれる｡
     avatar_paths: HashMap<String, PathBuf>,
-    /// ダウンロード済みの post の media (#65)｡media の URL を鍵にする —
-    /// `avatar_paths` と同じ形だが､二つは別の cache ディレクトリに置かれ
-    /// 別のフィールドから来るので､それぞれ別の map にしてある｡
+    /// ダウンロード済みの post の media のサムネイル (#65)｡media の URL を
+    /// 鍵にする — `avatar_paths` と同じ形だが､二つは別の cache ディレクトリに
+    /// 置かれ別のフィールドから来るので､それぞれ別の map にしてある｡
+    /// 値は `?name=small` の variant (#305) か､それが取れなかったときの元の URL｡
     media_paths: HashMap<String, PathBuf>,
     /// 直近のダウンロードが失敗した media の URL (#188)｡`media_paths` に
     /// 無いことは「まだ取っていない」と「取れなかった」の両方を意味しうる
     /// ので､クリックした先の viewer が「開けない」を言うにはこちらが要る｡
     /// `refresh_media` が取れたら remove する｡
     media_failed: HashSet<String>,
+    /// viewer が見せる原寸の写真 (#305)｡
+    full_size: image_viewer::FullSizePhotos,
     /// 行と viewer が `img` に渡す､デコード済み画像の置き場｡渡さないと
     /// gpui は App 全体の asset cache に入れ､`remove_asset` を呼ぶまで
     /// 手放さない｡timeline の 500 件の窓から外れた URL の画像は
@@ -2633,8 +2636,18 @@ mod tests {
         let second = root.join("assets/../assets/AppIcon.png");
         cx.update(|cx| {
             timeline.update(cx, |view, cx| {
-                view.media_paths.insert("media/e.png".to_string(), first);
-                view.media_paths.insert("media/f.png".to_string(), second);
+                view.media_paths
+                    .insert("media/e.png".to_string(), first.clone());
+                view.media_paths
+                    .insert("media/f.png".to_string(), second.clone());
+                // #305: viewer の原寸も同じ窓で刈られる｡
+                view.full_size
+                    .paths
+                    .insert("media/e.png".to_string(), first);
+                view.full_size
+                    .paths
+                    .insert("media/f.png".to_string(), second);
+                view.full_size.failed.insert("media/e.png".to_string());
                 cx.notify();
             });
         });
@@ -2673,6 +2686,12 @@ mod tests {
                 !view.media_paths.contains_key("media/e.png"),
                 "the url that left the window is dropped from media_paths"
             );
+            assert_eq!(
+                view.full_size.paths.keys().collect::<Vec<_>>(),
+                vec!["media/f.png"],
+                "the full-size photo that left the window is dropped too"
+            );
+            assert!(view.full_size.failed.is_empty(), "and so is its failure");
         });
     }
 
