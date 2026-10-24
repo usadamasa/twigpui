@@ -213,6 +213,11 @@ impl TimelineView {
         }));
     }
 
+    /// viewer が見せる原寸の写真を落とす (#305)｡
+    pub(in crate::ui) fn fetch_photo(&mut self, url: &str, cx: &mut Context<'_, Self>) {
+        let _ = (url, cx);
+    }
+
     /// timeline がもう参照しない avatar と media を index から落とし､
     /// デコード済みの画像も `image_cache` から手放す｡デコード済み画像の
     /// 寿命は timeline の 500 件の窓と同じになる｡

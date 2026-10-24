@@ -498,9 +498,9 @@ mod tests {
         let (_window, timeline) = fixture_window(cx, fixture_with(&["1"], &[]));
         cx.update(|cx| {
             timeline.update(cx, |view, _cx| {
-                view.media_paths
+                view.photo_paths
                     .insert("media/wide.png".to_string(), arrived.clone());
-                view.media_paths
+                view.photo_paths
                     .insert("media/tall.png".to_string(), arrived.clone());
             });
         });
@@ -544,12 +544,15 @@ mod tests {
 
     /// #188: 画像がまだ無いときは､なぜ無いのかを出す｡取りそこねたものは
     /// 待っても着かないので､「読み込み中」と言い続けてはいけない｡
+    ///
+    /// 見るのは原寸の側 (#305)｡`media/waiting.png` はディスクに無いので､
+    /// 取得が走り終われば失敗になる｡「読み込み中」はその前に見る｡
     #[gpui::test]
     fn a_photo_without_a_file_says_why(cx: &mut gpui::TestAppContext) {
         let (_window, timeline) = fixture_window(cx, fixture_with(&["1"], &[]));
         cx.update(|cx| {
             timeline.update(cx, |view, _cx| {
-                view.media_failed.insert("media/failed.png".to_string());
+                view.photo_failed.insert("media/failed.png".to_string());
             });
         });
         let photos = vec![
@@ -568,10 +571,15 @@ mod tests {
         assert_eq!(
             viewer_notice(viewer, cx),
             Some("Could not load this image".into()),
-            "a url in media_failed says the download failed"
+            "a url in photo_failed says the download failed"
         );
 
         visual.update(|window, cx| window.dispatch_action(Box::new(super::NextPhoto), cx));
+        assert_eq!(
+            viewer_notice(viewer, cx),
+            Some("Loading…".into()),
+            "a url in neither set is still on its way"
+        );
         draw_until_parked(&mut visual, cx);
         assert!(
             visual.debug_bounds("image-viewer-notice").is_some(),
@@ -579,8 +587,90 @@ mod tests {
         );
         assert_eq!(
             viewer_notice(viewer, cx),
+            Some("Could not load this image".into()),
+            "a full-size fetch that found nothing ends as a failure, not an endless wait"
+        );
+    }
+
+    /// #305: viewer は開いた写真の原寸を取りにいく｡行のサムネイルは小さい
+    /// variant なので､それを流用すると拡大してぼやける｡
+    #[gpui::test]
+    fn opening_a_photo_fetches_it_at_full_size(cx: &mut gpui::TestAppContext) {
+        let file = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/AppIcon.png");
+        let url = file.to_string_lossy().into_owned();
+        let (_window, timeline) = fixture_window(cx, fixture_with(&["1"], &[]));
+
+        cx.update(|cx| super::open(&timeline, vec![photo(&url, 800, 600)], 0, cx));
+        let viewer = viewer_window(cx);
+        cx.run_until_parked();
+
+        cx.update(|cx| {
+            assert_eq!(
+                timeline.read(cx).photo_paths.get(&url),
+                Some(&file),
+                "the photo opened in the viewer is fetched at full size"
+            );
+        });
+        assert_eq!(viewer_notice(viewer, cx), None, "and the viewer shows it");
+    }
+
+    /// #305: 原寸を取るのは見せた写真だけ｡`→` で移った先はそのとき取る｡
+    /// 開かれない写真の原寸まで落とすと､ダウンロードとディスクが倍になる｡
+    #[gpui::test]
+    fn moving_to_another_photo_fetches_that_one(cx: &mut gpui::TestAppContext) {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let first = root.join("assets/AppIcon.png").to_string_lossy().into_owned();
+        let second = root
+            .join("assets/../assets/AppIcon.png")
+            .to_string_lossy()
+            .into_owned();
+        let (_window, timeline) = fixture_window(cx, fixture_with(&["1"], &[]));
+        let photos = vec![photo(&first, 800, 600), photo(&second, 800, 600)];
+        cx.update(|cx| super::open(&timeline, photos, 0, cx));
+        let viewer = viewer_window(cx);
+        let mut visual = gpui::VisualTestContext::from_window(viewer.into(), cx);
+        draw_until_parked(&mut visual, cx);
+        cx.update(|cx| {
+            let view = timeline.read(cx);
+            assert!(view.photo_paths.contains_key(&first), "the opened photo");
+            assert!(
+                !view.photo_paths.contains_key(&second),
+                "a photo not yet shown is not fetched"
+            );
+        });
+
+        visual.update(|window, cx| window.dispatch_action(Box::new(super::NextPhoto), cx));
+        draw_until_parked(&mut visual, cx);
+        cx.update(|cx| {
+            assert!(
+                timeline.read(cx).photo_paths.contains_key(&second),
+                "moving to the next photo fetches it"
+            );
+        });
+    }
+
+    /// #305: 行のサムネイルが手元にあっても､viewer は原寸が届くまで
+    /// "Loading…" を出す｡小さい variant を viewer の大きさへ引き伸ばさない｡
+    #[gpui::test]
+    fn the_viewer_does_not_show_the_thumbnail(cx: &mut gpui::TestAppContext) {
+        let thumbnail = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/AppIcon.png");
+        let (_window, timeline) = fixture_window(cx, fixture_with(&["1"], &[]));
+        cx.update(|cx| {
+            timeline.update(cx, |view, _cx| {
+                view.media_paths
+                    .insert("media/small.png".to_string(), thumbnail);
+            });
+        });
+
+        cx.update(|cx| {
+            super::open(&timeline, vec![photo("media/small.png", 800, 600)], 0, cx);
+        });
+        let viewer = viewer_window(cx);
+
+        assert_eq!(
+            viewer_notice(viewer, cx),
             Some("Loading…".into()),
-            "a url in neither set is still on its way"
+            "only the thumbnail is here, so the full size is still on its way"
         );
     }
 
@@ -761,7 +851,7 @@ mod tests {
 
     /// #188: 開いた後に届いた画像がそのまま出る｡
     ///
-    /// viewer は `media_paths` のコピーを持たず `cx.observe` で通知を受ける｡
+    /// viewer は `photo_paths` のコピーを持たず `cx.observe` で通知を受ける｡
     /// これが無いと､開くのが速すぎた読み手は着かない "Loading…" を見つづける｡
     #[gpui::test]
     fn a_photo_that_arrives_late_replaces_the_notice(cx: &mut gpui::TestAppContext) {
@@ -771,17 +861,19 @@ mod tests {
         });
         let viewer = viewer_window(cx);
         let mut visual = gpui::VisualTestContext::from_window(viewer.into(), cx);
-        draw_until_parked(&mut visual, cx);
+        // `media/late.png` はディスクに無く､原寸の取得 (#305) が走り終わると
+        // 失敗になる｡「まだ届いていない」はその前に見る｡
         assert_eq!(
             viewer_notice(viewer, cx),
             Some("Loading…".into()),
             "nothing has arrived yet"
         );
+        draw_until_parked(&mut visual, cx);
 
         let arrived = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/AppIcon.png");
         cx.update(|cx| {
             timeline.update(cx, |view, cx| {
-                view.media_paths
+                view.photo_paths
                     .insert("media/late.png".to_string(), arrived);
                 cx.notify();
             });
