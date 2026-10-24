@@ -166,6 +166,9 @@ impl TimelineView {
     /// 添付 media は avatar より大きいが同じ経路で届く (`pbs.twimg.com`､
     /// API の quota も credit も無い)｡`image_cache` の上限は 1 ファイルの
     /// 大きさだけで､ディスク上の合計は抑えていない｡
+    ///
+    /// 落とすのは行のサムネイル用の小さい variant (#305､[`crate::media`])｡
+    /// viewer の原寸は [`Self::fetch_photo`] が開いたときに取る｡
     fn refresh_media(&mut self, cx: &mut Context<'_, Self>) {
         let TimelineState::Loaded(items) = &self.state else {
             return;
@@ -187,7 +190,7 @@ impl TimelineView {
                 let fetch_url = url.clone();
                 let result = cx
                     .background_executor()
-                    .spawn(async move { image_cache::ensure_cached(&dir, &fetch_url) })
+                    .spawn(async move { crate::media::ensure_thumbnail_cached(&dir, &fetch_url) })
                     .await;
 
                 match result {

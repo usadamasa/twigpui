@@ -68,6 +68,8 @@ fn extension_of(url: &str) -> &str {
     let candidate = url
         .rsplit('/')
         .next()
+        // `?name=small` (#305) のようなクエリは拡張子に含めない｡
+        .map(|name| name.split_once('?').map_or(name, |(name, _)| name))
         .and_then(|name| name.rsplit_once('.'))
         .map(|(_, extension)| extension)
         .unwrap_or_default();

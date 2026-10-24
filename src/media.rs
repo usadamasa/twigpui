@@ -19,7 +19,11 @@ use crate::image_cache;
 /// クエリを持たない `https://pbs.twimg.com/media/` の URL だけにする｡
 /// fixture のローカルパスもここを素通りする｡
 pub(crate) fn thumbnail_url(url: &str) -> String {
-    url.to_string()
+    if url.starts_with("https://pbs.twimg.com/media/") && !url.contains('?') {
+        format!("{url}?name=small")
+    } else {
+        url.to_string()
+    }
 }
 
 /// `url` の写真のサムネイルのローカルパス｡まだキャッシュされていなければ
@@ -29,7 +33,17 @@ pub(crate) fn thumbnail_url(url: &str) -> String {
 /// fallback する｡どちらも自分の key でキャッシュされるので､fallback の
 /// 代償は追加リクエスト 1 回きりになる｡
 pub(crate) fn ensure_thumbnail_cached(dir: &Path, url: &str) -> Result<PathBuf> {
-    image_cache::ensure_cached(dir, url)
+    let preferred = thumbnail_url(url);
+    match image_cache::ensure_cached(dir, &preferred) {
+        Ok(path) => Ok(path),
+        Err(error) if preferred != url => {
+            // 小さい variant は推測だが､API 自身の URL はそうではない｡
+            image_cache::ensure_cached(dir, url).map_err(|fallback_error| {
+                fallback_error.context(format!("the {preferred} variant also failed: {error:#}"))
+            })
+        }
+        Err(error) => Err(error),
+    }
 }
 
 #[cfg(test)]
