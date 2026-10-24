@@ -489,14 +489,8 @@ pub(crate) struct TimelineView {
     /// ので､クリックした先の viewer が「開けない」を言うにはこちらが要る｡
     /// `refresh_media` が取れたら remove する｡
     media_failed: HashSet<String>,
-    /// viewer が見せる原寸の写真 (#305)｡鍵は `media_paths` と同じ media の
-    /// URL｡行のサムネイルは小さい variant なので別のエントリにしてある｡
-    /// viewer が開いた写真だけを `fetch_photo` が落とす｡
-    photo_paths: HashMap<String, PathBuf>,
-    /// 原寸の取得が失敗した URL (#305)｡`media_failed` の原寸版｡
-    photo_failed: HashSet<String>,
-    /// 進行中の原寸の取得｡URL ごとに 1 つで､同じ写真を二重に取りにいかない｡
-    photo_fetches: HashMap<String, Task<()>>,
+    /// viewer が見せる原寸の写真 (#305)｡
+    full_size: image_viewer::FullSizePhotos,
     /// 行と viewer が `img` に渡す､デコード済み画像の置き場｡渡さないと
     /// gpui は App 全体の asset cache に入れ､`remove_asset` を呼ぶまで
     /// 手放さない｡timeline の 500 件の窓から外れた URL の画像は
@@ -2642,12 +2636,18 @@ mod tests {
         let second = root.join("assets/../assets/AppIcon.png");
         cx.update(|cx| {
             timeline.update(cx, |view, cx| {
-                view.media_paths.insert("media/e.png".to_string(), first.clone());
-                view.media_paths.insert("media/f.png".to_string(), second.clone());
+                view.media_paths
+                    .insert("media/e.png".to_string(), first.clone());
+                view.media_paths
+                    .insert("media/f.png".to_string(), second.clone());
                 // #305: viewer の原寸も同じ窓で刈られる｡
-                view.photo_paths.insert("media/e.png".to_string(), first);
-                view.photo_paths.insert("media/f.png".to_string(), second);
-                view.photo_failed.insert("media/e.png".to_string());
+                view.full_size
+                    .paths
+                    .insert("media/e.png".to_string(), first);
+                view.full_size
+                    .paths
+                    .insert("media/f.png".to_string(), second);
+                view.full_size.failed.insert("media/e.png".to_string());
                 cx.notify();
             });
         });
@@ -2687,14 +2687,11 @@ mod tests {
                 "the url that left the window is dropped from media_paths"
             );
             assert_eq!(
-                view.photo_paths.keys().collect::<Vec<_>>(),
+                view.full_size.paths.keys().collect::<Vec<_>>(),
                 vec!["media/f.png"],
                 "the full-size photo that left the window is dropped too"
             );
-            assert!(
-                view.photo_failed.is_empty(),
-                "and so is its failure"
-            );
+            assert!(view.full_size.failed.is_empty(), "and so is its failure");
         });
     }
 

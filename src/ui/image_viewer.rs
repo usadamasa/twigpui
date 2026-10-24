@@ -5,15 +5,19 @@
 //! 手元に落ちている画像をそのまま出すだけのウィンドウで､`←` / `→` で
 //! 同じ post の写真のあいだを動く｡
 //!
-//! `TimelineView` からは `media_paths` と `media_failed` を毎 render で
-//! 読む｡開いた後に画像が届いても描き直るようにするためで､viewer 自身は
-//! ダウンロードを始めない｡
+//! 行のサムネイルは小さい variant (#305) なので､viewer は原寸を別に持つ｡
+//! 写真を見せるたび (開いたとき､`←` / `→` で移ったとき) に
+//! `TimelineView::fetch_photo` で原寸の取得を始めさせ､[`FullSizePhotos`] を
+//! 毎 render で読む｡取得の持ち主は timeline のままで､viewer は結果を読む
+//! だけ｡開いた後に画像が届いても描き直る｡
 
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use gpui::{
     App, Bounds, Context, Entity, FocusHandle, ObjectFit, Pixels, SharedString, Size, Subscription,
-    TitlebarOptions, Window, WindowBounds, WindowOptions, div, img, prelude::*, px, rgb, size,
+    Task, TitlebarOptions, Window, WindowBounds, WindowOptions, div, img, prelude::*, px, rgb,
+    size,
 };
 
 use super::TimelineView;
@@ -162,9 +166,25 @@ fn side(pixels: Option<u32>) -> Option<f32> {
     Some(f32::from(u16::try_from(pixels).unwrap_or(u16::MAX)))
 }
 
+/// viewer が見せる原寸の写真 (#305)｡持ち主は `TimelineView` で､
+/// `fetch_photo` が埋め､`prune_images` が 500 件の窓から外れた URL を刈る｡
+///
+/// 鍵は `media_paths` と同じ media の URL｡行のサムネイルは小さい variant
+/// なので別に持つ｡viewer が見せた写真だけがここに入る｡
+#[derive(Default)]
+pub(in crate::ui) struct FullSizePhotos {
+    /// 取れた原寸のファイル｡
+    pub(in crate::ui) paths: HashMap<String, PathBuf>,
+    /// 取得が失敗した URL｡`media_failed` の原寸版で､無いと viewer は
+    /// 「取れなかった」と「まだ届いていない」を言い分けられない｡
+    pub(in crate::ui) failed: HashSet<String>,
+    /// 進行中の取得｡URL ごとに 1 つで､同じ写真を二重に取りにいかない｡
+    pub(in crate::ui) fetches: HashMap<String, Task<()>>,
+}
+
 /// 1 つの post の写真を 1 枚ずつ見せるウィンドウ (#188)｡
 pub(in crate::ui) struct ImageViewer {
-    /// `media_paths` と `media_failed` を毎 render で読む先｡自分では
+    /// `full_size` を毎 render で読む先｡自分では
     /// コピーを持たない — 開いた後に画像が届いても描き直るため｡
     ///
     /// 弱い handle｡強く持つと､timeline のウィンドウを閉じても
@@ -214,6 +234,7 @@ impl ImageViewer {
             _timeline_changed: timeline_changed,
         };
         window.focus(&this.focus_handle, cx);
+        this.fetch_current(cx);
         this
     }
 
@@ -222,13 +243,21 @@ impl ImageViewer {
         self.photos.get(self.index)
     }
 
+    /// いま見せている写真の原寸を timeline に取りにいかせる (#305)｡
+    fn fetch_current(&self, cx: &mut App) {
+        let (Some(photo), Some(timeline)) = (self.current(), self.timeline.upgrade()) else {
+            return;
+        };
+        timeline.update(cx, |timeline, cx| timeline.fetch_photo(&photo.url, cx));
+    }
+
     /// いま見せている写真のファイルと､それを置く timeline の image cache｡
     /// まだ手元に無ければ `None`｡
     fn path(&self, cx: &App) -> Option<(PathBuf, Entity<gpui::RetainAllImageCache>)> {
         let photo = self.current()?;
         let timeline = self.timeline.upgrade()?;
         let timeline = timeline.read(cx);
-        let path = timeline.media_paths.get(&photo.url).cloned()?;
+        let path = timeline.full_size.paths.get(&photo.url).cloned()?;
         Some((path, timeline.image_cache.clone()))
     }
 
@@ -245,10 +274,10 @@ impl ImageViewer {
             return Some(UNAVAILABLE.into());
         };
         let timeline = timeline.read(cx);
-        if timeline.media_paths.contains_key(&photo.url) {
+        if timeline.full_size.paths.contains_key(&photo.url) {
             return None;
         }
-        if timeline.media_failed.contains(&photo.url) {
+        if timeline.full_size.failed.contains(&photo.url) {
             return Some(UNAVAILABLE.into());
         }
         Some("Loading…".into())
@@ -279,6 +308,7 @@ impl ImageViewer {
     fn show(&mut self, index: usize, cx: &mut Context<'_, Self>) {
         if index != self.index {
             self.index = index;
+            self.fetch_current(cx);
             cx.notify();
         }
     }
@@ -291,8 +321,8 @@ impl Render for ImageViewer {
             // 幅と高さを両方与えたうえで `Contain` に吸収させる (#256)｡
             // 片方だけだと gpui が画像の縦横比を layout に持ち込み､枠を
             // 突き抜ける｡
-            // 行のサムネイルと同じデコード済み画像を使い､timeline の窓から
-            // 外れたときに一緒に手放されるよう､timeline の cache を共有する｡
+            // timeline の窓から外れたときに行のサムネイルと一緒に手放される
+            // よう､timeline の cache を共有する｡
             Some((path, cache)) => img(path)
                 .image_cache(&cache)
                 .addressable("image-viewer-image")
@@ -498,9 +528,11 @@ mod tests {
         let (_window, timeline) = fixture_window(cx, fixture_with(&["1"], &[]));
         cx.update(|cx| {
             timeline.update(cx, |view, _cx| {
-                view.photo_paths
+                view.full_size
+                    .paths
                     .insert("media/wide.png".to_string(), arrived.clone());
-                view.photo_paths
+                view.full_size
+                    .paths
                     .insert("media/tall.png".to_string(), arrived.clone());
             });
         });
@@ -552,7 +584,7 @@ mod tests {
         let (_window, timeline) = fixture_window(cx, fixture_with(&["1"], &[]));
         cx.update(|cx| {
             timeline.update(cx, |view, _cx| {
-                view.photo_failed.insert("media/failed.png".to_string());
+                view.full_size.failed.insert("media/failed.png".to_string());
             });
         });
         let photos = vec![
@@ -571,7 +603,7 @@ mod tests {
         assert_eq!(
             viewer_notice(viewer, cx),
             Some("Could not load this image".into()),
-            "a url in photo_failed says the download failed"
+            "a url whose full-size fetch failed says the download failed"
         );
 
         visual.update(|window, cx| window.dispatch_action(Box::new(super::NextPhoto), cx));
@@ -606,7 +638,7 @@ mod tests {
 
         cx.update(|cx| {
             assert_eq!(
-                timeline.read(cx).photo_paths.get(&url),
+                timeline.read(cx).full_size.paths.get(&url),
                 Some(&file),
                 "the photo opened in the viewer is fetched at full size"
             );
@@ -619,7 +651,10 @@ mod tests {
     #[gpui::test]
     fn moving_to_another_photo_fetches_that_one(cx: &mut gpui::TestAppContext) {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        let first = root.join("assets/AppIcon.png").to_string_lossy().into_owned();
+        let first = root
+            .join("assets/AppIcon.png")
+            .to_string_lossy()
+            .into_owned();
         let second = root
             .join("assets/../assets/AppIcon.png")
             .to_string_lossy()
@@ -632,9 +667,12 @@ mod tests {
         draw_until_parked(&mut visual, cx);
         cx.update(|cx| {
             let view = timeline.read(cx);
-            assert!(view.photo_paths.contains_key(&first), "the opened photo");
             assert!(
-                !view.photo_paths.contains_key(&second),
+                view.full_size.paths.contains_key(&first),
+                "the opened photo"
+            );
+            assert!(
+                !view.full_size.paths.contains_key(&second),
                 "a photo not yet shown is not fetched"
             );
         });
@@ -643,7 +681,7 @@ mod tests {
         draw_until_parked(&mut visual, cx);
         cx.update(|cx| {
             assert!(
-                timeline.read(cx).photo_paths.contains_key(&second),
+                timeline.read(cx).full_size.paths.contains_key(&second),
                 "moving to the next photo fetches it"
             );
         });
@@ -851,7 +889,7 @@ mod tests {
 
     /// #188: 開いた後に届いた画像がそのまま出る｡
     ///
-    /// viewer は `photo_paths` のコピーを持たず `cx.observe` で通知を受ける｡
+    /// viewer は `full_size` のコピーを持たず `cx.observe` で通知を受ける｡
     /// これが無いと､開くのが速すぎた読み手は着かない "Loading…" を見つづける｡
     #[gpui::test]
     fn a_photo_that_arrives_late_replaces_the_notice(cx: &mut gpui::TestAppContext) {
@@ -873,7 +911,8 @@ mod tests {
         let arrived = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/AppIcon.png");
         cx.update(|cx| {
             timeline.update(cx, |view, cx| {
-                view.photo_paths
+                view.full_size
+                    .paths
                     .insert("media/late.png".to_string(), arrived);
                 cx.notify();
             });

@@ -213,9 +213,44 @@ impl TimelineView {
         }));
     }
 
-    /// viewer が見せる原寸の写真を落とす (#305)｡
+    /// viewer が見せる原寸の写真を落とす (#305)｡viewer が写真を見せるたびに
+    /// 呼ぶ｡持っているもの､取りにいっている最中のものは何もしない｡
+    ///
+    /// 行のサムネイル ([`Self::refresh_media`]) は小さい variant なので､
+    /// 原寸は開かれた写真だけをここで別に取る｡全部の写真の原寸を先に落とすと
+    /// ダウンロードとディスクが倍になる｡取得の持ち主は viewer ではなく
+    /// timeline のまま — 結果は `full_size` に置き､viewer はそれを読む｡
+    /// 失敗した URL は次に見せたときに取り直す｡
     pub(in crate::ui) fn fetch_photo(&mut self, url: &str, cx: &mut Context<'_, Self>) {
-        let _ = (url, cx);
+        if self.full_size.paths.contains_key(url) || self.full_size.fetches.contains_key(url) {
+            return;
+        }
+        let dir = self.paths.media_dir();
+        let key = url.to_string();
+        let url = key.clone();
+        let fetch_url = key.clone();
+        let task = cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { image_cache::ensure_cached(&dir, &fetch_url) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                let full_size = &mut this.full_size;
+                full_size.fetches.remove(&url);
+                match result {
+                    Ok(path) => {
+                        full_size.paths.insert(url.clone(), path);
+                        full_size.failed.remove(&url);
+                    }
+                    Err(error) => {
+                        log::warn(&format!("photo fetch failed: {error:#}"));
+                        full_size.failed.insert(url.clone());
+                    }
+                }
+                cx.notify();
+            });
+        });
+        self.full_size.fetches.insert(key, task);
     }
 
     /// timeline がもう参照しない avatar と media を index から落とし､
@@ -244,7 +279,16 @@ impl TimelineView {
                 .extract_if(|url, _| !media.contains(url.as_str()))
                 .map(|(_, path)| path),
         );
+        dropped.extend(
+            self.full_size
+                .paths
+                .extract_if(|url, _| !media.contains(url.as_str()))
+                .map(|(_, path)| path),
+        );
         self.media_failed.retain(|url| media.contains(url.as_str()));
+        self.full_size
+            .failed
+            .retain(|url| media.contains(url.as_str()));
         if dropped.is_empty() {
             return;
         }
