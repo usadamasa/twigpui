@@ -192,6 +192,18 @@ mod tests {
     }
 
     #[test]
+    fn the_extension_ignores_the_query_string() {
+        // #305: サムネイルは `?name=small` 付きで取る｡クエリまで拡張子に
+        // 含めると `img` へ落ち､cache のファイルが見分けられなくなる｡
+        assert_eq!(
+            cache_key("https://pbs.twimg.com/media/GabcXYZ.jpg?name=small")
+                .rsplit_once('.')
+                .map(|(_, extension)| extension),
+            Some("jpg")
+        );
+    }
+
+    #[test]
     fn an_implausible_extension_falls_back_to_img() {
         // そのまま信用することは決してない: これはこの後書き込まれる
         // ファイル名の一部になる｡

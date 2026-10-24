@@ -38,6 +38,7 @@ mod headless_shot;
 mod image_cache;
 mod like;
 mod log;
+mod media;
 mod menu;
 mod oauth;
 mod paths;
