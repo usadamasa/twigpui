@@ -40,7 +40,7 @@
           cargo-llvm-cov = pkgs.cargo-llvm-cov.overrideAttrs { doCheck = false; };
         in
         {
-          default = pkgs.mkShell {
+          default = pkgs.mkShellNoCC {
             packages = [
               rust
               cargo-llvm-cov
@@ -49,6 +49,10 @@
             # gpui の build script の bindgen が dlopen する libclang。未指定だと clang-sys が
             # 独自の探索順で端末の libclang (Homebrew や CLT) を掴む
             LIBCLANG_PATH = "${pkgs.libclang.lib}/lib";
+            # リンクは Xcode CLT で行う。rust-overlay の toolchain が連れてくる nixpkgs の cc は apple-sdk 14.4 で
+            # リンクし、AppKit は古い SDK のアプリを旧来の見た目と挙動で動かす。libiconv も /nix/store を指し、
+            # store の GC で .app が起動しなくなる
+            CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER = "/usr/bin/cc";
           };
         }
       );

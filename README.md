@@ -56,6 +56,7 @@
 Rust の toolchain (rustc・cargo・clippy・rustfmt・`llvm-tools-preview`) と `cargo-llvm-cov` は
 `flake.nix` の devShell が渡す。Nix と direnv (nix-direnv) を入れてリポジトリで `direnv allow` すると、
 `.envrc` が devShell を読み込む。direnv を使わないなら `nix develop` で入る。
+リンクは Xcode Command Line Tools の `/usr/bin/cc` で行うので、CLT も要る (理由は `flake.nix` のコメント)。
 
 `gpui_platform` の `runtime_shaders` フィーチャを有効にしてあるので､ビルドに
 `xcrun metal` は要らない｡これは Command Line Tools ではなく完全な Xcode に同梱される
