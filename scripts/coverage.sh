@@ -54,36 +54,6 @@ work_dir="./tmp/coverage"
 cov_json="$work_dir/llvm-cov.json"
 cutoffs_json="$work_dir/cutoffs.json"
 
-# `llvm-tools-preview` は通常 rustup から来る｡Homebrew の toolchain には
-# rustup が無いので Homebrew の LLVM へフォールバックする — ただしバージョンが
-# rustc のものと一致するときだけだ｡profile のフォーマットは LLVM のリリース
-# ごとに動くので､食い違うと最初ではなくレポートの途中で失敗する｡
-ensure_llvm_tools() {
-  if [ -n "${LLVM_COV:-}" ] && [ -n "${LLVM_PROFDATA:-}" ]; then
-    return
-  fi
-
-  local brew_llvm="/opt/homebrew/opt/llvm/bin"
-  if [ ! -x "$brew_llvm/llvm-cov" ]; then
-    # フォールバック先が無い｡何が足りないかは cargo-llvm-cov が言う｡
-    return
-  fi
-
-  local rustc_llvm brew_llvm_version
-  rustc_llvm=$(rustc --version --verbose | awk '/^LLVM version:/ { print $3 }')
-  brew_llvm_version=$("$brew_llvm/llvm-cov" --version |
-    awk '/LLVM version/ { print $NF }')
-
-  if [ "$rustc_llvm" != "$brew_llvm_version" ]; then
-    printf 'rustc uses LLVM %s but %s is LLVM %s. Install llvm-tools-preview, or set LLVM_COV and LLVM_PROFDATA.\n' \
-      "$rustc_llvm" "$brew_llvm/llvm-cov" "$brew_llvm_version" >&2
-    exit 1
-  fi
-
-  export LLVM_COV="$brew_llvm/llvm-cov"
-  export LLVM_PROFDATA="$brew_llvm/llvm-profdata"
-}
-
 # 各ファイルで実装が終わる位置｡`code-metrics.sh` の `implementation_lines` を
 # 写したもので､「テストモジュールが無い」(grep exit 1) と本当の読み取り失敗
 # (それ以外) を見分けるやり方も含めて同じだ｡
@@ -162,8 +132,11 @@ remove_stale_objects() {
 # `COVERAGE_REUSE=1` は profile が古くても再利用を強制する｡CI は､自分で
 # 組み立てたばかりの profile に対する 2 回目と 3 回目のパスでこれを設定する｡
 # その間にツリーが変わりようがないからだ｡
+#
+# llvm-cov と llvm-profdata は toolchain の `llvm-tools-preview` から
+# cargo-llvm-cov が自分で見つける (devShell は flake.nix、CI は rustup が入れる)。
+# rustc と同じ配布物なので LLVM のバージョンは必ず一致する。
 measure() {
-  ensure_llvm_tools
   mkdir -p "$work_dir"
 
   if [ -n "${COVERAGE_REUSE:-}" ]; then

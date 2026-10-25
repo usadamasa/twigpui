@@ -37,6 +37,10 @@ X クライアントとして当然あるべき操作 (読む、書く、反応�
 
 ## ビルドとテスト
 
+toolchain と `cargo-llvm-cov` は `flake.nix` の devShell が `.envrc` 経由で渡す。
+Homebrew の `rust` / `llvm` は使わない。`cargo` が devShell のものに解決しないときは
+`resolving-path` スキルに従う。CI は devShell を使わず `dtolnay/rust-toolchain` の stable で動く。
+
 push 前にこの 3 つを通す。CI (`macos-latest`) が見るのと同じもの。
 
 ```sh

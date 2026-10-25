@@ -1,6 +1,7 @@
 /target
 /tmp
 /dist
+/.direnv
 
 # Credentials — never commit these.
 .env
