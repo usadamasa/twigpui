@@ -53,6 +53,10 @@
 
 ## 必要なもの
 
+Rust の toolchain (rustc・cargo・clippy・rustfmt・`llvm-tools-preview`) と `cargo-llvm-cov` は
+`flake.nix` の devShell が渡す。Nix と direnv (nix-direnv) を入れてリポジトリで `direnv allow` すると、
+`.envrc` が devShell を読み込む。direnv を使わないなら `nix develop` で入る。
+
 `gpui_platform` の `runtime_shaders` フィーチャを有効にしてあるので､ビルドに
 `xcrun metal` は要らない｡これは Command Line Tools ではなく完全な Xcode に同梱される
 ものである｡描画は代わりに実行時コンパイルを通る｡
