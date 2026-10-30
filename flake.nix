@@ -33,7 +33,11 @@
           # upstream の配布物。llvm-tools-preview が rustc と同じ LLVM の llvm-cov を sysroot に置き、
           # cargo-llvm-cov はそこを自分で見つける
           rust = pkgs.rust-bin.stable.latest.default.override {
-            extensions = [ "llvm-tools-preview" ];
+            extensions = [
+              "llvm-tools-preview"
+              "rust-analyzer"
+              "rust-src"
+            ];
           };
           # nixpkgs の check は nixpkgs の rustc で計測付き binary を走らせ、darwin では SIGSEGV で落ちる。
           # 計測に使うのは上の toolchain なので check を外す
