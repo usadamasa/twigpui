@@ -368,6 +368,33 @@ mod tests {
         }
     }
 
+    /// #298: rate limit と取り違えていた 2 つの block を 1 画面ずつ置く｡
+    /// `sync-failed.json` は連続回数も書き､理由がそれに勝つことを見せる｡
+    #[test]
+    fn the_sync_fixtures_cover_the_blocks_that_are_not_rate_limits() {
+        for (file, cause) in [
+            ("sync-failed.json", crate::sync::BlockCause::Failure),
+            ("sync-rejected.json", crate::sync::BlockCause::Rejections),
+        ] {
+            let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("fixtures")
+                .join(file);
+            let fixture = load(&path).unwrap_or_else(|error| panic!("{file}: {error:#}"));
+            let sync = fixture.sync.expect(file);
+            assert_eq!(sync.blocked_by, cause, "{file}");
+            assert!(sync.blocked_for_seconds > 0, "{file} must be blocked");
+            assert!(sync.pending > 0, "{file}: a row with nothing owed");
+        }
+    }
+
+    #[test]
+    fn a_sync_fixture_from_before_the_cause_reads_as_a_rate_limit() {
+        // `timeline.json` は理由を書かない｡今までどおり rate limit の行を出す｡
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/timeline.json");
+        let sync = load(&path).unwrap().sync.unwrap();
+        assert_eq!(sync.blocked_by, crate::sync::BlockCause::RateLimit);
+    }
+
     #[test]
     fn the_compose_fixture_declares_composer_open() {
         // #282: `cargo run -- --fixture fixtures/compose.json` が compose

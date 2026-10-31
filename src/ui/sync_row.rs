@@ -410,6 +410,64 @@ impl TimelineView {
 mod tests {
     use super::*;
 
+    // --- フィクスチャの状態 (#205, #298) ---
+
+    fn fixture_sync(blocked_by: sync::BlockCause) -> crate::fixture::FixtureSync {
+        crate::fixture::FixtureSync {
+            pending: 1_204,
+            blocked_for_seconds: 5_400,
+            refusals: 3,
+            blocked_by,
+        }
+    }
+
+    #[test]
+    fn a_fixture_refusal_reads_as_rate_limited() {
+        assert_eq!(
+            fixture_status(&fixture_sync(sync::BlockCause::RateLimit), 1_000),
+            SyncStatus::RateLimited {
+                until: 6_400,
+                pending: 1_204,
+                refusals: 3,
+            }
+        );
+    }
+
+    // 本物の tick と同じ判断を通るので､連続回数が書いてあっても理由が勝つ｡
+    #[test]
+    fn a_fixture_failure_reads_as_failed() {
+        assert_eq!(
+            fixture_status(&fixture_sync(sync::BlockCause::Failure), 1_000),
+            SyncStatus::Failed { until: 6_400 }
+        );
+    }
+
+    #[test]
+    fn a_fixture_run_of_rejections_reads_as_rejected() {
+        assert_eq!(
+            fixture_status(&fixture_sync(sync::BlockCause::Rejections), 1_000),
+            SyncStatus::Rejected {
+                until: 6_400,
+                pending: 1_204,
+            }
+        );
+    }
+
+    #[test]
+    fn an_unblocked_fixture_counts_down_to_its_fade() {
+        let fixture = crate::fixture::FixtureSync {
+            blocked_for_seconds: 0,
+            ..fixture_sync(sync::BlockCause::RateLimit)
+        };
+        assert_eq!(
+            fixture_status(&fixture, 1_000),
+            SyncStatus::Idle {
+                until: 1_000 + TimelineView::FIXTURE_SYNC_SECONDS.cast_signed(),
+                pending: 1_204,
+            }
+        );
+    }
+
     // --- 行を出すかどうか ---
 
     /// #205 が起票された理由｡何も起きていない sync が footer に文言を

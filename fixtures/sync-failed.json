@@ -1,0 +1,18 @@
+{
+  "signed_in_as": { "id": "5685672", "username": "usadamasa" },
+  "items": [
+    {
+      "id": "9400000000000000001",
+      "text": "sync-failed.json (#298): the sync row after a tick that failed outright, waiting out its interval.",
+      "created_at": "2026-10-31T09:00:00.000Z",
+      "author_name": "Sync Probe",
+      "author_username": "syncprobe"
+    }
+  ],
+  "sync": {
+    "pending": 1204,
+    "blocked_for_seconds": 21600,
+    "refusals": 3,
+    "blocked_by": "failure"
+  }
+}
