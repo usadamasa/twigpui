@@ -67,7 +67,7 @@ pub(crate) use auto::{Pacing, Tick, tick};
 pub(crate) use pacing::WritePacing;
 pub(crate) use run::{Request, run_cli};
 pub(crate) use schedule::{Outcome, is_finished, notice};
-pub(crate) use state::{SyncState, load_state, save_state};
+pub(crate) use state::{BlockCause, REJECTIONS_IN_A_ROW_LIMIT, SyncState, load_state, save_state};
 
 /// entry が diff のどちら側から来たか｡
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -396,6 +396,25 @@ fn run(
     })
 }
 
+/// `--apply` が block の前で止まるとき､括弧の中で言う理由 (#298)｡
+///
+/// `refusals` からは推さない: 失敗した tick や 400 の連続は連続回数を
+/// 消さないので､古い連続が残っていると "refusal #N" と取り違える｡
+fn backoff_reason(state: &super::SyncState) -> String {
+    match state.blocked_by {
+        super::BlockCause::RateLimit if state.refusals > 0 => {
+            format!("refusal #{}", state.refusals)
+        }
+        super::BlockCause::RateLimit => "the rate limit window is used up".to_string(),
+        super::BlockCause::Failure => "the last attempt failed".to_string(),
+        super::BlockCause::Rejections => format!(
+            "{} writes in a row were rejected by X, in case the list or the \
+             request itself is what is being rejected",
+            super::REJECTIONS_IN_A_ROW_LIMIT
+        ),
+    }
+}
+
 /// plan を流し切るか止められるまで tick を回し､届いた件数を返す ([`run`]
 /// の `--apply` の本体)｡
 ///
@@ -463,15 +482,7 @@ fn drain(
                 "{landed} write(s) landed; the plan on file records them. The sync is backing \
                  off until unix time {} ({}); re-run --apply after that.",
                 tick.wake_at,
-                if tick.state.refusals > 0 {
-                    format!("refusal #{}", tick.state.refusals)
-                } else {
-                    format!(
-                        "{} writes in a row were rejected by X, in case the list or the \
-                         request itself is what is being rejected",
-                        super::state::REJECTIONS_IN_A_ROW_LIMIT
-                    )
-                }
+                backoff_reason(&tick.state)
             );
         }
         // tick が置いた間 (gap か cooldown) を眠る｡loop は毎分起きて決め直す
@@ -877,6 +888,48 @@ mod tests {
 
         assert!(error.contains("refusal #2"), "{error}");
         assert!(client.calls().is_empty(), "nothing may be sent");
+    }
+
+    // --- #298: 止まった理由は推さずに state から読む ---
+
+    fn blocked_by(cause: super::super::BlockCause, refusals: u32) -> super::super::SyncState {
+        super::super::SyncState {
+            blocked_until: Some(i64::MAX),
+            blocked_by: cause,
+            refusals,
+            ..super::super::SyncState::default()
+        }
+    }
+
+    #[test]
+    fn a_failure_is_not_reported_as_a_refusal_even_with_a_streak_on_file() {
+        let reason = backoff_reason(&blocked_by(super::super::BlockCause::Failure, 3));
+        assert!(reason.contains("the last attempt failed"), "{reason}");
+        assert!(!reason.contains("refusal"), "{reason}");
+    }
+
+    #[test]
+    fn a_run_of_rejections_is_not_reported_as_a_refusal_even_with_a_streak_on_file() {
+        let reason = backoff_reason(&blocked_by(super::super::BlockCause::Rejections, 2));
+        assert!(
+            reason.contains("3 writes in a row were rejected"),
+            "{reason}"
+        );
+        assert!(!reason.contains("refusal"), "{reason}");
+    }
+
+    #[test]
+    fn an_opaque_refusal_names_its_place_in_the_streak() {
+        let reason = backoff_reason(&blocked_by(super::super::BlockCause::RateLimit, 2));
+        assert_eq!(reason, "refusal #2");
+    }
+
+    // window を使い切った 429 は連続回数に触れない｡"refusal #0" とは言わない｡
+    #[test]
+    fn a_used_up_window_is_not_counted_as_a_refusal() {
+        let reason = backoff_reason(&blocked_by(super::super::BlockCause::RateLimit, 0));
+        assert!(reason.contains("rate limit window"), "{reason}");
+        assert!(!reason.contains('#'), "{reason}");
     }
 
     // --- run: dry-run と apply の入口 ---

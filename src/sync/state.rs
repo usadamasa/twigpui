@@ -96,11 +96,17 @@ pub(crate) struct SyncState {
     /// 再起動でも守られるよう永続化してある (#198)｡
     #[serde(default)]
     pub blocked_until: Option<i64>,
+    /// `blocked_until` を置いたのが何か (#298)｡`refusals` からは推せない:
+    /// window を使い切った 429 は `refusals` に触れないので､`refusals == 0`
+    /// は rate limit でも失敗でも 400 の連続でもありうる｡
+    /// #298 より前のファイルは [`BlockCause::RateLimit`] と読む｡
+    #[serde(default)]
+    pub blocked_by: BlockCause,
     /// 次の write まで自分に課した間 — gap か cooldown｡[`settle`] が write
     /// ごとに引き直す｡
     ///
     /// これは拒否ではないので `blocked_until` とは分ける｡
-    /// `ui::list_sync::status_of` は block を「rate limited」と読むため､
+    /// `ui::list_sync::status_of` は block を拒否か失敗として読むため､
     /// 相乗りさせると普通のペース待ちが拒否として表示される｡
     ///
     /// 永続化する理由は `blocked_until` と同じ｡追いつきの途中で再起動しても
@@ -128,6 +134,20 @@ pub(crate) struct SyncState {
     /// 「何件通ったあとの拒否か」を言えるのはこれがあるからだ｡
     #[serde(default)]
     pub landed_since_refusal: u64,
+}
+
+/// [`SyncState::blocked_until`] を置いた理由 (#298)｡ステータスバーの文言と､
+/// 手動 sync がその block をまたげるか (`schedule::blocked_for`) を分ける｡
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum BlockCause {
+    /// 上限が 429 で拒んだ — window の期限か opaque な backoff｡
+    #[default]
+    RateLimit,
+    /// tick が完全に失敗して interval 丸ごと退いた｡
+    Failure,
+    /// 400 が [`REJECTIONS_IN_A_ROW_LIMIT`] 件続いて interval 丸ごと退いた｡
+    Rejections,
 }
 
 impl SyncState {
@@ -246,6 +266,7 @@ pub(crate) fn settle(
         None => {
             let until = now.saturating_add(i64::from(spacing.interval_seconds));
             next.blocked_until = Some(until);
+            next.blocked_by = BlockCause::Failure;
             until
         }
         Some(Outcome::Idle { until, .. }) => *until,
@@ -266,12 +287,14 @@ pub(crate) fn settle(
                 *until
             };
             next.blocked_until = Some(until);
+            next.blocked_by = BlockCause::RateLimit;
             until
         }
         Some(Outcome::Applied { sent: 0, .. }) => now,
         Some(Outcome::Applied { sent, remaining }) => {
             next.refusals = 0;
             next.blocked_until = None;
+            next.blocked_by = BlockCause::default();
             next.rejected_in_a_row = 0;
             next.landed_since_refusal = next
                 .landed_since_refusal
@@ -284,6 +307,7 @@ pub(crate) fn settle(
                 next.rejected_in_a_row = 0;
                 let until = now.saturating_add(i64::from(spacing.interval_seconds));
                 next.blocked_until = Some(until);
+                next.blocked_by = BlockCause::Rejections;
                 until
             } else {
                 pace(&mut next, 1, *remaining, now, spacing)
@@ -697,6 +721,31 @@ mod tests {
         assert_eq!(settled.wake_at, 1_000 + i64::from(INTERVAL));
         // 上限の梯子ではない: rate limit の連続回数には触れない｡
         assert_eq!(settled.state.refusals, 0);
+        assert_eq!(settled.state.blocked_by, BlockCause::Rejections);
+    }
+
+    // --- settle: block の理由 (#298) ---
+
+    #[test]
+    fn a_refusal_records_the_rate_limit_as_the_cause() {
+        // 前の block の理由が残っていても､この block は上限が言ったもの｡
+        let state = SyncState {
+            blocked_by: BlockCause::Failure,
+            ..calm()
+        };
+        let settled = settle(state, Some(&opaque(0)), 1_000, spacing());
+        assert_eq!(settled.state.blocked_by, BlockCause::RateLimit);
+    }
+
+    #[test]
+    fn a_landed_write_clears_the_cause_along_with_the_block() {
+        let state = SyncState {
+            blocked_until: Some(900),
+            blocked_by: BlockCause::Rejections,
+            ..calm()
+        };
+        let settled = settle(state, Some(&landed(10)), 1_000, spacing());
+        assert_eq!(settled.state.blocked_by, BlockCause::default());
     }
 
     // --- settle: refusal の間に届いた件数 (#231) ---
@@ -749,6 +798,19 @@ mod tests {
             Some(1_000 + i64::from(INTERVAL))
         );
         assert_eq!(settled.state.refusals, 0);
+        assert_eq!(settled.state.blocked_by, BlockCause::Failure);
+    }
+
+    #[test]
+    fn a_failure_during_a_refusal_streak_is_still_a_failure() {
+        // 連続回数は残るが､今の block を決めたのは失敗した tick｡
+        let state = SyncState {
+            refusals: 3,
+            ..calm()
+        };
+        let settled = settle(state, None, 1_000, spacing());
+        assert_eq!(settled.state.refusals, 3);
+        assert_eq!(settled.state.blocked_by, BlockCause::Failure);
     }
 
     // #198 の端から端まで: 拒否され､1 分後に起きて待てと言われ､その 1 分
@@ -799,6 +861,7 @@ mod tests {
             last_diff_at: Some(1_700_000_000),
             following_count: Some(2340),
             blocked_until: Some(1_700_000_900),
+            blocked_by: BlockCause::Rejections,
             paused_until: Some(1_700_000_077),
             refusals: 3,
             batch_left: 2,
@@ -845,6 +908,24 @@ mod tests {
         assert_eq!(state.batch_left, 0);
         assert_eq!(state.rejected_in_a_row, 0);
         assert_eq!(state.landed_since_refusal, 0);
+    }
+
+    #[test]
+    fn a_block_from_before_its_cause_was_recorded_reads_as_a_rate_limit() {
+        // #298 より前のファイルの block は今までどおり rate limit と出る｡
+        let state: SyncState =
+            serde_json::from_str(r#"{"blocked_until":1787470513,"refusals":0}"#).unwrap();
+        assert_eq!(state.blocked_by, BlockCause::RateLimit);
+    }
+
+    #[test]
+    fn the_cause_is_written_in_snake_case() {
+        let state = SyncState {
+            blocked_by: BlockCause::RateLimit,
+            ..calm()
+        };
+        let json = serde_json::to_string(&state).unwrap();
+        assert!(json.contains(r#""blocked_by":"rate_limit""#), "{json}");
     }
 
     #[test]

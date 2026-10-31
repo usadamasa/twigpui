@@ -153,6 +153,10 @@ API が返しえないタイムラインは書けない。**見たいケース�
 | `pending` の 2 件 | 5 秒後に届く "2 new posts" のバー (#21) |
 | `lists` / `sync` | picker のセグメントと、いちばん込み入った sync の行 (#164, #205) |
 
+sync の行は block の理由ごとに文言と色が変わる (#298)。`timeline.json` は rate limit の行で、
+失敗した tick と 400 の連続は `fixtures/sync-failed.json` と `fixtures/sync-rejected.json` に
+1 画面ずつ置いてある (`"blocked_by"` を書く)。
+
 行を足したら `cargo test` を通す。`fixture::tests` が同梱のフィクスチャを読み、
 上の行がまだ入っていることを assert している。消すなら assert も一緒に消す。
 

@@ -12,8 +12,8 @@
 
 use super::fade::{FADE_STEP_MILLIS, Fade, fade_occupies, fade_opacity, fade_settled, next_fade};
 use super::list_sync::{
-    SyncOff, SyncStatus, SyncTrigger, offers_sync, sync_confirm_label, sync_status_color,
-    sync_status_label,
+    SyncOff, SyncStatus, SyncTrigger, offers_sync, status_of, sync_confirm_label,
+    sync_status_color, sync_status_label,
 };
 use super::render::Addressable as _;
 use super::{
@@ -21,6 +21,35 @@ use super::{
     ParentElement as _, StatefulInteractiveElement as _, Styled as _, TimelineView, div, oauth,
     rgb, rgba, sync, theme,
 };
+
+/// フィクスチャが書いた sync の状態が出す [`SyncStatus`] (#205, #298)｡
+///
+/// 状態を idle な起床の tick に組み､本物の tick と同じ
+/// [`super::list_sync::status_of`] を通す｡ここで variant を選べば､block の
+/// 理由の読み分けがフィクスチャだけ別物になる｡
+///
+/// block されていなければ､`until` (#214: footer が "Next sync in …" と
+/// 数える先) はフェードが落ちるその瞬間｡
+pub(super) fn fixture_status(fixture: &crate::fixture::FixtureSync, now: i64) -> SyncStatus {
+    let blocked_until =
+        (fixture.blocked_for_seconds > 0).then(|| now.saturating_add(fixture.blocked_for_seconds));
+    let wake_at = blocked_until
+        .unwrap_or_else(|| now.saturating_add(TimelineView::FIXTURE_SYNC_SECONDS.cast_signed()));
+    let tick = sync::Tick {
+        outcome: Ok(sync::Outcome::Idle {
+            until: wake_at,
+            pending: fixture.pending,
+        }),
+        state: sync::SyncState {
+            blocked_until,
+            blocked_by: fixture.blocked_by,
+            refusals: fixture.refusals,
+            ..sync::SyncState::default()
+        },
+        wake_at,
+    };
+    status_of(&tick, now)
+}
 
 /// sync の行を今 出すかどうか (#205)｡
 ///
@@ -34,7 +63,8 @@ pub(super) fn wants_sync_row(status: &SyncStatus) -> bool {
         // 手動 sync を確認した直後に落ちうる先｡出さないと押下が無反応に見える｡
         | SyncStatus::AwaitingAccount
         | SyncStatus::RateLimited { .. }
-        | SyncStatus::Failed => true,
+        | SyncStatus::Failed { .. }
+        | SyncStatus::Rejected { .. } => true,
         SyncStatus::Idle { pending, .. } => *pending > 0,
         SyncStatus::Off(_) | SyncStatus::Ready => false,
     }
@@ -66,7 +96,8 @@ pub(super) fn sync_blocked_reason(status: &SyncStatus) -> Option<&'static str> {
         SyncStatus::Ready
         | SyncStatus::Idle { .. }
         | SyncStatus::RateLimited { .. }
-        | SyncStatus::Failed => None,
+        | SyncStatus::Failed { .. }
+        | SyncStatus::Rejected { .. } => None,
     }
 }
 
@@ -324,23 +355,7 @@ impl TimelineView {
         fixture: &crate::fixture::FixtureSync,
         cx: &mut Context<'_, Self>,
     ) {
-        let now = oauth::unix_now();
-        let status = if fixture.blocked_for_seconds > 0 {
-            SyncStatus::RateLimited {
-                until: now.saturating_add(fixture.blocked_for_seconds),
-                pending: fixture.pending,
-                refusals: fixture.refusals,
-            }
-        } else {
-            // #214: `until` は footer が "Next sync in …" と数える先｡
-            // 追いつきの最中なら次のバッチ — ここではフェードが落ちる
-            // その瞬間だ｡
-            SyncStatus::Idle {
-                until: now.saturating_add(Self::FIXTURE_SYNC_SECONDS.cast_signed()),
-                pending: fixture.pending,
-            }
-        };
-        self.show_sync(status, cx);
+        self.show_sync(fixture_status(fixture, oauth::unix_now()), cx);
         self.auto_sync = Some(cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(Duration::from_secs(Self::FIXTURE_SYNC_SECONDS))
@@ -408,6 +423,64 @@ impl TimelineView {
 mod tests {
     use super::*;
 
+    // --- フィクスチャの状態 (#205, #298) ---
+
+    fn fixture_sync(blocked_by: sync::BlockCause) -> crate::fixture::FixtureSync {
+        crate::fixture::FixtureSync {
+            pending: 1_204,
+            blocked_for_seconds: 5_400,
+            refusals: 3,
+            blocked_by,
+        }
+    }
+
+    #[test]
+    fn a_fixture_refusal_reads_as_rate_limited() {
+        assert_eq!(
+            fixture_status(&fixture_sync(sync::BlockCause::RateLimit), 1_000),
+            SyncStatus::RateLimited {
+                until: 6_400,
+                pending: 1_204,
+                refusals: 3,
+            }
+        );
+    }
+
+    // 本物の tick と同じ判断を通るので､連続回数が書いてあっても理由が勝つ｡
+    #[test]
+    fn a_fixture_failure_reads_as_failed() {
+        assert_eq!(
+            fixture_status(&fixture_sync(sync::BlockCause::Failure), 1_000),
+            SyncStatus::Failed { until: 6_400 }
+        );
+    }
+
+    #[test]
+    fn a_fixture_run_of_rejections_reads_as_rejected() {
+        assert_eq!(
+            fixture_status(&fixture_sync(sync::BlockCause::Rejections), 1_000),
+            SyncStatus::Rejected {
+                until: 6_400,
+                pending: 1_204,
+            }
+        );
+    }
+
+    #[test]
+    fn an_unblocked_fixture_counts_down_to_its_fade() {
+        let fixture = crate::fixture::FixtureSync {
+            blocked_for_seconds: 0,
+            ..fixture_sync(sync::BlockCause::RateLimit)
+        };
+        assert_eq!(
+            fixture_status(&fixture, 1_000),
+            SyncStatus::Idle {
+                until: 1_000 + TimelineView::FIXTURE_SYNC_SECONDS.cast_signed(),
+                pending: 1_204,
+            }
+        );
+    }
+
     // --- 行を出すかどうか ---
 
     /// #205 が起票された理由｡何も起きていない sync が footer に文言を
@@ -442,7 +515,11 @@ mod tests {
                 pending: 7,
                 refusals: 1,
             },
-            SyncStatus::Failed,
+            SyncStatus::Failed { until: 0 },
+            SyncStatus::Rejected {
+                until: 0,
+                pending: 7,
+            },
         ] {
             assert!(wants_sync_row(&loud), "{loud:?} has something to say");
         }
@@ -484,7 +561,11 @@ mod tests {
                 pending: 3,
                 refusals: 1,
             },
-            SyncStatus::Failed,
+            SyncStatus::Failed { until: 0 },
+            SyncStatus::Rejected {
+                until: 0,
+                pending: 3,
+            },
         ] {
             assert_eq!(
                 sync_blocked_reason(&status).is_none(),
