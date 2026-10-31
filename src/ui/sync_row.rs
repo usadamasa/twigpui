@@ -442,7 +442,11 @@ mod tests {
                 pending: 7,
                 refusals: 1,
             },
-            SyncStatus::Failed,
+            SyncStatus::Failed { until: 0 },
+            SyncStatus::Rejected {
+                until: 0,
+                pending: 7,
+            },
         ] {
             assert!(wants_sync_row(&loud), "{loud:?} has something to say");
         }
@@ -484,7 +488,11 @@ mod tests {
                 pending: 3,
                 refusals: 1,
             },
-            SyncStatus::Failed,
+            SyncStatus::Failed { until: 0 },
+            SyncStatus::Rejected {
+                until: 0,
+                pending: 3,
+            },
         ] {
             assert_eq!(
                 sync_blocked_reason(&status).is_none(),

@@ -646,7 +646,11 @@ mod tests {
                 pending: 7,
                 refusals: 4,
             },
-            SyncStatus::Failed,
+            SyncStatus::Failed { until: 0 },
+            SyncStatus::Rejected {
+                until: 0,
+                pending: 7,
+            },
         ] {
             let label = sync_status_label(&status, 0);
             assert!(label.starts_with("List sync:"), "{label}");
@@ -694,7 +698,16 @@ mod tests {
 
     #[test]
     fn a_failed_sync_is_offered_so_it_can_be_retried() {
-        assert!(offers_sync(&SyncStatus::Failed));
+        assert!(offers_sync(&SyncStatus::Failed { until: 0 }));
+    }
+
+    // 拒まれ続けた list を直した人が､interval を待たずに再試行できる｡
+    #[test]
+    fn a_rejected_sync_is_offered_so_it_can_be_retried() {
+        assert!(offers_sync(&SyncStatus::Rejected {
+            until: 0,
+            pending: 7,
+        }));
     }
 
     /// ループから見た tick｡`state` の既定は穏やかな状態で､テストは status
@@ -709,8 +722,13 @@ mod tests {
 
     #[test]
     fn a_failed_tick_stops_the_window_reporting_the_last_success() {
-        let failed = tick(Err(anyhow::anyhow!("403 Forbidden")), 9_000);
-        assert_eq!(status_of(&failed, 1_000), SyncStatus::Failed);
+        let mut failed = tick(Err(anyhow::anyhow!("403 Forbidden")), 9_000);
+        failed.state.blocked_until = Some(22_600);
+        failed.state.blocked_by = sync::BlockCause::Failure;
+        assert_eq!(
+            status_of(&failed, 1_000),
+            SyncStatus::Failed { until: 22_600 }
+        );
     }
 
     // diff はそのまま仕事へ戻ってくる (`wake_at` は now) ので､ここで idle
@@ -879,8 +897,8 @@ mod tests {
 
     #[test]
     fn an_idle_wake_up_with_nothing_owed_is_never_rate_limited() {
-        // 失敗した tick は､空かもしれない計画とともに `blocked_until` を
-        // 立てたまま残す｡それは待ちであって､拒否された追いつきではない｡
+        // window の block は空の計画では待ちであって､拒否された追いつき
+        // ではない｡
         let mut idle = tick(
             Ok(sync::Outcome::Idle {
                 until: 22_600,
@@ -893,6 +911,101 @@ mod tests {
             status_of(&idle, 1_000),
             SyncStatus::Idle { pending: 0, .. }
         ));
+    }
+
+    // --- #298: block の理由で読み分ける ---
+
+    /// `cause` で `until` まで退いている state を持つ idle な起床｡
+    fn blocked_wake_up(cause: sync::BlockCause, pending: usize) -> sync::Tick {
+        let mut idle = tick(
+            Ok(sync::Outcome::Idle {
+                until: 22_600,
+                pending,
+            }),
+            22_600,
+        );
+        idle.state.blocked_until = Some(22_600);
+        idle.state.blocked_by = cause;
+        idle
+    }
+
+    // #298 の症状: 失敗した tick の次の起床から "rate limited" に化けた｡
+    #[test]
+    fn an_idle_wake_up_after_a_failure_still_reads_as_failed() {
+        assert_eq!(
+            status_of(&blocked_wake_up(sync::BlockCause::Failure, 2_157), 1_000),
+            SyncStatus::Failed { until: 22_600 }
+        );
+    }
+
+    // scope が失効した後に "up to date" と出れば､直す理由が見えなくなる｡
+    #[test]
+    fn an_idle_wake_up_after_a_failure_with_nothing_owed_still_reads_as_failed() {
+        assert_eq!(
+            status_of(&blocked_wake_up(sync::BlockCause::Failure, 0), 1_000),
+            SyncStatus::Failed { until: 22_600 }
+        );
+    }
+
+    #[test]
+    fn an_idle_wake_up_after_a_run_of_rejections_reads_as_rejected() {
+        assert_eq!(
+            status_of(
+                &blocked_wake_up(sync::BlockCause::Rejections, 2_157),
+                1_000
+            ),
+            SyncStatus::Rejected {
+                until: 22_600,
+                pending: 2_157,
+            }
+        );
+    }
+
+    // 退いた tick とその次の起床が別のことを言えば､#198 と同じちらつきになる｡
+    #[test]
+    fn the_rejection_that_ends_a_run_reads_as_rejected_at_once() {
+        let mut rejected = tick(Ok(sync::Outcome::Rejected { remaining: 2_154 }), 22_600);
+        rejected.state.blocked_until = Some(22_600);
+        rejected.state.blocked_by = sync::BlockCause::Rejections;
+        assert_eq!(
+            status_of(&rejected, 1_000),
+            SyncStatus::Rejected {
+                until: 22_600,
+                pending: 2_154,
+            }
+        );
+    }
+
+    #[test]
+    fn a_failure_says_when_it_retries_in_jst() {
+        let theme = Theme::light();
+        let failed = SyncStatus::Failed { until: 0 };
+        assert_eq!(
+            sync_status_label(&failed, -1),
+            "List sync: last attempt failed — retry at 09:00 JST"
+        );
+        assert_eq!(sync_status_color(&failed, theme), theme.danger);
+    }
+
+    // settle は上限に届いたところで連続回数を 0 に戻すので､数は上限そのもの｡
+    #[test]
+    fn a_run_of_rejections_says_how_many_and_when_it_retries() {
+        let theme = Theme::light();
+        let rejected = SyncStatus::Rejected {
+            until: 8_200,
+            pending: 2_157,
+        };
+        assert_eq!(
+            sync_status_label(&rejected, 1_000),
+            "List sync: rejected 3× in a row, 2157 to go — retry at 11:16 JST"
+        );
+        assert_eq!(sync_status_color(&rejected, theme), theme.danger);
+    }
+
+    #[test]
+    fn a_failure_whose_retry_already_passed_reads_as_resuming() {
+        let label = sync_status_label(&SyncStatus::Failed { until: 900 }, 1_000);
+        assert!(label.ends_with("resuming"), "{label}");
     }
 
     #[test]

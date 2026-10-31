@@ -662,6 +662,7 @@ mod tests {
             following_count: None,
             last_diff_at: Some(1_000),
             blocked_until: Some(22_600),
+            blocked_by: crate::sync::BlockCause::Failure,
             paused_until: None,
             refusals: 0,
             ..crate::sync::SyncState::default()
@@ -700,6 +701,33 @@ mod tests {
             ..crate::sync::SyncState::default()
         };
         assert_eq!(blocked_for(true, &refused), Some(22_600));
+    }
+
+    // #298: 失敗した tick の block は､連続回数が残っていても上限の梯子ではない｡
+    #[test]
+    fn forcing_steps_over_a_failure_even_during_a_refusal_streak() {
+        let failed = crate::sync::SyncState {
+            blocked_until: Some(22_600),
+            blocked_by: crate::sync::BlockCause::Failure,
+            refusals: 4,
+            ..crate::sync::SyncState::default()
+        };
+        assert_eq!(blocked_for(true, &failed), None);
+        assert_eq!(blocked_for(false, &failed), Some(22_600));
+    }
+
+    // 400 の連続で退いた block も､list を直した人がすぐ再試行できるように
+    // またぐ｡費用は高々 `REJECTIONS_IN_A_ROW_LIMIT` 件の write｡
+    #[test]
+    fn forcing_steps_over_a_run_of_rejections() {
+        let rejected = crate::sync::SyncState {
+            blocked_until: Some(22_600),
+            blocked_by: crate::sync::BlockCause::Rejections,
+            refusals: 2,
+            ..crate::sync::SyncState::default()
+        };
+        assert_eq!(blocked_for(true, &rejected), None);
+        assert_eq!(blocked_for(false, &rejected), Some(22_600));
     }
 
     // --- batch と batch のあいだの間 ---

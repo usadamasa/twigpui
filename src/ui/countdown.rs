@@ -379,12 +379,16 @@ mod tests {
             SyncStatus::Ready,
             SyncStatus::Working,
             SyncStatus::AwaitingAccount,
-            SyncStatus::Failed,
+            SyncStatus::Failed { until: 5_000 },
             SyncStatus::Off(crate::ui::list_sync::SyncOff::NoList),
             SyncStatus::RateLimited {
                 until: 5_000,
                 pending: 3,
                 refusals: 1,
+            },
+            SyncStatus::Rejected {
+                until: 5_000,
+                pending: 3,
             },
         ] {
             assert_eq!(sync_deadline(&status), None, "{status:?}");
