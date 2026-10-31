@@ -290,7 +290,11 @@ pub(super) fn status_of(tick: &sync::Tick, now: i64) -> SyncStatus {
         {
             blocked(*pending)
         }
-        Ok(sync::Outcome::Rejected { remaining }) if is_blocked => blocked(*remaining),
+        Ok(sync::Outcome::Rejected { remaining })
+            if is_blocked && tick.state.blocked_by == sync::BlockCause::Rejections =>
+        {
+            blocked(*remaining)
+        }
         // 拒否された write (#254) も進捗だ: entry は残務から外れ､ループは
         // 次の write までの間を置いて戻ってくる｡
         Ok(
@@ -1005,6 +1009,22 @@ mod tests {
             status_of(&rejected, 1_000),
             SyncStatus::Rejected {
                 until: 22_600,
+                pending: 2_154,
+            }
+        );
+    }
+
+    // 手動 sync は失敗の block をまたぐ｡その最初の 400 は連続の 1 件目で
+    // block を置き直さないので､残っている失敗の期限を出してはならない｡
+    #[test]
+    fn a_single_rejection_over_a_crossed_failure_is_plain_progress() {
+        let mut rejected = tick(Ok(sync::Outcome::Rejected { remaining: 2_154 }), 1_014);
+        rejected.state.blocked_until = Some(22_600);
+        rejected.state.blocked_by = sync::BlockCause::Failure;
+        assert_eq!(
+            status_of(&rejected, 1_000),
+            SyncStatus::Idle {
+                until: 1_014,
                 pending: 2_154,
             }
         );
