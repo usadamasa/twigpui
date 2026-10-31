@@ -137,6 +137,10 @@ pub(crate) struct FixtureSync {
     /// 上限が続けて何回 no と言ったか (#197)｡2 回以上で文言と色が変わる｡
     #[serde(default)]
     pub refusals: u32,
+    /// 何が block を置いたか (#298)｡無ければ rate limit で､#298 より前に
+    /// 書いたフィクスチャは今までと同じ行を出す｡
+    #[serde(default)]
+    pub blocked_by: crate::sync::BlockCause,
 }
 
 /// フィクスチャファイルを読んでパースする｡

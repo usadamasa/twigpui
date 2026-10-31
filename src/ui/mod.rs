@@ -2399,6 +2399,7 @@ mod tests {
                 pending,
                 blocked_for_seconds: 0,
                 refusals: 0,
+                blocked_by: crate::sync::BlockCause::default(),
             }),
             ..fixture_with(shown, &[])
         }

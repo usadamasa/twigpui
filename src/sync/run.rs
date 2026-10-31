@@ -396,6 +396,25 @@ fn run(
     })
 }
 
+/// `--apply` が block の前で止まるとき､括弧の中で言う理由 (#298)｡
+///
+/// `refusals` からは推さない: 失敗した tick や 400 の連続は連続回数を
+/// 消さないので､古い連続が残っていると "refusal #N" と取り違える｡
+fn backoff_reason(state: &super::SyncState) -> String {
+    match state.blocked_by {
+        super::BlockCause::RateLimit if state.refusals > 0 => {
+            format!("refusal #{}", state.refusals)
+        }
+        super::BlockCause::RateLimit => "the rate limit window is used up".to_string(),
+        super::BlockCause::Failure => "the last attempt failed".to_string(),
+        super::BlockCause::Rejections => format!(
+            "{} writes in a row were rejected by X, in case the list or the \
+             request itself is what is being rejected",
+            super::REJECTIONS_IN_A_ROW_LIMIT
+        ),
+    }
+}
+
 /// plan を流し切るか止められるまで tick を回し､届いた件数を返す ([`run`]
 /// の `--apply` の本体)｡
 ///
@@ -463,15 +482,7 @@ fn drain(
                 "{landed} write(s) landed; the plan on file records them. The sync is backing \
                  off until unix time {} ({}); re-run --apply after that.",
                 tick.wake_at,
-                if tick.state.refusals > 0 {
-                    format!("refusal #{}", tick.state.refusals)
-                } else {
-                    format!(
-                        "{} writes in a row were rejected by X, in case the list or the \
-                         request itself is what is being rejected",
-                        super::state::REJECTIONS_IN_A_ROW_LIMIT
-                    )
-                }
+                backoff_reason(&tick.state)
             );
         }
         // tick が置いた間 (gap か cooldown) を眠る｡loop は毎分起きて決め直す
@@ -900,7 +911,10 @@ mod tests {
     #[test]
     fn a_run_of_rejections_is_not_reported_as_a_refusal_even_with_a_streak_on_file() {
         let reason = backoff_reason(&blocked_by(super::super::BlockCause::Rejections, 2));
-        assert!(reason.contains("3 writes in a row were rejected"), "{reason}");
+        assert!(
+            reason.contains("3 writes in a row were rejected"),
+            "{reason}"
+        );
         assert!(!reason.contains("refusal"), "{reason}");
     }
 

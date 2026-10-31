@@ -12,8 +12,8 @@
 
 use super::fade::{FADE_STEP_MILLIS, Fade, fade_occupies, fade_opacity, fade_settled, next_fade};
 use super::list_sync::{
-    SyncOff, SyncStatus, SyncTrigger, offers_sync, sync_confirm_label, sync_status_color,
-    sync_status_label,
+    SyncOff, SyncStatus, SyncTrigger, offers_sync, status_of, sync_confirm_label,
+    sync_status_color, sync_status_label,
 };
 use super::render::Addressable as _;
 use super::{
@@ -21,6 +21,35 @@ use super::{
     ParentElement as _, StatefulInteractiveElement as _, Styled as _, TimelineView, div, oauth,
     rgb, rgba, sync, theme,
 };
+
+/// フィクスチャが書いた sync の状態が出す [`SyncStatus`] (#205, #298)｡
+///
+/// 状態を idle な起床の tick に組み､本物の tick と同じ
+/// [`super::list_sync::status_of`] を通す｡ここで variant を選べば､block の
+/// 理由の読み分けがフィクスチャだけ別物になる｡
+///
+/// block されていなければ､`until` (#214: footer が "Next sync in …" と
+/// 数える先) はフェードが落ちるその瞬間｡
+pub(super) fn fixture_status(fixture: &crate::fixture::FixtureSync, now: i64) -> SyncStatus {
+    let blocked_until =
+        (fixture.blocked_for_seconds > 0).then(|| now.saturating_add(fixture.blocked_for_seconds));
+    let wake_at = blocked_until
+        .unwrap_or_else(|| now.saturating_add(TimelineView::FIXTURE_SYNC_SECONDS.cast_signed()));
+    let tick = sync::Tick {
+        outcome: Ok(sync::Outcome::Idle {
+            until: wake_at,
+            pending: fixture.pending,
+        }),
+        state: sync::SyncState {
+            blocked_until,
+            blocked_by: fixture.blocked_by,
+            refusals: fixture.refusals,
+            ..sync::SyncState::default()
+        },
+        wake_at,
+    };
+    status_of(&tick, now)
+}
 
 /// sync の行を今 出すかどうか (#205)｡
 ///
@@ -326,23 +355,7 @@ impl TimelineView {
         fixture: &crate::fixture::FixtureSync,
         cx: &mut Context<'_, Self>,
     ) {
-        let now = oauth::unix_now();
-        let status = if fixture.blocked_for_seconds > 0 {
-            SyncStatus::RateLimited {
-                until: now.saturating_add(fixture.blocked_for_seconds),
-                pending: fixture.pending,
-                refusals: fixture.refusals,
-            }
-        } else {
-            // #214: `until` は footer が "Next sync in …" と数える先｡
-            // 追いつきの最中なら次のバッチ — ここではフェードが落ちる
-            // その瞬間だ｡
-            SyncStatus::Idle {
-                until: now.saturating_add(Self::FIXTURE_SYNC_SECONDS.cast_signed()),
-                pending: fixture.pending,
-            }
-        };
-        self.show_sync(status, cx);
+        self.show_sync(fixture_status(fixture, oauth::unix_now()), cx);
         self.auto_sync = Some(cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(Duration::from_secs(Self::FIXTURE_SYNC_SECONDS))
