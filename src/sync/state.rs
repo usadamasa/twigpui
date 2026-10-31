@@ -96,11 +96,17 @@ pub(crate) struct SyncState {
     /// 再起動でも守られるよう永続化してある (#198)｡
     #[serde(default)]
     pub blocked_until: Option<i64>,
+    /// `blocked_until` を置いたのが何か (#298)｡`refusals` からは推せない:
+    /// window を使い切った 429 は `refusals` に触れないので､`refusals == 0`
+    /// は rate limit でも失敗でも 400 の連続でもありうる｡
+    /// #298 より前のファイルは [`BlockCause::RateLimit`] と読む｡
+    #[serde(default)]
+    pub blocked_by: BlockCause,
     /// 次の write まで自分に課した間 — gap か cooldown｡[`settle`] が write
     /// ごとに引き直す｡
     ///
     /// これは拒否ではないので `blocked_until` とは分ける｡
-    /// `ui::list_sync::status_of` は block を「rate limited」と読むため､
+    /// `ui::list_sync::status_of` は block を拒否か失敗として読むため､
     /// 相乗りさせると普通のペース待ちが拒否として表示される｡
     ///
     /// 永続化する理由は `blocked_until` と同じ｡追いつきの途中で再起動しても
@@ -128,6 +134,20 @@ pub(crate) struct SyncState {
     /// 「何件通ったあとの拒否か」を言えるのはこれがあるからだ｡
     #[serde(default)]
     pub landed_since_refusal: u64,
+}
+
+/// [`SyncState::blocked_until`] を置いた理由 (#298)｡ステータスバーの文言と､
+/// 手動 sync がその block をまたげるか (`schedule::blocked_for`) を分ける｡
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum BlockCause {
+    /// 上限が 429 で拒んだ — window の期限か opaque な backoff｡
+    #[default]
+    RateLimit,
+    /// tick が完全に失敗して interval 丸ごと退いた｡
+    Failure,
+    /// 400 が [`REJECTIONS_IN_A_ROW_LIMIT`] 件続いて interval 丸ごと退いた｡
+    Rejections,
 }
 
 impl SyncState {
@@ -246,6 +266,7 @@ pub(crate) fn settle(
         None => {
             let until = now.saturating_add(i64::from(spacing.interval_seconds));
             next.blocked_until = Some(until);
+            next.blocked_by = BlockCause::Failure;
             until
         }
         Some(Outcome::Idle { until, .. }) => *until,
@@ -266,12 +287,14 @@ pub(crate) fn settle(
                 *until
             };
             next.blocked_until = Some(until);
+            next.blocked_by = BlockCause::RateLimit;
             until
         }
         Some(Outcome::Applied { sent: 0, .. }) => now,
         Some(Outcome::Applied { sent, remaining }) => {
             next.refusals = 0;
             next.blocked_until = None;
+            next.blocked_by = BlockCause::default();
             next.rejected_in_a_row = 0;
             next.landed_since_refusal = next
                 .landed_since_refusal
@@ -284,6 +307,7 @@ pub(crate) fn settle(
                 next.rejected_in_a_row = 0;
                 let until = now.saturating_add(i64::from(spacing.interval_seconds));
                 next.blocked_until = Some(until);
+                next.blocked_by = BlockCause::Rejections;
                 until
             } else {
                 pace(&mut next, 1, *remaining, now, spacing)

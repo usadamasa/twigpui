@@ -34,7 +34,8 @@ pub(super) fn wants_sync_row(status: &SyncStatus) -> bool {
         // 手動 sync を確認した直後に落ちうる先｡出さないと押下が無反応に見える｡
         | SyncStatus::AwaitingAccount
         | SyncStatus::RateLimited { .. }
-        | SyncStatus::Failed => true,
+        | SyncStatus::Failed { .. }
+        | SyncStatus::Rejected { .. } => true,
         SyncStatus::Idle { pending, .. } => *pending > 0,
         SyncStatus::Off(_) | SyncStatus::Ready => false,
     }
@@ -66,7 +67,8 @@ pub(super) fn sync_blocked_reason(status: &SyncStatus) -> Option<&'static str> {
         SyncStatus::Ready
         | SyncStatus::Idle { .. }
         | SyncStatus::RateLimited { .. }
-        | SyncStatus::Failed => None,
+        | SyncStatus::Failed { .. }
+        | SyncStatus::Rejected { .. } => None,
     }
 }
 

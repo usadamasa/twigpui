@@ -78,9 +78,13 @@ pub(super) enum SyncStatus {
     },
     /// 直前の tick が完全に失敗した — 取り消された scope､削除された list､
     /// parse できない計画ファイル｡ループはすでに丸ごと 1 interval を再試行
-    /// のために取ってある｡これがあるのは､ウィンドウが最後の成功をあたかも
-    /// 現在のことのように報告し続けないためだ｡
-    Failed,
+    /// のために取ってあり､`until` がその明ける時刻｡これがあるのは､ウィンドウが
+    /// 最後の成功をあたかも現在のことのように報告し続けないためだ｡
+    Failed { until: i64 },
+    /// 400 が `REJECTIONS_IN_A_ROW_LIMIT` 件続き､ループは `until` まで
+    /// interval 丸ごと退いている (#254, #298)｡上限の拒否ではなく list や
+    /// request の形が疑わしいので､[`SyncStatus::RateLimited`] とは分ける｡
+    Rejected { until: i64, pending: usize },
 }
 
 /// 止まった sync がどの gate で止まっているか — [`SyncStatus::Off`] を見よ｡
@@ -114,7 +118,8 @@ pub(super) fn offers_sync(status: &SyncStatus) -> bool {
         SyncStatus::Ready
         | SyncStatus::Idle { .. }
         | SyncStatus::RateLimited { .. }
-        | SyncStatus::Failed => true,
+        | SyncStatus::Failed { .. }
+        | SyncStatus::Rejected { .. } => true,
         SyncStatus::Off(_) | SyncStatus::Working | SyncStatus::AwaitingAccount => false,
     }
 }
@@ -145,12 +150,8 @@ pub(super) fn sync_status_label(status: &SyncStatus, now: i64) -> String {
             refusals,
         } => {
             let stuck = *refusals >= STUCK_AFTER_REFUSALS;
-            let lifts = if *until <= now {
-                // 過去の時刻をそのまま出すと､明けているのにまだ待っている
-                // ように読める｡#174 の 0 下限と同じ用心を時刻に置いたもの｡
-                "resuming".to_string()
-            } else if stuck {
-                format!("retry at {} JST", jst_hhmm(*until))
+            let lifts = if stuck || *until <= now {
+                retry_at(*until, now)
             } else {
                 format!("resumes {} JST", jst_hhmm(*until))
             };
@@ -162,7 +163,25 @@ pub(super) fn sync_status_label(status: &SyncStatus, now: i64) -> String {
                 format!("List sync: rate limited, {pending} to go — {lifts}")
             }
         }
-        SyncStatus::Failed => "List sync: last attempt failed".to_string(),
+        SyncStatus::Failed { until } => {
+            format!("List sync: last attempt failed — {}", retry_at(*until, now))
+        }
+        SyncStatus::Rejected { until, pending } => format!(
+            "List sync: rejected {}× in a row, {pending} to go — {}",
+            sync::REJECTIONS_IN_A_ROW_LIMIT,
+            retry_at(*until, now)
+        ),
+    }
+}
+
+/// block が明ける時刻の言い方｡過去の時刻をそのまま出すと､明けているのに
+/// まだ待っているように読めるので､過ぎていれば "resuming" — #174 の 0 下限と
+/// 同じ用心を時刻に置いたもの｡
+fn retry_at(until: i64, now: i64) -> String {
+    if until <= now {
+        "resuming".to_string()
+    } else {
+        format!("retry at {} JST", jst_hhmm(until))
     }
 }
 
@@ -200,13 +219,14 @@ const STUCK_AFTER_REFUSALS: u32 = 2;
 
 /// ステータスバーの sync セグメントを何色で塗るか (#174)｡
 ///
-/// `danger` は本当に間違っている状態だけ — 失敗した tick､誰かが何かを
-/// する必要のある gate､そして [`STUCK_AFTER_REFUSALS`] 回続けて拒否された
-/// 追いつき (#197)｡1 回の rate limit はそこに入らない: ループが対処して
-/// いるし､隣の件数はまだ正しい｡
+/// `danger` は本当に間違っている状態だけ — 失敗した tick､続けざまの 400､
+/// 誰かが何かをする必要のある gate､そして [`STUCK_AFTER_REFUSALS`] 回続けて
+/// 拒否された追いつき (#197)｡1 回の rate limit はそこに入らない: ループが
+/// 対処しているし､隣の件数はまだ正しい｡
 pub(super) fn sync_status_color(status: &SyncStatus, theme: Theme) -> u32 {
     match status {
-        SyncStatus::Failed
+        SyncStatus::Failed { .. }
+        | SyncStatus::Rejected { .. }
         | SyncStatus::Off(SyncOff::MissingScope)
         | SyncStatus::RateLimited {
             refusals: STUCK_AFTER_REFUSALS..,
@@ -237,23 +257,40 @@ pub(super) fn sync_status_color(status: &SyncStatus, theme: Theme) -> u32 {
 /// くる (`wake_at` は now) ので､次の tick が同じ秒のうちに上書きする
 /// idle 状態ではなく [`SyncStatus::Working`] に対応する｡
 ///
-/// 状態が blocked で仕事が残っている最中の idle な tick は､拒否を待って
-/// いる追いつきであり､[`SyncStatus::RateLimited`] と読む — 拒否した tick
-/// が言ったのと同じことを､それが続く限り言う｡ループが今にも送るかの
-/// ような "N to go" ではなく｡
+/// 状態が blocked の最中の idle な tick は､block を置いた tick が言った
+/// のと同じことを､それが続く限り言う｡ループが今にも送るかのような
+/// "N to go" ではなく｡何と言うかは block の理由 ([`sync::BlockCause`]) で
+/// 決まる (#298)｡`refusals` からは推せない — window を使い切った 429 は
+/// `refusals` に触れないので､0 は rate limit でも失敗でも 400 の連続でも
+/// ありうる｡失敗の block は計画が空でも [`SyncStatus::Failed`] だ: 失効した
+/// scope のあとに "up to date" と出れば､直す理由が見えなくなる｡
+///
+/// 400 の連続で退いた tick 自身も同じ読み方をする｡退いた tick と次の起床が
+/// 別のことを言えば､#198 と同じちらつきになる｡
 pub(super) fn status_of(tick: &sync::Tick, now: i64) -> SyncStatus {
+    let until = tick.state.blocked_until.unwrap_or(tick.wake_at);
     let refused = |pending: usize| SyncStatus::RateLimited {
-        until: tick.state.blocked_until.unwrap_or(tick.wake_at),
+        until,
         pending,
         refusals: tick.state.refusals,
     };
+    let blocked = |pending: usize| match tick.state.blocked_by {
+        sync::BlockCause::RateLimit => refused(pending),
+        sync::BlockCause::Failure => SyncStatus::Failed { until },
+        sync::BlockCause::Rejections => SyncStatus::Rejected { until, pending },
+    };
+    let is_blocked = tick.state.is_blocked(now);
     match &tick.outcome {
-        Err(_) => SyncStatus::Failed,
+        Err(_) => SyncStatus::Failed { until },
         Ok(sync::Outcome::Diffed { .. }) => SyncStatus::Working,
         Ok(sync::Outcome::RateLimited { remaining, .. }) => refused(*remaining),
-        Ok(sync::Outcome::Idle { pending, .. }) if *pending > 0 && tick.state.is_blocked(now) => {
-            refused(*pending)
+        Ok(sync::Outcome::Idle { pending, .. })
+            if is_blocked
+                && (*pending > 0 || tick.state.blocked_by == sync::BlockCause::Failure) =>
+        {
+            blocked(*pending)
         }
+        Ok(sync::Outcome::Rejected { remaining }) if is_blocked => blocked(*remaining),
         // 拒否された write (#254) も進捗だ: entry は残務から外れ､ループは
         // 次の write までの間を置いて戻ってくる｡
         Ok(
@@ -950,10 +987,7 @@ mod tests {
     #[test]
     fn an_idle_wake_up_after_a_run_of_rejections_reads_as_rejected() {
         assert_eq!(
-            status_of(
-                &blocked_wake_up(sync::BlockCause::Rejections, 2_157),
-                1_000
-            ),
+            status_of(&blocked_wake_up(sync::BlockCause::Rejections, 2_157), 1_000),
             SyncStatus::Rejected {
                 until: 22_600,
                 pending: 2_157,

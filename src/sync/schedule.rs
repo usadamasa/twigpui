@@ -6,6 +6,8 @@
 //! 投げない｡[`Step`] を受けて動く loop は隣の [`super::auto`] にあり､
 //! そちらは [`super::api::ListSyncApi`] 越しに request を投げる｡
 
+use super::BlockCause;
+
 /// loop が今すべきこと｡
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Step {
@@ -250,21 +252,30 @@ pub(crate) fn last_diff_for(forced: bool, recorded: Option<i64>) -> Option<i64> 
 /// 呼び出し側が強制したかどうか (#174) と block が何のためのものかを
 /// 踏まえ､この tick での [`Situation::blocked_until`] が何であるべきか｡
 ///
-/// block は #198 で永続化され､強制された tick が出会う種類が二つになった｡
-/// 失敗した tick の block (`refusals == 0`) は､loop が毎分再試行しないよう
+/// block は #198 で永続化され､何が置いたかは [`super::SyncState::blocked_by`]
+/// が持つ (#298)｡
+///
+/// 失敗した tick の block ([`BlockCause::Failure`]) は､loop が毎分再試行しないよう
 /// [`super::state::settle`] が失効した scope や削除された list に渡す
 /// interval だ — そして status bar が「Failed」を押せるものとして出すのは､
 /// 原因を直した人が今すぐ再試行できるようにするためにほかならない｡強制は
-/// こちらをまたぐ｡refusal の block (`refusals > 0`) は否と言った上限から
-/// 後退していく梯子であり､ボタンを押すことはそれが明けた証拠にならない:
-/// 強制は他の tick と同じくこちらは待ち切る｡それがボタンを上限の迂回路に
-/// しないための仕組みだ｡
+/// こちらをまたぐ｡400 の連続の block ([`BlockCause::Rejections`]) も同じで､
+/// list を直した人が試すのに interval を待たせない｡費用は高々
+/// `REJECTIONS_IN_A_ROW_LIMIT` 件の write で､それでまた退く｡
 ///
-/// 使い切った window 由来の block (`refusals` には触れない) もまたぐが､
-/// 費用はかからない: `rate_limit::decision` が送信前に拒否し､tick は同じ
-/// 期限を持って `RateLimited` で戻ってくる｡
+/// rate limit の block のうち opaque な refusal の梯子 (`refusals > 0`) は
+/// 否と言った上限から後退していくもので､ボタンを押すことはそれが明けた
+/// 証拠にならない: 強制は他の tick と同じくこちらは待ち切る｡それがボタンを
+/// 上限の迂回路にしないための仕組みだ｡使い切った window 由来の block
+/// (`refusals` には触れない) はまたぐが､費用はかからない:
+/// `rate_limit::decision` が送信前に拒否し､tick は同じ期限を持って
+/// `RateLimited` で戻ってくる｡
 pub(crate) fn blocked_for(forced: bool, state: &super::SyncState) -> Option<i64> {
-    if forced && state.refusals == 0 {
+    let crossable = match state.blocked_by {
+        BlockCause::Failure | BlockCause::Rejections => true,
+        BlockCause::RateLimit => state.refusals == 0,
+    };
+    if forced && crossable {
         None
     } else {
         state.blocked_until
@@ -662,7 +673,7 @@ mod tests {
             following_count: None,
             last_diff_at: Some(1_000),
             blocked_until: Some(22_600),
-            blocked_by: crate::sync::BlockCause::Failure,
+            blocked_by: BlockCause::Failure,
             paused_until: None,
             refusals: 0,
             ..crate::sync::SyncState::default()
@@ -708,7 +719,7 @@ mod tests {
     fn forcing_steps_over_a_failure_even_during_a_refusal_streak() {
         let failed = crate::sync::SyncState {
             blocked_until: Some(22_600),
-            blocked_by: crate::sync::BlockCause::Failure,
+            blocked_by: BlockCause::Failure,
             refusals: 4,
             ..crate::sync::SyncState::default()
         };
@@ -722,7 +733,7 @@ mod tests {
     fn forcing_steps_over_a_run_of_rejections() {
         let rejected = crate::sync::SyncState {
             blocked_until: Some(22_600),
-            blocked_by: crate::sync::BlockCause::Rejections,
+            blocked_by: BlockCause::Rejections,
             refusals: 2,
             ..crate::sync::SyncState::default()
         };

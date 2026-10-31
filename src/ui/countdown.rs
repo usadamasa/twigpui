@@ -149,8 +149,9 @@ pub(super) fn refresh_label(
 ///
 /// [`SyncStatus::Idle`] の `until` だけだ｡それが tick が返した `wake_at`
 /// で､ループが実際に眠る先 ([`super::list_sync::status_of`] を見よ)｡
-/// [`SyncStatus::RateLimited`] も `until` を持つが､あれは sync の行が
-/// "resumes HH:MM JST" と言う (#205)｡2 か所で言えば､どちらかが古くなる｡
+/// [`SyncStatus::RateLimited`]・[`SyncStatus::Failed`]・[`SyncStatus::Rejected`]
+/// も `until` を持つが､あれは sync の行が "resumes / retry at HH:MM JST" と
+/// 言う (#205, #298)｡2 か所で言えば､どちらかが古くなる｡
 /// 残りの状態は次の時刻をそもそも持たない — 走っている最中か､gate で
 /// 止まっているか､タイマーが切れているかだ｡
 pub(super) fn sync_deadline(status: &SyncStatus) -> Option<i64> {
@@ -161,7 +162,8 @@ pub(super) fn sync_deadline(status: &SyncStatus) -> Option<i64> {
         | SyncStatus::AwaitingAccount
         | SyncStatus::Working
         | SyncStatus::RateLimited { .. }
-        | SyncStatus::Failed => None,
+        | SyncStatus::Failed { .. }
+        | SyncStatus::Rejected { .. } => None,
     }
 }
 
