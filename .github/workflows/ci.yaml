@@ -13,7 +13,6 @@ name: CI
       - opened
       - synchronize
       - reopened
-      - edited
   merge_group:
 
 permissions:
