@@ -39,6 +39,17 @@ assert できる。`simulate_click` は hit test も通るので、クリック�
 | 状態遷移・フォーカス | `dispatch_action` (#146 層 3) |
 | 色・フォント・字の詰まり方・アイコンの描かれ方 | 撮る (この手順) |
 
+### 幅で変わる見た目は 2 つの幅で押さえる
+
+footer やバナーに文言を足すときは、`simulate_resize` で 2 つの幅のテストを書く。
+429px は本番で使われているウィンドウの幅で、`Density::Compact` になる。
+560px は `window_state::DEFAULT_SIZE` の幅で、`Density::Wide` になる。Wide は文言が長いぶん、
+広いウィンドウのほうが先に溢れることがある。狭い幅のテストだけでは足りない。
+
+テストプラットフォームのフォントは本番より約 25% 広いので、px の閾値は本番の寸法と比べられない。
+assert するのは、文言を詰める順と "…" で切る順、区画どうしの相対的な大きさにする。
+例は `src/ui/mod.rs` の `the_footer_shortens_first_and_truncates_last`。
+
 ## 手順
 
 ```sh
