@@ -99,6 +99,10 @@ RT に関わる描画は 1 か所に無い。触るときは下の全部を通�
 - 元 post と RT 自身のどちらの値を読むかは `TimelineItem` の doc が
   フィールドごとに言っている (`id` は RT 自身、`text`・`media`・`metrics` は
   元 post)。迷ったら `model.rs` の `build_item` を読む。
+- メディアのサムネイル (元 post のメディア、引用カードのメディア) は `ui/post_row.rs` の
+  `media_cell` が描く。角丸を保つため `ObjectFit::Cover` ではなく `Contain` を使う。gpui の content mask は
+  矩形だけなので、Cover が枠より大きく描いた画像を `overflow_hidden` で切ると、切った辺の
+  角が直角になる。幅と高さを枠と `img` の両方へ与える理由は `media_cell` の doc にある。
 - RT に効く変更は、`a_repost_of_a_quote_carries_the_nested_quote_card`
   (`model.rs`) と `offers_quote_on_a_repost_row` / `offers_like_on_a_repost_row`
   (`ui/mod.rs`) が既存の守り。描画の面を足したら `fixture::tests` の

@@ -28,6 +28,19 @@ scripts/coverage.sh --json       # 同じ数字を JSON で
 複数のレポートを出すのに使っているだけで、**手元では使わないこと。**
 編集した後に付けると、直す前のコードの数字が返る。
 
+### sandbox の外で実行する
+
+`scripts/coverage.sh` は `.claude/settings.json` の `excludedCommands` に入っているので、
+素の 1 文で打つ (引数はあってよい)。パイプ・リダイレクト・`&&` を付けると除外に一致せず、
+script は sandbox の中で実行される。そこで測り直しが要ると、
+`perf::tests::the_process_can_read_itself` が `/bin/ps` を起動できず、
+`Operation not permitted` で落ちる (exit 101)。
+
+出力をファイルへ残したいとき、または sandbox の中で落ちたときは、先に profile を新しくしてから
+リダイレクトを付けて打ち直す。profile を新しくするには、素の `scripts/coverage.sh` か
+`cargo llvm-cov --locked --all-targets --no-report` を打つ (`cargo` も sandbox の外で動く)。
+profile が新しければ script は再ビルドとテストを省くので、sandbox の中で実行しても通る。
+
 CI では Coverage ジョブが同じものを step summary に貼る。**必須チェックではない。**
 落ちても止まらないし、そもそも閾値が無い。
 
