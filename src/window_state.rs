@@ -109,7 +109,7 @@ pub(crate) fn load(path: &Path) -> WindowState {
 
 /// `path` があればそこから読み､無ければ (fixture のウィンドウ) 既定値 (#267)｡
 pub(crate) fn load_or_default(path: Option<&Path>) -> WindowState {
-    path.map(load).unwrap_or_default()
+    path.map_or_default(load)
 }
 
 /// ウィンドウの状態を `path` へ書く｡
