@@ -197,8 +197,7 @@ pub(crate) const TSV_HEADER: &str = "elapsed_ms\trss_kb\tcpu_ms\tcpu_pct\tps_pcp
 pub(crate) fn tsv_row(sample: &Sample, previous: Option<&Sample>) -> String {
     let interval = previous
         .and_then(|previous| interval_cpu_tenths(previous, sample))
-        .map(tenths)
-        .unwrap_or_default();
+        .map_or_default(tenths);
     format!(
         "{}\t{}\t{}\t{}\t{}",
         sample.elapsed.as_millis(),
