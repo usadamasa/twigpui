@@ -605,8 +605,8 @@ fn author_fields(post: &Post, users: &HashMap<&str, &User>) -> (String, String, 
         .as_deref()
         .and_then(|id| users.get(id).copied());
     (
-        author.map(|u| u.name.clone()).unwrap_or_default(),
-        author.map(|u| u.username.clone()).unwrap_or_default(),
+        author.map_or_default(|u| u.name.clone()),
+        author.map_or_default(|u| u.username.clone()),
         author.and_then(|u| u.profile_image_url.clone()),
     )
 }
@@ -718,8 +718,7 @@ fn reply_target(
         .find(|r| r.kind == ReferenceKind::RepliedTo)?;
     let (author_name, author_username, _avatar) = referenced
         .get(reply_ref.id.as_str())
-        .map(|parent| author_fields(parent, users))
-        .unwrap_or_default();
+        .map_or_default(|parent| author_fields(parent, users));
     Some(RepliedTo {
         post_id: reply_ref.id.clone(),
         author_name,

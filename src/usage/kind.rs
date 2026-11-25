@@ -109,8 +109,7 @@ pub(crate) fn extract_resource_ids(body: &str) -> Vec<String> {
         serde_json::Value::Object(_) => data
             .get("id")
             .and_then(serde_json::Value::as_str)
-            .map(|id| vec![id.to_string()])
-            .unwrap_or_default(),
+            .map_or_default(|id| vec![id.to_string()]),
         _ => Vec::new(),
     }
 }
