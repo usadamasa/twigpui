@@ -52,19 +52,17 @@ assert するのは、文言を詰める順と "…" で切る順、区画どう
 
 ## 手順
 
-```sh
-# 1. 決定的なオフライン起動。background で走らせる
-cargo run -- --fixture fixtures/timeline.json
+1. 次のコマンドを background job として実行し、ネットワークに出ない決定的な画面を開く。
 
-# 2. ウィンドウが出たか確かめる
-cleanshot-capture list
+   ```sh
+   cargo run -- --fixture fixtures/timeline.json
+   ```
 
-# 3. 撮る
-cleanshot-capture window --app twigpui --out ./tmp/shot.png
-```
+2. `visuals:cleanshot-capture` スキルに従って `list` を実行し、ウィンドウが出たか確かめる。
+3. 同じスキルに従って `window --app twigpui --out ./tmp/shot.png` で撮る。
 
-撮ったら `Read` で開く。撮り方の詳細と、別のウィンドウが写るときの対処は
-`cleanshot-capture` スキルに従う。
+撮ったら `Read` で開く。実行ファイルの場所、撮り方の詳細、別のウィンドウが写るときの対処は
+`visuals:cleanshot-capture` スキルにある。
 
 **画面がロックされているならこの手順は使えない** (真っ黒になる)。下の
 「画面がロックされているときは window を開かずに PNG へ描く」へ。
@@ -76,11 +74,8 @@ cleanshot-capture window --app twigpui --out ./tmp/shot.png
 `twigpui` (dev の `.app` を組んだときだけ `twigpui-dev`) なので、
 本番の `.app` を開いたまま `cargo run` すると `--app twigpui` が両方に当たる。
 
-そのときは `--title` で絞る:
-
-```sh
-cleanshot-capture window --app twigpui --title "twigpui (dev)" --out ./tmp/shot.png
-```
+そのときは `visuals:cleanshot-capture` の `window` に
+`--app twigpui --title "twigpui (dev)" --out ./tmp/shot.png` を渡し、`--title` で絞る。
 
 ### `--fixture` と素の起動を使い分ける
 
@@ -118,7 +113,7 @@ cargo run --features headless-shot -- --fixture fixtures/timeline.json --png ./t
 ```
 
 撮れたら `Read` で開く。本物の CoreText と Metal で描くので、色・フォント・
-字の詰まり方はそのまま見られる。`cleanshot-capture` も画面収録の許可も要らない。
+字の詰まり方はそのまま見られる。`visuals:cleanshot-capture` も画面収録の許可も要らない。
 
 `--features headless-shot` が要るのは、この経路が使う gpui の `test-support` を
 本番のバイナリへ入れないためで、理由は `src/headless_shot.rs` のモジュール doc にある。
@@ -133,8 +128,9 @@ feature の組み合わせは `cargo test` と同じなので、ビルドは使�
 | 高さ | 820px 固定。下に隠れる行を見たいなら fixture のコピーでその行を先頭へ寄せる |
 | stderr | 毎回 `WARN could not set the window level: ... no raw handle` が出る。TestWindow は raw handle を持たないだけで、異常ではない |
 
-**画面が点いていて、透過・メニュー・本物の window chrome を見たいときは、下の
-`cleanshot-capture` 手順のまま。** そちらでしか写らないものがある。
+**画面が点いていて、透過・メニュー・本物の window chrome を見たいときは、
+`visuals:cleanshot-capture` で撮る手順 (上の「手順」と、下の透過の撮り方) のまま。**
+そちらでしか写らないものがある。
 
 ### 終わらせ方
 
@@ -182,10 +178,10 @@ sync の行は block の理由ごとに文言と色が変わる (#298)。`timeli
   引き伸ばされれば帯が傾く。
 - fixture は `XClient` を組まないので、ボタンは描かれるが押しても届く先が無い。
 - `"translucent": true` を書くと fixture のウィンドウが透過で立ち上がる (#267)。
-  **`--png` では写らない** (後ろに何も無いため)。透過の確認は `cleanshot-capture` の
+  **`--png` では写らない** (後ろに何も無いため)。透過の確認は `visuals:cleanshot-capture` の
   `area` を使う下の手順でしかできない。
   fixture は window state ファイルを読まないので、書かなければ常に不透明。
-  撮るときは後ろに文字のあるウィンドウを置き、`cleanshot-capture` の `area` で
+  撮るときは後ろに文字のあるウィンドウを置き、`visuals:cleanshot-capture` の `area` で
   座標を指定する。`window` で撮ると背景抜きの alpha になり、透けているかが写らない。
   ウィンドウは手元に無いあいだだけ透けるので、撮る前に別のアプリを前に出しておく。
   Claude のセッションから前に出せるのは `open-artifact ./tmp/probe.png` だけ
@@ -194,7 +190,7 @@ sync の行は block の理由ごとに文言と色が変わる (#298)。`timeli
   2 行目以降に置く。`pending` は空にしておく (5 秒後に先頭へ流れ込んで行がずれる)。
 
 - `"float_on_top": true` を書くと fixture のウィンドウが他のアプリより上に留まった状態で
-  立ち上がる (#267)。効いていれば `cleanshot-capture list` から消える (layer 0 しか並ばない)
+  立ち上がる (#267)。効いていれば `visuals:cleanshot-capture` の `list` から消える (layer 0 しか並ばない)
   ので、`area` で座標を指定して撮る。stderr に `could not set the window level` が出ないことも見る。
 
 ## 撮れないもの

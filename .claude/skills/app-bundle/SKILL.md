@@ -49,7 +49,7 @@ dev の XDG ディレクトリと callback port を選ぶのは debug ビルド�
 | アイコン | `assets/AppIcon.png` | 同じ絵を彩度落とししたもの |
 
 両方インストールして構わない。実行ファイル名が違うので、
-`open` も `cleanshot-capture --app twigpui-dev` も取り違えない。
+`open` も `visuals:cleanshot-capture` の `window --app twigpui-dev` も取り違えない。
 
 プロファイルが何を分けているか、dev の client_id をどこに置くかは
 [README の Development builds](../../../README.md#development-builds) にある。
