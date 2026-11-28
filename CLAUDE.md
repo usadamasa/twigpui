@@ -39,7 +39,7 @@ X クライアントとして当然あるべき操作 (読む、書く、反応�
 
 toolchain と `cargo-llvm-cov` は `flake.nix` の devShell が `.envrc` 経由で渡す。
 Homebrew の `rust` / `llvm` は使わない。`cargo` が devShell のものに解決しないときは
-`resolving-path` スキルに従う。CI は devShell を使わず `dtolnay/rust-toolchain` の stable で動く。
+`toolchain:resolving-path` スキルに従う。CI は devShell を使わず `dtolnay/rust-toolchain` の stable で動く。
 
 push 前にこの 3 つを通す。CI (`macos-latest`) が見るのと同じもの。
 
@@ -68,7 +68,7 @@ CI の clippy はこれに `--features headless-shot` を足して feature の�
 - **`cargo` は sandbox の外で動かす**: `.claude/settings.json` の
   `sandbox.excludedCommands` に `cargo *` を置いている。この指定を外すと `cargo fetch` が
   crate の展開途中で止まり、`cargo run` はウィンドウを開けない。sandbox 由来の失敗を
-  切り分けるときは `sandbox-troubleshooting` スキルに従う。
+  切り分けるときは `harness:sandbox-troubleshooting` スキルに従う。
 - **中間成果物は `target/` に無い**: `.cargo/config.toml` の `build.build-dir` が
   `deps/` `build/` `incremental/` を `$CARGO_HOME/build/twigpui` へ逃がしている。
   worktree をまたいで依存を再利用するためで、`target/{profile}/` に残るのは
