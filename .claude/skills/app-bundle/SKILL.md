@@ -69,7 +69,7 @@ dev の XDG ディレクトリと callback port を選ぶのは debug ビルド�
 `sandbox` 内では `sips` が必ず失敗する (`$TMPDIR` ではなく `/var/folders` へ
 中間ファイルを書くため)。Claude のセッションからは検証できないので、
 アイコンまわりを変えたらユーザーに `! ./scripts/build-app-bundle.sh --dev` を
-実行してもらう。詳細は `sandbox-troubleshooting` スキル。
+実行してもらう。詳細は `harness:sandbox-troubleshooting` スキル。
 
 ## Finder から起動する前に読む
 
